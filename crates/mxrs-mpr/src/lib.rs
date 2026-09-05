@@ -1,8 +1,18 @@
-//! Low-level Mendix `.mpr` SQLite/BSON unit I/O.
+//! Low-level Mendix `.mpr` SQLite/`.mxunit` unit I/O.
 //!
-//! Skeleton crate — not yet implemented. Scope (see
-//! `lib/mxrb/io/mpr_file.rb` and `lib/mxrb/io/mxunit_codec.rb` in mxrb, and
-//! milestones M1.2-M1.4 in the mxrs plan): open/create the `Unit`/`_MetaData`
-//! SQLite tables, read/write the v2 (`.mxunit` content-addressed file)
-//! storage format used by Studio Pro 10+, transactional inserts/updates/
-//! deletes/relocates.
+//! Ports `lib/mxrb/io/mpr_file.rb` and `lib/mxrb/io/mxunit_codec.rb` from
+//! mxrb (Ruby). Targets the v2 (`.mxunit` content-addressed file) storage
+//! format used by Studio Pro 10+ — see `decisions/mxrs-rust-rewrite-plan.md`
+//! (milestones M1.2-M1.4) in this project's ai-memory for the locked MVP
+//! scope and what's deliberately deferred (v1 storage, migration between
+//! formats, sidecar tables owned by other future crates).
+
+pub mod error;
+pub mod format;
+pub mod mpr_file;
+pub mod mxunit;
+pub mod transaction;
+
+pub use error::{MprError, Result};
+pub use format::StorageFormat;
+pub use mpr_file::{MprFile, RawUnit, WriteStats};
