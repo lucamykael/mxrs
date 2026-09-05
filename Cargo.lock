@@ -370,6 +370,9 @@ name = "mxrs-fragment-store"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -389,7 +392,9 @@ dependencies = [
 name = "mxrs-schema"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "mxrs-bson",
+ "uuid",
 ]
 
 [[package]]

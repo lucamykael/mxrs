@@ -1,0 +1,1215 @@
+{
+  "Projects$Project": [
+    "$ID",
+    "$Type",
+    "DeploymentID",
+    "RuntimeVersion",
+    "ModelVersion",
+    "SprintrProjectName"
+  ],
+  "Settings$ProjectSettings": [
+    "$ID",
+    "$Type",
+    "Settings"
+  ],
+  "Texts$SystemTextCollection": [
+    "$ID",
+    "$Type",
+    "SystemTexts"
+  ],
+  "Navigation$NavigationDocument": [
+    "$ID",
+    "$Type",
+    "Profiles",
+    "Grids",
+    "CustomWidgetModules",
+    "PluginWidgets"
+  ],
+  "Security$ProjectSecurity": [
+    "$ID",
+    "$Type",
+    "UserRoles",
+    "DemoUsers",
+    "PasswordPolicySettings",
+    "SecurityLevel",
+    "AdminUserName",
+    "AdminUserRole",
+    "EnableDemoUsers",
+    "EnableGuestAccess",
+    "GuestUserRole",
+    "StrictMode"
+  ],
+  "Projects$ModuleImpl": [
+    "$ID",
+    "$Type",
+    "DomainModel",
+    "AllDocuments"
+  ],
+  "DomainModels$DomainModel": [
+    "$ID",
+    "$Type",
+    "Entities",
+    "Associations",
+    "CrossAssociations"
+  ],
+  "JavaActions$JavaAction": [
+    "$ID",
+    "$Type",
+    "Parameters",
+    "Name",
+    "QualifiedName",
+    "ReturnType"
+  ],
+  "Enumerations$Enumeration": [
+    "$ID",
+    "$Type",
+    "Values",
+    "Name",
+    "QualifiedName"
+  ],
+  "Images$ImageCollection": [
+    "$ID",
+    "$Type",
+    "Images",
+    "Name",
+    "QualifiedName"
+  ],
+  "Microflows$Microflow": [
+    "$ID",
+    "$Type",
+    "ObjectCollection",
+    "SequenceFlows",
+    "ConcurrenyErrorMessage",
+    "UrlSegments",
+    "Name",
+    "QualifiedName",
+    "ReturnType",
+    "ApplyEntityAccess",
+    "ModelerAllowedUserRoles",
+    "AllowConcurrentExecution",
+    "ConcurrencyErrorMicroflow",
+    "Url",
+    "UrlSearchParameters"
+  ],
+  "Queues$Queue": [
+    "$ID",
+    "$Type",
+    "Config",
+    "Name",
+    "QualifiedName"
+  ],
+  "Forms$Layout": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName"
+  ],
+  "Forms$Page": [
+    "$ID",
+    "$Type",
+    "Parameters",
+    "Title",
+    "UrlSegments",
+    "Name",
+    "QualifiedName",
+    "ModelerAllowedUserRoles",
+    "PopupWidth",
+    "PopupHeight",
+    "PopupResizable",
+    "Url"
+  ],
+  "Microflows$Nanoflow": [
+    "$ID",
+    "$Type",
+    "ObjectCollection",
+    "SequenceFlows",
+    "Name",
+    "QualifiedName",
+    "ReturnType"
+  ],
+  "Constants$Constant": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName",
+    "DataType",
+    "ExposedToClient"
+  ],
+  "ScheduledEvents$ScheduledEvent": [
+    "$ID",
+    "$Type",
+    "Schedule",
+    "Name",
+    "QualifiedName",
+    "StartDateTime",
+    "TimeZone",
+    "OnOverlap",
+    "Interval",
+    "IntervalType",
+    "Microflow",
+    "Documentation"
+  ],
+  "RegularExpressions$RegularExpression": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName",
+    "Expression"
+  ],
+  "Microflows$Rule": [
+    "$ID",
+    "$Type",
+    "ObjectCollection",
+    "SequenceFlows",
+    "Name",
+    "QualifiedName",
+    "ReturnType",
+    "ApplyEntityAccess"
+  ],
+  "JavaScriptActions$JavaScriptAction": [
+    "$ID",
+    "$Type",
+    "Parameters",
+    "Name",
+    "QualifiedName"
+  ],
+  "CustomIcons$CustomIconCollection": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName"
+  ],
+  "Forms$Snippet": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName"
+  ],
+  "Menus$MenuDocument": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName"
+  ],
+  "Forms$WebUIProjectSettingsPart": [
+    "$ID",
+    "$Type",
+    "UrlPrefix",
+    "EnableNewStringBehavior"
+  ],
+  "Settings$IntegrationProjectSettingsPart": [
+    "$ID",
+    "$Type"
+  ],
+  "Settings$ConfigurationSettings": [
+    "$ID",
+    "$Type"
+  ],
+  "Settings$ModelSettings": [
+    "$ID",
+    "$Type",
+    "AfterStartupMicroflow",
+    "BeforeShutdownMicroflow",
+    "HealthCheckMicroflow",
+    "FirstDayOfWeek",
+    "DefaultTimeZoneCode",
+    "ScheduledEventTimeZoneCode",
+    "HashAlgorithm",
+    "BcryptCost",
+    "RoundingMode",
+    "AllowUserMultipleSessions",
+    "EnableDataStorageOptimisticLocking",
+    "UseDatabaseForeignKeyConstraints",
+    "UseOQLVersion2",
+    "SslCertificateAlgorithm",
+    "DecimalScale"
+  ],
+  "Settings$ConventionSettings": [
+    "$ID",
+    "$Type"
+  ],
+  "Settings$LanguageSettings": [
+    "$ID",
+    "$Type",
+    "Languages",
+    "DefaultLanguageCode"
+  ],
+  "Texts$Language": [
+    "$ID",
+    "$Type",
+    "Code",
+    "Description",
+    "RightToLeft",
+    "CheckCompleteness",
+    "CustomDateFormat",
+    "CustomTimeFormat",
+    "CustomDateTimeFormat"
+  ],
+  "Settings$CertificateSettings": [
+    "$ID",
+    "$Type"
+  ],
+  "Settings$WorkflowsProjectSettingsPart": [
+    "$ID",
+    "$Type",
+    "Groups",
+    "OnWorkflowEvent",
+    "UserEntity"
+  ],
+  "Settings$JarDeploymentSettings": [
+    "$ID",
+    "$Type"
+  ],
+  "Settings$DistributionSettings": [
+    "$ID",
+    "$Type"
+  ],
+  "Texts$SystemText": [
+    "$ID",
+    "$Type",
+    "Text",
+    "InternalKey"
+  ],
+  "Texts$Text": [
+    "$ID",
+    "$Type"
+  ],
+  "Navigation$NavigationProfile": [
+    "$ID",
+    "$Type",
+    "OfflineEntityConfigsRuntime",
+    "HomePage",
+    "HomeItems",
+    "AppTitle",
+    "LoginPageSettings",
+    "ProgressiveWebAppSettings",
+    "NotFoundHomepage",
+    "Name",
+    "IsOffline",
+    "ThrowPartialSyncError",
+    "Kind",
+    "AppIcon"
+  ],
+  "Navigation$HomePage": [
+    "$ID",
+    "$Type",
+    "Page",
+    "Microflow"
+  ],
+  "Forms$FormSettings": [
+    "$ID",
+    "$Type",
+    "TitleOverride",
+    "ParameterMappings",
+    "Form",
+    "Location"
+  ],
+  "Security$UserRole": [
+    "$ID",
+    "$Type",
+    "GUID",
+    "Name",
+    "Description",
+    "IsSystemAdministrator",
+    "ManageableRoles",
+    "ManageUsersWithoutRoles",
+    "CheckSecurity"
+  ],
+  "Security$PasswordPolicySettings": [
+    "$ID",
+    "$Type",
+    "MinimumLength",
+    "RequireMixedCase",
+    "RequireSymbol",
+    "RequireDigit"
+  ],
+  "DomainModels$EntityImpl": [
+    "$ID",
+    "$Type",
+    "MaybeGeneralization",
+    "Attributes",
+    "ValidationRules",
+    "Events",
+    "Indexes",
+    "AccessRules",
+    "Source",
+    "GUID",
+    "Image",
+    "QualifiedName",
+    "UnqualifiedName"
+  ],
+  "DomainModels$NoGeneralization": [
+    "$ID",
+    "$Type",
+    "Key",
+    "Persistable",
+    "HasCreatedDateAttr",
+    "HasChangedDateAttr",
+    "HasOwnerAttr",
+    "HasChangedByAttr",
+    "Generalization"
+  ],
+  "DomainModels$Attribute": [
+    "$ID",
+    "$Type",
+    "Value",
+    "Type",
+    "Name",
+    "GUID"
+  ],
+  "DomainModels$StoredValue": [
+    "$ID",
+    "$Type",
+    "DefaultValue"
+  ],
+  "DomainModels$StringAttributeType": [
+    "$ID",
+    "$Type",
+    "Length"
+  ],
+  "DomainModels$EntityIndex": [
+    "$ID",
+    "$Type",
+    "Attributes",
+    "GUID",
+    "IncludeInOffline"
+  ],
+  "DomainModels$IndexedAttribute": [
+    "$ID",
+    "$Type",
+    "Type",
+    "AttributePointer",
+    "AssociationPointer",
+    "Ascending"
+  ],
+  "DomainModels$AccessRule": [
+    "$ID",
+    "$Type",
+    "MemberAccesses",
+    "AllowedUserRoles",
+    "AllowCreate",
+    "AllowDelete",
+    "XPathConstraint"
+  ],
+  "DomainModels$MemberAccess": [
+    "$ID",
+    "$Type",
+    "Attribute",
+    "Association",
+    "AccessRights"
+  ],
+  "DomainModels$HashedStringAttributeType": [
+    "$ID",
+    "$Type"
+  ],
+  "DomainModels$DateTimeAttributeType": [
+    "$ID",
+    "$Type",
+    "LocalizeDate"
+  ],
+  "DomainModels$BooleanAttributeType": [
+    "$ID",
+    "$Type"
+  ],
+  "DomainModels$IntegerAttributeType": [
+    "$ID",
+    "$Type"
+  ],
+  "DomainModels$ValidationRule": [
+    "$ID",
+    "$Type",
+    "Message",
+    "RuleInfo",
+    "Attribute"
+  ],
+  "DomainModels$UniqueRuleInfo": [
+    "$ID",
+    "$Type"
+  ],
+  "DomainModels$RequiredRuleInfo": [
+    "$ID",
+    "$Type"
+  ],
+  "DomainModels$AutoNumberAttributeType": [
+    "$ID",
+    "$Type"
+  ],
+  "DomainModels$BinaryAttributeType": [
+    "$ID",
+    "$Type"
+  ],
+  "DomainModels$LongAttributeType": [
+    "$ID",
+    "$Type"
+  ],
+  "DomainModels$Generalization": [
+    "$ID",
+    "$Type",
+    "Persistable",
+    "HasCreatedDateAttr",
+    "HasChangedDateAttr",
+    "HasOwnerAttr",
+    "HasChangedByAttr",
+    "Generalization"
+  ],
+  "DomainModels$EnumerationAttributeType": [
+    "$ID",
+    "$Type",
+    "Enumeration"
+  ],
+  "DomainModels$Association": [
+    "$ID",
+    "$Type",
+    "DeleteBehavior",
+    "Source",
+    "GUID",
+    "Type",
+    "Owner",
+    "StorageFormat",
+    "ParentPointer",
+    "QualifiedName",
+    "UnqualifiedName",
+    "Navigability",
+    "ChildPointer"
+  ],
+  "DomainModels$DeleteBehavior": [
+    "$ID",
+    "$Type",
+    "ParentErrorMessage",
+    "ChildErrorMessage",
+    "ParentDeleteBehavior",
+    "ChildDeleteBehavior"
+  ],
+  "JavaActions$JavaActionParameter": [
+    "$ID",
+    "$Type",
+    "Name",
+    "Type"
+  ],
+  "Enumerations$EnumerationValue": [
+    "$ID",
+    "$Type",
+    "Caption",
+    "RemoteValue",
+    "Name",
+    "Image"
+  ],
+  "Images$Image": [
+    "$ID",
+    "$Type",
+    "Name",
+    "Image",
+    "Format",
+    "QualifiedName"
+  ],
+  "Microflows$MicroflowObjectCollection": [
+    "$ID",
+    "$Type",
+    "Objects"
+  ],
+  "Microflows$StartEvent": [
+    "$ID",
+    "$Type"
+  ],
+  "Microflows$EndEvent": [
+    "$ID",
+    "$Type",
+    "ReturnValue"
+  ],
+  "Microflows$ActionActivity": [
+    "$ID",
+    "$Type",
+    "Action",
+    "Caption",
+    "Disabled"
+  ],
+  "Microflows$ShowHomePageAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType"
+  ],
+  "Microflows$SequenceFlow": [
+    "$ID",
+    "$Type",
+    "CaseValues",
+    "OriginPointer",
+    "DestinationPointer",
+    "IsErrorHandler"
+  ],
+  "Microflows$NoCase": [
+    "$ID",
+    "$Type",
+    "StringRepresentation"
+  ],
+  "Queues$BasicQueueConfig": [
+    "$ID",
+    "$Type",
+    "ParallelismExpression",
+    "ClusterWide"
+  ],
+  "DomainModels$DecimalAttributeType": [
+    "$ID",
+    "$Type"
+  ],
+  "Microflows$MicroflowParameter": [
+    "$ID",
+    "$Type",
+    "Name",
+    "Type",
+    "IsRequired",
+    "DefaultValue"
+  ],
+  "Microflows$CreateChangeAction": [
+    "$ID",
+    "$Type",
+    "Items",
+    "ErrorHandlingType",
+    "RefreshInClient",
+    "Commit",
+    "Entity",
+    "VariableName"
+  ],
+  "Microflows$ChangeActionItem": [
+    "$ID",
+    "$Type",
+    "Attribute",
+    "Association",
+    "Type",
+    "Value"
+  ],
+  "Microflows$RetrieveAction": [
+    "$ID",
+    "$Type",
+    "RetrieveSource",
+    "ErrorHandlingType",
+    "ResultVariableName"
+  ],
+  "Microflows$DatabaseRetrieveSource": [
+    "$ID",
+    "$Type",
+    "Range",
+    "NewSortings",
+    "Type",
+    "Entity",
+    "XpathConstraint"
+  ],
+  "Microflows$ConstantRange": [
+    "$ID",
+    "$Type",
+    "SingleObject"
+  ],
+  "Microflows$SortingsList": [
+    "$ID",
+    "$Type",
+    "Sortings"
+  ],
+  "Microflows$FindByExpression": [
+    "$ID",
+    "$Type",
+    "Expression",
+    "ListName"
+  ],
+  "Microflows$ImportXmlAction": [
+    "$ID",
+    "$Type",
+    "ResultHandling",
+    "IsValidationRequired",
+    "XmlDocumentVariableName",
+    "ErrorHandlingType"
+  ],
+  "Microflows$MicroflowParameterValue": [
+    "$ID",
+    "$Type",
+    "Microflow",
+    "ValueExpression"
+  ],
+  "Microflows$DownloadFileAction": [
+    "$ID",
+    "$Type",
+    "FileDocumentVariableName",
+    "ShowFileInBrowser",
+    "ErrorHandlingType"
+  ],
+  "Microflows$CustomRequestHandling": [
+    "$ID",
+    "$Type",
+    "Template"
+  ],
+  "Microflows$ListOperationsAction": [
+    "$ID",
+    "$Type",
+    "NewOperation",
+    "ResultVariableName",
+    "ErrorHandlingType"
+  ],
+  "Microflows$RetrieveSorting": [
+    "$ID",
+    "$Type",
+    "AttributePath",
+    "SortOrder"
+  ],
+  "Microflows$RuleCall": [
+    "$ID",
+    "$Type",
+    "ParameterMappings",
+    "Microflow"
+  ],
+  "Microflows$RuleCallParameterMapping": [
+    "$ID",
+    "$Type",
+    "Parameter",
+    "Argument"
+  ],
+  "Microflows$RuleSplitCondition": [
+    "$ID",
+    "$Type",
+    "RuleCall"
+  ],
+  "Microflows$Sort": [
+    "$ID",
+    "$Type",
+    "Sortings",
+    "ListName"
+  ],
+  "Microflows$Subtract": [
+    "$ID",
+    "$Type",
+    "SecondListOrObjectName",
+    "ListName"
+  ],
+  "ScheduledEvents$DaySchedule": [
+    "$ID",
+    "$Type",
+    "HourOfDay",
+    "MinuteOfHour"
+  ],
+  "DomainModels$CrossAssociation": [
+    "$ID",
+    "$Type",
+    "DeleteBehavior",
+    "Source",
+    "GUID",
+    "Type",
+    "Owner",
+    "StorageFormat",
+    "ParentPointer",
+    "QualifiedName",
+    "UnqualifiedName",
+    "Navigability",
+    "Child"
+  ],
+  "Microflows$ExclusiveSplit": [
+    "$ID",
+    "$Type",
+    "SplitCondition",
+    "Caption",
+    "ErrorHandlingType"
+  ],
+  "Microflows$ExpressionSplitCondition": [
+    "$ID",
+    "$Type",
+    "Expression"
+  ],
+  "Microflows$JavaActionCallAction": [
+    "$ID",
+    "$Type",
+    "QueueSettings",
+    "ParameterMappings",
+    "ErrorHandlingType",
+    "JavaAction",
+    "ResultVariableName"
+  ],
+  "Microflows$EntityTypeCodeActionParameterValue": [
+    "$ID",
+    "$Type",
+    "Entity",
+    "ValueExpression"
+  ],
+  "DatabaseConnector$ExecuteDatabaseQueryAction": [
+    "$ID",
+    "$Type",
+    "ConnectionParameterMappings",
+    "DynamicQuery",
+    "ErrorHandlingType",
+    "OutputVariableName",
+    "ParameterMappings",
+    "Query"
+  ],
+  "DatabaseConnector$ConnectionParameterMapping": [
+    "$ID",
+    "$Type",
+    "ParameterName",
+    "Value"
+  ],
+  "DatabaseConnector$QueryParameterMapping": [
+    "$ID",
+    "$Type",
+    "ParameterName",
+    "Value"
+  ],
+  "Microflows$AggregateAction": [
+    "$ID",
+    "$Type",
+    "AggregateVariableName",
+    "Attribute",
+    "Expression",
+    "UseExpression",
+    "AggregateFunction",
+    "VariableName",
+    "Type",
+    "ReduceInitialValueExpression",
+    "ErrorHandlingType"
+  ],
+  "Microflows$JavaActionParameterMapping": [
+    "$ID",
+    "$Type",
+    "Value",
+    "Parameter"
+  ],
+  "Microflows$BasicCodeActionParameterValue": [
+    "$ID",
+    "$Type",
+    "ValueExpression"
+  ],
+  "Microflows$Annotation": [
+    "$ID",
+    "$Type"
+  ],
+  "Microflows$EnumerationCase": [
+    "$ID",
+    "$Type",
+    "StringRepresentation",
+    "Value"
+  ],
+  "Microflows$MicroflowCallAction": [
+    "$ID",
+    "$Type",
+    "MicroflowCall",
+    "ErrorHandlingType",
+    "ResultVariableName"
+  ],
+  "Microflows$MicroflowCall": [
+    "$ID",
+    "$Type",
+    "QueueSettings",
+    "ParameterMappings",
+    "Microflow"
+  ],
+  "Microflows$MicroflowCallParameterMapping": [
+    "$ID",
+    "$Type",
+    "Parameter",
+    "Argument"
+  ],
+  "Microflows$ChangeAction": [
+    "$ID",
+    "$Type",
+    "Items",
+    "ErrorHandlingType",
+    "RefreshInClient",
+    "Commit",
+    "ChangeVariableName"
+  ],
+  "Microflows$LogMessageAction": [
+    "$ID",
+    "$Type",
+    "MessageTemplate",
+    "ErrorHandlingType",
+    "Level",
+    "Node",
+    "IncludeLatestStackTrace"
+  ],
+  "Microflows$StringTemplate": [
+    "$ID",
+    "$Type",
+    "Parameters",
+    "Text"
+  ],
+  "Microflows$TemplateParameter": [
+    "$ID",
+    "$Type",
+    "Expression"
+  ],
+  "JavaScriptActions$JavaScriptActionParameter": [
+    "$ID",
+    "$Type",
+    "Name"
+  ],
+  "Microflows$CommitAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "WithEvents",
+    "CommitVariableName",
+    "RefreshInClient"
+  ],
+  "Microflows$JavaScriptActionCallAction": [
+    "$ID",
+    "$Type",
+    "ParameterMappings",
+    "ErrorHandlingType",
+    "JavaScriptAction",
+    "UseReturnVariable",
+    "OutputVariableName"
+  ],
+  "Forms$PageTemplate": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName"
+  ],
+  "Forms$BuildingBlock": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName"
+  ],
+  "ExportMappings$ExportMapping": [
+    "$ID",
+    "$Type",
+    "Elements",
+    "Name",
+    "QualifiedName",
+    "XmlSchema",
+    "JsonStructure",
+    "XsdRootElementName",
+    "WsdlFile",
+    "ServiceName",
+    "OperationName",
+    "MessageDefinition",
+    "MessageDefinition2",
+    "SupportedContentTypesRuntime",
+    "ParameterName",
+    "IsHeaderParameter",
+    "NullValueOption"
+  ],
+  "JsonStructures$JsonStructure": [
+    "$ID",
+    "$Type",
+    "Name",
+    "QualifiedName",
+    "JsonSnippet"
+  ],
+  "ImportMappings$ImportMapping": [
+    "$ID",
+    "$Type",
+    "Elements",
+    "Name",
+    "QualifiedName",
+    "XmlSchema",
+    "JsonStructure",
+    "XsdRootElementName",
+    "WsdlFile",
+    "ServiceName",
+    "OperationName",
+    "MessageDefinition",
+    "MessageDefinition2",
+    "SupportedContentTypesRuntime",
+    "ParameterDataTypeRuntime",
+    "UseSubtransactionsForMicroflows"
+  ],
+  "Security$DemoUserImpl": [
+    "$ID",
+    "$Type",
+    "UserName",
+    "Password",
+    "Entity",
+    "UserRoles"
+  ],
+  "Microflows$JavaScriptActionParameterMapping": [
+    "$ID",
+    "$Type",
+    "Parameter"
+  ],
+  "Microflows$ExclusiveMerge": [
+    "$ID",
+    "$Type"
+  ],
+  "Microflows$ValidationFeedbackAction": [
+    "$ID",
+    "$Type",
+    "FeedbackTemplate",
+    "ErrorHandlingType",
+    "ValidationVariableName",
+    "Attribute",
+    "Association"
+  ],
+  "Microflows$TextTemplate": [
+    "$ID",
+    "$Type",
+    "Parameters",
+    "Text"
+  ],
+  "Microflows$ShowFormAction": [
+    "$ID",
+    "$Type",
+    "FormSettings",
+    "ErrorHandlingType",
+    "NumberOfPagesToClose"
+  ],
+  "Forms$PageParameterMapping": [
+    "$ID",
+    "$Type",
+    "Parameter",
+    "Argument"
+  ],
+  "Microflows$ShowMessageAction": [
+    "$ID",
+    "$Type",
+    "Template",
+    "ErrorHandlingType",
+    "Type",
+    "Blocking"
+  ],
+  "Microflows$AssociationRetrieveSource": [
+    "$ID",
+    "$Type",
+    "Type",
+    "StartVariableName",
+    "AssociationId"
+  ],
+  "Microflows$DeleteAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "DeleteVariableName",
+    "RefreshInClient"
+  ],
+  "Microflows$CloseFormAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "NumberOfPagesToClose"
+  ],
+  "Forms$PageParameter": [
+    "$ID",
+    "$Type",
+    "Name",
+    "ParameterTypeRuntime",
+    "IsRequired"
+  ],
+  "Microflows$InheritanceSplit": [
+    "$ID",
+    "$Type",
+    "SplitVariableName",
+    "Caption"
+  ],
+  "Microflows$CastAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "VariableName"
+  ],
+  "Microflows$InheritanceCase": [
+    "$ID",
+    "$Type",
+    "StringRepresentation",
+    "Value"
+  ],
+  "Microflows$NanoflowCallAction": [
+    "$ID",
+    "$Type",
+    "NanoflowCall",
+    "ErrorHandlingType",
+    "UseReturnVariable",
+    "OutputVariableName"
+  ],
+  "Microflows$NanoflowCall": [
+    "$ID",
+    "$Type",
+    "ParameterMappings",
+    "Nanoflow"
+  ],
+  "Microflows$NanoflowCallParameterMapping": [
+    "$ID",
+    "$Type",
+    "Parameter",
+    "Argument"
+  ],
+  "Microflows$CreateVariableAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "VariableName",
+    "Type",
+    "InitialValue"
+  ],
+  "Microflows$ChangeVariableAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "ChangeVariableName",
+    "Value"
+  ],
+  "Microflows$RestCallAction": [
+    "$ID",
+    "$Type",
+    "HttpConfiguration",
+    "RequestHandling",
+    "ResultHandling",
+    "ProxyConfiguration",
+    "ErrorHandlingType",
+    "ErrorResultHandlingType",
+    "RequestTimeOutExpression",
+    "RequestProxyType"
+  ],
+  "Microflows$HttpConfiguration": [
+    "$ID",
+    "$Type",
+    "CustomLocationTemplate",
+    "HttpHeaderEntries",
+    "CustomLocation",
+    "UseHttpAuthentication",
+    "HttpAuthenticationUserName",
+    "HttpAuthenticationPassword",
+    "HttpMethod",
+    "ClientCertificate"
+  ],
+  "Microflows$HttpHeaderEntry": [
+    "$ID",
+    "$Type",
+    "Key",
+    "Value"
+  ],
+  "Microflows$MappingRequestHandling": [
+    "$ID",
+    "$Type",
+    "MappingId",
+    "MappingVariableName",
+    "ContentTypeRuntime"
+  ],
+  "Microflows$ResultHandling": [
+    "$ID",
+    "$Type",
+    "ImportMappingCall",
+    "Bind",
+    "ResultVariableName",
+    "VariableDataType"
+  ],
+  "Microflows$ImportMappingCall": [
+    "$ID",
+    "$Type",
+    "Range",
+    "ReturnValueMapping",
+    "ObjectHandlingBackup",
+    "Commit",
+    "ParameterVariableName",
+    "ContentType",
+    "ForceSingleOccurrence"
+  ],
+  "ExportMappings$ObjectMappingElement": [
+    "$ID",
+    "$Type",
+    "CustomHandlerCall",
+    "Children",
+    "ElementType",
+    "JsonPath",
+    "XmlPath",
+    "MinOccurs",
+    "MaxOccurs",
+    "Nillable",
+    "OccursMoreThanOnce",
+    "Entity",
+    "Association",
+    "ObjectHandling",
+    "ObjectHandlingBackup",
+    "ObjectHandlingBackupOverride",
+    "IsDefaultType"
+  ],
+  "ExportMappings$ValueMappingElement": [
+    "$ID",
+    "$Type",
+    "ElementType",
+    "JsonPath",
+    "XmlPath",
+    "MinOccurs",
+    "MaxOccurs",
+    "Nillable",
+    "OccursMoreThanOnce",
+    "XmlType",
+    "IsKey",
+    "IsXmlAttribute",
+    "XmlPrimitiveType",
+    "IsContent",
+    "Attribute",
+    "Converter",
+    "MaxLength",
+    "FractionDigits",
+    "TotalDigits",
+    "OriginalValue"
+  ],
+  "ImportMappings$ObjectMappingElement": [
+    "$ID",
+    "$Type",
+    "CustomHandlerCall",
+    "Children",
+    "ElementType",
+    "JsonPath",
+    "XmlPath",
+    "MinOccurs",
+    "MaxOccurs",
+    "Nillable",
+    "OccursMoreThanOnce",
+    "Entity",
+    "Association",
+    "ObjectHandling",
+    "ObjectHandlingBackup",
+    "ObjectHandlingBackupOverride",
+    "IsDefaultType"
+  ],
+  "ImportMappings$ValueMappingElement": [
+    "$ID",
+    "$Type",
+    "ElementType",
+    "JsonPath",
+    "XmlPath",
+    "MinOccurs",
+    "MaxOccurs",
+    "Nillable",
+    "OccursMoreThanOnce",
+    "XmlType",
+    "IsKey",
+    "IsXmlAttribute",
+    "XmlPrimitiveType",
+    "IsContent",
+    "Attribute",
+    "Converter",
+    "MaxLength",
+    "FractionDigits",
+    "TotalDigits",
+    "OriginalValue"
+  ],
+  "Microflows$LoopedActivity": [
+    "$ID",
+    "$Type",
+    "ObjectCollection",
+    "LoopSource",
+    "ErrorHandlingType"
+  ],
+  "Microflows$WhileLoopCondition": [
+    "$ID",
+    "$Type",
+    "WhileExpression"
+  ],
+  "Microflows$CreateListAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "Entity",
+    "VariableName"
+  ],
+  "Microflows$ChangeListAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "ChangeVariableName",
+    "Value",
+    "Type"
+  ],
+  "Microflows$IterableList": [
+    "$ID",
+    "$Type",
+    "ListVariableName",
+    "VariableName"
+  ]
+}

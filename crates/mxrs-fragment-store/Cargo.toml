@@ -9,3 +9,8 @@ description = "Content-addressed (SHA-256) store for unmodeled BSON fragments. S
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
+sha2 = "0.10"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

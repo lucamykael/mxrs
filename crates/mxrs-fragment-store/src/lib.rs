@@ -1,7 +1,13 @@
-//! Content-addressed (SHA-256) store for BSON sub-documents with no typed
-//! model yet.
+//! Content-addressed store for BSON sub-documents that have no typed model
+//! yet, achieving losslessness for exotic/unmodeled Mendix constructs
+//! without writing new codec code for each one.
 //!
-//! Skeleton crate — not yet implemented. Scope (see
-//! `lib/mxrb/native_fragment_store.rb` in mxrb, milestone M1.5 in the mxrs
-//! plan): `put(document)` / `fetch(digest, types, hints)` with declared-type
-//! and hint verification, fail-closed on mismatch.
+//! Ports `Mxrb::NativeFragmentStore` from `lib/mxrb/native_fragment_store.rb`
+//! (milestone M1.5 in `decisions/mxrs-rust-rewrite-plan.md`) — see
+//! `store.rs` for what was deliberately left out and why.
+
+pub mod error;
+pub mod store;
+
+pub use error::{FragmentStoreError, Result};
+pub use store::{FetchOptions, NativeFragmentStore};
