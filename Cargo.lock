@@ -375,6 +375,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-forms"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-fragment-store",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "mxrs-fragment-store"
 version = "0.1.0"
 dependencies = [
