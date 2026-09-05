@@ -1,0 +1,14 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "Dev-only differential-testing/fixture-generation harness against mxrb (Ruby), per the mxrs plan's Testing section. Never linked into shipped mxrs binaries."
+
+[dependencies]
+mxrs-bson = { path = "../crates/mxrs-bson" }
+mxrs-mpr = { path = "../crates/mxrs-mpr" }
+sha2 = "0.10"
