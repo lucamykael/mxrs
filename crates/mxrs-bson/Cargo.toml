@@ -1,0 +1,18 @@
+[package]
+name = "mxrs-bson"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Mendix-specific BSON codec: MS-GUID<->UUID conversion, $ID 3-encoding extraction, array-marker convention. Ports lib/mxrb/io/bson_codec.rb from mxrb."
+
+[dependencies]
+base64 = "0.22"
+bson = "3"
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha2 = "0.10"
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1.11.0"

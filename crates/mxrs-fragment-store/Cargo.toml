@@ -1,0 +1,11 @@
+[package]
+name = "mxrs-fragment-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Content-addressed (SHA-256) store for unmodeled BSON fragments. Skeleton — see Phase 1 (M1.5) in ai-memory decisions/mxrs-rust-rewrite-plan.md."
+
+[dependencies]
+mxrs-bson = { path = "../mxrs-bson" }
