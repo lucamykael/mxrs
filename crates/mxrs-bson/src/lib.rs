@@ -34,4 +34,4 @@ pub use id::extract_id;
 // Re-export the underlying BSON types so downstream crates (mxrs-mpr,
 // mxrs-model, ...) depend on a single, pinned `bson` version through this
 // crate rather than declaring their own.
-pub use bson::{doc, spec::BinarySubtype, Binary, Bson, Document};
+pub use bson::{doc, spec::BinarySubtype, Binary, Bson, DateTime, Document};
