@@ -138,8 +138,34 @@ impl Association {
         }
     }
 
+    /// `to_entity_id` doubles as a dotted `"Module.Entity"` qualified name
+    /// for a cross-module target (see `from_bson`'s `Child`/`ChildPointer`
+    /// fallback) — detected here the same way, since `DomainModel` routes
+    /// this association into its `crossAssociations` array either way and
+    /// the BSON shape must match: `$Type: DomainModels$CrossAssociation`,
+    /// a `Child` qualified-name field instead of `ChildID`, no editor
+    /// connection-point fields (mirrors mxrb's `cross_association_doc`).
+    pub fn is_cross_module(&self) -> bool {
+        self.to_entity_id.as_deref().is_some_and(|s| s.contains('.'))
+    }
+
     pub fn to_bson(&self) -> Document {
         let id = self.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if self.is_cross_module() {
+            return doc! {
+                "$ID": id,
+                "$Type": "DomainModels$CrossAssociation",
+                "Name": self.name.clone(),
+                "Documentation": self.documentation.clone(),
+                "ParentID": self.from_entity_id.clone(),
+                "Child": self.to_entity_id.clone(),
+                "Type": self.association_type.as_str(),
+                "Owner": self.owner.as_str(),
+                "StorageFormat": self.storage_format.as_str(),
+                "DeleteBehavior": self.delete_behavior.clone().unwrap_or_else(default_delete_behavior),
+                "ExportLevel": self.export_level.clone(),
+            };
+        }
         doc! {
             "$ID": id,
             "$Type": "DomainModels$Association",
@@ -249,5 +275,48 @@ mod tests {
         };
         let assoc = Association::from_bson(&d);
         assert_eq!(assoc.to_entity_id.as_deref(), Some("Sales.Customer"));
+    }
+
+    #[test]
+    fn cross_module_association_serializes_as_cross_association_with_child_field() {
+        let assoc = Association {
+            id: None,
+            name: Some("Order_Customer".into()),
+            documentation: String::new(),
+            from_entity_id: Some(uuid::Uuid::new_v4().to_string()),
+            to_entity_id: Some("Sales.Customer".into()),
+            association_type: AssociationType::Reference,
+            owner: Owner::Default,
+            storage_format: StorageFormat::Column,
+            delete_behavior: None,
+            export_level: "Hidden".into(),
+        };
+        assert!(assoc.is_cross_module());
+        let out = assoc.to_bson();
+        assert_eq!(out.get_str("$Type").unwrap(), "DomainModels$CrossAssociation");
+        assert_eq!(out.get_str("Child").unwrap(), "Sales.Customer");
+        assert!(!out.contains_key("ChildID"));
+
+        let round_tripped = Association::from_bson(&out);
+        assert_eq!(round_tripped.to_entity_id.as_deref(), Some("Sales.Customer"));
+        assert_eq!(round_tripped.name.as_deref(), Some("Order_Customer"));
+    }
+
+    #[test]
+    fn same_module_association_is_not_cross_module() {
+        let assoc = Association {
+            id: None,
+            name: Some("Order_Line".into()),
+            documentation: String::new(),
+            from_entity_id: Some(uuid::Uuid::new_v4().to_string()),
+            to_entity_id: Some(uuid::Uuid::new_v4().to_string()),
+            association_type: AssociationType::Reference,
+            owner: Owner::Default,
+            storage_format: StorageFormat::Column,
+            delete_behavior: None,
+            export_level: "Hidden".into(),
+        };
+        assert!(!assoc.is_cross_module());
+        assert_eq!(assoc.to_bson().get_str("$Type").unwrap(), "DomainModels$Association");
     }
 }

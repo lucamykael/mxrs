@@ -443,6 +443,8 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "mxrs-bson",
+ "serde_json",
+ "thiserror",
  "uuid",
 ]
 

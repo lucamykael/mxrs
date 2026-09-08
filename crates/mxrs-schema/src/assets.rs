@@ -18,6 +18,13 @@ pub const RUNTIME_SCHEMA_11: &str = include_str!("../assets/runtime-11.json");
 /// BSON-decoding the contained documents.
 pub const SYSTEM_MODEL_SEED_11_12_1: &str = include_str!("../assets/system-model-11.12.1.b64");
 
+/// The fresh-project bootstrap template for 11.12.1: a JSON manifest of
+/// `Settings$ProjectSettings`/`Texts$SystemTextCollection`/
+/// `Projects$ProjectConversion` native units, extracted from a real
+/// Studio-Pro-created blank project (`lib/mxrb/templates/project/11.12.1.json`
+/// in mxrb). See `project_template` for the parsed form.
+pub const PROJECT_TEMPLATE_11_12_1: &str = include_str!("../assets/project-template-11.12.1.json");
+
 #[cfg(test)]
 mod tests {
     use super::*;

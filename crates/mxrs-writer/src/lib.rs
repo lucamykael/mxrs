@@ -6,20 +6,22 @@
 //! **Not ported** (deliberately, for this pass): `writer.rb`'s incremental
 //! `synchronize_ruby_*!` re-sync machinery (rewriting an *existing* project
 //! while preserving unrelated content/GUIDs across regenerations — this
-//! crate only creates brand-new projects); `ProjectSettings`/
-//! `Security$ProjectSecurity`/`Navigation$NavigationDocument`/default
-//! application layout scaffolding (mxrb's `create_project!` writes these,
-//! but they're a real Studio-Pro-openability requirement this pass doesn't
-//! yet meet — flagged as a known gap, not silently glossed over); pages/
-//! widgets, menus, enumerations/constants, security, and every other
-//! document type `Module` supports beyond microflows; cross-module
-//! associations (see `domain` module doc).
+//! crate only creates brand-new projects); pages/widgets, menus,
+//! enumerations/constants, and every other document type `Module` supports
+//! beyond microflows; DSL-level customization of security/navigation
+//! content (`scaffold` writes sane, empty defaults for both, matching what
+//! `mxrb generate` produces for a brand-new project, but there's no DSL
+//! surface yet to configure user roles, guest access, or navigation
+//! profiles). Cross-module associations and the default `ProjectSettings`/
+//! `Security$ProjectSecurity`/`Navigation$NavigationDocument` scaffold
+//! *are* ported (see `domain` and `scaffold` module docs).
 
 pub mod domain;
 pub mod error;
 pub mod flow_compiler;
 pub mod module;
 pub mod project;
+pub mod scaffold;
 
 pub use error::{Result, WriterError};
 pub use project::write_project;

@@ -3,6 +3,8 @@
 //! unit per microflow. Mirrors the fresh-project slice of `Writer#module_doc`
 //! + `#write_domain_model` + `#write_documents`.
 
+use std::collections::HashSet;
+
 use mxrs_ir::declaration::ModuleDecl;
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
@@ -10,7 +12,12 @@ use mxrs_mpr::MprFile;
 use crate::error::Result;
 use crate::{domain, flow_compiler};
 
-pub fn write_module(mpr: &mut MprFile, project_root_id: &str, decl: &ModuleDecl) -> Result<()> {
+pub fn write_module(
+    mpr: &mut MprFile,
+    project_root_id: &str,
+    decl: &ModuleDecl,
+    known_entities: &HashSet<String>,
+) -> Result<()> {
     let module_id = uuid::Uuid::new_v4().to_string();
     let module = mxrs_model::Module {
         id: module_id.clone(),
@@ -30,7 +37,7 @@ pub fn write_module(mpr: &mut MprFile, project_root_id: &str, decl: &ModuleDecl)
     };
     mpr.insert_unit(project_root_id, "Modules", module.to_bson(), Some(&module_id))?;
 
-    let (domain_model, _entity_ids) = domain::build_domain_model(&decl.name, &decl.entities)?;
+    let (domain_model, _entity_ids) = domain::build_domain_model(&decl.name, &decl.entities, known_entities)?;
     let domain_model_id = uuid::Uuid::new_v4().to_string();
     mpr.insert_unit(&module_id, "DomainModel", domain_model.to_bson(&domain_model_id), Some(&domain_model_id))?;
 
