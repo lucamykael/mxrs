@@ -398,6 +398,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-model"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-forms",
+ "mxrs-mpr",
+ "mxrs-settings",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "mxrs-mpr"
 version = "0.1.0"
 dependencies = [

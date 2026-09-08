@@ -1,0 +1,16 @@
+[package]
+name = "mxrs-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Project/Module/Entity/Page/Microflow model graph tying mxrs-mpr, mxrs-forms and mxrs-settings together. Ports lib/mxrb/model/{project,unit}.rb and subclasses from mxrb."
+
+[dependencies]
+mxrs-bson = { path = "../mxrs-bson" }
+mxrs-forms = { path = "../mxrs-forms" }
+mxrs-mpr = { path = "../mxrs-mpr" }
+mxrs-settings = { path = "../mxrs-settings" }
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }
