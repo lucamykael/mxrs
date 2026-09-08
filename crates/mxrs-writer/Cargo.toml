@@ -1,0 +1,21 @@
+[package]
+name = "mxrs-writer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Persists an mxrs-ir::ProjectDecl into a fresh .mpr (domain model + microflow subset, Phase 3 scope). Ports the relevant slice of writer.rb's fresh-project path — not its incremental synchronize_ruby_*! re-sync machinery, which is out of scope for this pass."
+
+[dependencies]
+mxrs-bson = { path = "../mxrs-bson" }
+mxrs-ir = { path = "../mxrs-ir" }
+mxrs-model = { path = "../mxrs-model" }
+mxrs-mpr = { path = "../mxrs-mpr" }
+mxrs-schema = { path = "../mxrs-schema" }
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+mxrs-dsl = { path = "../mxrs-dsl" }
+tempfile = "3.27.0"

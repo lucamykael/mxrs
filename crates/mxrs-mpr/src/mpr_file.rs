@@ -78,6 +78,55 @@ pub struct MprFile {
 }
 
 impl MprFile {
+    /// Creates a brand-new v2-storage `.mpr` at `path` — a self-referential
+    /// root `Projects$Project` unit plus the sibling `mprcontents` directory
+    /// — and opens it read-write. Mirrors `Writer#create_project!`'s v2
+    /// branch; v1 (inline-BSON) creation is out of this crate's locked MVP
+    /// scope. `schema_hash` is caller-supplied (via `mxrs-schema::schema_hash`)
+    /// rather than looked up here, keeping this crate independent of the
+    /// version/schema registry.
+    pub fn create(path: impl AsRef<Path>, version: &str, schema_hash: &str) -> Result<Self> {
+        let path = std::path::absolute(path.as_ref())?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(
+            "CREATE TABLE _MetaData (
+                _FormatVersion INTEGER, _ProductVersion TEXT,
+                _BuildVersion TEXT, _SchemaHash TEXT
+            );
+            CREATE TABLE Unit (
+                UnitID BLOB PRIMARY KEY NOT NULL, ContainerID BLOB,
+                ContainmentName TEXT, TreeConflict LONG,
+                ContentsHash TEXT, ContentsConflicts TEXT
+            );",
+        )?;
+        conn.execute(
+            "INSERT INTO _MetaData (_FormatVersion, _ProductVersion, _BuildVersion, _SchemaHash) \
+             VALUES (2, ?1, ?1, ?2)",
+            rusqlite::params![version, schema_hash],
+        )?;
+
+        let contents_dir = format::contents_dir(&path);
+        std::fs::create_dir_all(&contents_dir)?;
+
+        let root_id = uuid::Uuid::new_v4().to_string();
+        let doc = mxrs_bson::doc! { "$ID": root_id.clone(), "$Type": "Projects$Project", "IsSystemProject": false };
+        let bytes = mxrs_bson::serialize(&doc)?;
+        let blob = mxrs_bson::uuid_to_blob(&root_id)?.to_vec();
+        conn.execute(
+            "INSERT INTO Unit (UnitID, ContainerID, ContainmentName, TreeConflict, ContentsHash, ContentsConflicts) \
+             VALUES (?1, ?1, '', 0, ?2, '')",
+            rusqlite::params![blob, mxrs_bson::contents_hash(&bytes)],
+        )?;
+        mxunit::write_atomic(&mxunit::path_for(&contents_dir, &root_id), &bytes)?;
+        drop(conn);
+
+        Self::open(&path, false)
+    }
+
     pub fn open(path: impl AsRef<Path>, readonly: bool) -> Result<Self> {
         let path = std::path::absolute(path.as_ref())?;
         let flags = OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -1055,6 +1104,23 @@ mod tests {
 
     fn root_doc(uuid: &str) -> mxrs_bson::Document {
         mxrs_bson::doc! { "$ID": uuid, "$Type": "Projects$Project", "Name": "Test" }
+    }
+
+    #[test]
+    fn create_makes_a_fresh_v2_mpr_with_a_self_referential_root_project_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("New.mpr");
+        let mpr = MprFile::create(&path, "11.12.1", "test-hash").unwrap();
+
+        assert_eq!(mpr.format(), StorageFormat::V2);
+        assert_eq!(mpr.mendix_version().unwrap().as_deref(), Some("11.12.1"));
+        assert!(!mpr.readonly());
+
+        let root = mpr.root_unit().unwrap().unwrap();
+        assert_eq!(root.unit_id, root.container_id);
+        let doc = mpr.parse_contents(&root).unwrap();
+        assert_eq!(doc.get_str("$Type").unwrap(), "Projects$Project");
+        assert!(dir.path().join("mprcontents").is_dir());
     }
 
     #[test]

@@ -375,6 +375,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-dsl"
+version = "0.1.0"
+dependencies = [
+ "mxrs-ir",
+ "mxrs-model",
+]
+
+[[package]]
 name = "mxrs-forms"
 version = "0.1.0"
 dependencies = [
@@ -395,6 +403,13 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "mxrs-ir"
+version = "0.1.0"
+dependencies = [
+ "mxrs-model",
 ]
 
 [[package]]
@@ -441,6 +456,21 @@ dependencies = [
  "regex",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "mxrs-writer"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-dsl",
+ "mxrs-ir",
+ "mxrs-model",
+ "mxrs-mpr",
+ "mxrs-schema",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
