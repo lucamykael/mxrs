@@ -39,4 +39,4 @@ pub mod project;
 pub mod scaffold;
 
 pub use error::{Result, WriterError};
-pub use project::write_project;
+pub use project::{synchronize_project, write_project};

@@ -18,29 +18,7 @@ pub fn write_module(
     decl: &ModuleDecl,
     known_entities: &HashSet<String>,
 ) -> Result<()> {
-    let module_id = uuid::Uuid::new_v4().to_string();
-    let module = mxrs_model::Module {
-        id: module_id.clone(),
-        name: Some(decl.name.clone()),
-        sort_index: None,
-        from_app_store: false,
-        app_store_guid: None,
-        app_store_version: None,
-        export_level: "Hidden".into(),
-        domain_model: None,
-        pages: vec![],
-        microflows: vec![],
-        nanoflows: vec![],
-        rules: vec![],
-        menus: vec![],
-        module_roles: vec![],
-    };
-    mpr.insert_unit(
-        project_root_id,
-        "Modules",
-        module.to_bson(),
-        Some(&module_id),
-    )?;
+    let module_id = insert_bare_module(mpr, project_root_id, &decl.name)?;
 
     let (domain_model, _entity_ids) =
         domain::build_domain_model(&decl.name, &decl.entities, known_entities)?;
@@ -76,4 +54,40 @@ pub fn write_module(
     }
 
     Ok(())
+}
+
+/// A `Projects$Module` unit with no `DomainModel`/`Documents` children yet
+/// — used both by fresh creation (`write_module`, populating those right
+/// after) and by `project::synchronize_project` (upserting a module that's
+/// new to an existing project, before delegating to
+/// `domain::synchronize_domain_model`/`documents::synchronize_microflows`).
+pub(crate) fn insert_bare_module(
+    mpr: &mut MprFile,
+    project_root_id: &str,
+    name: &str,
+) -> Result<String> {
+    let module_id = uuid::Uuid::new_v4().to_string();
+    let module = mxrs_model::Module {
+        id: module_id.clone(),
+        name: Some(name.to_string()),
+        sort_index: None,
+        from_app_store: false,
+        app_store_guid: None,
+        app_store_version: None,
+        export_level: "Hidden".into(),
+        domain_model: None,
+        pages: vec![],
+        microflows: vec![],
+        nanoflows: vec![],
+        rules: vec![],
+        menus: vec![],
+        module_roles: vec![],
+    };
+    mpr.insert_unit(
+        project_root_id,
+        "Modules",
+        module.to_bson(),
+        Some(&module_id),
+    )?;
+    Ok(module_id)
 }
