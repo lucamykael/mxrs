@@ -158,3 +158,25 @@ fn a_reference_to_a_renamed_association_fails_to_compile() {
         "expected a compile failure for a renamed/removed association marker, but it compiled"
     );
 }
+
+/// M8.4 (per the phased roadmap): a type that exists but doesn't implement
+/// `EntityMarker` gets `#[diagnostic::on_unimplemented]`'s custom message
+/// instead of the generic "the trait bound `X: EntityMarker` is not
+/// satisfied" — this is the case (unlike an outright-unresolved name, which
+/// rustc already reports clearly on its own) where the improvement actually
+/// matters.
+#[test]
+fn a_type_that_is_not_an_entity_marker_gets_the_custom_diagnostic_message() {
+    let output = try_compile(
+        "struct NotAMarker;\nfn wants_entity<M: mxrs_ir::EntityMarker>() {}\npub fn use_it() { wants_entity::<NotAMarker>(); }",
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for a type that isn't an EntityMarker"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("is not a Mendix entity marker"),
+        "expected the custom on_unimplemented message, got:\n{stderr}"
+    );
+}
