@@ -188,6 +188,68 @@ fn a_duplicate_documentation_field_fails_to_compile() {
 }
 
 #[test]
+fn a_field_missing_mx_attribute_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        #[derive(mxrs_macros::MxEntity)]
+        struct Order {
+            number: String,
+        }
+        pub fn make() {}
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for a field with no #[mx_attribute(...)]"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mx_attribute"),
+        "expected the diagnostic to mention the missing attribute, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn an_unknown_mx_attribute_kind_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        #[derive(mxrs_macros::MxEntity)]
+        struct Order {
+            #[mx_attribute(kind = "blob")]
+            number: String,
+        }
+        pub fn make() {}
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for an unknown mx_attribute kind"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("blob"),
+        "expected the diagnostic to name the bad kind, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn deriving_mx_entity_on_an_enum_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        #[derive(mxrs_macros::MxEntity)]
+        enum Order {
+            Draft,
+        }
+        pub fn make() {}
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for deriving MxEntity on an enum"
+    );
+}
+
+#[test]
 fn a_microflow_missing_a_return_keyword_fails_to_compile() {
     let output = try_compile(
         r#"

@@ -34,11 +34,14 @@
 //! ```
 //!
 //! See `parse`'s doc comment for the full grammar and what's deliberately
-//! not covered yet (entity documentation/`persistable`, microflows), and
-//! `expand`'s doc comment for the non-negotiable rule this crate follows:
-//! every expansion lowers to calls against `mxrs-dsl` pub fns a caller
-//! could already reach by hand.
+//! not covered yet, and `expand`'s doc comment for the non-negotiable rule
+//! this crate follows: every expansion lowers to calls against `mxrs-dsl`
+//! pub fns a caller could already reach by hand.
+//!
+//! `#[derive(MxEntity)]` (M8.3) is a second, independent front end onto the
+//! same `mxrs-dsl` surface — see `derive`'s doc comment.
 
+mod derive;
 mod expand;
 mod parse;
 
@@ -51,4 +54,13 @@ use crate::parse::ProjectInput;
 pub fn project(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as ProjectInput);
     expand::expand(&parsed).into()
+}
+
+#[proc_macro_derive(MxEntity, attributes(mx_entity, mx_attribute))]
+pub fn derive_mx_entity(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as syn::DeriveInput);
+    match derive::expand_derive(&parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
 }
