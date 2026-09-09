@@ -56,6 +56,29 @@ pub trait AttributeMarker: 'static {
     const NAME: &'static str;
 }
 
+/// Implemented by a generated marker type for one *declared* association of
+/// one entity (e.g. `markers::Sales::Order_Order_Customer`, generated from
+/// a manifest entity's `associations` list — see `mxrs-typegen`'s manifest
+/// docs). Unlike `EntityMarker`/`AttributeMarker`, `mxrs-dsl` doesn't
+/// require this one: `EntityBuilder::association`'s target parameter is
+/// `Ref<M: EntityMarker>` (validating the *target*), not an
+/// `AssociationMarker` (which would validate the whole declaration —
+/// name, direction, and type — against the manifest). This trait exists so
+/// the manifest can still describe associations and generate *something*
+/// checkable from that description, without forcing a second, more
+/// invasive change to the builder's already-shipped signature in the same
+/// pass that just wired `Ref<M>` in.
+pub trait AssociationMarker: 'static {
+    /// The entity this association is declared on (the one carrying the
+    /// foreign key — same "FROM" convention as
+    /// `mxrs_model::association::Association::from_entity_id`).
+    type From: EntityMarker;
+    /// The entity this association points to.
+    type To: EntityMarker;
+    const NAME: &'static str;
+    const ASSOCIATION_TYPE: mxrs_model::association::AssociationType;
+}
+
 /// A typed reference to an entity, carrying no runtime state beyond what's
 /// needed to resolve back to the qualified name `mxrs-writer` already
 /// expects (`"Module.Entity"`) — so once `mxrs-dsl` is wired to accept
@@ -105,6 +128,21 @@ mod tests {
         const NAME: &'static str = "Number";
     }
 
+    struct Customer;
+    impl EntityMarker for Customer {
+        const MODULE: &'static str = "Sales";
+        const NAME: &'static str = "Customer";
+    }
+
+    struct OrderCustomer;
+    impl AssociationMarker for OrderCustomer {
+        type From = Order;
+        type To = Customer;
+        const NAME: &'static str = "Order_Customer";
+        const ASSOCIATION_TYPE: mxrs_model::association::AssociationType =
+            mxrs_model::association::AssociationType::Reference;
+    }
+
     #[test]
     fn qualified_name_joins_module_and_entity() {
         assert_eq!(Order::qualified_name(), "Sales.Order");
@@ -122,6 +160,23 @@ mod tests {
         assert_eq!(
             <OrderNumber as AttributeMarker>::Entity::qualified_name(),
             "Sales.Order"
+        );
+    }
+
+    #[test]
+    fn association_marker_names_its_from_to_and_type() {
+        assert_eq!(OrderCustomer::NAME, "Order_Customer");
+        assert_eq!(
+            <OrderCustomer as AssociationMarker>::From::qualified_name(),
+            "Sales.Order"
+        );
+        assert_eq!(
+            <OrderCustomer as AssociationMarker>::To::qualified_name(),
+            "Sales.Customer"
+        );
+        assert_eq!(
+            OrderCustomer::ASSOCIATION_TYPE,
+            mxrs_model::association::AssociationType::Reference
         );
     }
 }

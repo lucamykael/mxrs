@@ -19,12 +19,23 @@
 //!
 //! This does mean the manifest and the `mxrs-dsl` builder calls that
 //! actually persist the project are two things a user keeps in sync by
-//! hand, for now — `mxrs-dsl` is not yet wired to require the generated
-//! `Ref<M>` markers in place of raw strings (see `mxrs_ir::markers`' doc
-//! comment for the follow-up that closes this gap). Until then, this
-//! crate's value is exactly what Phase 4's done-definition asks for: a
-//! nonexistent/renamed reference against the generated markers themselves
-//! fails to compile — proven by this crate's `trybuild` test.
+//! hand. `mxrs-dsl` *is* wired to require the generated `Ref<M>` markers in
+//! place of raw strings for association targets (`EntityBuilder::association`
+//! — see `mxrs_ir::markers`' doc comment), so a nonexistent/renamed entity
+//! reference fails `cargo build` end to end, not just against the generated
+//! markers in isolation — proven by this crate's `tests/reference_checking.rs`
+//! (real throwaway `cargo build` invocations, not `trybuild` `.stderr`
+//! snapshots — see that file's doc comment for why) and by
+//! `mxrs-macros`' `tests/typegen_integration.rs`, which exercises the full
+//! typegen → `project! {}` → `mxrs-writer` pipeline.
+//!
+//! Associations are also in the manifest (an entity's `associations` list:
+//! `name`/`target`/`type`), each generating an `AssociationMarker` impl —
+//! but `mxrs-dsl` does *not* require one of these for
+//! `EntityBuilder::association`'s own `name`/`association_type` parameters
+//! (only the target is marker-checked, via `EntityMarker`/`Ref<M>`); see
+//! `mxrs_ir::markers::AssociationMarker`'s doc comment for why that's a
+//! deliberately narrower wiring than the entity/attribute case.
 //!
 //! # Usage (in a downstream project's own `build.rs`)
 //!
@@ -45,7 +56,7 @@ pub mod manifest;
 
 use std::path::Path;
 
-pub use manifest::{EntityManifest, Manifest, ModuleManifest};
+pub use manifest::{AssociationManifest, EntityManifest, Manifest, ModuleManifest};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TypegenError {
@@ -66,6 +77,18 @@ pub enum TypegenError {
 
     #[error("duplicate attribute name {0}.{1}.{2:?} in manifest")]
     DuplicateAttribute(String, String, String),
+
+    #[error("duplicate association name {0}.{1}.{2:?} in manifest")]
+    DuplicateAssociation(String, String, String),
+
+    #[error("association {0}.{1}.{2:?} has unknown type {3:?} (expected \"Reference\" or \"ReferenceSet\")")]
+    UnknownAssociationType(String, String, String, String),
+
+    #[error("association {0}.{1}.{2:?} targets {3:?}, which no manifest entity declares")]
+    UnknownAssociationTarget(String, String, String, String),
+
+    #[error("entity {0}.{1:?} has both an attribute and an association named {2:?} — the generated marker names would collide")]
+    MarkerNameCollision(String, String, String),
 }
 
 /// Renders `manifest` into Rust marker-type source (see [`codegen::generate`]).

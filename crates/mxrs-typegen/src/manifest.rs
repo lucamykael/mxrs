@@ -7,9 +7,10 @@
 //! top-level doc comment for the alternatives this was weighed against).
 //!
 //! Narrow on purpose: only what's needed to generate a distinct marker type
-//! per module/entity/attribute (names) — no attribute types, association
-//! declarations, or microflow bodies yet. Widen incrementally as `mxrs-dsl`
-//! grows a typed surface that actually consumes more of it.
+//! per module/entity/attribute/association (names, plus an association's
+//! target and type) — no attribute types or microflow bodies yet. Widen
+//! incrementally as `mxrs-dsl` grows a typed surface that actually consumes
+//! more of it.
 
 use std::path::Path;
 
@@ -29,11 +30,25 @@ pub struct ModuleManifest {
     pub entities: Vec<EntityManifest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EntityManifest {
     pub name: String,
     #[serde(default)]
     pub attributes: Vec<String>,
+    #[serde(default)]
+    pub associations: Vec<AssociationManifest>,
+}
+
+/// `target` is `"Entity"` for a same-module target or `"Module.Entity"` for
+/// cross-module — same convention `mxrs_ir::Ref<M>::qualified_name()`
+/// produces at the `mxrs-dsl` layer. `association_type` is `"Reference"` or
+/// `"ReferenceSet"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssociationManifest {
+    pub name: String,
+    pub target: String,
+    #[serde(rename = "type")]
+    pub association_type: String,
 }
 
 impl Manifest {

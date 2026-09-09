@@ -4,7 +4,14 @@
       "name": "Sales",
       "entities": [
         { "name": "Customer", "attributes": ["Name"] },
-        { "name": "Order", "attributes": ["Number", "Total"] }
+        {
+          "name": "Order",
+          "attributes": ["Number", "Total"],
+          "associations": [
+            { "name": "Order_Customer", "target": "Customer", "type": "Reference" },
+            { "name": "Order_Account", "target": "CRM.Account", "type": "Reference" }
+          ]
+        }
       ]
     },
     {

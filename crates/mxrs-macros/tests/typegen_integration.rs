@@ -66,3 +66,31 @@ fn a_generated_marker_carries_the_manifests_qualified_name() {
     assert_eq!(Sales::Order::qualified_name(), "Sales.Order");
     assert_eq!(CRM::Account::qualified_name(), "CRM.Account");
 }
+
+/// `manifest.json` also declares `Order`'s associations (a same-module
+/// `Order_Customer` and a cross-module `Order_Account`) — proving the
+/// generated `AssociationMarker` impls resolve correctly closes the loop
+/// on widening the manifest to describe associations, not just
+/// entities/attributes.
+#[test]
+fn generated_association_markers_resolve_their_from_and_to() {
+    use mxrs_ir::{AssociationMarker, EntityMarker};
+
+    assert_eq!(
+        <Sales::Order_Order_Customer as AssociationMarker>::From::qualified_name(),
+        "Sales.Order"
+    );
+    assert_eq!(
+        <Sales::Order_Order_Customer as AssociationMarker>::To::qualified_name(),
+        "Sales.Customer"
+    );
+    assert_eq!(
+        Sales::Order_Order_Customer::ASSOCIATION_TYPE,
+        mxrs_model::association::AssociationType::Reference
+    );
+
+    assert_eq!(
+        <Sales::Order_Order_Account as AssociationMarker>::To::qualified_name(),
+        "CRM.Account"
+    );
+}

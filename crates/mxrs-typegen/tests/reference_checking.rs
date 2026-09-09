@@ -25,10 +25,21 @@ fn sample_manifest() -> mxrs_typegen::Manifest {
     mxrs_typegen::Manifest {
         modules: vec![mxrs_typegen::ModuleManifest {
             name: "Sales".into(),
-            entities: vec![mxrs_typegen::EntityManifest {
-                name: "Order".into(),
-                attributes: vec!["Number".into()],
-            }],
+            entities: vec![
+                mxrs_typegen::EntityManifest {
+                    name: "Order".into(),
+                    attributes: vec!["Number".into()],
+                    associations: vec![mxrs_typegen::AssociationManifest {
+                        name: "Order_Customer".into(),
+                        target: "Customer".into(),
+                        association_type: "Reference".into(),
+                    }],
+                },
+                mxrs_typegen::EntityManifest {
+                    name: "Customer".into(),
+                    ..Default::default()
+                },
+            ],
         }],
     }
 }
@@ -55,8 +66,9 @@ fn try_compile(body: &str) -> Output {
         .collect();
     let name = format!("typegen-refcheck-fixture-{unique}");
     let cargo_toml = format!(
-        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-ir = {{ path = {:?} }}\n",
-        workspace_root().join("crates/mxrs-ir")
+        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-ir = {{ path = {:?} }}\nmxrs-model = {{ path = {:?} }}\n",
+        workspace_root().join("crates/mxrs-ir"),
+        workspace_root().join("crates/mxrs-model")
     );
     std::fs::write(dir.path().join("Cargo.toml"), cargo_toml).unwrap();
     std::fs::write(
@@ -121,5 +133,28 @@ fn a_reference_to_a_renamed_attribute_fails_to_compile() {
     assert!(
         !output.status.success(),
         "expected a compile failure for a renamed/removed attribute marker, but it compiled"
+    );
+}
+
+#[test]
+fn a_reference_to_a_known_association_marker_resolves_its_from_and_to() {
+    let output = try_compile(
+        "pub fn use_it() -> (String, String) { use mxrs_ir::{AssociationMarker, EntityMarker}; (<Sales::Order_Order_Customer as AssociationMarker>::From::qualified_name(), <Sales::Order_Order_Customer as AssociationMarker>::To::qualified_name()) }",
+    );
+    assert!(
+        output.status.success(),
+        "expected success, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_reference_to_a_renamed_association_fails_to_compile() {
+    let output = try_compile(
+        "fn wants_association<M: mxrs_ir::AssociationMarker>() {}\npub fn use_it() { wants_association::<Sales::Order_Order_Ghost>(); }",
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for a renamed/removed association marker, but it compiled"
     );
 }
