@@ -26,6 +26,7 @@
 //! exactly would risk silently eating a genuine `false` value for zero
 //! practical benefit.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use mxrs_bson::{doc, Bson, Document};
@@ -37,6 +38,26 @@ use crate::types::{data_type, is_data_type_document};
 use crate::CompilerError;
 
 pub use crate::support::AssociationInfo;
+
+/// Non-fatal, out-of-band findings surfaced during node compilation — never
+/// changes the compiled output, purely an explicit diagnostic sink.
+///
+/// **Rust-does-it-better opportunity, not a divergence from `mxrb`**:
+/// `database_connector_action_compiler.rb`'s own `unconfigured_write?` doc
+/// comment already flags this exact case as high-risk, but Ruby only acts
+/// on it silently — the write still gets swapped for a no-op
+/// `LogMessageAction` (see [`noop_database_action`]), and the fact that it
+/// happened is otherwise invisible until someone notices missing data in
+/// production. This variant carries the same signal into something a
+/// caller (`mxrs-cli`, an acceptance pass) can actually list before
+/// deploy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowDiagnostic {
+    UnconfiguredWrite {
+        action_id: String,
+        connection_name: String,
+    },
+}
 
 /// A module-role-name -> [(entity qualified name)] map keyed by the
 /// `Microflows$MicroflowParameter` nodes found anywhere in a flow's tree —
@@ -62,6 +83,14 @@ pub struct FlowNodeCompiler<'a> {
     schema: &'a RuntimeModelSchema,
     database_connector: Option<DatabaseConnectorCompiler<'a>>,
     associations: &'a HashMap<String, AssociationInfo>,
+    /// Interior mutability, not shared cross-call state like the nanoflow
+    /// compiler's `@programs` cache: `compile`/`compile_hash`/`compile_node`
+    /// stay `&self` (this crate's house style — see the module doc comment),
+    /// and every `FlowNodeCompiler` instance is freshly constructed per
+    /// `FlowCompiler::compile_flow` call anyway, so there is no
+    /// cross-flow leakage to worry about — just a side channel for
+    /// [`FlowDiagnostic`]s alongside the primary `Result` return value.
+    diagnostics: RefCell<Vec<FlowDiagnostic>>,
 }
 
 impl<'a> FlowNodeCompiler<'a> {
@@ -74,7 +103,12 @@ impl<'a> FlowNodeCompiler<'a> {
             schema,
             database_connector,
             associations,
+            diagnostics: RefCell::new(Vec::new()),
         }
+    }
+
+    pub fn diagnostics(&self) -> Vec<FlowDiagnostic> {
+        self.diagnostics.borrow().clone()
     }
 
     /// Replaces `MicroflowNodeCompiler#prepare` — walks the whole flow
@@ -145,6 +179,12 @@ impl<'a> FlowNodeCompiler<'a> {
                 .as_ref()
                 .expect("a flow referencing a database action needs a DatabaseConnectorCompiler");
             let replaced = if connector.is_unconfigured_write(source)? {
+                self.diagnostics
+                    .borrow_mut()
+                    .push(FlowDiagnostic::UnconfiguredWrite {
+                        action_id: get_str_any(source, &["$ID"]).unwrap_or_default(),
+                        connection_name: connector.connection_name_for(source),
+                    });
                 noop_database_action(source)
             } else {
                 connector.compile(source)?
@@ -492,6 +532,50 @@ mod tests {
         associations: &'a HashMap<String, AssociationInfo>,
     ) -> FlowNodeCompiler<'a> {
         FlowNodeCompiler::new(schema, associations, None)
+    }
+
+    #[test]
+    fn an_unconfigured_write_still_noops_but_also_records_a_diagnostic() {
+        let schema = schema();
+        let associations = HashMap::new();
+        let query = doc! {
+            "$ID": "q1", "Name": "DoInsert", "Query": "insert into orders values (1)",
+        };
+        let connection = doc! {
+            "ConnectionString": "Sales.DbConnectionString",
+            "Queries": mxrs_bson::build_array(vec![Bson::Document(query)], 3),
+        };
+        let mut connections = HashMap::new();
+        connections.insert("Sales.MainDb".to_string(), connection);
+        let mut constants = HashMap::new();
+        constants.insert(
+            "Sales.DbConnectionString".to_string(),
+            doc! { "Name": "DbConnectionString", "DefaultValue": "" },
+        );
+        let db_compiler = DatabaseConnectorCompiler::new(&connections, &constants);
+        let c = FlowNodeCompiler::new(&schema, &associations, Some(db_compiler));
+        let action = Bson::Document(doc! {
+            "$ID": "action-1",
+            "$Type": "DatabaseConnector$ExecuteDatabaseQueryAction",
+            "Query": "Sales.MainDb.DoInsert",
+        });
+
+        let compiled = c.compile(&action, &VariableTypes::new()).unwrap();
+
+        let Bson::Document(compiled) = compiled else {
+            panic!("expected a document")
+        };
+        assert_eq!(
+            compiled.get_str("$Type").unwrap(),
+            "Microflows$LogMessageAction"
+        );
+        assert_eq!(
+            c.diagnostics(),
+            vec![FlowDiagnostic::UnconfiguredWrite {
+                action_id: "action-1".to_string(),
+                connection_name: "Sales.MainDb".to_string(),
+            }]
+        );
     }
 
     #[test]

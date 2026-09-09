@@ -135,6 +135,19 @@ impl<'a> DatabaseConnectorCompiler<'a> {
             .is_empty())
     }
 
+    /// The connection name a `DatabaseConnector$ExecuteDatabaseQueryAction`
+    /// targets, split off its `Query` field the same way [`Self::resolve_query`]
+    /// does. Used only to label an [`crate::node::FlowDiagnostic::UnconfiguredWrite`]
+    /// diagnostic after [`Self::is_unconfigured_write`] has already returned
+    /// `true` — not itself part of that decision, so it never fails: an
+    /// action with a malformed `Query` field would already have raised
+    /// `UnknownDatabaseConnection`/`UnknownDatabaseQuery` earlier in the same
+    /// call, per [`Self::is_unconfigured_write`]'s own doc comment.
+    pub fn connection_name_for(&self, action: &Document) -> String {
+        let query_ref = get_str_any(action, &["Query"]).unwrap_or_default();
+        rpartition(&query_ref).0
+    }
+
     fn resolve_query(&self, qualified: &str) -> Result<(Document, Document), CompilerError> {
         let (connection_name, query_name) = rpartition(qualified);
         let connection = self
@@ -800,6 +813,18 @@ mod tests {
         let compiler = compiler_with(&connections, &constants);
         let action = doc! { "$Type": "Microflows$LogMessageAction" };
         assert!(!compiler.is_unconfigured_write(&action).unwrap());
+    }
+
+    #[test]
+    fn connection_name_for_splits_off_the_query_name() {
+        let connections = HashMap::new();
+        let constants = HashMap::new();
+        let compiler = compiler_with(&connections, &constants);
+        let action = doc! {
+            "$Type": "DatabaseConnector$ExecuteDatabaseQueryAction",
+            "Query": "Sales.MainDb.DoInsert",
+        };
+        assert_eq!(compiler.connection_name_for(&action), "Sales.MainDb");
     }
 
     #[test]

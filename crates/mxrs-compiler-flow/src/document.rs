@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use mxrs_bson::{doc, Bson, Document};
 use mxrs_schema::RuntimeModelSchema;
 
-use crate::node::{FlowNodeCompiler, VariableTypes};
+use crate::node::{FlowDiagnostic, FlowNodeCompiler, VariableTypes};
 use crate::support::{derived_id, get_any, get_doc_any, get_str_any, stable_dedup};
 use crate::types::data_type;
 use crate::CompilerError;
@@ -52,6 +52,12 @@ impl<'a> FlowDocumentCompiler<'a> {
             );
         }
         Ok(result)
+    }
+
+    /// See [`FlowNodeCompiler::diagnostics`] — this just forwards the
+    /// embedded node compiler's own side channel.
+    pub fn diagnostics(&self) -> Vec<FlowDiagnostic> {
+        self.nodes.diagnostics()
     }
 
     fn root_value(

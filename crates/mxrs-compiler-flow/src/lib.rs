@@ -27,7 +27,7 @@ pub use code_action::CodeActionCompiler;
 pub use database_connector::DatabaseConnectorCompiler;
 pub use document::FlowDocumentCompiler;
 pub use facade::FlowCompiler;
-pub use node::FlowNodeCompiler;
+pub use node::{FlowDiagnostic, FlowNodeCompiler};
 pub use support::ProjectFlowIndex;
 pub use types::{code_action_type, data_type};
 

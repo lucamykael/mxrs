@@ -7,19 +7,30 @@
 //! a real project) needs exactly this: build the project-wide index once,
 //! then compile any number of flows/code actions against it.
 
+use std::cell::RefCell;
+
 use mxrs_model::Project;
 use mxrs_schema::RuntimeModelSchema;
 
 use crate::code_action::CodeActionCompiler;
 use crate::database_connector::DatabaseConnectorCompiler;
 use crate::document::FlowDocumentCompiler;
-use crate::node::FlowNodeCompiler;
+use crate::node::{FlowDiagnostic, FlowNodeCompiler};
 use crate::support::ProjectFlowIndex;
 use crate::CompilerError;
 
 pub struct FlowCompiler {
     schema: RuntimeModelSchema,
     index: ProjectFlowIndex,
+    /// Accumulates every [`FlowDiagnostic`] across every [`Self::compile_flow`]
+    /// call made against this instance — unlike a per-call node/document
+    /// compiler (freshly built inside `compile_flow` and discarded once it
+    /// returns), `FlowCompiler` itself is the project-scoped, many-calls
+    /// object (see the module doc comment), so this is where a caller
+    /// compiling an entire project's worth of flows can collect the full
+    /// diagnostic list in one place instead of threading it through every
+    /// call site.
+    diagnostics: RefCell<Vec<FlowDiagnostic>>,
 }
 
 impl FlowCompiler {
@@ -35,6 +46,7 @@ impl FlowCompiler {
         Ok(FlowCompiler {
             schema: RuntimeModelSchema::for_11(existing_runtime_documents)?,
             index: ProjectFlowIndex::build(project)?,
+            diagnostics: RefCell::new(Vec::new()),
         })
     }
 
@@ -48,7 +60,17 @@ impl FlowCompiler {
         let nodes = FlowNodeCompiler::new(&self.schema, &self.index.associations, Some(connector));
         let document_compiler =
             FlowDocumentCompiler::new(&self.schema, nodes, &self.index.role_map);
-        document_compiler.compile(source, module_name)
+        let result = document_compiler.compile(source, module_name);
+        self.diagnostics
+            .borrow_mut()
+            .extend(document_compiler.diagnostics());
+        result
+    }
+
+    /// Every [`FlowDiagnostic`] recorded across every [`Self::compile_flow`]
+    /// call made so far against this instance.
+    pub fn diagnostics(&self) -> Vec<FlowDiagnostic> {
+        self.diagnostics.borrow().clone()
     }
 
     pub fn compile_code_action(
