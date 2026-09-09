@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Persists an mxrs-ir::ProjectDecl into a fresh .mpr (domain model + microflow subset, Phase 3 scope). Ports the relevant slice of writer.rb's fresh-project path — not its incremental synchronize_ruby_*! re-sync machinery, which is out of scope for this pass."
+description = "Persists an mxrs-ir::ProjectDecl into a fresh .mpr, and incrementally re-syncs an existing one's domain model (Phase 3 scope)."
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }

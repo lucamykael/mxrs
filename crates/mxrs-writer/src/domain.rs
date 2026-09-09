@@ -4,10 +4,16 @@
 //! `Writer#write_domain_model`, narrowed to fresh-project creation (no
 //! reconciliation against an existing domain model).
 //!
-//! `synchronize_domain_associations` covers the association-reconciliation
-//! half of that gap for an *already-existing* domain model — mirrors
-//! `Writer#synchronize_ruby_domain_associations!`, see its own doc comment
-//! for the scope this narrows (entity structures are not synced here).
+//! `synchronize_domain_model` (composing `synchronize_domain_entities` +
+//! `synchronize_domain_associations`) covers that same reconciliation for an
+//! *already-existing* domain model — mirrors mxrb's own
+//! `write_domain_model` (which mxrb itself reuses for both fresh creation
+//! and incremental resync, unlike the narrower, entity-structure-only
+//! `synchronize_ruby_entity_structures!`). See each function's doc comment
+//! for exactly what's preserved vs. re-derived, and what's still not ported
+//! (indexes/access-rules/lifecycle/generalization-target reconciliation —
+//! `EntityDecl` has no DSL surface for those yet, so existing entities keep
+//! whatever they already had for those fields, verbatim).
 //!
 //! Cross-module associations (`target` contains a `.`) mirror mxrb's own
 //! `cross_association_doc`: unlike same-module associations, the target is
@@ -27,8 +33,8 @@ use mxrs_bson::{Bson, Document};
 use mxrs_ir::declaration::EntityDecl;
 use mxrs_model::association::Association;
 use mxrs_model::entity::{Entity, Location, SystemMembers};
-use mxrs_model::DomainModel;
-use mxrs_mpr::MprFile;
+use mxrs_model::{Attribute, DomainModel};
+use mxrs_mpr::{MprFile, RawUnit};
 
 use crate::error::{Result, WriterError};
 
@@ -50,26 +56,7 @@ pub fn build_domain_model(
     for decl in decls {
         let id = uuid::Uuid::new_v4().to_string();
         entity_ids.insert(decl.name.clone(), id.clone());
-        entities.push(Entity {
-            id: Some(id),
-            name: Some(decl.name.clone()),
-            qualified_name: Some(format!("{module_name}.{}", decl.name)),
-            documentation: decl.documentation.clone(),
-            persistable: decl.persistable,
-            location: Location { x: 0, y: 0 },
-            data_storage_guid: None,
-            export_level: "Hidden".into(),
-            generalization: None,
-            access_rules: vec![],
-            indexes: vec![],
-            system_members: SystemMembers::default(),
-            lifecycle: vec![],
-            validation_rules: vec![],
-            source: None,
-            oql_query: None,
-            native_type: None,
-            attributes: decl.attributes.clone(),
-        });
+        entities.push(fresh_entity(module_name, decl, id));
     }
 
     let mut associations = Vec::new();
@@ -140,11 +127,7 @@ pub fn synchronize_domain_associations(
     entities: &[EntityDecl],
     known_entities: &HashSet<String>,
 ) -> Result<()> {
-    let dm_unit = mpr
-        .units_by_containment("DomainModel")?
-        .into_iter()
-        .find(|u| u.container_id == module_id)
-        .ok_or_else(|| WriterError::MissingDomainModel(module_name.to_string()))?;
+    let dm_unit = find_domain_model_unit(mpr, module_id, module_name)?;
     let dm_id = dm_unit.unit_id.clone();
     let mut doc = mpr.parse_contents(&dm_unit)?;
 
@@ -292,4 +275,196 @@ fn array_field<'a>(doc: &'a Document, key: &str) -> Option<&'a [Bson]> {
         Some(Bson::Array(items)) => Some(items),
         _ => None,
     }
+}
+
+fn find_domain_model_unit(mpr: &MprFile, module_id: &str, module_name: &str) -> Result<RawUnit> {
+    mpr.units_by_containment("DomainModel")?
+        .into_iter()
+        .find(|u| u.container_id == module_id)
+        .ok_or_else(|| WriterError::MissingDomainModel(module_name.to_string()))
+}
+
+/// Builds a brand-new `Entity` for a declaration with no prior on-disk
+/// counterpart — shared by `build_domain_model` (every entity is new) and
+/// `synchronize_domain_entities` (only entities absent from the existing
+/// domain model take this path). Mirrors `Writer#entity_doc`'s `previous:
+/// nil` branch, narrowed to what `EntityDecl` exposes today (no
+/// indexes/access-rules/lifecycle/generalization-target DSL surface yet).
+fn fresh_entity(module_name: &str, decl: &EntityDecl, id: String) -> Entity {
+    Entity {
+        id: Some(id),
+        name: Some(decl.name.clone()),
+        qualified_name: Some(format!("{module_name}.{}", decl.name)),
+        documentation: decl.documentation.clone(),
+        persistable: decl.persistable,
+        location: Location { x: 0, y: 0 },
+        data_storage_guid: None,
+        export_level: "Hidden".into(),
+        generalization: None,
+        access_rules: vec![],
+        indexes: vec![],
+        system_members: SystemMembers::default(),
+        lifecycle: vec![],
+        validation_rules: vec![],
+        source: None,
+        oql_query: None,
+        native_type: None,
+        attributes: decl.attributes.clone(),
+    }
+}
+
+/// Reads whichever of `"name"`/`"Name"` a raw entity/attribute doc carries.
+fn doc_name(doc: &Document) -> Option<String> {
+    match doc.get("name").or_else(|| doc.get("Name")) {
+        Some(Bson::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Rebuilds one attribute doc for a declared `Attribute`, preserving the
+/// prior attribute's `$ID`/`dataStorageGuid` when its name matches — every
+/// other field (type, default, length, ...) is fully re-derived from the
+/// declared value every time, since `mxrs_ir`'s `Attribute` (reused directly
+/// from `mxrs_model`, unlike mxrb's sparser Ruby declarations) always
+/// carries a complete value, not a partial override.
+fn reconcile_attribute_doc(decl: &Attribute, previous: Option<&Document>) -> Document {
+    match previous {
+        Some(prev) => {
+            let prior = Attribute::from_bson(prev);
+            Attribute { id: prior.id, data_storage_guid: prior.data_storage_guid, ..decl.clone() }.to_bson()
+        }
+        None => decl.to_bson(),
+    }
+}
+
+/// Rebuilds one entity doc for a declared `EntityDecl` against its prior
+/// on-disk counterpart (`None` for a brand-new entity). For an existing
+/// entity, everything **not** explicitly re-declared — `location`,
+/// `generalization`, `accessRules`, `indexes`, `eventHandlers`,
+/// `validationRules`, `source`/`oqlQuery`, and any unknown/foreign fields —
+/// survives untouched, because this merges onto a clone of the prior raw
+/// document rather than rebuilding it from `Entity::to_bson` (which has no
+/// surface to round-trip those fields — see its doc comment). Only `name`,
+/// `documentation`, and the reconciled `attributes` array are overwritten.
+/// Mirrors `Writer#entity_doc`, narrowed the same way `fresh_entity` is.
+fn build_entity_doc(module_name: &str, decl: &EntityDecl, previous: Option<&Document>, id: String, index: usize) -> Document {
+    let Some(prev) = previous else {
+        return fresh_entity(module_name, decl, id).to_bson();
+    };
+
+    let mut out = prev.clone();
+    out.insert("$ID", id);
+    let name_key = native_key(prev, "name", "Name");
+    out.insert(name_key, decl.name.clone());
+    let doc_key = native_key(prev, "documentation", "Documentation");
+    out.insert(doc_key, decl.documentation.clone());
+
+    let attrs_key = native_key(prev, "attributes", "Attributes");
+    let prev_attrs_raw = mxrs_bson::parse_array(array_field(prev, attrs_key));
+    let prev_attrs_by_name: HashMap<String, Document> = prev_attrs_raw
+        .items
+        .iter()
+        .filter_map(|b| match b {
+            Bson::Document(d) => doc_name(d).map(|name| (name, d.clone())),
+            _ => None,
+        })
+        .collect();
+    let new_attrs: Vec<Bson> = decl
+        .attributes
+        .iter()
+        .map(|a| {
+            let prior = a.name.as_deref().and_then(|name| prev_attrs_by_name.get(name));
+            Bson::Document(reconcile_attribute_doc(a, prior))
+        })
+        .collect();
+    out.insert(attrs_key, Bson::Array(mxrs_bson::build_array(new_attrs, prev_attrs_raw.marker)));
+    let _ = index; // reserved: mxrb positions brand-new entities by index; fresh_entity already defaults to (0, 0)
+    out
+}
+
+/// Re-syncs the entity graph of an *existing* domain model against a
+/// re-declared `entities` list, mirroring the entity-add/rename/remove half
+/// of `Writer#write_domain_model` (the same method mxrb's own writer uses
+/// for both fresh creation and incremental resync — unlike
+/// `synchronize_ruby_entity_structures!`, which only ever mutates entities
+/// that already exist by name).
+///
+/// - An entity whose name matches an existing one is reconciled via
+///   [`build_entity_doc`]: its `$ID` and everything not re-declared here
+///   survive; its attributes are reconciled by name (added, removed, or
+///   `$ID`-preserved on an unchanged name) via [`reconcile_attribute_doc`].
+/// - An entity whose name has no existing match is created fresh via
+///   [`fresh_entity`] (new `$ID`, `Location { 0, 0 }` — same simplification
+///   `build_domain_model` already makes for brand-new projects).
+/// - An existing entity **not** named in `entities` is dropped — `entities`
+///   is the complete authoritative list for the module, exactly as in
+///   `write_domain_model` (which only ever emits `mod.fetch(:entities).map`,
+///   never merges in leftover prior entities). Associations sourced from a
+///   dropped entity are not cascade-removed here either, matching mxrb's own
+///   behavior (`write_domain_model` doesn't clean those up on entity
+///   removal — cascading is the caller's responsibility, same as upstream).
+///
+/// Returns the resulting `name -> id` map, so a caller can pass it straight
+/// into [`synchronize_domain_associations`] (or the combined
+/// [`synchronize_domain_model`] entry point does that already).
+pub fn synchronize_domain_entities(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    entities: &[EntityDecl],
+) -> Result<HashMap<String, String>> {
+    let dm_unit = find_domain_model_unit(mpr, module_id, module_name)?;
+    let dm_id = dm_unit.unit_id.clone();
+    let mut doc = mpr.parse_contents(&dm_unit)?;
+
+    let entities_key = native_key(&doc, "entities", "Entities");
+    let existing_raw = mxrs_bson::parse_array(array_field(&doc, entities_key));
+    let mut existing_by_name: HashMap<String, Document> = HashMap::new();
+    for item in &existing_raw.items {
+        if let Bson::Document(d) = item {
+            if let Some(name) = doc_name(d) {
+                existing_by_name.insert(name, d.clone());
+            }
+        }
+    }
+
+    let mut declared_names: HashSet<String> = HashSet::new();
+    let mut entity_ids = HashMap::new();
+    let mut new_items = Vec::with_capacity(entities.len());
+    for (index, decl) in entities.iter().enumerate() {
+        if !declared_names.insert(decl.name.clone()) {
+            return Err(WriterError::DuplicateEntity { module_name: module_name.to_string(), name: decl.name.clone() });
+        }
+
+        let previous = existing_by_name.get(&decl.name);
+        let id = match previous.and_then(|p| p.get("$ID")) {
+            Some(v) => mxrs_bson::extract_id(v).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            None => uuid::Uuid::new_v4().to_string(),
+        };
+        entity_ids.insert(decl.name.clone(), id.clone());
+        new_items.push(Bson::Document(build_entity_doc(module_name, decl, previous, id, index)));
+    }
+
+    doc.insert(entities_key, Bson::Array(mxrs_bson::build_array(new_items, existing_raw.marker)));
+    mpr.update_unit(&dm_id, doc)?;
+    Ok(entity_ids)
+}
+
+/// Combined incremental re-sync entry point for one module's domain model:
+/// runs [`synchronize_domain_entities`] then [`synchronize_domain_associations`]
+/// against the same `.mpr`, mirroring the two-phase order mxrb itself
+/// requires (`synchronize_ruby_entity_structures!` before
+/// `synchronize_ruby_domain_associations!`) — associations resolve targets
+/// against whatever entity ids exist *after* the entity pass, so brand-new
+/// entities declared in the same call are valid association targets.
+pub fn synchronize_domain_model(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    entities: &[EntityDecl],
+    known_entities: &HashSet<String>,
+) -> Result<()> {
+    synchronize_domain_entities(mpr, module_id, module_name, entities)?;
+    synchronize_domain_associations(mpr, module_id, module_name, entities, known_entities)?;
+    Ok(())
 }

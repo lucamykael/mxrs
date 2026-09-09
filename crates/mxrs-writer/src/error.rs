@@ -23,6 +23,9 @@ pub enum WriterError {
     #[error("duplicate association {module_name}.{name:?} declared while synchronizing")]
     DuplicateAssociation { module_name: String, name: String },
 
+    #[error("duplicate entity {module_name}.{name:?} declared while synchronizing")]
+    DuplicateEntity { module_name: String, name: String },
+
     #[error("BSON codec error: {0}")]
     Bson(#[from] mxrs_bson::BsonCodecError),
 
