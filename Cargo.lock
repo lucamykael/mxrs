@@ -422,8 +422,10 @@ dependencies = [
  "mxrs-ir",
  "mxrs-macros",
  "mxrs-model",
+ "mxrs-mpr",
  "mxrs-writer",
  "tempfile",
+ "thiserror",
  "uuid",
 ]
 

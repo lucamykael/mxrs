@@ -42,7 +42,7 @@ fn usage() {
     eprintln!("       mxrs dump-unit <file.mpr> <unit_id>");
     eprintln!("       mxrs sql <file.mpr> \"<query>\"");
     eprintln!("       mxrs modules <file.mpr>");
-    eprintln!("       mxrs export <file.mpr> [-o <out.rs>]");
+    eprintln!("       mxrs export <file.mpr> [-o <out.rs>] [--allow-lossy]");
 }
 
 fn run_validate(mut args: Vec<String>) -> ExitCode {
@@ -264,12 +264,24 @@ fn run_modules(args: Vec<String>) -> ExitCode {
 
 fn run_export(mut args: Vec<String>) -> ExitCode {
     let out_path = take_value(&mut args, "-o");
+    let allow_lossy = take_flag(&mut args, "--allow-lossy");
     let Some(path) = args.first() else {
-        eprintln!("[mxrs] error: usage: mxrs export <file.mpr> [-o <out.rs>]");
+        eprintln!("[mxrs] error: usage: mxrs export <file.mpr> [-o <out.rs>] [--allow-lossy]");
         return ExitCode::FAILURE;
     };
 
-    let source = match mxrs_exporter::export_project(path) {
+    let exported = if allow_lossy {
+        mxrs_exporter::export_project_lossy(path).map_err(|error| error.to_string())
+    } else {
+        mxrs_exporter::export_project(path).map_err(|error| {
+            let mut message = error.to_string();
+            for gap in error.gaps() {
+                message.push_str(&format!("\n  - {}: {}", gap.path, gap.reason));
+            }
+            message
+        })
+    };
+    let source = match exported {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[mxrs] error: {e}");

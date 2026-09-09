@@ -9,12 +9,14 @@ description = "Reads an existing .mpr and emits Rust project! {} source text an 
 
 [dependencies]
 mxrs-model = { path = "../mxrs-model" }
+thiserror.workspace = true
 
 [dev-dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
 mxrs-dsl = { path = "../mxrs-dsl" }
 mxrs-ir = { path = "../mxrs-ir" }
 mxrs-macros = { path = "../mxrs-macros" }
+mxrs-mpr = { path = "../mxrs-mpr" }
 mxrs-writer = { path = "../mxrs-writer" }
 tempfile = "3.27.0"
 uuid = { version = "1", features = ["v4"] }

@@ -10,6 +10,11 @@
 //! different, new capability: model → **Rust** source, which the original
 //! plan didn't anticipate needing.
 //!
+//! `export_project` is fail-closed: it refuses projects whose unsupported
+//! domain features would be erased or reset by a subsequent synchronization.
+//! `export_project_lossy` retains the original best-effort behavior for source
+//! inspection, but its output must be reviewed before write-back.
+//!
 //! **First-slice scope, loud not silent about what's outside it**:
 //!
 //! - **Domain model only** — entities, attributes, associations. Not
@@ -23,8 +28,8 @@
 //!   what it's given (see its own doc comment) — so writing an exported
 //!   file straight back through `synchronize_project` leaves every
 //!   existing microflow on disk untouched, not deleted.
-//! - **Unsupported attribute types are commented out, not silently
-//!   dropped**: `project! {}`'s grammar covers seven attribute kinds
+//! - **Unsupported attribute types are rejected by the safe entry point and
+//!   commented by the lossy entry point**: `project! {}`'s grammar covers seven attribute kinds
 //!   (string/integer/long/decimal/boolean/datetime/autonumber);
 //!   `Float`/`HashString`/`Binary`/`Enum` attributes get a `// TODO` line
 //!   naming the attribute and its real type instead of vanishing from the
@@ -58,12 +63,121 @@ use mxrs_model::entity::Entity;
 use mxrs_model::Attribute;
 use mxrs_model::{Association, Module, Project};
 
-pub fn export_project(path: impl AsRef<Path>) -> mxrs_model::Result<String> {
+/// One model feature the generated `project! {}` source cannot faithfully
+/// represent yet. Paths use Mendix qualified names so the user can resolve
+/// every finding without having to inspect storage ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundTripGap {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExportError {
+    #[error(transparent)]
+    Model(#[from] mxrs_model::ModelError),
+
+    #[error("refusing a lossy Rust export; {0} unsupported model feature(s) would not round-trip (pass --allow-lossy only if this is intentional)")]
+    Lossy(usize, Vec<RoundTripGap>),
+}
+
+impl ExportError {
+    pub fn gaps(&self) -> &[RoundTripGap] {
+        match self {
+            ExportError::Lossy(_, gaps) => gaps,
+            ExportError::Model(_) => &[],
+        }
+    }
+}
+
+pub type Result<T> = std::result::Result<T, ExportError>;
+
+/// Exports only when the generated source can be synchronized back without
+/// erasing a feature this first-slice grammar cannot express. The old,
+/// explicitly lossy behavior remains available as [`export_project_lossy`]
+/// for inspection and assisted migrations.
+pub fn export_project(path: impl AsRef<Path>) -> Result<String> {
+    let project = Project::open(path, true)?;
+    let mendix_version = project.mendix_version()?.unwrap_or_default();
+    let mut modules = project.modules()?;
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+    let gaps = round_trip_gaps(&modules);
+    if !gaps.is_empty() {
+        return Err(ExportError::Lossy(gaps.len(), gaps));
+    }
+    Ok(render(&mendix_version, &modules))
+}
+
+/// Emits best-effort source even when unsupported features must be rendered
+/// as `TODO` comments. Callers must not feed this output back to
+/// `synchronize_project` without reviewing every comment.
+pub fn export_project_lossy(path: impl AsRef<Path>) -> mxrs_model::Result<String> {
     let project = Project::open(path, true)?;
     let mendix_version = project.mendix_version()?.unwrap_or_default();
     let mut modules = project.modules()?;
     modules.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(render(&mendix_version, &modules))
+}
+
+fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
+    let entity_qualified_name_by_id = index_entities_by_id(modules);
+    let mut gaps = Vec::new();
+    for module in modules {
+        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        let Some(domain_model) = &module.domain_model else {
+            continue;
+        };
+        for entity in &domain_model.entities {
+            let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
+            for attribute in &entity.attributes {
+                let attribute_name = attribute.name.as_deref().unwrap_or("Unnamed");
+                let path = format!("{module_name}.{entity_name}.{attribute_name}");
+                if project_attr_keyword(attribute.attribute_type).is_none() {
+                    gaps.push(RoundTripGap {
+                        path: path.clone(),
+                        reason: format!(
+                            "attribute type {:?} has no project! grammar",
+                            attribute.attribute_type
+                        ),
+                    });
+                }
+                if !attribute.documentation.is_empty()
+                    || attribute.length.is_some_and(|length| length != 200)
+                    || attribute.localize_date == Some(false)
+                    || attribute.export_level != "Hidden"
+                {
+                    gaps.push(RoundTripGap {
+                        path,
+                        reason: "attribute metadata has no project! grammar".to_string(),
+                    });
+                }
+            }
+        }
+        for association in domain_model.all_associations() {
+            let name = association.name.as_deref().unwrap_or("Unnamed");
+            let path = format!("{module_name}.{name}");
+            let target_resolves = association.to_entity_id.as_deref().is_some_and(|target| {
+                target.contains('.') || entity_qualified_name_by_id.contains_key(target)
+            });
+            if !target_resolves {
+                gaps.push(RoundTripGap {
+                    path: path.clone(),
+                    reason: "association target cannot be resolved".to_string(),
+                });
+            }
+            if association.owner != mxrs_model::association::Owner::Default
+                || association.storage_format != mxrs_model::association::StorageFormat::Column
+                || !association.documentation.is_empty()
+                || association.export_level != "Hidden"
+            {
+                gaps.push(RoundTripGap {
+                    path,
+                    reason: "association metadata has no project! grammar".to_string(),
+                });
+            }
+        }
+    }
+    gaps
 }
 
 fn render(mendix_version: &str, modules: &[Module]) -> String {
@@ -393,6 +507,55 @@ mod tests {
         assert!(source.contains("TODO"));
         assert!(source.contains("Score"));
         assert!(!source.contains("float Score"));
+    }
+
+    #[test]
+    fn safe_export_refuses_an_attribute_the_generated_source_would_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Project.mpr");
+        let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+        builder.module("Sales", |module| {
+            module.entity("Order", |entity| {
+                entity.string("Number");
+            });
+        });
+        mxrs_writer::write_project(&path, &builder.build()).unwrap();
+
+        let project = Project::open(&path, true).unwrap();
+        let module = project.modules().unwrap().remove(0);
+        drop(project);
+        let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+        let domain_unit = mpr
+            .units_by_containment("DomainModel")
+            .unwrap()
+            .into_iter()
+            .find(|unit| unit.container_id == module.id)
+            .unwrap();
+        let mut domain_doc = mpr.parse_contents(&domain_unit).unwrap();
+        let entities = domain_doc.get_array_mut("entities").unwrap();
+        let order = entities
+            .iter_mut()
+            .find_map(|value| value.as_document_mut())
+            .unwrap();
+        order
+            .get_array_mut("attributes")
+            .unwrap()
+            .push(mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "DomainModels$Attribute",
+                "name": "Score",
+                "type": { "$Type": "DomainModels$FloatAttributeType" },
+            }));
+        mpr.update_unit(&domain_unit.unit_id, domain_doc).unwrap();
+        drop(mpr);
+
+        let error = export_project(&path).unwrap_err();
+        assert_eq!(error.gaps().len(), 1);
+        assert_eq!(error.gaps()[0].path, "Sales.Order.Score");
+        assert!(error.to_string().contains("refusing a lossy Rust export"));
+
+        let source = export_project_lossy(&path).unwrap();
+        assert!(source.contains("TODO: attribute \"Score\""));
     }
 
     #[test]
