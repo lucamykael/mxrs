@@ -1,11 +1,13 @@
-//! Thin CLI dispatcher over `mxrs_cli`'s `validate`/`compare`/`inspect` —
-//! mirrors `bin/mxrb`'s `when "validate"`/`when "compare"` cases (`mxrb
-//! validate`, `mxrb compare`), narrowed the same way the library crate is
-//! (see `lib.rs`'s doc comment for what's not ported yet: `export`,
-//! `--json` output is supported but no `preflight`/`pack`/`portable`/`mda`/
-//! `diagram-er` — those depend on Phase 5 packaging, which doesn't exist).
-//! `inspect` has no `bin/mxrb` equivalent — it's a new single-file front
-//! end onto `compare`'s existing snapshot machinery (see `lib.rs`).
+//! Thin CLI dispatcher over `mxrs_cli`'s subcommand modules — mirrors
+//! `bin/mxrb`'s `when "validate"`/`when "compare"`/`when "inspect"`/
+//! `when "sql"`/... cases, narrowed the same way the library crate is (see
+//! `lib.rs`'s doc comment for exactly what each command covers and what's
+//! not ported yet — most of `bin/mxrb`'s ~45 subcommands depend on engines
+//! mxrs hasn't built yet, e.g. `preflight`/`pack`/`portable`/`mda` need
+//! Phase 5 packaging, `db`/`run` need Docker/Java orchestration, `oql`
+//! needs an OQL server, `refs`/`rename`/`move` need the semantic index).
+//! `inspect` has no `bin/mxrb` equivalent under that name — it's a new
+//! single-file front end onto `compare`'s existing snapshot machinery.
 
 use std::process::ExitCode;
 
@@ -15,6 +17,10 @@ fn main() -> ExitCode {
         Some("validate") => run_validate(args.collect()),
         Some("compare") => run_compare(args.collect()),
         Some("inspect") => run_inspect(args.collect()),
+        Some("units") => run_units(args.collect()),
+        Some("dump-unit") => run_dump_unit(args.collect()),
+        Some("sql") => run_sql(args.collect()),
+        Some("modules") => run_modules(args.collect()),
         Some(other) => {
             eprintln!("[mxrs] error: unknown command {other:?}");
             usage();
@@ -31,6 +37,10 @@ fn usage() {
     eprintln!("Usage: mxrs validate <file.mpr> [--json]");
     eprintln!("       mxrs compare <left.mpr> <right.mpr> [--json]");
     eprintln!("       mxrs inspect <file.mpr> [--json]");
+    eprintln!("       mxrs units <file.mpr>");
+    eprintln!("       mxrs dump-unit <file.mpr> <unit_id>");
+    eprintln!("       mxrs sql <file.mpr> \"<query>\"");
+    eprintln!("       mxrs modules <file.mpr>");
 }
 
 fn run_validate(mut args: Vec<String>) -> ExitCode {
@@ -143,6 +153,111 @@ fn run_inspect(mut args: Vec<String>) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn run_units(args: Vec<String>) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprintln!("[mxrs] error: usage: mxrs units <file.mpr>");
+        return ExitCode::FAILURE;
+    };
+    let report = match mxrs_cli::browse::units(path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[mxrs] error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("Project : {}", report.project_name.as_deref().unwrap_or(""));
+    println!(
+        "Version : {}",
+        report.mendix_version.as_deref().unwrap_or("")
+    );
+    println!("Tables  : {}", report.tables.join(", "));
+    println!();
+    println!("Unit types found:");
+    for t in &report.unit_types {
+        println!("  {t}");
+    }
+    println!();
+    println!("All units:");
+    for u in &report.units {
+        println!(
+            "  [{}] {} (container={}, name={})",
+            u.unit_id, u.type_name, u.container_id, u.containment_name
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_dump_unit(args: Vec<String>) -> ExitCode {
+    if args.len() != 2 {
+        eprintln!("[mxrs] error: usage: mxrs dump-unit <file.mpr> <unit_id>");
+        return ExitCode::FAILURE;
+    }
+    let dump = match mxrs_cli::browse::dump_unit(&args[0], &args[1]) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            eprintln!("[mxrs] error: unit {} not found", args[1]);
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("[mxrs] error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("UnitID           : {}", dump.unit_id);
+    println!("ContainerID      : {}", dump.container_id);
+    println!("ContainmentName  : {}", dump.containment_name);
+    println!("TypeName         : {}", dump.type_name);
+    println!(
+        "ContentsHash     : {}",
+        dump.contents_hash.unwrap_or_default()
+    );
+    println!("Contents (hex)   :");
+    match &dump.bytes {
+        Some(bytes) if !bytes.is_empty() => print!("{}", mxrs_cli::browse::format_hex_dump(bytes)),
+        _ => println!("  (empty)"),
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_sql(args: Vec<String>) -> ExitCode {
+    if args.len() != 2 {
+        eprintln!("[mxrs] error: usage: mxrs sql <file.mpr> \"<query>\"");
+        return ExitCode::FAILURE;
+    }
+    let result = match mxrs_cli::browse::sql(&args[0], &args[1]) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[mxrs] error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for row in &result.rows {
+        let cells: Vec<String> = row.iter().map(|c| c.to_string()).collect();
+        println!("[{}]", cells.join(", "));
+    }
+    println!("({} rows)", result.rows.len());
+    ExitCode::SUCCESS
+}
+
+fn run_modules(args: Vec<String>) -> ExitCode {
+    let Some(path) = args.first() else {
+        eprintln!("[mxrs] error: usage: mxrs modules <file.mpr>");
+        return ExitCode::FAILURE;
+    };
+    match mxrs_cli::browse::list_modules(path) {
+        Ok(names) => {
+            for name in names {
+                println!("{name}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("[mxrs] error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {

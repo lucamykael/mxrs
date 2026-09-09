@@ -47,6 +47,54 @@ pub struct WriteStats {
     pub deleted: u64,
 }
 
+/// [`MprFile::raw_query`]'s result — column names plus each row's cells in
+/// the same order, since a debug query's shape isn't known ahead of time
+/// (unlike [`RawUnit`], which always has the same fixed columns).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SqlResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<SqlCell>>,
+}
+
+/// SQLite's own dynamic column typing, carried through undecoded — a
+/// `Contents` blob is opaque BSON here, not parsed (that's
+/// [`MprFile::parse_contents`]'s job on an actual [`RawUnit`], not a debug
+/// query result of arbitrary shape).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlCell {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl SqlCell {
+    fn from_value_ref(value: rusqlite::types::ValueRef<'_>) -> rusqlite::Result<Self> {
+        Ok(match value {
+            rusqlite::types::ValueRef::Null => SqlCell::Null,
+            rusqlite::types::ValueRef::Integer(i) => SqlCell::Integer(i),
+            rusqlite::types::ValueRef::Real(f) => SqlCell::Real(f),
+            rusqlite::types::ValueRef::Text(t) => {
+                SqlCell::Text(String::from_utf8_lossy(t).into_owned())
+            }
+            rusqlite::types::ValueRef::Blob(b) => SqlCell::Blob(b.to_vec()),
+        })
+    }
+}
+
+impl std::fmt::Display for SqlCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SqlCell::Null => write!(f, "NULL"),
+            SqlCell::Integer(i) => write!(f, "{i}"),
+            SqlCell::Real(r) => write!(f, "{r}"),
+            SqlCell::Text(s) => write!(f, "{s}"),
+            SqlCell::Blob(b) => write!(f, "<{} byte blob>", b.len()),
+        }
+    }
+}
+
 /// A dynamically-typed SQL parameter, used where the column list (and thus
 /// the parameter list) is only known at runtime — mirrors Ruby's duck-typed
 /// bind array in `insert_unit`.
@@ -166,6 +214,26 @@ impl MprFile {
 
     pub fn write_stats(&self) -> WriteStats {
         self.write_stats
+    }
+
+    /// Runs an arbitrary read query against the underlying SQLite store —
+    /// mirrors `Mxrb::Project#query`/`bin/mxrb`'s `sql` command, a debugging
+    /// escape hatch for inspecting a `.mpr`'s raw storage shape (schema
+    /// exploration, ad-hoc row counts, ...), not a supported data-access API.
+    /// Like the Ruby original, this doesn't restrict the query to `SELECT` —
+    /// callers on a `readonly: true`-opened file are protected by SQLite's
+    /// own read-only connection mode; callers on a writable file are not.
+    pub fn raw_query(&self, sql: &str) -> Result<SqlResult> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let rows = stmt
+            .query_map([], |row| {
+                (0..columns.len())
+                    .map(|i| SqlCell::from_value_ref(row.get_ref(i)?))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(SqlResult { columns, rows })
     }
 
     pub fn tables(&self) -> Result<Vec<String>> {
@@ -1136,6 +1204,33 @@ mod tests {
         let mpr = MprFile::open(&path, false).unwrap();
         assert_eq!(mpr.format(), StorageFormat::V2);
         assert_eq!(mpr.mendix_version().unwrap().as_deref(), Some("11.12.1"));
+    }
+
+    #[test]
+    fn raw_query_returns_columns_and_typed_cells() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_v2_fixture(dir.path());
+        let mpr = MprFile::open(&path, false).unwrap();
+        let result = mpr
+            .raw_query("SELECT _ProductVersion, _BuildVersion FROM _MetaData")
+            .unwrap();
+        assert_eq!(result.columns, vec!["_ProductVersion", "_BuildVersion"]);
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                SqlCell::Text("11.12.1".to_string()),
+                SqlCell::Text("11.12.1".to_string()),
+            ]]
+        );
+    }
+
+    #[test]
+    fn raw_query_reports_null_for_no_matching_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = create_v2_fixture(dir.path());
+        let mpr = MprFile::open(&path, false).unwrap();
+        let result = mpr.raw_query("SELECT COUNT(*) FROM Unit").unwrap();
+        assert_eq!(result.rows, vec![vec![SqlCell::Integer(0)]]);
     }
 
     #[test]

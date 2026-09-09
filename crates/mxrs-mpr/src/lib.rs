@@ -15,4 +15,4 @@ pub mod transaction;
 
 pub use error::{MprError, Result};
 pub use format::StorageFormat;
-pub use mpr_file::{MprFile, RawUnit, WriteStats};
+pub use mpr_file::{MprFile, RawUnit, SqlCell, SqlResult, WriteStats};
