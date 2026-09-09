@@ -10,12 +10,17 @@
 //! returns), so it's usable directly wherever one is needed —
 //! `mxrs_writer::write_project(path, &project! { ... })`.
 //!
-//! References `::mxrs_model::association::AssociationType` directly rather
-//! than going through an `mxrs-dsl` re-export (there isn't one — existing
-//! hand-written `mxrs-dsl` usage already imports `mxrs_model::association`
-//! types directly, e.g. in `mxrs-writer`'s own test suite), so a crate
-//! using `project! {}` needs `mxrs-model` as a direct dependency too, same
-//! as hand-written `mxrs-dsl` usage already does.
+//! References `::mxrs_model::association::AssociationType` and
+//! `::mxrs_ir::Ref` directly rather than going through an `mxrs-dsl`
+//! re-export (there isn't one — existing hand-written `mxrs-dsl` usage
+//! already imports `mxrs_model::association`/`mxrs_ir` types directly, e.g.
+//! in `mxrs-writer`'s own test suite), so a crate using `project! {}` needs
+//! `mxrs-model` and `mxrs-ir` as direct dependencies too, same as
+//! hand-written `mxrs-dsl` usage already does. An association's target
+//! path (`e.association(name, Ref::<#target>::new(), ...)`) is resolved in
+//! the *macro call site's* scope, not this crate's — it has to name a
+//! marker type implementing `mxrs_ir::EntityMarker` that's actually
+//! visible there (via `use`, a fully-qualified path, ...).
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -74,6 +79,10 @@ fn expand_association(association: &AssociationInput) -> TokenStream {
     let target = &association.target;
     let association_type = &association.association_type;
     quote! {
-        e.association(#name, #target, ::mxrs_model::association::AssociationType::#association_type);
+        e.association(
+            #name,
+            ::mxrs_ir::Ref::<#target>::new(),
+            ::mxrs_model::association::AssociationType::#association_type,
+        );
     }
 }

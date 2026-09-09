@@ -1,22 +1,35 @@
 //! Phase 4 marker-type contract: the trait surface `mxrs-typegen`-generated
-//! code implements, and the newtype `mxrs-dsl` (eventually) uses in place of
-//! raw string references. Kept here rather than in `mxrs-typegen` itself so
-//! a user's generated-markers module only needs to depend on `mxrs-ir`
-//! (already a transitive dependency via `mxrs-dsl`), not on the codegen
-//! tool — the same "no capability exists only through generated code" split
-//! `mxrs-macros` (Phase 8) is required to follow for the same reason.
+//! code implements, and the newtype `mxrs-dsl::EntityBuilder::association`
+//! now *requires* in place of a raw string target. Kept here rather than in
+//! `mxrs-typegen` itself so a user's generated-markers module only needs to
+//! depend on `mxrs-ir` (already a transitive dependency via `mxrs-dsl`),
+//! not on the codegen tool — the same "no capability exists only through
+//! generated code" split `mxrs-macros` (Phase 8) is required to follow for
+//! the same reason.
 //!
-//! **Scope of this pass**: the trait contract, the generated code that
-//! implements it (`mxrs-typegen`), and a `Ref<M>` newtype exist and are
-//! tested (including a `trybuild` compile-fail proving an unknown reference
-//! doesn't compile — the plan's literal Phase 4 done-definition). `mxrs-dsl`
-//! itself is **not yet wired** to require `Ref<M>` instead of a plain
-//! `&str` in `EntityBuilder::association`/`association_target` — that's a
-//! larger, separate change to the builder's public API (touches every
-//! existing association-target call site and `mxrs-writer`'s
-//! `AssociationDecl::target` resolution), left for a follow-up pass so this
-//! one doesn't destabilize Phase 3's already-shipped, oracle-verified
-//! surface.
+//! **`mxrs-dsl` wiring** (`EntityBuilder::association`'s target parameter
+//! is `Ref<M>`, not `impl Into<String>`): a typo'd or renamed association
+//! target — even a same-module one — now fails `cargo build` via a
+//! "no such marker type" error, not `mxrs-writer`'s runtime
+//! `UnknownAssociationTarget`. The runtime check still exists and still
+//! matters: a `Ref<M>` only proves the *marker type* exists (i.e. some
+//! manifest once declared that name), not that the specific `ProjectDecl`
+//! being written actually includes that entity — those are two different
+//! guarantees, and only the second one is enforceable at compile time
+//! without also making the whole `ProjectBuilder` invocation type-level
+//! (out of scope for this pass). See
+//! `mxrs-writer::domain::resolve_association`'s doc comment for the
+//! consequence this has on local-vs-cross-module routing: a same-module
+//! `Ref<M>` still resolves to a fully-qualified `"Module.Entity"` string
+//! (there's no "short form" anymore), so routing can no longer key off
+//! "does the target string contain a dot."
+//!
+//! `AssociationDecl.target` itself is still a plain `String`, deliberately:
+//! only the *builder's* entry point requires a marker; the underlying IR
+//! stays constructible directly (with a hand-written string target,
+//! unqualified or qualified) for lower-level callers — `mxrs-writer`'s own
+//! test suite does this to exercise `synchronize_domain_associations`
+//! without going through `mxrs-dsl` at all.
 
 use std::marker::PhantomData;
 

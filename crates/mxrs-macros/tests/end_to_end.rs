@@ -7,6 +7,28 @@
 use mxrs_macros::project;
 use mxrs_model::Project;
 
+/// Hand-written marker types an association's target path resolves
+/// against — same rationale as `mxrs-writer`'s test suite: these tests
+/// don't need a manifest/build.rs, just something implementing
+/// `EntityMarker`. `mxrs-typegen`'s own crate proves the codegen path.
+#[allow(dead_code, non_snake_case)]
+mod markers {
+    pub mod Sales {
+        pub struct Customer;
+        impl mxrs_ir::EntityMarker for Customer {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "Customer";
+        }
+    }
+    pub mod CRM {
+        pub struct Account;
+        impl mxrs_ir::EntityMarker for Account {
+            const MODULE: &'static str = "CRM";
+            const NAME: &'static str = "Account";
+        }
+    }
+}
+
 #[test]
 fn expands_to_a_project_decl_writable_and_readable_like_hand_written_dsl() {
     let dir = tempfile::tempdir().unwrap();
@@ -21,7 +43,7 @@ fn expands_to_a_project_decl_writable_and_readable_like_hand_written_dsl() {
             entity Order {
                 string Number = "A-0000";
                 decimal Total;
-                association Order_Customer -> Customer as Reference;
+                association Order_Customer -> markers::Sales::Customer as Reference;
             }
         }
     };
@@ -43,12 +65,13 @@ fn expands_to_a_project_decl_writable_and_readable_like_hand_written_dsl() {
     let associations = sales.associations();
     assert_eq!(associations.len(), 1);
     assert_eq!(associations[0].name.as_deref(), Some("Order_Customer"));
+    assert!(!associations[0].is_cross_module());
     let customer = entities.iter().find(|e| e.name.as_deref() == Some("Customer")).unwrap();
     assert_eq!(associations[0].to_entity_id.as_deref(), customer.id.as_deref());
 }
 
 #[test]
-fn supports_a_cross_module_dotted_association_target() {
+fn supports_a_cross_module_association_target() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("CrossModule.mpr");
 
@@ -56,7 +79,7 @@ fn supports_a_cross_module_dotted_association_target() {
         "11.12.1",
         module Sales {
             entity Order {
-                association Order_Account -> CRM.Account as Reference;
+                association Order_Account -> markers::CRM::Account as Reference;
             }
         },
         module CRM {
@@ -84,11 +107,34 @@ fn supports_a_reference_set_association() {
         module Sales {
             entity Customer {}
             entity Order {
-                association Order_Customers -> Customer as ReferenceSet;
+                association Order_Customers -> markers::Sales::Customer as ReferenceSet;
             }
         }
     };
     let sales = &definition.modules[0];
     let order = sales.entities.iter().find(|e| e.name == "Order").unwrap();
     assert_eq!(order.associations[0].association_type, mxrs_model::association::AssociationType::ReferenceSet);
+    assert_eq!(order.associations[0].target, "Sales.Customer");
+}
+
+/// Resolving the target path via a local `use` (rather than a fully
+/// qualified path in the macro invocation itself) proves the target is
+/// genuinely resolved in the *call site's* scope, ordinary Rust name
+/// resolution and all — not something this crate special-cases.
+#[test]
+fn a_target_path_resolves_via_a_local_use_import() {
+    use markers::Sales::Customer;
+
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Customer {}
+            entity Order {
+                association Order_Customer -> Customer as Reference;
+            }
+        }
+    };
+    let sales = &definition.modules[0];
+    let order = sales.entities.iter().find(|e| e.name == "Order").unwrap();
+    assert_eq!(order.associations[0].target, "Sales.Customer");
 }

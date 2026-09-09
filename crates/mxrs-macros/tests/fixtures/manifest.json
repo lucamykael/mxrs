@@ -1,0 +1,15 @@
+{
+  "modules": [
+    {
+      "name": "Sales",
+      "entities": [
+        { "name": "Customer", "attributes": ["Name"] },
+        { "name": "Order", "attributes": ["Number", "Total"] }
+      ]
+    },
+    {
+      "name": "CRM",
+      "entities": [{ "name": "Account", "attributes": ["Name"] }]
+    }
+  ]
+}

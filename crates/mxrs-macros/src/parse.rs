@@ -1,10 +1,9 @@
 //! Parses `project! { ... }`'s custom grammar. Deliberately narrower than
 //! `mxrs-dsl`'s full builder surface for this first pass: entity
-//! documentation/`persistable`, module-level microflows, and cross-module
-//! association targets beyond a single `Module.Entity` dotted path are not
-//! part of the grammar yet — widen incrementally, the same way every other
-//! "first slice" in this codebase has (see `mxrs-writer`'s and
-//! `mxrs-typegen`'s crate docs for the same pattern).
+//! documentation/`persistable` and module-level microflows are not part of
+//! the grammar yet — widen incrementally, the same way every other "first
+//! slice" in this codebase has (see `mxrs-writer`'s and `mxrs-typegen`'s
+//! crate docs for the same pattern).
 //!
 //! Grammar (informally):
 //! ```text
@@ -13,9 +12,19 @@
 //! entity     := "entity" <ident> "{" (<attribute> | <association>)* "}"
 //! attribute  := <attr-kind> <ident> ("=" <expr>)? ";"
 //! attr-kind  := "string" | "integer" | "long" | "decimal" | "boolean" | "datetime" | "autonumber"
-//! association:= "association" <ident> "->" <path> "as" <ident> ";"
-//! path       := <ident> ("." <ident>)?
+//! association:= "association" <ident> "->" <rust-path> "as" <ident> ";"
 //! ```
+//!
+//! `<rust-path>` (an association's target) is a real Rust type path — e.g.
+//! `Customer` or `markers::CRM::Account` — resolving to a marker type
+//! implementing `mxrs_ir::EntityMarker`, exactly what
+//! `mxrs_dsl::EntityBuilder::association` requires since `mxrs-dsl` was
+//! wired to reject raw strings there. This is deliberately *not* a
+//! Mendix-style dotted `Module.Entity` name parsed and re-joined by this
+//! crate (an earlier version of this grammar did that): the target now has
+//! to be something that resolves in the caller's own scope the same way
+//! any other Rust path would (via `use`, a fully-qualified path, ...),
+//! because it expands directly into `Ref::<#target>::new()`.
 
 use syn::parse::{Parse, ParseStream};
 use syn::{braced, Ident, LitStr, Result, Token};
@@ -88,9 +97,10 @@ pub struct AttributeInput {
 
 pub struct AssociationInput {
     pub name: Ident,
-    /// `"Entity"` or `"Module.Entity"` — already joined into the same
-    /// string shape `mxrs-dsl`'s `association(name, target, ...)` expects.
-    pub target: String,
+    /// A Rust path to a marker type implementing `mxrs_ir::EntityMarker`
+    /// (e.g. `Customer` or `markers::CRM::Account`), resolved in the
+    /// macro call site's own scope — see this module's doc comment.
+    pub target: syn::Path,
     pub association_type: Ident,
 }
 
@@ -164,14 +174,7 @@ impl Parse for AssociationInput {
         expect_keyword(input, "association")?;
         let name: Ident = input.parse()?;
         input.parse::<Token![->]>()?;
-        let first: Ident = input.parse()?;
-        let target = if input.peek(Token![.]) {
-            input.parse::<Token![.]>()?;
-            let second: Ident = input.parse()?;
-            format!("{first}.{second}")
-        } else {
-            first.to_string()
-        };
+        let target: syn::Path = input.call(syn::Path::parse_mod_style)?;
         input.parse::<Token![as]>()?;
         let association_type: Ident = input.parse()?;
         if association_type != "Reference" && association_type != "ReferenceSet" {

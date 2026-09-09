@@ -81,6 +81,38 @@ fn an_unknown_association_type_fails_with_a_message_naming_it() {
     assert!(stderr.contains("Bogus"), "expected the diagnostic to name the bad association type, got:\n{stderr}");
 }
 
+/// The actual point of wiring `mxrs-dsl` to require `Ref<M>`: a target
+/// naming a marker type that was never declared fails at `cargo build`,
+/// not at `mxrs-writer`'s runtime `UnknownAssociationTarget`.
+#[test]
+fn an_association_target_naming_an_undeclared_marker_type_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        mod markers {
+            pub struct Customer;
+            impl mxrs_ir::EntityMarker for Customer {
+                const MODULE: &'static str = "Sales";
+                const NAME: &'static str = "Customer";
+            }
+        }
+
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    entity Order {
+                        association Order_Customer -> markers::Ghost as Reference;
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(!output.status.success(), "expected a compile failure for an undeclared marker type");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Ghost"), "expected the diagnostic to name the unresolved marker, got:\n{stderr}");
+}
+
 #[test]
 fn a_missing_semicolon_fails_to_compile() {
     let output = try_compile(

@@ -15,17 +15,25 @@
 //! `EntityDecl` has no DSL surface for those yet, so existing entities keep
 //! whatever they already had for those fields, verbatim).
 //!
-//! Cross-module associations (`target` contains a `.`) mirror mxrb's own
-//! `cross_association_doc`: unlike same-module associations, the target is
-//! **not** resolved to an id — it's persisted as the literal `"Module.Entity"`
-//! qualified-name string in a `Child` field, and the association is routed
-//! into `DomainModel::cross_associations` rather than `associations`
+//! Cross-module associations mirror mxrb's own `cross_association_doc`:
+//! unlike same-module associations, the target is **not** resolved to an
+//! id — it's persisted as the literal `"Module.Entity"` qualified-name
+//! string in a `Child` field, and the association is routed into
+//! `DomainModel::cross_associations` rather than `associations`
 //! (`Association::to_bson` picks the `DomainModels$CrossAssociation` BSON
 //! shape automatically whenever `to_entity_id` contains a `.`). The caller
 //! still validates the target against `known_entities` — every
 //! `"Module.Entity"` qualified name declared anywhere in the project — so a
 //! typo'd or renamed cross-module target fails at write time rather than
 //! producing a `.mpr` Studio Pro can't open.
+//!
+//! Routing between the two is **not** "does the target string contain a
+//! dot" — `mxrs_dsl::EntityBuilder::association` always emits a
+//! fully-qualified `"Module.Entity"` target now (via `Ref<M>::qualified_name()`,
+//! see `mxrs_ir::markers`), so a same-module association is dotted too.
+//! [`resolve_association`] instead splits the target into `(module, name)`
+//! and compares the module against the association's *own* declaring
+//! module — see its doc comment.
 
 use std::collections::{HashMap, HashSet};
 
@@ -64,39 +72,12 @@ pub fn build_domain_model(
     for decl in decls {
         let from_id = entity_ids.get(&decl.name).expect("just inserted above").clone();
         for assoc in &decl.associations {
-            if assoc.target.contains('.') {
-                let target = assoc.target.clone();
-                if !known_entities.contains(&target) {
-                    return Err(WriterError::UnknownCrossModuleAssociationTarget(target));
-                }
-                cross_associations.push(Association {
-                    id: None,
-                    name: Some(assoc.name.clone()),
-                    documentation: assoc.documentation.clone(),
-                    from_entity_id: Some(from_id.clone()),
-                    to_entity_id: Some(target),
-                    association_type: assoc.association_type,
-                    owner: assoc.owner,
-                    storage_format: assoc.storage_format,
-                    delete_behavior: None,
-                    export_level: "Hidden".into(),
-                });
-                continue;
+            let built = resolve_association(assoc, module_name, &from_id, &entity_ids, known_entities, None)?;
+            if built.is_cross_module() {
+                cross_associations.push(built);
+            } else {
+                associations.push(built);
             }
-            let to_id =
-                entity_ids.get(&assoc.target).cloned().ok_or_else(|| WriterError::UnknownAssociationTarget(assoc.target.clone()))?;
-            associations.push(Association {
-                id: None,
-                name: Some(assoc.name.clone()),
-                documentation: assoc.documentation.clone(),
-                from_entity_id: Some(from_id.clone()),
-                to_entity_id: Some(to_id),
-                association_type: assoc.association_type,
-                owner: assoc.owner,
-                storage_format: assoc.storage_format,
-                delete_behavior: None,
-                export_level: "Hidden".into(),
-            });
         }
     }
 
@@ -192,43 +173,8 @@ pub fn synchronize_domain_associations(
                 });
             }
 
-            let (target_module, target_name) = association_target(&assoc.target, module_name);
             let prior = previous_by_name.get(&assoc.name);
-            let built = if target_module == module_name {
-                let to_id = entity_ids
-                    .get(&target_name)
-                    .cloned()
-                    .ok_or_else(|| WriterError::UnknownAssociationTarget(assoc.target.clone()))?;
-                Association {
-                    id: prior.and_then(|p| p.id.clone()),
-                    name: Some(assoc.name.clone()),
-                    documentation: assoc.documentation.clone(),
-                    from_entity_id: Some(from_id.clone()),
-                    to_entity_id: Some(to_id),
-                    association_type: assoc.association_type,
-                    owner: assoc.owner,
-                    storage_format: assoc.storage_format,
-                    delete_behavior: prior.and_then(|p| p.delete_behavior.clone()),
-                    export_level: prior.map(|p| p.export_level.clone()).unwrap_or_else(|| "Hidden".into()),
-                }
-            } else {
-                let qualified = format!("{target_module}.{target_name}");
-                if !known_entities.contains(&qualified) {
-                    return Err(WriterError::UnknownCrossModuleAssociationTarget(qualified));
-                }
-                Association {
-                    id: prior.and_then(|p| p.id.clone()),
-                    name: Some(assoc.name.clone()),
-                    documentation: assoc.documentation.clone(),
-                    from_entity_id: Some(from_id.clone()),
-                    to_entity_id: Some(qualified),
-                    association_type: assoc.association_type,
-                    owner: assoc.owner,
-                    storage_format: assoc.storage_format,
-                    delete_behavior: prior.and_then(|p| p.delete_behavior.clone()),
-                    export_level: prior.map(|p| p.export_level.clone()).unwrap_or_else(|| "Hidden".into()),
-                }
-            };
+            let built = resolve_association(assoc, module_name, &from_id, &entity_ids, known_entities, prior)?;
 
             if built.is_cross_module() {
                 new_cross.push(Bson::Document(built.to_bson()));
@@ -248,11 +194,60 @@ pub fn synchronize_domain_associations(
 /// `"Module.Entity"` target names a cross-module entity, otherwise the
 /// target is resolved against `default_module` (mirrors mxrb's
 /// `Writer#association_target`).
+///
+/// Critically, a *dotted* target whose module happens to equal
+/// `default_module` is still local — `mxrs_dsl::EntityBuilder::association`
+/// now always emits a fully-qualified `"Module.Entity"` target (via
+/// `Ref<M>::qualified_name()`, see `mxrs_ir::markers`), so same-module
+/// associations routinely arrive dotted too. Routing on "contains a dot"
+/// instead of "resolves to a different module" would misfile every
+/// same-module association through the cross-module path, emitting the
+/// wrong BSON shape (`DomainModels$CrossAssociation` with a qualified-name
+/// `Child` field, instead of `DomainModels$Association` with a `ChildID`
+/// pointer) for what Studio Pro expects to be a same-module association.
 fn association_target<'a>(target: &'a str, default_module: &'a str) -> (&'a str, String) {
     match target.split_once('.') {
         Some((module, name)) => (module, name.to_string()),
         None => (default_module, target.to_string()),
     }
+}
+
+/// Resolves one declared association against already-assigned entity ids,
+/// shared by [`build_domain_model`] (fresh creation, `prior: None`) and
+/// [`synchronize_domain_associations`] (`prior: Some(existing)` preserves
+/// `$ID`/`DeleteBehavior` on a name match) — the only difference between
+/// the two call sites is where `prior` comes from.
+fn resolve_association(
+    assoc: &mxrs_ir::declaration::AssociationDecl,
+    module_name: &str,
+    from_id: &str,
+    entity_ids: &HashMap<String, String>,
+    known_entities: &HashSet<String>,
+    prior: Option<&Association>,
+) -> Result<Association> {
+    let (target_module, target_name) = association_target(&assoc.target, module_name);
+    let to_entity_id = if target_module == module_name {
+        entity_ids.get(&target_name).cloned().ok_or_else(|| WriterError::UnknownAssociationTarget(assoc.target.clone()))?
+    } else {
+        let qualified = format!("{target_module}.{target_name}");
+        if !known_entities.contains(&qualified) {
+            return Err(WriterError::UnknownCrossModuleAssociationTarget(qualified));
+        }
+        qualified
+    };
+
+    Ok(Association {
+        id: prior.and_then(|p| p.id.clone()),
+        name: Some(assoc.name.clone()),
+        documentation: assoc.documentation.clone(),
+        from_entity_id: Some(from_id.to_string()),
+        to_entity_id: Some(to_entity_id),
+        association_type: assoc.association_type,
+        owner: assoc.owner,
+        storage_format: assoc.storage_format,
+        delete_behavior: prior.and_then(|p| p.delete_behavior.clone()),
+        export_level: prior.map(|p| p.export_level.clone()).unwrap_or_else(|| "Hidden".into()),
+    })
 }
 
 /// Picks whichever key spelling is already present on `doc` (older/foreign

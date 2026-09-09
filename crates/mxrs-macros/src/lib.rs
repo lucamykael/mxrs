@@ -4,6 +4,18 @@
 //!
 //! ```
 //! # fn main() {
+//! // A marker type per referenceable entity — hand-written here; in a real
+//! // project these come from `mxrs-typegen`'s build.rs codegen. An
+//! // association's target (after `->`) is this kind of Rust path, not a
+//! // Mendix-style dotted name — see `parse`'s doc comment.
+//! mod markers {
+//!     pub struct Customer;
+//!     impl mxrs_ir::EntityMarker for Customer {
+//!         const MODULE: &'static str = "Sales";
+//!         const NAME: &'static str = "Customer";
+//!     }
+//! }
+//!
 //! let definition = mxrs_macros::project! {
 //!     "11.12.1",
 //!     module Sales {
@@ -13,7 +25,7 @@
 //!         entity Order {
 //!             string Number = "A-0000";
 //!             decimal Total;
-//!             association Order_Customer -> Customer as Reference;
+//!             association Order_Customer -> markers::Customer as Reference;
 //!         }
 //!     }
 //! };
@@ -22,8 +34,7 @@
 //! ```
 //!
 //! See `parse`'s doc comment for the full grammar and what's deliberately
-//! not covered yet (entity documentation/`persistable`, microflows,
-//! cross-module targets beyond one dotted `Module.Entity` path), and
+//! not covered yet (entity documentation/`persistable`, microflows), and
 //! `expand`'s doc comment for the non-negotiable rule this crate follows:
 //! every expansion lowers to calls against `mxrs-dsl` pub fns a caller
 //! could already reach by hand.

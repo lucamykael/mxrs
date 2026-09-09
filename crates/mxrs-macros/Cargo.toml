@@ -15,8 +15,12 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 
+[build-dependencies]
+mxrs-typegen = { path = "../mxrs-typegen" }
+
 [dev-dependencies]
 mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-ir = { path = "../mxrs-ir" }
 mxrs-model = { path = "../mxrs-model" }
 mxrs-writer = { path = "../mxrs-writer" }
 tempfile = "3.27.0"

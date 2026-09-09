@@ -8,9 +8,37 @@
 use mxrs_dsl::ProjectBuilder;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
 use mxrs_ir::flow::MicroflowCallMapping;
-use mxrs_ir::Member;
+use mxrs_ir::{Member, Ref};
 use mxrs_model::association::{AssociationType, Owner, StorageFormat};
 use mxrs_model::Project;
+
+/// Hand-written marker types (not `mxrs-typegen`-generated — these tests
+/// don't need a manifest/build.rs, just something implementing
+/// `EntityMarker`) covering every entity these tests declare associations
+/// to. `mxrs-typegen`'s own crate proves the codegen path; this proves the
+/// trait contract alone is enough for `EntityBuilder::association` to work.
+#[allow(dead_code, non_snake_case)]
+mod markers {
+    pub mod Sales {
+        pub struct Customer;
+        impl mxrs_ir::EntityMarker for Customer {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "Customer";
+        }
+        pub struct Order;
+        impl mxrs_ir::EntityMarker for Order {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "Order";
+        }
+    }
+    pub mod CRM {
+        pub struct Account;
+        impl mxrs_ir::EntityMarker for Account {
+            const MODULE: &'static str = "CRM";
+            const NAME: &'static str = "Account";
+        }
+    }
+}
 
 #[test]
 fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
@@ -26,7 +54,7 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
             e.documentation("A customer order");
             e.string("Number").default_value = Some("A-0000".into());
             e.decimal("Total");
-            e.association("Order_Customer", "Customer", AssociationType::Reference).owner = Owner::Default;
+            e.association("Order_Customer", Ref::<markers::Sales::Customer>::new(), AssociationType::Reference).owner = Owner::Default;
         });
         m.microflow("ACT_CreateOrder", |f| {
             f.create_object("order", "Sales.Order", vec![Member::attribute("Number", "'A-1'")], false);
@@ -94,7 +122,7 @@ fn writes_a_cross_module_association_that_reads_back_as_a_qualified_name() {
     let mut project = ProjectBuilder::new("11.12.1");
     project.module("Sales", |m| {
         m.entity("Order", |e| {
-            e.association("Order_Account", "CRM.Account", AssociationType::Reference).owner = Owner::Default;
+            e.association("Order_Account", Ref::<markers::CRM::Account>::new(), AssociationType::Reference).owner = Owner::Default;
         });
     });
     project.module("CRM", |m| {
@@ -155,13 +183,71 @@ fn unknown_cross_module_association_target_fails_at_write_time() {
     let mut project = ProjectBuilder::new("11.12.1");
     project.module("Sales", |m| {
         m.entity("Order", |e| {
-            e.association("Order_Account", "CRM.Account", AssociationType::Reference);
+            e.association("Order_Account", Ref::<markers::CRM::Account>::new(), AssociationType::Reference);
         });
     });
     let definition = project.build();
 
     let err = mxrs_writer::write_project(&path, &definition).unwrap_err();
     assert!(matches!(err, mxrs_writer::WriterError::UnknownCrossModuleAssociationTarget(target) if target == "CRM.Account"));
+}
+
+/// The marker type for a target proves it *exists somewhere* (per whatever
+/// manifest declared it) — it does not prove *this* `ProjectBuilder`
+/// invocation actually declares that entity. Both checks matter: a
+/// compile-time-valid `Ref<M>` referencing an entity this specific project
+/// never declares still has to fail at write time, same as it always has.
+#[test]
+fn a_valid_marker_for_an_entity_absent_from_this_project_still_fails_at_write_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("MarkerWithoutDeclaration.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.entity("Order", |e| {
+            e.association("Order_Customer", Ref::<markers::Sales::Customer>::new(), AssociationType::Reference);
+        });
+    });
+    let definition = project.build();
+
+    let err = mxrs_writer::write_project(&path, &definition).unwrap_err();
+    assert!(matches!(err, mxrs_writer::WriterError::UnknownAssociationTarget(target) if target == "Sales.Customer"));
+}
+
+/// Regression test for the local/cross routing fix `resolve_association`
+/// makes: `EntityBuilder::association` now always emits a fully-qualified
+/// `"Module.Entity"` target (via `Ref<M>::qualified_name()`), including for
+/// a same-module association — this must still resolve as local (a plain
+/// `ChildID` pointer, `DomainModels$Association`), not get misrouted into
+/// the cross-module `DomainModels$CrossAssociation` shape just because the
+/// target string happens to contain a dot.
+#[test]
+fn a_same_module_association_stays_local_even_though_its_target_is_fully_qualified() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("QualifiedSameModule.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.entity("Customer", |e| {
+            e.string("Name");
+        });
+        m.entity("Order", |e| {
+            e.association("Order_Customer", Ref::<markers::Sales::Customer>::new(), AssociationType::Reference);
+        });
+    });
+    let definition = project.build();
+    assert_eq!(definition.modules[0].entities[1].associations[0].target, "Sales.Customer");
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let sales = read.modules().unwrap().into_iter().find(|m| m.name.as_deref() == Some("Sales")).unwrap();
+    let associations = sales.associations();
+    assert_eq!(associations.len(), 1);
+    let assoc = associations[0];
+    assert!(!assoc.is_cross_module(), "a same-module association was misrouted as cross-module");
+    let customer = sales.entities().iter().find(|e| e.name.as_deref() == Some("Customer")).unwrap();
+    assert_eq!(assoc.to_entity_id.as_deref(), customer.id.as_deref());
 }
 
 #[test]
@@ -176,7 +262,7 @@ fn synchronize_domain_associations_preserves_ids_adds_and_removes() {
         });
         m.entity("Order", |e| {
             e.string("Number");
-            e.association("Order_Customer", "Customer", AssociationType::Reference).owner = Owner::Default;
+            e.association("Order_Customer", Ref::<markers::Sales::Customer>::new(), AssociationType::Reference).owner = Owner::Default;
         });
     });
     mxrs_writer::write_project(&path, &project.build()).unwrap();
@@ -464,7 +550,7 @@ fn synchronize_domain_model_adds_an_entity_and_an_association_to_it_in_one_pass(
     project.module("Sales", |m| {
         m.entity("Order", |e| {
             e.string("Number");
-            e.association("Order_Customer", "Customer", AssociationType::Reference);
+            e.association("Order_Customer", Ref::<markers::Sales::Customer>::new(), AssociationType::Reference);
         });
         m.entity("Customer", |e| {
             e.string("Name");

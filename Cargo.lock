@@ -432,7 +432,9 @@ name = "mxrs-macros"
 version = "0.1.0"
 dependencies = [
  "mxrs-dsl",
+ "mxrs-ir",
  "mxrs-model",
+ "mxrs-typegen",
  "mxrs-writer",
  "proc-macro2",
  "quote",
