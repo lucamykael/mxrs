@@ -270,3 +270,56 @@ fn a_microflow_missing_a_return_keyword_fails_to_compile() {
         "expected a compile failure for a microflow body missing `return`"
     );
 }
+
+#[test]
+fn an_if_without_an_else_branch_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    microflow ACT_Broken {
+                        if "$order/Total > 0" {
+                            commit order;
+                        }
+                        return "$order";
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for an `if` with no `else` branch"
+    );
+}
+
+#[test]
+fn an_unknown_microflow_statement_fails_with_a_message_naming_it() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    microflow ACT_Broken {
+                        rollback order;
+                        return "$order";
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for an unknown microflow statement"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown microflow statement `rollback`"),
+        "expected the error to name the bad keyword, got: {stderr}"
+    );
+}

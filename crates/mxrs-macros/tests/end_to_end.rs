@@ -204,3 +204,93 @@ fn supports_a_module_level_microflow_with_a_return_statement() {
     assert_eq!(sales.microflows.len(), 1);
     assert_eq!(sales.microflows[0].name.as_deref(), Some("ACT_GetConstant"));
 }
+
+#[test]
+fn supports_the_full_widened_microflow_grammar() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Microflow.mpr");
+
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Order {
+                string Number;
+                decimal Total;
+            }
+            microflow ACT_ProcessOrder {
+                create order = "Sales.Order" {
+                    Number = "'A-1'";
+                } commit;
+                change order = "Sales.Order" {
+                    Total = "100";
+                };
+                if "$order/Total > 0" {
+                    commit order;
+                    call "Sales.ACT_Notify" (OrderNumber: "$order/Number") -> notified;
+                } else {
+                    delete order;
+                }
+                return "$order";
+            }
+        }
+    };
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let sales = read
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert_eq!(sales.microflows.len(), 1);
+    let mf = &sales.microflows[0];
+    assert_eq!(mf.name.as_deref(), Some("ACT_ProcessOrder"));
+
+    let flow_types: Vec<String> = mf
+        .objects
+        .iter()
+        .filter_map(|o| o.get_str("$Type").ok().map(String::from))
+        .collect();
+    assert!(flow_types.contains(&"Microflows$ActionActivity".to_string()));
+    assert!(flow_types.contains(&"Microflows$ExclusiveSplit".to_string()));
+}
+
+#[test]
+fn supports_an_association_member_in_a_create_statement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Microflow.mpr");
+
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Customer {
+                string Name;
+            }
+            entity Order {
+                string Number;
+                association ToCustomer -> markers::Sales::Customer as Reference;
+            }
+            microflow ACT_CreateOrder {
+                create order = "Sales.Order" {
+                    Number = "'A-1'";
+                    assoc ToCustomer = "$customer";
+                } commit;
+                return "$order";
+            }
+        }
+    };
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let sales = read
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert_eq!(sales.microflows.len(), 1);
+    assert!(!sales.microflows[0].objects.is_empty());
+}

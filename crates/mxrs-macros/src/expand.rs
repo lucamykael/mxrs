@@ -10,11 +10,12 @@
 //! returns), so it's usable directly wherever one is needed —
 //! `mxrs_writer::write_project(path, &project! { ... })`.
 //!
-//! References `::mxrs_model::association::AssociationType` and
-//! `::mxrs_ir::Ref` directly rather than going through an `mxrs-dsl`
-//! re-export (there isn't one — existing hand-written `mxrs-dsl` usage
-//! already imports `mxrs_model::association`/`mxrs_ir` types directly, e.g.
-//! in `mxrs-writer`'s own test suite), so a crate using `project! {}` needs
+//! References `::mxrs_model::association::AssociationType`, `::mxrs_ir::Ref`,
+//! `::mxrs_ir::Member`, and `::mxrs_ir::MicroflowCallMapping` directly
+//! rather than going through an `mxrs-dsl` re-export (there isn't one —
+//! existing hand-written `mxrs-dsl` usage already imports
+//! `mxrs_model::association`/`mxrs_ir` types directly, e.g. in
+//! `mxrs-writer`'s own test suite), so a crate using `project! {}` needs
 //! `mxrs-model` and `mxrs-ir` as direct dependencies too, same as
 //! hand-written `mxrs-dsl` usage already does. An association's target
 //! path (`e.association(name, Ref::<#target>::new(), ...)`) is resolved in
@@ -26,16 +27,24 @@
 //! statement is only emitted when declared (`Option<TokenStream>` renders
 //! to nothing for `None`, same trick `quote!` gives any `Option<T:
 //! ToTokens>` for free), leaving `mxrs-dsl`'s own defaults (empty
-//! documentation, persistable) in place otherwise. A module-level
-//! `microflow` only ever emits a single `f.return_value(...)` call — see
-//! `parse`'s doc comment for the narrower-than-`mxrs-dsl` grammar this
-//! implies (no create/change-object, decisions, or microflow calls yet).
+//! documentation, persistable) in place otherwise.
+//!
+//! A module-level `microflow`'s body statements (`create`/`change`/
+//! `delete`/`commit`/`call`/`if`) each lower to one `FlowBuilder` call —
+//! `FlowItem::If` is the one case that isn't a 1:1 `Activity` variant, since
+//! `mxrs-dsl` models a decision as `FlowBuilder::decision(cond, then, else)`
+//! taking two closures rather than a struct with pre-built branch vecs; the
+//! generated `then`/`else` closures each take their own shadowed `f: &mut
+//! FlowBuilder` (ordinary Rust closure-parameter shadowing, not a macro
+//! trick) and recurse through the same `expand_flow_item` used at the top
+//! level, so nested `if` inside a branch works for free.
 
 use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::parse::{
-    AssociationInput, AttributeInput, EntityInput, MicroflowInput, ModuleInput, ProjectInput,
+    AssociationInput, AttributeInput, EntityInput, FlowItem, MappingInput, MemberInput,
+    MicroflowInput, ModuleInput, ProjectInput,
 };
 
 pub fn expand(input: &ProjectInput) -> TokenStream {
@@ -88,11 +97,104 @@ fn expand_entity(entity: &EntityInput) -> TokenStream {
 
 fn expand_microflow(microflow: &MicroflowInput) -> TokenStream {
     let name = microflow.name.to_string();
-    let return_expression = &microflow.return_expression;
+    let activity_stmts: Vec<TokenStream> =
+        microflow.activities.iter().map(expand_flow_item).collect();
+    let return_stmt = microflow
+        .return_expression
+        .as_ref()
+        .map(|expr| quote! { f.return_value(#expr); });
     quote! {
         m.microflow(#name, |f| {
-            f.return_value(#return_expression);
+            #(#activity_stmts)*
+            #return_stmt
         });
+    }
+}
+
+fn expand_flow_item(item: &FlowItem) -> TokenStream {
+    match item {
+        FlowItem::Create {
+            variable,
+            entity,
+            members,
+            commit,
+        } => {
+            let variable = variable.to_string();
+            let member_exprs: Vec<TokenStream> = members.iter().map(expand_member).collect();
+            quote! {
+                f.create_object(#variable, #entity, vec![#(#member_exprs),*], #commit);
+            }
+        }
+        FlowItem::Change {
+            variable,
+            entity,
+            members,
+            commit,
+        } => {
+            let variable = variable.to_string();
+            let member_exprs: Vec<TokenStream> = members.iter().map(expand_member).collect();
+            quote! {
+                f.change_object(#variable, #entity, vec![#(#member_exprs),*], #commit);
+            }
+        }
+        FlowItem::Delete { variable } => {
+            let variable = variable.to_string();
+            quote! { f.delete_object(#variable); }
+        }
+        FlowItem::Commit { variable } => {
+            let variable = variable.to_string();
+            quote! { f.commit(#variable); }
+        }
+        FlowItem::Call {
+            name,
+            mappings,
+            result_variable,
+        } => {
+            let mapping_exprs: Vec<TokenStream> = mappings.iter().map(expand_mapping).collect();
+            let (result_expr, use_return) = match result_variable {
+                Some(variable) => {
+                    let variable = variable.to_string();
+                    (quote! { Some(#variable.to_string()) }, quote! { true })
+                }
+                None => (quote! { None }, quote! { false }),
+            };
+            quote! {
+                f.call_microflow(#name, #result_expr, #use_return, vec![#(#mapping_exprs),*]);
+            }
+        }
+        FlowItem::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let then_stmts: Vec<TokenStream> = then_branch.iter().map(expand_flow_item).collect();
+            let else_stmts: Vec<TokenStream> = else_branch.iter().map(expand_flow_item).collect();
+            quote! {
+                f.decision(
+                    #condition,
+                    |f| { #(#then_stmts)* },
+                    |f| { #(#else_stmts)* },
+                );
+            }
+        }
+    }
+}
+
+fn expand_member(member: &MemberInput) -> TokenStream {
+    let name = member.name.to_string();
+    let value = &member.value;
+    if member.is_association {
+        quote! { ::mxrs_ir::Member::association(#name, #value) }
+    } else {
+        quote! { ::mxrs_ir::Member::attribute(#name, #value) }
+    }
+}
+
+fn expand_mapping(mapping: &MappingInput) -> TokenStream {
+    let parameter = mapping.parameter.to_string();
+    let value = &mapping.value;
+    quote! {
+        ::mxrs_ir::MicroflowCallMapping { parameter: #parameter.to_string(), value: (#value).to_string() }
     }
 }
 
