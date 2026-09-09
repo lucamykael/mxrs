@@ -11,11 +11,13 @@
 pub mod assets;
 pub mod compatibility;
 pub mod project_template;
+pub mod runtime_model;
 pub mod system_model;
 pub mod tables;
 
 pub use assets::{RUNTIME_SCHEMA_11, SYSTEM_MODEL_SEED_11_12_1};
 pub use compatibility::{apply_document, schema_hash, SCHEMA_HASH_11_12_1};
 pub use project_template::{project_template_units, ProjectTemplateError, TemplateUnit};
+pub use runtime_model::{RuntimeModelError, RuntimeModelSchema};
 pub use system_model::{system_model_documents, SystemModelError, SYSTEM_MODULE_ID};
 pub use tables::{table_info, TableInfo, ATTRIBUTE_TYPES, TABLES, UNIT_TYPES};
