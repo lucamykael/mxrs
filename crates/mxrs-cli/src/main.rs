@@ -21,6 +21,7 @@ fn main() -> ExitCode {
         Some("dump-unit") => run_dump_unit(args.collect()),
         Some("sql") => run_sql(args.collect()),
         Some("modules") => run_modules(args.collect()),
+        Some("export") => run_export(args.collect()),
         Some(other) => {
             eprintln!("[mxrs] error: unknown command {other:?}");
             usage();
@@ -41,6 +42,7 @@ fn usage() {
     eprintln!("       mxrs dump-unit <file.mpr> <unit_id>");
     eprintln!("       mxrs sql <file.mpr> \"<query>\"");
     eprintln!("       mxrs modules <file.mpr>");
+    eprintln!("       mxrs export <file.mpr> [-o <out.rs>]");
 }
 
 fn run_validate(mut args: Vec<String>) -> ExitCode {
@@ -258,6 +260,43 @@ fn run_modules(args: Vec<String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_export(mut args: Vec<String>) -> ExitCode {
+    let out_path = take_value(&mut args, "-o");
+    let Some(path) = args.first() else {
+        eprintln!("[mxrs] error: usage: mxrs export <file.mpr> [-o <out.rs>]");
+        return ExitCode::FAILURE;
+    };
+
+    let source = match mxrs_exporter::export_project(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[mxrs] error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match out_path {
+        Some(out_path) => {
+            if let Err(e) = std::fs::write(&out_path, source) {
+                eprintln!("[mxrs] error: writing {out_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+            eprintln!("[mxrs] wrote {out_path}");
+        }
+        None => print!("{source}"),
+    }
+    ExitCode::SUCCESS
+}
+
+fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
+    let pos = args.iter().position(|a| a == flag)?;
+    if pos + 1 >= args.len() {
+        return None;
+    }
+    args.remove(pos);
+    Some(args.remove(pos))
 }
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {

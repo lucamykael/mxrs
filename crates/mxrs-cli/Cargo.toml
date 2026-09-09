@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
+mxrs-exporter = { path = "../mxrs-exporter" }
 mxrs-mpr = { path = "../mxrs-mpr" }
 mxrs-model = { path = "../mxrs-model" }
 serde_json.workspace = true

@@ -380,6 +380,7 @@ version = "0.1.0"
 dependencies = [
  "mxrs-bson",
  "mxrs-dsl",
+ "mxrs-exporter",
  "mxrs-ir",
  "mxrs-model",
  "mxrs-mpr",
@@ -410,6 +411,20 @@ version = "0.1.0"
 dependencies = [
  "mxrs-ir",
  "mxrs-model",
+]
+
+[[package]]
+name = "mxrs-exporter"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-dsl",
+ "mxrs-ir",
+ "mxrs-macros",
+ "mxrs-model",
+ "mxrs-writer",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
