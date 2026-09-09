@@ -134,6 +134,9 @@ impl Attribute {
         if matches!(self.attribute_type, AttributeType::DateTime) {
             type_doc.insert("localizeDate", true);
         }
+        if matches!(self.attribute_type, AttributeType::Enum) {
+            type_doc.insert("enumeration", self.enumeration.clone().unwrap_or_default());
+        }
 
         doc! {
             "$ID": id,
@@ -177,5 +180,33 @@ pub fn apply_validation_rules(attributes: &mut [Attribute], rules: &[Document]) 
         if kind.ends_with("UniqueRuleInfo") {
             attribute.unique = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enumeration_reference_survives_serialization() {
+        let source = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "name": "State",
+            "type": {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "DomainModels$EnumerationAttributeType",
+                "enumeration": "Demo.State",
+            },
+        };
+        let attribute = Attribute::from_bson(&source);
+        let output = attribute.to_bson();
+        assert_eq!(
+            output
+                .get_document("type")
+                .unwrap()
+                .get_str("enumeration")
+                .unwrap(),
+            "Demo.State"
+        );
     }
 }

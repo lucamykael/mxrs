@@ -22,6 +22,7 @@ fn main() -> ExitCode {
         Some("sql") => run_sql(args.collect()),
         Some("modules") => run_modules(args.collect()),
         Some("export") => run_export(args.collect()),
+        Some("javagen") => run_javagen(args.collect()),
         Some(other) => {
             eprintln!("[mxrs] error: unknown command {other:?}");
             usage();
@@ -43,6 +44,7 @@ fn usage() {
     eprintln!("       mxrs sql <file.mpr> \"<query>\"");
     eprintln!("       mxrs modules <file.mpr>");
     eprintln!("       mxrs export <file.mpr> [-o <out.rs>] [--allow-lossy]");
+    eprintln!("       mxrs javagen <file.mpr> [--project-root <directory>]");
 }
 
 fn run_validate(mut args: Vec<String>) -> ExitCode {
@@ -300,6 +302,36 @@ fn run_export(mut args: Vec<String>) -> ExitCode {
         None => print!("{source}"),
     }
     ExitCode::SUCCESS
+}
+
+fn run_javagen(mut args: Vec<String>) -> ExitCode {
+    let project_root = take_value(&mut args, "--project-root");
+    if args.len() != 1 {
+        eprintln!("[mxrs] error: usage: mxrs javagen <file.mpr> [--project-root <directory>]");
+        return ExitCode::FAILURE;
+    }
+    let mpr_path = std::path::Path::new(&args[0]);
+    let root = project_root
+        .map(std::path::PathBuf::from)
+        .or_else(|| mpr_path.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let generator = match mxrs_javagen::JavaProxyGenerator::new(mpr_path, &root) {
+        Ok(generator) => generator,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match generator.generate() {
+        Ok(count) => {
+            println!("[mxrs] generated {count} Java file(s)");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
