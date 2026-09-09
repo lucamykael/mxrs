@@ -1,0 +1,24 @@
+[package]
+name = "mxrs-compiler-flow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Compiles mxrb microflow/nanoflow/rule/code-action/database-connector-action editor documents into Mendix Runtime shape (and, for nanoflows, into client-side JS instruction programs). Second crate of Phase 5's compiler pipeline, sibling to mxrs-compiler-domain."
+
+[dependencies]
+mxrs-bson = { path = "../mxrs-bson" }
+mxrs-model = { path = "../mxrs-model" }
+mxrs-schema = { path = "../mxrs-schema" }
+thiserror.workspace = true
+sha2 = "0.10"
+serde_json.workspace = true
+regex = "1"
+
+[dev-dependencies]
+mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-ir = { path = "../mxrs-ir" }
+mxrs-mpr = { path = "../mxrs-mpr" }
+mxrs-writer = { path = "../mxrs-writer" }
+tempfile = "3.27.0"

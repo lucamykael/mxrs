@@ -444,6 +444,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-compiler-flow"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-dsl",
+ "mxrs-ir",
+ "mxrs-model",
+ "mxrs-mpr",
+ "mxrs-schema",
+ "mxrs-writer",
+ "regex",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "mxrs-dsl"
 version = "0.1.0"
 dependencies = [
