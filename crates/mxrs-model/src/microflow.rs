@@ -116,12 +116,18 @@ fn string_items(doc: &Document, keys: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// Mirrors `Writer#microflow_data_type_doc`'s own void-default branch
+/// (`writer.rb:5968-5993`): a real Mendix `MicroflowReturnType` field is
+/// the `DataTypes$*` document *directly*, not wrapped in an intermediate
+/// `Microflows$MicroflowReturnType` container — there is no such type in
+/// the real schema. (A prior version of this function produced that
+/// nonexistent wrapper shape; `mxrs-compiler-flow`'s `data_type` — which
+/// reads `$Type` directly off whatever this field holds, exactly like
+/// `mxrb`'s own `RuntimeDataTypes#data_type` — caught the mismatch.)
 fn default_void_return() -> Document {
     mxrs_bson::doc! {
         "$ID": uuid::Uuid::new_v4().to_string(),
-        "$Type": "Microflows$MicroflowReturnType",
-        "Type": mxrs_bson::Bson::Null,
-        "AllowedModuleRoles": mxrs_bson::build_array(vec![], 1),
+        "$Type": "DataTypes$VoidType",
     }
 }
 
