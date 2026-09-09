@@ -385,6 +385,7 @@ dependencies = [
  "mxrs-mpr",
  "mxrs-writer",
  "serde_json",
+ "sha2",
  "tempfile",
  "uuid",
 ]

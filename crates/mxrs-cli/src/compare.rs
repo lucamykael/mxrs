@@ -1,11 +1,15 @@
 //! Structural project comparison — ports the snapshot-and-diff shape of
-//! mxrb's `Mxrb::Compare` (`compare.rb`), narrowed to what `mxrs-model`
-//! already reads: the flat unit list, and per-module entities,
-//! associations, and microflows/nanoflows. Not yet ported:
-//! `security_summary` (needs a `Security$ProjectSecurity` reader),
-//! `design_asset_summary` (filesystem asset hashing), and page/menu
-//! summaries (mxrs-model reads `Page`/`Menu` already, but their summary
-//! shape isn't wired up here yet — narrow the gap incrementally).
+//! mxrb's `Mxrb::Compare` (`compare.rb`) in full: the flat unit list,
+//! per-module entities/associations/microflows/nanoflows/pages/menus, the
+//! project's security configuration (`security_summary` — read directly off
+//! the raw `Security$ProjectSecurity` unit, mxrs-model has no dedicated
+//! Security reader, same as `compare.rb` itself doesn't go through a model
+//! layer for this either), and a filesystem design-asset inventory
+//! (`design_asset_summary` — SHA-256 per file under the same
+//! `ASSET_DIRECTORIES` mxrb's `Model::DesignSystem` scans, next to the
+//! `.mpr`; that's the only piece of `Model::DesignSystem` this crate needs
+//! — the rest of it, token extraction/quality metrics, is out of scope for
+//! a comparison snapshot).
 //!
 //! Diffing reuses `compare.rb`'s two key insights directly:
 //! - Named collections (anything shaped `[{ "name": ..., ... }, ...]`) diff
@@ -38,16 +42,20 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use mxrs_bson::{Bson, Document};
-use mxrs_model::{Association, Entity, Microflow, Module, Project};
+use mxrs_model::{Association, Entity, Menu, MenuItem, Microflow, Module, Page, Project, Widget};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 pub fn snapshot(path: impl AsRef<Path>) -> mxrs_model::Result<Value> {
-    let project = Project::open(&path, true)?;
+    let path = path.as_ref();
+    let project = Project::open(path, true)?;
     let mut modules = project.modules()?;
     modules.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(json!({
         "project": { "mendix_version": project.mendix_version()? },
+        "security": security_summary(&project),
+        "design_assets": design_asset_summary(path),
         "units": unit_summary(&project),
         "modules": modules.iter().map(module_summary).collect::<Vec<_>>(),
     }))
@@ -88,6 +96,10 @@ fn module_summary(module: &Module) -> Value {
     entities.sort_by(|a, b| a.name.cmp(&b.name));
     let mut associations: Vec<&Association> = module.associations();
     associations.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut pages: Vec<&Page> = module.pages.iter().collect();
+    pages.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut menus: Vec<&Menu> = module.menus.iter().collect();
+    menus.sort_by(|a, b| a.name.cmp(&b.name));
     let mut microflows: Vec<&Microflow> = module.microflows.iter().collect();
     microflows.sort_by(|a, b| a.name.cmp(&b.name));
     let mut nanoflows: Vec<&Microflow> = module.nanoflows.iter().collect();
@@ -97,9 +109,236 @@ fn module_summary(module: &Module) -> Value {
         "name": module.name,
         "entities": entities.iter().map(|e| entity_summary(e)).collect::<Vec<_>>(),
         "associations": associations.iter().map(|a| association_summary(a)).collect::<Vec<_>>(),
+        "pages": pages.iter().map(|p| page_summary(p)).collect::<Vec<_>>(),
+        "menus": menus.iter().map(|m| menu_summary(m)).collect::<Vec<_>>(),
         "microflows": microflows.iter().map(|f| flow_summary(f)).collect::<Vec<_>>(),
         "nanoflows": nanoflows.iter().map(|f| flow_summary(f)).collect::<Vec<_>>(),
     })
+}
+
+fn page_summary(page: &Page) -> Value {
+    let mut allowed_roles = page.allowed_module_roles.clone();
+    allowed_roles.sort();
+    json!({
+        "name": page.name,
+        "title": page.title,
+        "layout": page.layout_id,
+        "allowed_roles": allowed_roles,
+        "data_source": page.data_source.as_ref().map(|d| bson_to_json(&Bson::Document(d.clone()))),
+        "widgets": page.widgets.iter().map(widget_summary).collect::<Vec<_>>(),
+    })
+}
+
+fn widget_summary(widget: &Widget) -> Value {
+    json!({
+        "type": widget.widget_type,
+        "name": widget.name,
+        "options": bson_to_json(&Bson::Document(widget.options.clone())),
+        "events": widget.events.iter().map(|e| bson_to_json(&Bson::Document(e.clone()))).collect::<Vec<_>>(),
+        "children": widget.children.iter().map(widget_summary).collect::<Vec<_>>(),
+    })
+}
+
+fn menu_summary(menu: &Menu) -> Value {
+    json!({
+        "name": menu.name,
+        "items": menu.items.iter().map(menu_item_summary).collect::<Vec<_>>(),
+    })
+}
+
+/// Mirrors `compare.rb#menu_item_summary`'s quirk verbatim: `"name"` is the
+/// item's *caption*, not its `Name` field — `MenuItem` carries a `name`
+/// field too (mxrs-model reads it), but the oracle deliberately uses the
+/// caption for both so this stays a faithful port, not an "improvement".
+fn menu_item_summary(item: &MenuItem) -> Value {
+    json!({
+        "name": item.caption,
+        "caption": item.caption,
+        "page": item.page,
+        "items": item.items.iter().map(menu_item_summary).collect::<Vec<_>>(),
+    })
+}
+
+/// General BSON → JSON conversion with no dropped keys and no id
+/// substitution — unlike [`normalize_flow_value`], which is specifically
+/// for microflow bodies (drops volatile presentation fields, rewrites
+/// known-object pointers). Used for widget options/events/data sources and
+/// the project's security document, none of which have that flow-specific
+/// shape.
+fn bson_to_json(value: &Bson) -> Value {
+    match value {
+        Bson::Document(d) => Value::Object(
+            d.iter()
+                .map(|(k, v)| (k.clone(), bson_to_json(v)))
+                .collect(),
+        ),
+        Bson::Array(items) => Value::Array(items.iter().map(bson_to_json).collect()),
+        Bson::String(s) => Value::String(s.clone()),
+        Bson::Boolean(b) => Value::Bool(*b),
+        Bson::Int32(i) => json!(i),
+        Bson::Int64(i) => json!(i),
+        Bson::Double(d) => json!(d),
+        Bson::Null => Value::Null,
+        other => Value::String(format!("{other:?}")),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Ports `compare.rb#security_summary`: reads the raw `Security$ProjectSecurity`
+/// unit directly (there's no dedicated Security reader in `mxrs-model`,
+/// matching `compare.rb` itself, which doesn't go through a model layer for
+/// this either). `None` when the project has no such unit at all.
+fn security_summary(project: &Project) -> Option<Value> {
+    let units = project.all_units().ok()?;
+    let raw = units.into_iter().find(|u| {
+        project
+            .mpr()
+            .parse_contents(u)
+            .ok()
+            .and_then(|d| d.get_str("$Type").ok().map(str::to_string))
+            .as_deref()
+            == Some("Security$ProjectSecurity")
+    })?;
+    let doc = project.mpr().parse_contents(&raw).ok()?;
+
+    let mut demo_users: Vec<Value> = string_array_items(&doc, "DemoUsers")
+        .into_iter()
+        .filter_map(|b| match b {
+            Bson::Document(u) => Some(u),
+            _ => None,
+        })
+        .map(|u| {
+            let mut roles = string_list(&u, "UserRoles");
+            roles.sort();
+            json!({
+                "name": u.get_str("UserName").unwrap_or_default(),
+                "entity": u.get_str("Entity").unwrap_or_default(),
+                "roles": roles,
+                "password_sha256": sha256_hex(u.get_str("Password").unwrap_or_default().as_bytes()),
+            })
+        })
+        .collect();
+    demo_users.sort_by_key(|v| v["name"].as_str().unwrap_or_default().to_string());
+
+    let mut user_roles: Vec<Value> = string_array_items(&doc, "UserRoles")
+        .into_iter()
+        .filter_map(|b| match b {
+            Bson::Document(r) => Some(r),
+            _ => None,
+        })
+        .map(|r| {
+            let mut module_roles = string_list(&r, "ModuleRoles");
+            module_roles.sort();
+            json!({
+                "name": r.get_str("Name").unwrap_or_default(),
+                "admin": r.get_bool("ManageAllRoles").unwrap_or(false),
+                "module_roles": module_roles,
+            })
+        })
+        .collect();
+    user_roles.sort_by_key(|v| v["name"].as_str().unwrap_or_default().to_string());
+
+    Some(json!({
+        "security_level": doc.get_str("SecurityLevel").ok(),
+        "check_security": doc.get_bool("CheckSecurity").ok(),
+        "admin_user_name": doc.get_str("AdminUserName").ok(),
+        "admin_user_role": doc.get_str("AdminUserRole").ok(),
+        "demo_users_enabled": doc.get_bool("EnableDemoUsers").ok(),
+        "demo_users": demo_users,
+        "guest_access_enabled": doc.get_bool("EnableGuestAccess").ok(),
+        "guest_user_role": doc.get_str("GuestUserRole").ok(),
+        "sign_in_microflow": doc.get_str("SignInMicroflow").ok(),
+        "password_policy": doc.get("PasswordPolicySettings").map(|v| normalize_flow_value(v, &HashMap::new())).unwrap_or(Value::Null),
+        "user_roles": user_roles,
+    }))
+}
+
+fn string_array_items(doc: &Document, key: &str) -> Vec<Bson> {
+    match doc.get(key) {
+        Some(Bson::Array(items)) => mxrs_bson::parse_array(Some(items)).items,
+        _ => Vec::new(),
+    }
+}
+
+fn string_list(doc: &Document, key: &str) -> Vec<String> {
+    string_array_items(doc, key)
+        .into_iter()
+        .filter_map(|b| match b {
+            Bson::String(s) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The subset of `Model::DesignSystem::ASSET_DIRECTORIES` this crate needs
+/// — directories mxrb scans for theme/widget/library assets, relative to
+/// the project root (the `.mpr`'s parent directory).
+const ASSET_DIRECTORIES: &[&str] = &[
+    "theme",
+    "theme-cache",
+    "themesource",
+    "resources",
+    "widgets",
+    "javasource",
+    "javascriptsource",
+    "userlib",
+    "vendorlib",
+];
+
+/// Ports `compare.rb#design_asset_summary`: SHA-256 of every regular file
+/// (symlinks excluded, matching `compare.rb`'s own `!File.symlink?`) under
+/// each `ASSET_DIRECTORIES` entry, keyed by its path relative to the
+/// project root.
+fn design_asset_summary(mpr_path: &Path) -> Value {
+    let root = mpr_path.parent().unwrap_or(Path::new("."));
+    let mut assets: Vec<(String, String)> = Vec::new();
+    for dir in ASSET_DIRECTORIES {
+        let mut files = Vec::new();
+        collect_regular_files(&root.join(dir), &mut files);
+        for file in files {
+            let Ok(bytes) = std::fs::read(&file) else {
+                continue;
+            };
+            let relative = file
+                .strip_prefix(root)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/");
+            assets.push((relative, sha256_hex(&bytes)));
+        }
+    }
+    assets.sort_by(|a, b| a.0.cmp(&b.0));
+    Value::Object(
+        assets
+            .into_iter()
+            .map(|(path, hash)| (path, Value::String(hash)))
+            .collect(),
+    )
+}
+
+fn collect_regular_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            collect_regular_files(&path, out);
+        } else if meta.is_file() {
+            out.push(path);
+        }
+    }
 }
 
 fn entity_summary(entity: &Entity) -> Value {
@@ -659,5 +898,74 @@ mod tests {
             "unexpected changes: {:?}",
             result.changes
         );
+    }
+
+    #[test]
+    fn a_fresh_project_has_the_default_administrator_security_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Fresh.mpr");
+        write_fixture(&path, |m| {
+            m.entity("Order", |_e| {});
+        });
+
+        let snap = snapshot(&path).unwrap();
+        let security = &snap["security"];
+        assert!(!security.is_null());
+        assert_eq!(security["security_level"], "CheckNothing");
+        assert_eq!(security["admin_user_role"], "Administrator");
+        let roles = security["user_roles"].as_array().unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0]["name"], "Administrator");
+        assert_eq!(roles[0]["admin"], true);
+    }
+
+    #[test]
+    fn a_changed_theme_asset_is_reported_as_a_difference() {
+        let dir = tempfile::tempdir().unwrap();
+        let left_dir = dir.path().join("left");
+        let right_dir = dir.path().join("right");
+        std::fs::create_dir_all(left_dir.join("theme")).unwrap();
+        std::fs::create_dir_all(right_dir.join("theme")).unwrap();
+        let left = left_dir.join("Project.mpr");
+        let right = right_dir.join("Project.mpr");
+        write_fixture(&left, |m| {
+            m.entity("Order", |_e| {});
+        });
+        write_fixture(&right, |m| {
+            m.entity("Order", |_e| {});
+        });
+        std::fs::write(left_dir.join("theme/main.css"), "body { color: red; }").unwrap();
+        std::fs::write(right_dir.join("theme/main.css"), "body { color: blue; }").unwrap();
+
+        let result = compare(&left, &right).unwrap();
+        assert!(result
+            .changes
+            .iter()
+            .any(|c| c.path.contains(&"design_assets".to_string())));
+    }
+
+    #[test]
+    fn identical_theme_assets_compare_clean_and_a_symlink_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("proj");
+        std::fs::create_dir_all(project_dir.join("theme")).unwrap();
+        let path = project_dir.join("Project.mpr");
+        write_fixture(&path, |m| {
+            m.entity("Order", |_e| {});
+        });
+        std::fs::write(project_dir.join("theme/main.css"), "body {}").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                project_dir.join("theme/main.css"),
+                project_dir.join("theme/link.css"),
+            )
+            .unwrap();
+        }
+
+        let snap = snapshot(&path).unwrap();
+        let assets = snap["design_assets"].as_object().unwrap();
+        assert!(assets.contains_key("theme/main.css"));
+        assert!(!assets.contains_key("theme/link.css"));
     }
 }

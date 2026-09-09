@@ -28,7 +28,7 @@ pub use attribute::{Attribute, AttributeType};
 pub use domain_model::DomainModel;
 pub use entity::Entity;
 pub use error::{ModelError, Result};
-pub use menu::Menu;
+pub use menu::{Menu, MenuItem};
 pub use microflow::Microflow;
 pub use module::Module;
 pub use navigation::Navigation;

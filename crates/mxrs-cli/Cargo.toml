@@ -16,6 +16,7 @@ mxrs-bson = { path = "../mxrs-bson" }
 mxrs-mpr = { path = "../mxrs-mpr" }
 mxrs-model = { path = "../mxrs-model" }
 serde_json.workspace = true
+sha2 = "0.10"
 
 [dev-dependencies]
 mxrs-dsl = { path = "../mxrs-dsl" }
