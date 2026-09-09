@@ -391,6 +391,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-compiler-domain"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-dsl",
+ "mxrs-ir",
+ "mxrs-model",
+ "mxrs-writer",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "mxrs-dsl"
 version = "0.1.0"
 dependencies = [

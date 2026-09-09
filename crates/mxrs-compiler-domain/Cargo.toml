@@ -1,0 +1,20 @@
+[package]
+name = "mxrs-compiler-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Phase 5 (first slice): compiles an mxrs-model DomainModel (editor shape) into Mendix Runtime shape. Ports lib/mxrb/compiler/domain_document_compiler.rb + domain_security_compiler.rb from mxrb."
+
+[dependencies]
+mxrs-bson = { path = "../mxrs-bson" }
+mxrs-model = { path = "../mxrs-model" }
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-ir = { path = "../mxrs-ir" }
+mxrs-writer = { path = "../mxrs-writer" }
+tempfile = "3.27.0"
