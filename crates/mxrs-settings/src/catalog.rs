@@ -23,11 +23,17 @@ pub const TYPE_METHODS: &[(&str, &str)] = &[
     ("Settings$DistributionSettings", "distribution"),
     ("Settings$JavaActionsSettings", "java_actions"),
     ("Settings$ThemeModuleEntry", "theme_module"),
-    ("Settings$ActionActivityDefaultColor", "action_activity_default_color"),
+    (
+        "Settings$ActionActivityDefaultColor",
+        "action_activity_default_color",
+    ),
     ("Settings$Certificate", "certificate"),
     ("Settings$ServerConfiguration", "server"),
     ("Settings$CustomSetting", "custom_setting"),
-    ("Settings$OpenTelemetryConfiguration", "open_telemetry_configuration"),
+    (
+        "Settings$OpenTelemetryConfiguration",
+        "open_telemetry_configuration",
+    ),
     ("Settings$TracingConfiguration", "tracing_configuration"),
     ("Texts$Language", "language"),
 ];
@@ -65,7 +71,10 @@ pub const FIELDS: &[(&str, &[&str])] = &[
             "UseOptimizedClient",
         ],
     ),
-    ("Settings$IntegrationProjectSettingsPart", &["ObsoleteEnableUrlEncoding"]),
+    (
+        "Settings$IntegrationProjectSettingsPart",
+        &["ObsoleteEnableUrlEncoding"],
+    ),
     ("Settings$ConfigurationSettings", &["Configurations"]),
     (
         "Settings$ModelSettings",
@@ -95,9 +104,17 @@ pub const FIELDS: &[(&str, &[&str])] = &[
     ),
     (
         "Settings$ConventionSettings",
-        &["ActionActivityDefaultColors", "DefaultAssociationStorage", "DefaultSequenceFlowLineType", "LowerCaseMicroflowVariables"],
+        &[
+            "ActionActivityDefaultColors",
+            "DefaultAssociationStorage",
+            "DefaultSequenceFlowLineType",
+            "LowerCaseMicroflowVariables",
+        ],
     ),
-    ("Settings$LanguageSettings", &["DefaultLanguageCode", "Languages"]),
+    (
+        "Settings$LanguageSettings",
+        &["DefaultLanguageCode", "Languages"],
+    ),
     ("Settings$CertificateSettings", &["Certificates"]),
     (
         "Settings$WorkflowsProjectSettingsPart",
@@ -112,10 +129,19 @@ pub const FIELDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Settings$JarDeploymentSettings", &["Exclusions"]),
-    ("Settings$DistributionSettings", &["BasedOnVersion", "IsDistributable", "Version"]),
-    ("Settings$JavaActionsSettings", &["GeneratePostfixesForParameters"]),
+    (
+        "Settings$DistributionSettings",
+        &["BasedOnVersion", "IsDistributable", "Version"],
+    ),
+    (
+        "Settings$JavaActionsSettings",
+        &["GeneratePostfixesForParameters"],
+    ),
     ("Settings$ThemeModuleEntry", &["ModuleName"]),
-    ("Settings$ActionActivityDefaultColor", &["ActionActivityType", "BackgroundColor"]),
+    (
+        "Settings$ActionActivityDefaultColor",
+        &["ActionActivityType", "BackgroundColor"],
+    ),
     ("Settings$Certificate", &["Data", "Type"]),
     (
         "Settings$ServerConfiguration",
@@ -142,11 +168,25 @@ pub const FIELDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Settings$CustomSetting", &["Name", "Value"]),
-    ("Settings$OpenTelemetryConfiguration", &["Enabled", "Endpoint", "Logs", "ServiceName", "Traces"]),
-    ("Settings$TracingConfiguration", &["Enabled", "Endpoint", "ServiceName"]),
+    (
+        "Settings$OpenTelemetryConfiguration",
+        &["Enabled", "Endpoint", "Logs", "ServiceName", "Traces"],
+    ),
+    (
+        "Settings$TracingConfiguration",
+        &["Enabled", "Endpoint", "ServiceName"],
+    ),
     (
         "Texts$Language",
-        &["CheckCompleteness", "Code", "CustomDateFormat", "CustomDateTimeFormat", "CustomTimeFormat", "Description", "RightToLeft"],
+        &[
+            "CheckCompleteness",
+            "Code",
+            "CustomDateFormat",
+            "CustomDateTimeFormat",
+            "CustomTimeFormat",
+            "Description",
+            "RightToLeft",
+        ],
     ),
 ];
 
@@ -154,7 +194,10 @@ pub const FIELDS: &[(&str, &[&str])] = &[
 pub const COLLECTION_MARKERS: &[((&str, &str), i32)] = &[
     (("Settings$ProjectSettings", "Settings"), 2),
     (("Settings$WorkflowsProjectSettingsPart", "Groups"), 2),
-    (("Settings$WorkflowsProjectSettingsPart", "OnWorkflowEvent"), 2),
+    (
+        ("Settings$WorkflowsProjectSettingsPart", "OnWorkflowEvent"),
+        2,
+    ),
     (("Settings$JarDeploymentSettings", "Exclusions"), 2),
 ];
 
@@ -193,7 +236,11 @@ pub fn is_part_type(storage_type: &str) -> bool {
 }
 
 pub fn fields_for(storage_type: &str) -> &'static [&'static str] {
-    FIELDS.iter().find(|(t, _)| *t == storage_type).map(|(_, f)| *f).unwrap_or(&[])
+    FIELDS
+        .iter()
+        .find(|(t, _)| *t == storage_type)
+        .map(|(_, f)| *f)
+        .unwrap_or(&[])
 }
 
 /// Mirrors Ruby's two-pass regex camelCase -> snake_case conversion:
@@ -214,7 +261,10 @@ pub fn field_for(storage_type: &str, method: &str) -> Result<&'static str> {
         .iter()
         .find(|f| field_method(f) == method)
         .copied()
-        .ok_or_else(|| SettingsError::UnknownField { storage_type: storage_type.to_string(), method: method.to_string() })
+        .ok_or_else(|| SettingsError::UnknownField {
+            storage_type: storage_type.to_string(),
+            method: method.to_string(),
+        })
 }
 
 pub fn is_collection_field(field: &str) -> bool {
@@ -222,7 +272,11 @@ pub fn is_collection_field(field: &str) -> bool {
 }
 
 pub fn collection_marker(storage_type: &str, field: &str) -> i32 {
-    COLLECTION_MARKERS.iter().find(|((t, f), _)| *t == storage_type && *f == field).map(|(_, m)| *m).unwrap_or(3)
+    COLLECTION_MARKERS
+        .iter()
+        .find(|((t, f), _)| *t == storage_type && *f == field)
+        .map(|(_, m)| *m)
+        .unwrap_or(3)
 }
 
 #[cfg(test)]
@@ -231,14 +285,23 @@ mod tests {
 
     #[test]
     fn method_for_type_and_back() {
-        assert_eq!(method_for_type("Settings$ProjectSettings").unwrap(), "project_settings");
-        assert_eq!(type_for_method("project_settings").unwrap(), "Settings$ProjectSettings");
+        assert_eq!(
+            method_for_type("Settings$ProjectSettings").unwrap(),
+            "project_settings"
+        );
+        assert_eq!(
+            type_for_method("project_settings").unwrap(),
+            "Settings$ProjectSettings"
+        );
         assert!(method_for_type("Nonexistent$Type").is_err());
     }
 
     #[test]
     fn field_method_handles_plain_camel_case() {
-        assert_eq!(field_method("EnableDownloadResources"), "enable_download_resources");
+        assert_eq!(
+            field_method("EnableDownloadResources"),
+            "enable_download_resources"
+        );
         assert_eq!(field_method("Name"), "name");
     }
 
@@ -246,19 +309,28 @@ mod tests {
     fn field_method_handles_acronym_boundaries() {
         assert_eq!(field_method("HttpPortNumber"), "http_port_number");
         assert_eq!(field_method("OpenAdminPort"), "open_admin_port");
-        assert_eq!(field_method("SslCertificateAlgorithm"), "ssl_certificate_algorithm");
+        assert_eq!(
+            field_method("SslCertificateAlgorithm"),
+            "ssl_certificate_algorithm"
+        );
         assert_eq!(field_method("UseOQLVersion2"), "use_oql_version2");
     }
 
     #[test]
     fn field_for_resolves_known_field_by_its_method_name() {
-        assert_eq!(field_for("Settings$ServerConfiguration", "http_port_number").unwrap(), "HttpPortNumber");
+        assert_eq!(
+            field_for("Settings$ServerConfiguration", "http_port_number").unwrap(),
+            "HttpPortNumber"
+        );
         assert!(field_for("Settings$ServerConfiguration", "not_a_field").is_err());
     }
 
     #[test]
     fn collection_marker_defaults_to_three() {
         assert_eq!(collection_marker("Settings$ProjectSettings", "Settings"), 2);
-        assert_eq!(collection_marker("Settings$LanguageSettings", "Languages"), 3);
+        assert_eq!(
+            collection_marker("Settings$LanguageSettings", "Languages"),
+            3
+        );
     }
 }

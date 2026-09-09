@@ -9,10 +9,17 @@ pub struct ProjectBuilder {
 
 impl ProjectBuilder {
     pub fn new(mendix_version: impl Into<String>) -> Self {
-        ProjectBuilder { version: mendix_version.into(), modules: vec![] }
+        ProjectBuilder {
+            version: mendix_version.into(),
+            modules: vec![],
+        }
     }
 
-    pub fn module(&mut self, name: impl Into<String>, configure: impl FnOnce(&mut ModuleBuilder)) -> &mut Self {
+    pub fn module(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut ModuleBuilder),
+    ) -> &mut Self {
         let mut builder = ModuleBuilder::new(name);
         configure(&mut builder);
         self.modules.push(builder.into_decl());
@@ -20,6 +27,9 @@ impl ProjectBuilder {
     }
 
     pub fn build(self) -> ProjectDecl {
-        ProjectDecl { mendix_version: self.version, modules: self.modules }
+        ProjectDecl {
+            mendix_version: self.version,
+            modules: self.modules,
+        }
     }
 }

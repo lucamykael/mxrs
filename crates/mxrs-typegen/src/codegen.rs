@@ -35,12 +35,20 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
         for entity in &module.entities {
             let entity_ident = valid_ident(&entity.name, "entity name")?;
             if !seen_entities.insert(entity.name.as_str()) {
-                return Err(TypegenError::DuplicateEntity(module.name.clone(), entity.name.clone()));
+                return Err(TypegenError::DuplicateEntity(
+                    module.name.clone(),
+                    entity.name.clone(),
+                ));
             }
 
             writeln!(out, "    pub struct {entity_ident};").unwrap();
             writeln!(out, "    impl mxrs_ir::EntityMarker for {entity_ident} {{").unwrap();
-            writeln!(out, "        const MODULE: &'static str = {:?};", module.name).unwrap();
+            writeln!(
+                out,
+                "        const MODULE: &'static str = {:?};",
+                module.name
+            )
+            .unwrap();
             writeln!(out, "        const NAME: &'static str = {:?};", entity.name).unwrap();
             out.push_str("    }\n");
 
@@ -57,7 +65,11 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
 
                 let marker_ident = format!("{entity_ident}_{attr_ident}");
                 writeln!(out, "    pub struct {marker_ident};").unwrap();
-                writeln!(out, "    impl mxrs_ir::AttributeMarker for {marker_ident} {{").unwrap();
+                writeln!(
+                    out,
+                    "    impl mxrs_ir::AttributeMarker for {marker_ident} {{"
+                )
+                .unwrap();
                 writeln!(out, "        type Entity = {entity_ident};").unwrap();
                 writeln!(out, "        const NAME: &'static str = {attribute:?};").unwrap();
                 out.push_str("    }\n");
@@ -70,10 +82,11 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
 }
 
 const RUST_KEYWORDS: &[&str] = &[
-    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for", "if", "impl",
-    "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct",
-    "super", "trait", "true", "type", "unsafe", "use", "where", "while", "async", "await", "dyn", "abstract",
-    "become", "box", "do", "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
 ];
 
 /// Validates `name` is usable verbatim as a Rust identifier — Mendix names
@@ -82,13 +95,21 @@ const RUST_KEYWORDS: &[&str] = &[
 /// name that needs mangling is a signal the manifest itself is wrong.
 fn valid_ident(name: &str, context: &str) -> Result<String, TypegenError> {
     let mut chars = name.chars();
-    let starts_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let starts_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
     let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !starts_ok || !rest_ok || name.is_empty() {
-        return Err(TypegenError::InvalidIdentifier(name.to_string(), context.to_string()));
+        return Err(TypegenError::InvalidIdentifier(
+            name.to_string(),
+            context.to_string(),
+        ));
     }
     if RUST_KEYWORDS.contains(&name) {
-        return Err(TypegenError::InvalidIdentifier(name.to_string(), context.to_string()));
+        return Err(TypegenError::InvalidIdentifier(
+            name.to_string(),
+            context.to_string(),
+        ));
     }
     Ok(name.to_string())
 }
@@ -103,8 +124,14 @@ mod tests {
             modules: vec![ModuleManifest {
                 name: "Sales".into(),
                 entities: vec![
-                    EntityManifest { name: "Order".into(), attributes: vec!["Number".into(), "Total".into()] },
-                    EntityManifest { name: "Customer".into(), attributes: vec!["Name".into()] },
+                    EntityManifest {
+                        name: "Order".into(),
+                        attributes: vec!["Number".into(), "Total".into()],
+                    },
+                    EntityManifest {
+                        name: "Customer".into(),
+                        attributes: vec!["Name".into()],
+                    },
                 ],
             }],
         }
@@ -130,7 +157,12 @@ mod tests {
 
     #[test]
     fn rejects_a_module_name_that_is_not_a_valid_identifier() {
-        let manifest = Manifest { modules: vec![ModuleManifest { name: "Sales-Team".into(), entities: vec![] }] };
+        let manifest = Manifest {
+            modules: vec![ModuleManifest {
+                name: "Sales-Team".into(),
+                entities: vec![],
+            }],
+        };
         let err = generate(&manifest).unwrap_err();
         assert!(matches!(err, TypegenError::InvalidIdentifier(name, _) if name == "Sales-Team"));
     }
@@ -140,7 +172,10 @@ mod tests {
         let manifest = Manifest {
             modules: vec![ModuleManifest {
                 name: "Sales".into(),
-                entities: vec![EntityManifest { name: "type".into(), attributes: vec![] }],
+                entities: vec![EntityManifest {
+                    name: "type".into(),
+                    attributes: vec![],
+                }],
             }],
         };
         let err = generate(&manifest).unwrap_err();
@@ -153,13 +188,21 @@ mod tests {
             modules: vec![ModuleManifest {
                 name: "Sales".into(),
                 entities: vec![
-                    EntityManifest { name: "Order".into(), attributes: vec![] },
-                    EntityManifest { name: "Order".into(), attributes: vec![] },
+                    EntityManifest {
+                        name: "Order".into(),
+                        attributes: vec![],
+                    },
+                    EntityManifest {
+                        name: "Order".into(),
+                        attributes: vec![],
+                    },
                 ],
             }],
         };
         let err = generate(&manifest).unwrap_err();
-        assert!(matches!(err, TypegenError::DuplicateEntity(module, entity) if module == "Sales" && entity == "Order"));
+        assert!(
+            matches!(err, TypegenError::DuplicateEntity(module, entity) if module == "Sales" && entity == "Order")
+        );
     }
 
     #[test]
@@ -167,7 +210,10 @@ mod tests {
         let manifest = Manifest {
             modules: vec![ModuleManifest {
                 name: "Sales".into(),
-                entities: vec![EntityManifest { name: "Order".into(), attributes: vec!["Number".into(), "Number".into()] }],
+                entities: vec![EntityManifest {
+                    name: "Order".into(),
+                    attributes: vec!["Number".into(), "Number".into()],
+                }],
             }],
         };
         let err = generate(&manifest).unwrap_err();

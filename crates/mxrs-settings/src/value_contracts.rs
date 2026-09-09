@@ -36,17 +36,37 @@ const BOOLEAN_FIELDS: &[&str] = &[
     "RightToLeft",
 ];
 
-const INTEGER_FIELDS: &[&str] =
-    &["BcryptCost", "DecimalScale", "DefaultTaskParallelism", "WorkflowEngineParallelism", "HttpPortNumber", "MaxJavaHeapSize", "ServerPortNumber"];
+const INTEGER_FIELDS: &[&str] = &[
+    "BcryptCost",
+    "DecimalScale",
+    "DefaultTaskParallelism",
+    "WorkflowEngineParallelism",
+    "HttpPortNumber",
+    "MaxJavaHeapSize",
+    "ServerPortNumber",
+];
 
-const NULLABLE_FIELDS: &[&str] = &["OpenTelemetry", "Tracing", "Logs", "Traces", "UsertaskOnStateChangeEvent", "WorkflowOnStateChangeEvent"];
+const NULLABLE_FIELDS: &[&str] = &[
+    "OpenTelemetry",
+    "Tracing",
+    "Logs",
+    "Traces",
+    "UsertaskOnStateChangeEvent",
+    "WorkflowOnStateChangeEvent",
+];
 
-const COMPONENTS: &[(&str, &str)] = &[("OpenTelemetry", "Settings$OpenTelemetryConfiguration"), ("Tracing", "Settings$TracingConfiguration")];
+const COMPONENTS: &[(&str, &str)] = &[
+    ("OpenTelemetry", "Settings$OpenTelemetryConfiguration"),
+    ("Tracing", "Settings$TracingConfiguration"),
+];
 
 const COLLECTION_COMPONENTS: &[(&str, &str)] = &[
     ("ThemeModuleOrder", "Settings$ThemeModuleEntry"),
     ("Configurations", "Settings$ServerConfiguration"),
-    ("ActionActivityDefaultColors", "Settings$ActionActivityDefaultColor"),
+    (
+        "ActionActivityDefaultColors",
+        "Settings$ActionActivityDefaultColor",
+    ),
     ("Languages", "Texts$Language"),
     ("Certificates", "Settings$Certificate"),
     ("CustomSettings", "Settings$CustomSetting"),
@@ -84,7 +104,11 @@ pub fn normalize(storage_type: &str, field: &str, value: Value) -> Result<Value>
 
     let expected = expected_type(field);
     if !is_valid(&expected, &value) {
-        return Err(SettingsError::TypeMismatch { storage_type: storage_type.to_string(), field: field.to_string(), expected: expected.label().to_string() });
+        return Err(SettingsError::TypeMismatch {
+            storage_type: storage_type.to_string(),
+            field: field.to_string(),
+            expected: expected.label().to_string(),
+        });
     }
     Ok(value)
 }
@@ -121,11 +145,19 @@ fn is_valid(expected: &Expected, value: &Value) -> bool {
 
 fn collection(storage_type: &str, field: &str, value: Value) -> Result<Value> {
     let Value::Collection(collection) = value else {
-        return Err(SettingsError::TypeMismatch { storage_type: storage_type.to_string(), field: field.to_string(), expected: "a Settings::Collection".to_string() });
+        return Err(SettingsError::TypeMismatch {
+            storage_type: storage_type.to_string(),
+            field: field.to_string(),
+            expected: "a Settings::Collection".to_string(),
+        });
     };
     for (index, item) in collection.items.iter().enumerate() {
         if !collection_item(field, item) {
-            return Err(SettingsError::InvalidCollectionItem { storage_type: storage_type.to_string(), field: field.to_string(), index });
+            return Err(SettingsError::InvalidCollectionItem {
+                storage_type: storage_type.to_string(),
+                field: field.to_string(),
+                index,
+            });
         }
     }
     Ok(Value::Collection(collection))
@@ -146,7 +178,14 @@ fn collection_item(field: &str, item: &Value) -> bool {
 
 fn typed_value(value: &Value) -> bool {
     match value {
-        Value::Node(_) | Value::Binary(_) | Value::String(_) | Value::Integer(_) | Value::Float(_) | Value::Time(_) | Value::Boolean(_) | Value::Null => true,
+        Value::Node(_)
+        | Value::Binary(_)
+        | Value::String(_)
+        | Value::Integer(_)
+        | Value::Float(_)
+        | Value::Time(_)
+        | Value::Boolean(_)
+        | Value::Null => true,
         Value::Collection(Collection { items, .. }) => items.iter().all(typed_value),
     }
 }
@@ -158,7 +197,10 @@ mod tests {
 
     #[test]
     fn nullable_field_accepts_null() {
-        assert_eq!(normalize("Settings$ServerConfiguration", "Tracing", Value::Null).unwrap(), Value::Null);
+        assert_eq!(
+            normalize("Settings$ServerConfiguration", "Tracing", Value::Null).unwrap(),
+            Value::Null
+        );
     }
 
     #[test]
@@ -166,29 +208,57 @@ mod tests {
         assert!(normalize("Settings$ServerConfiguration", "Name", Value::Null).is_err());
         // Logs/Traces are :typed_value AND nullable, and NilClass is a
         // recognized typed_value — both paths accept Null.
-        assert_eq!(normalize("Settings$OpenTelemetryConfiguration", "Logs", Value::Null).unwrap(), Value::Null);
+        assert_eq!(
+            normalize("Settings$OpenTelemetryConfiguration", "Logs", Value::Null).unwrap(),
+            Value::Null
+        );
     }
 
     #[test]
     fn boolean_field_rejects_non_boolean() {
-        assert!(normalize("Forms$WebUIProjectSettingsPart", "EnableRspackBundler", Value::Integer(1)).is_err());
-        assert!(normalize("Forms$WebUIProjectSettingsPart", "EnableRspackBundler", Value::Boolean(true)).is_ok());
+        assert!(normalize(
+            "Forms$WebUIProjectSettingsPart",
+            "EnableRspackBundler",
+            Value::Integer(1)
+        )
+        .is_err());
+        assert!(normalize(
+            "Forms$WebUIProjectSettingsPart",
+            "EnableRspackBundler",
+            Value::Boolean(true)
+        )
+        .is_ok());
     }
 
     #[test]
     fn component_field_requires_matching_storage_type() {
         let wrong = Node::new("Settings$TracingConfiguration").unwrap();
-        let result = normalize("Settings$ServerConfiguration", "OpenTelemetry", Value::Node(wrong));
+        let result = normalize(
+            "Settings$ServerConfiguration",
+            "OpenTelemetry",
+            Value::Node(wrong),
+        );
         assert!(result.is_err());
 
         let right = Node::new("Settings$OpenTelemetryConfiguration").unwrap();
-        assert!(normalize("Settings$ServerConfiguration", "OpenTelemetry", Value::Node(right)).is_ok());
+        assert!(normalize(
+            "Settings$ServerConfiguration",
+            "OpenTelemetry",
+            Value::Node(right)
+        )
+        .is_ok());
     }
 
     #[test]
     fn collection_field_requires_a_collection_value() {
-        assert!(normalize("Settings$JarDeploymentSettings", "Exclusions", Value::String("x".into())).is_err());
-        let collection = Value::Collection(Collection::new(vec![Value::String("x".into())], 2).unwrap());
+        assert!(normalize(
+            "Settings$JarDeploymentSettings",
+            "Exclusions",
+            Value::String("x".into())
+        )
+        .is_err());
+        let collection =
+            Value::Collection(Collection::new(vec![Value::String("x".into())], 2).unwrap());
         assert!(normalize("Settings$JarDeploymentSettings", "Exclusions", collection).is_ok());
     }
 

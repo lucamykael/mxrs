@@ -22,7 +22,14 @@ pub const TABLES: &[(&str, TableInfo)] = &[
         "Unit",
         TableInfo {
             desc: "Every Mendix artefact (module, entity, page, microflow...) is a Unit",
-            columns: &["UnitID", "ContainerID", "ContainmentName", "UnitTypeID", "ContentsHash", "Contents"],
+            columns: &[
+                "UnitID",
+                "ContainerID",
+                "ContainmentName",
+                "UnitTypeID",
+                "ContentsHash",
+                "Contents",
+            ],
         },
     ),
     (
@@ -42,7 +49,10 @@ pub const TABLES: &[(&str, TableInfo)] = &[
 ];
 
 pub fn table_info(name: &str) -> Option<&'static TableInfo> {
-    TABLES.iter().find(|(n, _)| *n == name).map(|(_, info)| info)
+    TABLES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, info)| info)
 }
 
 /// Known `UnitType` names (qualified Mendix metamodel class names). These
@@ -68,8 +78,19 @@ pub const UNIT_TYPES: &[&str] = &[
 ];
 
 /// Attribute types as used in the serialized `Contents` blob.
-pub const ATTRIBUTE_TYPES: &[&str] =
-    &["AutoNumber", "Boolean", "Currency", "DateTime", "Decimal", "Enum", "Float", "HashString", "Integer", "Long", "String"];
+pub const ATTRIBUTE_TYPES: &[&str] = &[
+    "AutoNumber",
+    "Boolean",
+    "Currency",
+    "DateTime",
+    "Decimal",
+    "Enum",
+    "Float",
+    "HashString",
+    "Integer",
+    "Long",
+    "String",
+];
 
 #[cfg(test)]
 mod tests {

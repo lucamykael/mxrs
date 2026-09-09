@@ -135,14 +135,23 @@ impl Type {
     }
 
     pub fn property(&self, identifier: &str, inherited: bool) -> Option<&Property> {
-        let candidates = if inherited { &self.all_properties } else { &self.properties };
+        let candidates = if inherited {
+            &self.all_properties
+        } else {
+            &self.properties
+        };
         let ruby_identifier = ruby_name(identifier);
-        candidates.iter().find(|p| p.name == identifier || p.ruby_name == ruby_identifier)
+        candidates
+            .iter()
+            .find(|p| p.name == identifier || p.ruby_name == ruby_identifier)
     }
 
     pub fn fetch_property(&self, identifier: &str, inherited: bool) -> Result<&Property> {
         self.property(identifier, inherited)
-            .ok_or_else(|| FormsError::UnknownProperty { type_name: self.name.clone(), property: identifier.to_string() })
+            .ok_or_else(|| FormsError::UnknownProperty {
+                type_name: self.name.clone(),
+                property: identifier.to_string(),
+            })
     }
 }
 
@@ -164,10 +173,17 @@ impl Catalog {
 
     fn parse(source: &str, expected_version: Option<&str>) -> Result<Self> {
         let payload: Json = serde_json::from_str(source)?;
-        let version = payload.get("mendix_version").and_then(Json::as_str).ok_or(FormsError::MalformedSchema("mendix_version"))?.to_string();
+        let version = payload
+            .get("mendix_version")
+            .and_then(Json::as_str)
+            .ok_or(FormsError::MalformedSchema("mendix_version"))?
+            .to_string();
         if let Some(expected) = expected_version {
             if version != expected {
-                return Err(FormsError::SchemaVersionMismatch { expected: expected.to_string(), actual: version });
+                return Err(FormsError::SchemaVersionMismatch {
+                    expected: expected.to_string(),
+                    actual: version,
+                });
             }
         }
 
@@ -179,14 +195,35 @@ impl Catalog {
             .filter_map(|w| w.get("name").and_then(Json::as_str))
             .collect();
 
-        let types_obj = payload.get("types").and_then(Json::as_object).ok_or(FormsError::MalformedSchema("types"))?;
-        let mut types: Vec<Type> = types_obj.iter().map(|(name, definition)| build_type(name, definition, widget_names.contains(name.as_str()))).collect::<Result<_>>()?;
+        let types_obj = payload
+            .get("types")
+            .and_then(Json::as_object)
+            .ok_or(FormsError::MalformedSchema("types"))?;
+        let mut types: Vec<Type> = types_obj
+            .iter()
+            .map(|(name, definition)| {
+                build_type(name, definition, widget_names.contains(name.as_str()))
+            })
+            .collect::<Result<_>>()?;
         types.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let by_name = types.iter().enumerate().map(|(i, t)| (t.name.clone(), i)).collect();
-        let by_ruby_name = types.iter().enumerate().map(|(i, t)| (t.ruby_name.clone(), i)).collect();
+        let by_name = types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.name.clone(), i))
+            .collect();
+        let by_ruby_name = types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.ruby_name.clone(), i))
+            .collect();
 
-        Ok(Self { version, types, by_name, by_ruby_name })
+        Ok(Self {
+            version,
+            types,
+            by_name,
+            by_ruby_name,
+        })
     }
 
     pub fn types(&self) -> &[Type] {
@@ -194,11 +231,18 @@ impl Catalog {
     }
 
     pub fn type_(&self, identifier: &str) -> Option<&Type> {
-        self.by_name.get(identifier).or_else(|| self.by_ruby_name.get(&ruby_name(identifier))).map(|&i| &self.types[i])
+        self.by_name
+            .get(identifier)
+            .or_else(|| self.by_ruby_name.get(&ruby_name(identifier)))
+            .map(|&i| &self.types[i])
     }
 
     pub fn fetch_type(&self, identifier: &str) -> Result<&Type> {
-        self.type_(identifier).ok_or_else(|| FormsError::UnknownType { version: self.version.clone(), type_name: identifier.to_string() })
+        self.type_(identifier)
+            .ok_or_else(|| FormsError::UnknownType {
+                version: self.version.clone(),
+                type_name: identifier.to_string(),
+            })
     }
 
     pub fn descendant(&self, candidate: &str, ancestor: &str) -> Result<bool> {
@@ -215,56 +259,139 @@ impl Catalog {
 }
 
 fn build_type(name: &str, definition: &Json, widget: bool) -> Result<Type> {
-    let kind_str = definition.get("kind").and_then(Json::as_str).ok_or(FormsError::MalformedSchema("kind"))?;
+    let kind_str = definition
+        .get("kind")
+        .and_then(Json::as_str)
+        .ok_or(FormsError::MalformedSchema("kind"))?;
     let kind = match kind_str {
         "enum" => TypeKind::Enum,
         "extend" => TypeKind::Extend,
         _ => TypeKind::Element,
     };
-    let abstract_ = definition.get("abstract").and_then(Json::as_bool).unwrap_or(false);
-    let base_name = definition.get("base").and_then(Json::as_str).map(str::to_string);
+    let abstract_ = definition
+        .get("abstract")
+        .and_then(Json::as_bool)
+        .unwrap_or(false);
+    let base_name = definition
+        .get("base")
+        .and_then(Json::as_str)
+        .map(str::to_string);
     let properties = build_properties(definition.get("properties"))?;
     let all_properties = build_properties(definition.get("all_properties"))?;
     let values = definition
         .get("values")
         .and_then(Json::as_array)
-        .map(|a| a.iter().filter_map(Json::as_str).map(str::to_string).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Json::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
 
-    Ok(Type { name: name.to_string(), ruby_name: ruby_name(name), kind, abstract_, base_name, properties, all_properties, values, widget })
+    Ok(Type {
+        name: name.to_string(),
+        ruby_name: ruby_name(name),
+        kind,
+        abstract_,
+        base_name,
+        properties,
+        all_properties,
+        values,
+        widget,
+    })
 }
 
 fn build_properties(definitions: Option<&Json>) -> Result<Vec<Property>> {
-    let Some(array) = definitions.and_then(Json::as_array) else { return Ok(Vec::new()) };
+    let Some(array) = definitions.and_then(Json::as_array) else {
+        return Ok(Vec::new());
+    };
     array.iter().map(build_property).collect()
 }
 
 fn build_property(definition: &Json) -> Result<Property> {
-    let name = definition.get("name").and_then(Json::as_str).ok_or(FormsError::MalformedSchema("property.name"))?.to_string();
-    let declared_by = definition.get("declared_by").and_then(Json::as_str).unwrap_or_default().to_string();
-    let type_name = definition.get("type").and_then(Json::as_str).unwrap_or_default().to_string();
-    let targets = definition.get("targets").and_then(Json::as_array).map(|a| a.iter().filter_map(Json::as_str).map(str::to_string).collect()).unwrap_or_default();
+    let name = definition
+        .get("name")
+        .and_then(Json::as_str)
+        .ok_or(FormsError::MalformedSchema("property.name"))?
+        .to_string();
+    let declared_by = definition
+        .get("declared_by")
+        .and_then(Json::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let type_name = definition
+        .get("type")
+        .and_then(Json::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let targets = definition
+        .get("targets")
+        .and_then(Json::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Json::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     let cardinality = match definition.get("cardinality").and_then(Json::as_str) {
         Some("many") => Cardinality::Many,
         _ => Cardinality::One,
     };
-    let optional = definition.get("optional").and_then(Json::as_bool).unwrap_or(false);
-    let default_value = definition.get("default_value").map(build_default).transpose()?;
-    let reference = definition.get("reference").and_then(Json::as_str).and_then(ReferenceKind::parse);
+    let optional = definition
+        .get("optional")
+        .and_then(Json::as_bool)
+        .unwrap_or(false);
+    let default_value = definition
+        .get("default_value")
+        .map(build_default)
+        .transpose()?;
+    let reference = definition
+        .get("reference")
+        .and_then(Json::as_str)
+        .and_then(ReferenceKind::parse);
 
-    Ok(Property { ruby_name: ruby_name(&name), name, declared_by, type_name, targets, cardinality, optional, default_value, reference })
+    Ok(Property {
+        ruby_name: ruby_name(&name),
+        name,
+        declared_by,
+        type_name,
+        targets,
+        cardinality,
+        optional,
+        default_value,
+        reference,
+    })
 }
 
 fn build_default(definition: &Json) -> Result<DefaultValue> {
-    let kind = definition.get("kind").and_then(Json::as_str).ok_or(FormsError::MalformedSchema("default_value.kind"))?;
+    let kind = definition
+        .get("kind")
+        .and_then(Json::as_str)
+        .ok_or(FormsError::MalformedSchema("default_value.kind"))?;
     match kind {
-        "literal" => Ok(DefaultValue::Literal(definition.get("value").cloned().unwrap_or(Json::Null))),
+        "literal" => Ok(DefaultValue::Literal(
+            definition.get("value").cloned().unwrap_or(Json::Null),
+        )),
         "size" => {
-            let width = definition.get("width").and_then(Json::as_i64).ok_or(FormsError::MalformedSchema("default_value.width"))?;
-            let height = definition.get("height").and_then(Json::as_i64).ok_or(FormsError::MalformedSchema("default_value.height"))?;
+            let width = definition
+                .get("width")
+                .and_then(Json::as_i64)
+                .ok_or(FormsError::MalformedSchema("default_value.width"))?;
+            let height = definition
+                .get("height")
+                .and_then(Json::as_i64)
+                .ok_or(FormsError::MalformedSchema("default_value.height"))?;
             Ok(DefaultValue::Size(Size { width, height }))
         }
-        "factory" => Ok(DefaultValue::Factory(definition.get("type").and_then(Json::as_str).unwrap_or_default().to_string())),
+        "factory" => Ok(DefaultValue::Factory(
+            definition
+                .get("type")
+                .and_then(Json::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        )),
         other => Ok(DefaultValue::Unknown(other.to_string())),
     }
 }
@@ -303,7 +430,10 @@ mod tests {
     #[test]
     fn fetch_type_by_ruby_name_also_resolves() {
         let catalog = Catalog::for_version("11.12.1").unwrap();
-        assert_eq!(catalog.type_("data_grid").map(|t| t.name.as_str()), catalog.type_("DataGrid").map(|t| t.name.as_str()));
+        assert_eq!(
+            catalog.type_("data_grid").map(|t| t.name.as_str()),
+            catalog.type_("DataGrid").map(|t| t.name.as_str())
+        );
     }
 
     #[test]

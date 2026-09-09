@@ -46,9 +46,7 @@ fn restored_to_json(restored: Restored) -> Value {
         // faithful JSON representation left; callers that need the `Binary`
         // itself should call `restore_extended_json` directly on that
         // sub-value rather than through a parent container.
-        Restored::Binary(binary) => {
-            Value::String(format!("<binary:{} bytes>", binary.bytes.len()))
-        }
+        Restored::Binary(binary) => Value::String(format!("<binary:{} bytes>", binary.bytes.len())),
         Restored::Json(value) => value,
     }
 }
@@ -57,7 +55,10 @@ fn restored_to_json(restored: Restored) -> Value {
 pub fn extended_binary(value: &Value) -> Option<Binary> {
     let payload = value.get("$binary")?.as_object()?;
     let base64_str = payload.get("base64")?.as_str()?;
-    let subtype_str = payload.get("subType").and_then(Value::as_str).unwrap_or("00");
+    let subtype_str = payload
+        .get("subType")
+        .and_then(Value::as_str)
+        .unwrap_or("00");
 
     let cleaned: String = base64_str.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = STANDARD.decode(cleaned).ok()?;

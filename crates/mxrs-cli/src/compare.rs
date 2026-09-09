@@ -62,12 +62,22 @@ fn unit_summary(project: &Project) -> Vec<Value> {
         .filter_map(|u| {
             let doc = project.mpr().parse_contents(&u).ok()?;
             let ty = doc.get_str("$Type").unwrap_or_default().to_string();
-            let name = doc.get_str("Name").or_else(|_| doc.get_str("name")).unwrap_or_default().to_string();
+            let name = doc
+                .get_str("Name")
+                .or_else(|_| doc.get_str("name"))
+                .unwrap_or_default()
+                .to_string();
             Some(json!({ "containment": u.containment_name, "type": ty, "name": name }))
         })
         .collect();
     summary.sort_by(|a, b| {
-        let key = |v: &Value| (v["containment"].as_str().unwrap_or_default().to_string(), v["type"].as_str().unwrap_or_default().to_string(), v["name"].as_str().unwrap_or_default().to_string());
+        let key = |v: &Value| {
+            (
+                v["containment"].as_str().unwrap_or_default().to_string(),
+                v["type"].as_str().unwrap_or_default().to_string(),
+                v["name"].as_str().unwrap_or_default().to_string(),
+            )
+        };
         key(a).cmp(&key(b))
     });
     summary
@@ -123,7 +133,11 @@ fn flow_summary(flow: &Microflow) -> Value {
     assign_flow_ids(&flow.objects, &flow.flows, &mut ids);
 
     let mut objects: Vec<&Document> = flow.objects.iter().collect();
-    objects.sort_by_key(|o| flow_id(o).and_then(|id| ids.get(&id).copied()).unwrap_or(ids.len()));
+    objects.sort_by_key(|o| {
+        flow_id(o)
+            .and_then(|id| ids.get(&id).copied())
+            .unwrap_or(ids.len())
+    });
 
     let mut normalized_flows: Vec<Value> = flow
         .flows
@@ -163,7 +177,8 @@ fn assign_flow_ids(objects: &[Document], flows: &[Document], ids: &mut HashMap<S
         .filter(|e| {
             let origin = e.get("OriginPointer").and_then(mxrs_bson::extract_id);
             let dest = e.get("DestinationPointer").and_then(mxrs_bson::extract_id);
-            origin.is_some_and(|o| local_ids.contains(&o)) && dest.is_some_and(|d| local_ids.contains(&d))
+            origin.is_some_and(|o| local_ids.contains(&o))
+                && dest.is_some_and(|d| local_ids.contains(&d))
         })
         .collect();
 
@@ -177,8 +192,11 @@ fn assign_flow_ids(objects: &[Document], flows: &[Document], ids: &mut HashMap<S
             has_incoming.insert(dest);
         }
     }
-    let object_index: HashMap<String, usize> =
-        objects.iter().enumerate().filter_map(|(i, o)| flow_id(o).map(|id| (id, i))).collect();
+    let object_index: HashMap<String, usize> = objects
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| flow_id(o).map(|id| (id, i)))
+        .collect();
 
     let mut root_ids: HashSet<String> = HashSet::new();
     let mut roots: Vec<&Document> = Vec::new();
@@ -220,8 +238,14 @@ fn assign_flow_ids(objects: &[Document], flows: &[Document], ids: &mut HashMap<S
             (is_error, dest_index)
         });
         for edge in edges {
-            if let Some(dest_id) = edge.get("DestinationPointer").and_then(mxrs_bson::extract_id) {
-                if let Some(target) = objects.iter().find(|o| flow_id(o).as_deref() == Some(dest_id.as_str())) {
+            if let Some(dest_id) = edge
+                .get("DestinationPointer")
+                .and_then(mxrs_bson::extract_id)
+            {
+                if let Some(target) = objects
+                    .iter()
+                    .find(|o| flow_id(o).as_deref() == Some(dest_id.as_str()))
+                {
                     queue.push_back(target);
                 }
             }
@@ -239,8 +263,12 @@ fn assign_flow_ids(objects: &[Document], flows: &[Document], ids: &mut HashMap<S
 }
 
 fn recurse_into_nested(object: &Document, flows: &[Document], ids: &mut HashMap<String, usize>) {
-    let Ok(oc) = object.get_document("ObjectCollection") else { return };
-    let Ok(nested_arr) = oc.get_array("Objects") else { return };
+    let Ok(oc) = object.get_document("ObjectCollection") else {
+        return;
+    };
+    let Ok(nested_arr) = oc.get_array("Objects") else {
+        return;
+    };
     let nested: Vec<Document> = mxrs_bson::parse_array(Some(nested_arr))
         .items
         .into_iter()
@@ -290,7 +318,9 @@ fn normalize_flow_value(value: &Bson, ids: &HashMap<String, usize>) -> Value {
             }
             Value::Object(map)
         }
-        Bson::Array(items) => Value::Array(items.iter().map(|v| normalize_flow_value(v, ids)).collect()),
+        Bson::Array(items) => {
+            Value::Array(items.iter().map(|v| normalize_flow_value(v, ids)).collect())
+        }
         Bson::String(s) => Value::String(s.clone()),
         Bson::Boolean(b) => Value::Bool(*b),
         Bson::Int32(i) => json!(i),
@@ -321,8 +351,14 @@ impl Change {
         format!(
             "{}: {} != {}",
             self.path.join("."),
-            self.before.as_ref().map(Value::to_string).unwrap_or_else(|| "nil".into()),
-            self.after.as_ref().map(Value::to_string).unwrap_or_else(|| "nil".into()),
+            self.before
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_else(|| "nil".into()),
+            self.after
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_else(|| "nil".into()),
         )
     }
 }
@@ -338,10 +374,15 @@ impl CompareResult {
     }
 }
 
-pub fn compare(left: impl AsRef<Path>, right: impl AsRef<Path>) -> mxrs_model::Result<CompareResult> {
+pub fn compare(
+    left: impl AsRef<Path>,
+    right: impl AsRef<Path>,
+) -> mxrs_model::Result<CompareResult> {
     let left_snapshot = snapshot(left)?;
     let right_snapshot = snapshot(right)?;
-    Ok(CompareResult { changes: diff(&left_snapshot, &right_snapshot) })
+    Ok(CompareResult {
+        changes: diff(&left_snapshot, &right_snapshot),
+    })
 }
 
 pub fn diff(left: &Value, right: &Value) -> Vec<Change> {
@@ -362,19 +403,29 @@ fn diff_values(left: &Value, right: &Value, path: &mut Vec<String>) -> Vec<Chang
             keys.into_iter()
                 .flat_map(|k| {
                     path.push(k.clone());
-                    let result = diff_values(l.get(k).unwrap_or(&Value::Null), r.get(k).unwrap_or(&Value::Null), path);
+                    let result = diff_values(
+                        l.get(k).unwrap_or(&Value::Null),
+                        r.get(k).unwrap_or(&Value::Null),
+                        path,
+                    );
                     path.pop();
                     result
                 })
                 .collect()
         }
-        (Value::Array(l), Value::Array(r)) if named_array(l) && named_array(r) => diff_named_arrays(l, r, path),
+        (Value::Array(l), Value::Array(r)) if named_array(l) && named_array(r) => {
+            diff_named_arrays(l, r, path)
+        }
         (Value::Array(l), Value::Array(r)) => {
             let max = l.len().max(r.len());
             (0..max)
                 .flat_map(|i| {
                     path.push(i.to_string());
-                    let result = diff_values(l.get(i).unwrap_or(&Value::Null), r.get(i).unwrap_or(&Value::Null), path);
+                    let result = diff_values(
+                        l.get(i).unwrap_or(&Value::Null),
+                        r.get(i).unwrap_or(&Value::Null),
+                        path,
+                    );
                     path.pop();
                     result
                 })
@@ -400,7 +451,10 @@ fn change_operation(left: &Value, right: &Value) -> Operation {
 }
 
 fn named_array(items: &[Value]) -> bool {
-    if !items.iter().all(|v| matches!(v, Value::Object(m) if m.contains_key("name"))) {
+    if !items
+        .iter()
+        .all(|v| matches!(v, Value::Object(m) if m.contains_key("name")))
+    {
         return false;
     }
     let mut names: Vec<String> = items.iter().map(name_of).collect();
@@ -411,7 +465,10 @@ fn named_array(items: &[Value]) -> bool {
 }
 
 fn name_of(v: &Value) -> String {
-    v.get("name").and_then(Value::as_str).unwrap_or_default().to_string()
+    v.get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn same_except_name(a: &Value, b: &Value) -> bool {
@@ -431,8 +488,10 @@ fn same_except_name(a: &Value, b: &Value) -> bool {
 /// `"name"` rather than position, with a same-content-except-name pass so a
 /// rename reports as one change instead of a spurious remove+add pair.
 fn diff_named_arrays(left: &[Value], right: &[Value], path: &mut Vec<String>) -> Vec<Change> {
-    let mut left_by_name: Vec<(String, Value)> = left.iter().map(|v| (name_of(v), v.clone())).collect();
-    let mut right_by_name: Vec<(String, Value)> = right.iter().map(|v| (name_of(v), v.clone())).collect();
+    let mut left_by_name: Vec<(String, Value)> =
+        left.iter().map(|v| (name_of(v), v.clone())).collect();
+    let mut right_by_name: Vec<(String, Value)> =
+        right.iter().map(|v| (name_of(v), v.clone())).collect();
     let mut changes = Vec::new();
 
     let mut common_names: Vec<String> = left_by_name
@@ -442,8 +501,18 @@ fn diff_named_arrays(left: &[Value], right: &[Value], path: &mut Vec<String>) ->
         .collect();
     common_names.sort();
     for name in &common_names {
-        let l = left_by_name.iter().find(|(n, _)| n == name).unwrap().1.clone();
-        let r = right_by_name.iter().find(|(n, _)| n == name).unwrap().1.clone();
+        let l = left_by_name
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap()
+            .1
+            .clone();
+        let r = right_by_name
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap()
+            .1
+            .clone();
         path.push(name.clone());
         changes.extend(diff_values(&l, &r, path));
         path.pop();
@@ -453,7 +522,10 @@ fn diff_named_arrays(left: &[Value], right: &[Value], path: &mut Vec<String>) ->
 
     let left_only_snapshot = left_by_name.clone();
     for (name, value) in &left_only_snapshot {
-        if let Some(pos) = right_by_name.iter().position(|(_, rv)| same_except_name(value, rv)) {
+        if let Some(pos) = right_by_name
+            .iter()
+            .position(|(_, rv)| same_except_name(value, rv))
+        {
             let (rname, rvalue) = right_by_name.remove(pos);
             path.push(format!("{name} -> {rname}"));
             changes.extend(diff_values(value, &rvalue, path));
@@ -504,7 +576,11 @@ mod tests {
         });
 
         let result = compare(&left, &right).unwrap();
-        assert!(result.is_identical(), "unexpected changes: {:?}", result.changes);
+        assert!(
+            result.is_identical(),
+            "unexpected changes: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -525,7 +601,11 @@ mod tests {
 
         let result = compare(&left, &right).unwrap();
         assert!(!result.is_identical());
-        let change = result.changes.iter().find(|c| c.path.contains(&"default".to_string())).unwrap();
+        let change = result
+            .changes
+            .iter()
+            .find(|c| c.path.contains(&"default".to_string()))
+            .unwrap();
         assert_eq!(change.operation, Operation::Changed);
         assert!(change.path.contains(&"Number".to_string()));
     }
@@ -544,7 +624,10 @@ mod tests {
         });
 
         let result = compare(&left, &right).unwrap();
-        assert!(result.changes.iter().any(|c| c.operation == Operation::Added && c.path.contains(&"Customer".to_string())));
+        assert!(result
+            .changes
+            .iter()
+            .any(|c| c.operation == Operation::Added && c.path.contains(&"Customer".to_string())));
     }
 
     #[test]
@@ -571,6 +654,10 @@ mod tests {
         mxrs_writer::write_project(&right, &right_project.build()).unwrap();
 
         let result = compare(&left, &right).unwrap();
-        assert!(result.is_identical(), "unexpected changes: {:?}", result.changes);
+        assert!(
+            result.is_identical(),
+            "unexpected changes: {:?}",
+            result.changes
+        );
     }
 }

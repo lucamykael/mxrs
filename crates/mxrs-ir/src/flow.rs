@@ -28,11 +28,19 @@ pub struct Member {
 
 impl Member {
     pub fn attribute(name: impl Into<String>, value: impl Into<String>) -> Self {
-        Member { attribute: Some(name.into()), association: None, value: value.into() }
+        Member {
+            attribute: Some(name.into()),
+            association: None,
+            value: value.into(),
+        }
     }
 
     pub fn association(name: impl Into<String>, value: impl Into<String>) -> Self {
-        Member { attribute: None, association: Some(name.into()), value: value.into() }
+        Member {
+            attribute: None,
+            association: Some(name.into()),
+            value: value.into(),
+        }
     }
 }
 
@@ -44,17 +52,35 @@ pub struct MicroflowCallMapping {
 
 #[derive(Debug, Clone)]
 pub enum Activity {
-    CreateObject { variable: String, entity: String, members: Vec<Member>, commit: bool },
-    ChangeObject { variable: String, entity: String, members: Vec<Member>, commit: bool },
-    Commit { variable: String },
-    DeleteObject { variable: String },
+    CreateObject {
+        variable: String,
+        entity: String,
+        members: Vec<Member>,
+        commit: bool,
+    },
+    ChangeObject {
+        variable: String,
+        entity: String,
+        members: Vec<Member>,
+        commit: bool,
+    },
+    Commit {
+        variable: String,
+    },
+    DeleteObject {
+        variable: String,
+    },
     CallMicroflow {
         name: String,
         result_variable: Option<String>,
         use_return: bool,
         mappings: Vec<MicroflowCallMapping>,
     },
-    Decision { condition: String, true_branch: Vec<Activity>, false_branch: Vec<Activity> },
+    Decision {
+        condition: String,
+        true_branch: Vec<Activity>,
+        false_branch: Vec<Activity>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +95,11 @@ pub struct MicroflowDecl {
 
 impl MicroflowDecl {
     pub fn new(name: impl Into<String>) -> Self {
-        MicroflowDecl { name: name.into(), documentation: String::new(), activities: vec![], return_expression: None }
+        MicroflowDecl {
+            name: name.into(),
+            documentation: String::new(),
+            activities: vec![],
+            return_expression: None,
+        }
     }
 }

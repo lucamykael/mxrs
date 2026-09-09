@@ -16,7 +16,9 @@
 
 use mxrs_bson::{Bson, Document};
 
-use crate::support::{docs_any, get_any, get_bool_any, get_doc_any, get_i32_any, get_id_any, get_str_any, items_any};
+use crate::support::{
+    docs_any, get_any, get_bool_any, get_doc_any, get_i32_any, get_id_any, get_str_any, items_any,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct Widget {
@@ -62,7 +64,8 @@ impl Page {
         Page {
             id: get_id_any(doc, &["$ID"]),
             name: get_str_any(doc, &["Name", "name"]),
-            documentation: get_str_any(doc, &["Documentation", "documentation"]).unwrap_or_default(),
+            documentation: get_str_any(doc, &["Documentation", "documentation"])
+                .unwrap_or_default(),
             url: get_str_any(doc, &["Url", "URL", "url"]).unwrap_or_default(),
             title: extract_text(get_any(doc, &["Title", "title"])),
             layout_id: extract_layout(doc),
@@ -73,7 +76,10 @@ impl Page {
             export_level: get_str_any(doc, &["ExportLevel"]).unwrap_or_else(|| "Hidden".into()),
             appearance_class: get_str_any(&appearance, &["Class"]).unwrap_or_default(),
             appearance_style: get_str_any(&appearance, &["Style"]).unwrap_or_default(),
-            allowed_module_roles: string_items(doc, &["AllowedModuleRoles", "AllowedRoles", "allowedModuleRoles"]),
+            allowed_module_roles: string_items(
+                doc,
+                &["AllowedModuleRoles", "AllowedRoles", "allowedModuleRoles"],
+            ),
             parameters: docs_any(doc, &["Parameters", "parameters"]),
             widgets,
             data_source,
@@ -82,7 +88,10 @@ impl Page {
     }
 
     pub fn to_bson(&self) -> Document {
-        let id = self.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = self
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         mxrs_bson::doc! {
             "$ID": id,
             "$Type": self.storage_type.clone(),
@@ -120,8 +129,12 @@ fn extract_text(value: Option<&Bson>) -> String {
             if get_str_any(d, &["$Type"]).as_deref() == Some("Forms$ClientTemplate") {
                 return extract_text(d.get("Template"));
             }
-            let translation = docs_any(d, &["Translations", "Items", "translations"]).into_iter().next();
-            translation.and_then(|t| get_str_any(&t, &["Translation", "Text", "text"])).unwrap_or_default()
+            let translation = docs_any(d, &["Translations", "Items", "translations"])
+                .into_iter()
+                .next();
+            translation
+                .and_then(|t| get_str_any(&t, &["Translation", "Text", "text"]))
+                .unwrap_or_default()
         }
         _ => String::new(),
     }
@@ -143,8 +156,13 @@ fn widget_roots(doc: &Document) -> Vec<Document> {
 }
 
 fn form_call_widgets(form_call: Option<&Document>) -> Vec<Document> {
-    let Some(form_call) = form_call else { return vec![] };
-    docs_any(form_call, &["Arguments"]).iter().flat_map(child_widgets).collect()
+    let Some(form_call) = form_call else {
+        return vec![];
+    };
+    docs_any(form_call, &["Arguments"])
+        .iter()
+        .flat_map(child_widgets)
+        .collect()
 }
 
 fn child_widgets(widget: &Document) -> Vec<Document> {
@@ -210,10 +228,15 @@ fn parse_widgets(items: &[Document], target: &mut Vec<Widget>) {
             target.push(layout_grid_widget(widget));
             continue;
         }
-        if matches!(ty.as_str(), "Pages$SnippetCall" | "Forms$SnippetCall" | "Forms$SnippetCallWidget") {
+        if matches!(
+            ty.as_str(),
+            "Pages$SnippetCall" | "Forms$SnippetCall" | "Forms$SnippetCallWidget"
+        ) {
             let snippet_ref = get_doc_any(widget, &["SnippetSettings"])
                 .and_then(|s| get_str_any(&s, &["Snippet"]))
-                .or_else(|| get_doc_any(widget, &["FormCall"]).and_then(|f| get_str_any(&f, &["Form"])))
+                .or_else(|| {
+                    get_doc_any(widget, &["FormCall"]).and_then(|f| get_str_any(&f, &["Form"]))
+                })
                 .unwrap_or_default();
             target.push(Widget {
                 widget_type: "snippet".into(),
@@ -224,7 +247,10 @@ fn parse_widgets(items: &[Document], target: &mut Vec<Widget>) {
             });
             continue;
         }
-        if matches!(ty.as_str(), "Pages$Container" | "Forms$Container" | "Forms$DivContainer") {
+        if matches!(
+            ty.as_str(),
+            "Pages$Container" | "Forms$Container" | "Forms$DivContainer"
+        ) {
             let mut children = Vec::new();
             parse_widgets(&docs_any(widget, &["Widgets"]), &mut children);
             target.push(Widget {
@@ -322,20 +348,28 @@ fn native_widget(widget: &Document) -> Widget {
 // ── Data source / data view ──────────────────────────────────────────────
 
 fn parse_data_view_source(source: Option<&Document>) -> Document {
-    let Some(source) = source else { return mxrs_bson::doc! { "kind": "context" } };
+    let Some(source) = source else {
+        return mxrs_bson::doc! { "kind": "context" };
+    };
     let ty = get_str_any(source, &["$Type"]).unwrap_or_default();
     let force_full = get_bool_any(source, &["ForceFullObjects"]).unwrap_or(false);
 
     let mut out = match ty.as_str() {
         "Pages$NanoflowSource" | "Forms$NanoflowSource" => {
             let name = get_str_any(source, &["Nanoflow"])
-                .or_else(|| get_doc_any(source, &["NanoflowSettings"]).and_then(|s| get_str_any(&s, &["Nanoflow"])))
+                .or_else(|| {
+                    get_doc_any(source, &["NanoflowSettings"])
+                        .and_then(|s| get_str_any(&s, &["Nanoflow"]))
+                })
                 .unwrap_or_default();
             mxrs_bson::doc! { "kind": "nanoflow", "name": name }
         }
         "Pages$MicroflowSource" | "Forms$MicroflowSource" => {
-            let settings = get_doc_any(source, &["MicroflowSettings"]).unwrap_or_else(|| source.clone());
-            let name = get_str_any(&settings, &["Microflow"]).or_else(|| get_str_any(source, &["Microflow"])).unwrap_or_default();
+            let settings =
+                get_doc_any(source, &["MicroflowSettings"]).unwrap_or_else(|| source.clone());
+            let name = get_str_any(&settings, &["Microflow"])
+                .or_else(|| get_str_any(source, &["Microflow"]))
+                .unwrap_or_default();
             mxrs_bson::doc! { "kind": "microflow", "name": name }
         }
         "Pages$ListenTargetSource" | "Forms$ListenTargetSource" => {
@@ -369,12 +403,18 @@ fn data_view_widget(widget: &Document) -> Widget {
 
     let mut options = appearance_options(widget);
     options.remove("visible");
-    options.insert("source", parse_data_view_source(get_doc_any(widget, &["DataSource"]).as_ref()));
+    options.insert(
+        "source",
+        parse_data_view_source(get_doc_any(widget, &["DataSource"]).as_ref()),
+    );
     let no_entity_message = extract_text(get_any(widget, &["NoEntityMessage"]));
     if !no_entity_message.is_empty() {
         options.insert("no_entity_message", no_entity_message);
     }
-    options.insert("show_footer", get_bool_any(widget, &["ShowFooter"]).unwrap_or(true));
+    options.insert(
+        "show_footer",
+        get_bool_any(widget, &["ShowFooter"]).unwrap_or(true),
+    );
 
     Widget {
         widget_type: "data_view".into(),
@@ -389,18 +429,23 @@ fn data_view_widget(widget: &Document) -> Widget {
 
 fn grid_entity(widget: &Document) -> Option<String> {
     get_doc_any(widget, &["DataSource"]).and_then(|d| {
-        get_str_any(&d, &["Entity"]).or_else(|| get_doc_any(&d, &["EntityRef"]).and_then(|r| get_str_any(&r, &["Entity"])))
+        get_str_any(&d, &["Entity"])
+            .or_else(|| get_doc_any(&d, &["EntityRef"]).and_then(|r| get_str_any(&r, &["Entity"])))
     })
 }
 
 fn grid_events(widget: &Document) -> Vec<Document> {
-    [("OnChangeAction", "on_change"), ("OnClickAction", "on_click"), ("Action", "on_click")]
-        .iter()
-        .filter_map(|(property, event)| {
-            let action = parse_action(get_doc_any(widget, &[property]).as_ref())?;
-            Some(with_event(action, event))
-        })
-        .collect()
+    [
+        ("OnChangeAction", "on_change"),
+        ("OnClickAction", "on_click"),
+        ("Action", "on_click"),
+    ]
+    .iter()
+    .filter_map(|(property, event)| {
+        let action = parse_action(get_doc_any(widget, &[property]).as_ref())?;
+        Some(with_event(action, event))
+    })
+    .collect()
 }
 
 fn parse_search_bar(sb: &Document) -> Option<Document> {
@@ -412,7 +457,9 @@ fn parse_search_bar(sb: &Document) -> Option<Document> {
                 .or_else(|| get_str_any(sf, &["Attribute", "AttributePath"]))?;
             let attribute = attr_ref.rsplit('/').next().unwrap_or(&attr_ref).to_string();
             let caption = extract_text(get_any(sf, &["Label", "Caption"]));
-            Some(Bson::Document(mxrs_bson::doc! { "attribute": attribute, "caption": caption }))
+            Some(Bson::Document(
+                mxrs_bson::doc! { "attribute": attribute, "caption": caption },
+            ))
         })
         .collect();
     if fields.is_empty() {
@@ -519,7 +566,9 @@ fn tab_control_widget(widget: &Document) -> Widget {
 fn table_widget(widget: &Document) -> Widget {
     let column_widths: Vec<Bson> = docs_any(widget, &["ColumnWidths"])
         .iter()
-        .map(|c| Bson::Document(mxrs_bson::doc! { "width": get_i32_any(c, &["Value"]).unwrap_or(0) }))
+        .map(|c| {
+            Bson::Document(mxrs_bson::doc! { "width": get_i32_any(c, &["Value"]).unwrap_or(0) })
+        })
         .collect();
 
     let mut cells_by_row: std::collections::BTreeMap<i32, Vec<Document>> = Default::default();
@@ -532,7 +581,10 @@ fn table_widget(widget: &Document) -> Widget {
         .iter()
         .enumerate()
         .map(|(row_index, _row)| {
-            let mut row_cells = cells_by_row.get(&(row_index as i32)).cloned().unwrap_or_default();
+            let mut row_cells = cells_by_row
+                .get(&(row_index as i32))
+                .cloned()
+                .unwrap_or_default();
             row_cells.sort_by_key(|c| get_i32_any(c, &["LeftColumnIndex"]).unwrap_or(0));
             let cells: Vec<Bson> = row_cells
                 .iter()
@@ -607,10 +659,23 @@ fn layout_grid_widget(widget: &Document) -> Widget {
 
 fn appearance_options(widget: &Document) -> Document {
     let appearance = get_doc_any(widget, &["Appearance"]);
-    let class_name = appearance.as_ref().and_then(|a| get_str_any(a, &["Class"])).or_else(|| get_str_any(widget, &["Class"])).unwrap_or_default();
-    let style = appearance.as_ref().and_then(|a| get_str_any(a, &["Style"])).or_else(|| get_str_any(widget, &["Style"])).unwrap_or_default();
-    let dynamic = appearance.as_ref().and_then(|a| get_str_any(a, &["DynamicClasses"])).unwrap_or_default();
-    let visible = get_doc_any(widget, &["ConditionalVisibilitySettings"]).and_then(|c| get_str_any(&c, &["Expression"])).unwrap_or_default();
+    let class_name = appearance
+        .as_ref()
+        .and_then(|a| get_str_any(a, &["Class"]))
+        .or_else(|| get_str_any(widget, &["Class"]))
+        .unwrap_or_default();
+    let style = appearance
+        .as_ref()
+        .and_then(|a| get_str_any(a, &["Style"]))
+        .or_else(|| get_str_any(widget, &["Style"]))
+        .unwrap_or_default();
+    let dynamic = appearance
+        .as_ref()
+        .and_then(|a| get_str_any(a, &["DynamicClasses"]))
+        .unwrap_or_default();
+    let visible = get_doc_any(widget, &["ConditionalVisibilitySettings"])
+        .and_then(|c| get_str_any(&c, &["Expression"]))
+        .unwrap_or_default();
 
     let mut out = Document::new();
     if !class_name.is_empty() {
@@ -629,7 +694,8 @@ fn appearance_options(widget: &Document) -> Document {
 }
 
 fn container_events(widget: &Document) -> Vec<Document> {
-    let action = get_doc_any(widget, &["OnClickAction"]).or_else(|| get_doc_any(widget, &["Action"]));
+    let action =
+        get_doc_any(widget, &["OnClickAction"]).or_else(|| get_doc_any(widget, &["Action"]));
     match parse_action(action.as_ref()) {
         Some(a) => vec![with_event(a, "on_click")],
         None => vec![],
@@ -637,7 +703,8 @@ fn container_events(widget: &Document) -> Vec<Document> {
 }
 
 fn template_parameters(widget: &Document) -> Vec<String> {
-    let Some(template) = get_doc_any(widget, &["Content", "CaptionTemplate", "LabelTemplate"]) else {
+    let Some(template) = get_doc_any(widget, &["Content", "CaptionTemplate", "LabelTemplate"])
+    else {
         return vec![];
     };
     docs_any(&template, &["Parameters"])
@@ -650,13 +717,17 @@ fn template_parameters(widget: &Document) -> Vec<String> {
             let attribute = get_doc_any(parameter, &["AttributeRef"])
                 .and_then(|a| get_str_any(&a, &["Attribute"]))
                 .and_then(|a| a.rsplit('.').next().map(str::to_string));
-            attribute.filter(|a| !a.is_empty()).map(|a| format!("$currentObject/{a}"))
+            attribute
+                .filter(|a| !a.is_empty())
+                .map(|a| format!("$currentObject/{a}"))
         })
         .collect()
 }
 
 fn attribute_path(widget: &Document) -> Option<String> {
-    get_str_any(widget, &["AttributePath"]).or_else(|| get_doc_any(widget, &["AttributeRef"]).and_then(|a| get_str_any(&a, &["Attribute"])))
+    get_str_any(widget, &["AttributePath"]).or_else(|| {
+        get_doc_any(widget, &["AttributeRef"]).and_then(|a| get_str_any(&a, &["Attribute"]))
+    })
 }
 
 fn widget_caption(widget: &Document, widget_type: &str) -> String {
@@ -667,44 +738,101 @@ fn widget_caption(widget: &Document, widget_type: &str) -> String {
         .or_else(|| get_any(widget, &["LabelText"]))
         .or_else(|| get_any(widget, &["LabelTemplate"]))
         .cloned()
-        .or_else(|| get_doc_any(widget, &["CaptionTemplate"]).and_then(|c| c.get("Template").cloned()));
+        .or_else(|| {
+            get_doc_any(widget, &["CaptionTemplate"]).and_then(|c| c.get("Template").cloned())
+        });
     extract_text(value.as_ref())
 }
 
 fn static_image_options(widget: &Document) -> Document {
     let mut out = appearance_options(widget);
     out.insert("image", get_str_any(widget, &["Image"]).unwrap_or_default());
-    out.insert("alternative_text", extract_text(get_any(widget, &["AlternativeText"])));
+    out.insert(
+        "alternative_text",
+        extract_text(get_any(widget, &["AlternativeText"])),
+    );
     out.insert("width", get_i32_any(widget, &["Width"]).unwrap_or(0));
     out.insert("height", get_i32_any(widget, &["Height"]).unwrap_or(0));
-    out.insert("width_unit", get_str_any(widget, &["WidthUnit"]).unwrap_or_else(|| "Pixels".into()).to_lowercase());
-    out.insert("height_unit", get_str_any(widget, &["HeightUnit"]).unwrap_or_else(|| "Pixels".into()).to_lowercase());
-    out.insert("responsive", get_bool_any(widget, &["Responsive"]).unwrap_or(true));
+    out.insert(
+        "width_unit",
+        get_str_any(widget, &["WidthUnit"])
+            .unwrap_or_else(|| "Pixels".into())
+            .to_lowercase(),
+    );
+    out.insert(
+        "height_unit",
+        get_str_any(widget, &["HeightUnit"])
+            .unwrap_or_else(|| "Pixels".into())
+            .to_lowercase(),
+    );
+    out.insert(
+        "responsive",
+        get_bool_any(widget, &["Responsive"]).unwrap_or(true),
+    );
     out
 }
 
 fn file_manager_options(widget: &Document) -> Document {
     let mut out = appearance_options(widget);
-    out.insert("allowed_extensions", get_str_any(widget, &["AllowedExtensions"]).unwrap_or_default());
-    out.insert("editable", get_str_any(widget, &["Editable"]).unwrap_or_else(|| "Always".into()));
-    out.insert("max_file_size", get_i32_any(widget, &["MaxFileSize"]).unwrap_or(5));
-    out.insert("show_file_in_browser", get_bool_any(widget, &["ShowFileInBrowser"]).unwrap_or(false));
-    out.insert("mode", get_str_any(widget, &["Type"]).unwrap_or_else(|| "Both".into()));
+    out.insert(
+        "allowed_extensions",
+        get_str_any(widget, &["AllowedExtensions"]).unwrap_or_default(),
+    );
+    out.insert(
+        "editable",
+        get_str_any(widget, &["Editable"]).unwrap_or_else(|| "Always".into()),
+    );
+    out.insert(
+        "max_file_size",
+        get_i32_any(widget, &["MaxFileSize"]).unwrap_or(5),
+    );
+    out.insert(
+        "show_file_in_browser",
+        get_bool_any(widget, &["ShowFileInBrowser"]).unwrap_or(false),
+    );
+    out.insert(
+        "mode",
+        get_str_any(widget, &["Type"]).unwrap_or_else(|| "Both".into()),
+    );
     out.insert("tab_index", get_i32_any(widget, &["TabIndex"]).unwrap_or(0));
     out
 }
 
 fn reference_set_selector_options(widget: &Document) -> Document {
     let mut out = appearance_options(widget);
-    out.insert("selection", get_str_any(widget, &["SelectionMode"]).unwrap_or_else(|| "Multi".into()));
-    out.insert("number_of_rows", get_i32_any(widget, &["NumberOfRows"]).unwrap_or(20));
-    out.insert("selectable_xpath", get_str_any(widget, &["SelectableXPathConstraint"]).unwrap_or_default());
-    out.insert("control_bar", get_bool_any(widget, &["IsControlBarVisible"]).unwrap_or(false));
-    out.insert("select_first", get_bool_any(widget, &["SelectFirst"]).unwrap_or(false));
-    out.insert("show_empty_rows", get_bool_any(widget, &["ShowEmptyRows"]).unwrap_or(false));
-    out.insert("paging", get_str_any(widget, &["ShowPagingBar"]).unwrap_or_else(|| "YesWithTotalCount".into()));
+    out.insert(
+        "selection",
+        get_str_any(widget, &["SelectionMode"]).unwrap_or_else(|| "Multi".into()),
+    );
+    out.insert(
+        "number_of_rows",
+        get_i32_any(widget, &["NumberOfRows"]).unwrap_or(20),
+    );
+    out.insert(
+        "selectable_xpath",
+        get_str_any(widget, &["SelectableXPathConstraint"]).unwrap_or_default(),
+    );
+    out.insert(
+        "control_bar",
+        get_bool_any(widget, &["IsControlBarVisible"]).unwrap_or(false),
+    );
+    out.insert(
+        "select_first",
+        get_bool_any(widget, &["SelectFirst"]).unwrap_or(false),
+    );
+    out.insert(
+        "show_empty_rows",
+        get_bool_any(widget, &["ShowEmptyRows"]).unwrap_or(false),
+    );
+    out.insert(
+        "paging",
+        get_str_any(widget, &["ShowPagingBar"]).unwrap_or_else(|| "YesWithTotalCount".into()),
+    );
     out.insert("tab_index", get_i32_any(widget, &["TabIndex"]).unwrap_or(0));
-    out.insert("width_unit", get_str_any(widget, &["WidthUnit"]).unwrap_or_else(|| "Weight".into()));
+    out.insert(
+        "width_unit",
+        get_str_any(widget, &["WidthUnit"]).unwrap_or_else(|| "Weight".into()),
+    );
     out
 }
 
@@ -716,33 +844,74 @@ fn navigation_list_options(widget: &Document) -> Document {
 
 fn scroll_container_options(widget: &Document) -> Document {
     let mut out = appearance_options(widget);
-    out.insert("alignment", get_str_any(widget, &["Alignment"]).unwrap_or_else(|| "Center".into()));
-    out.insert("layout_mode", get_str_any(widget, &["LayoutMode"]).unwrap_or_else(|| "Headline".into()));
-    out.insert("hide_scrollbars", get_bool_any(widget, &["NativeHideScrollbars"]).unwrap_or(false));
-    out.insert("scroll_behavior", get_str_any(widget, &["ScrollBehavior"]).unwrap_or_else(|| "PerRegion".into()));
+    out.insert(
+        "alignment",
+        get_str_any(widget, &["Alignment"]).unwrap_or_else(|| "Center".into()),
+    );
+    out.insert(
+        "layout_mode",
+        get_str_any(widget, &["LayoutMode"]).unwrap_or_else(|| "Headline".into()),
+    );
+    out.insert(
+        "hide_scrollbars",
+        get_bool_any(widget, &["NativeHideScrollbars"]).unwrap_or(false),
+    );
+    out.insert(
+        "scroll_behavior",
+        get_str_any(widget, &["ScrollBehavior"]).unwrap_or_else(|| "PerRegion".into()),
+    );
     out.insert("tab_index", get_i32_any(widget, &["TabIndex"]).unwrap_or(0));
     out.insert("width", get_i32_any(widget, &["Width"]).unwrap_or(0));
-    out.insert("width_mode", get_str_any(widget, &["WidthMode"]).unwrap_or_else(|| "Auto".into()));
+    out.insert(
+        "width_mode",
+        get_str_any(widget, &["WidthMode"]).unwrap_or_else(|| "Auto".into()),
+    );
     out
 }
 
 fn image_viewer_options(widget: &Document) -> Document {
     let source = get_doc_any(widget, &["DataSource"]).unwrap_or_default();
     let mut out = appearance_options(widget);
-    let entity = get_doc_any(&source, &["EntityRef"]).and_then(|r| get_str_any(&r, &["Entity"])).or_else(|| get_str_any(&source, &["EntityPath"]));
+    let entity = get_doc_any(&source, &["EntityRef"])
+        .and_then(|r| get_str_any(&r, &["Entity"]))
+        .or_else(|| get_str_any(&source, &["EntityPath"]));
     if let Some(entity) = entity {
         out.insert("entity", entity);
     }
-    out.insert("alternative_text", extract_text(get_any(widget, &["AlternativeText"])));
-    out.insert("default_image", get_str_any(widget, &["DefaultImage"]).unwrap_or_default());
-    out.insert("force_full_objects", get_bool_any(&source, &["ForceFullObjects"]).unwrap_or(false));
+    out.insert(
+        "alternative_text",
+        extract_text(get_any(widget, &["AlternativeText"])),
+    );
+    out.insert(
+        "default_image",
+        get_str_any(widget, &["DefaultImage"]).unwrap_or_default(),
+    );
+    out.insert(
+        "force_full_objects",
+        get_bool_any(&source, &["ForceFullObjects"]).unwrap_or(false),
+    );
     out.insert("width", get_i32_any(widget, &["Width"]).unwrap_or(100));
     out.insert("height", get_i32_any(widget, &["Height"]).unwrap_or(100));
-    out.insert("width_unit", get_str_any(widget, &["WidthUnit"]).unwrap_or_else(|| "Auto".into()));
-    out.insert("height_unit", get_str_any(widget, &["HeightUnit"]).unwrap_or_else(|| "Auto".into()));
-    out.insert("responsive", get_bool_any(widget, &["Responsive"]).unwrap_or(true));
-    out.insert("show_as_thumbnail", get_bool_any(widget, &["ShowAsThumbnail"]).unwrap_or(false));
-    out.insert("on_click_enlarge", get_bool_any(widget, &["OnClickEnlarge"]).unwrap_or(false));
+    out.insert(
+        "width_unit",
+        get_str_any(widget, &["WidthUnit"]).unwrap_or_else(|| "Auto".into()),
+    );
+    out.insert(
+        "height_unit",
+        get_str_any(widget, &["HeightUnit"]).unwrap_or_else(|| "Auto".into()),
+    );
+    out.insert(
+        "responsive",
+        get_bool_any(widget, &["Responsive"]).unwrap_or(true),
+    );
+    out.insert(
+        "show_as_thumbnail",
+        get_bool_any(widget, &["ShowAsThumbnail"]).unwrap_or(false),
+    );
+    out.insert(
+        "on_click_enlarge",
+        get_bool_any(widget, &["OnClickEnlarge"]).unwrap_or(false),
+    );
     out.insert("tab_index", get_i32_any(widget, &["TabIndex"]).unwrap_or(0));
     out
 }
@@ -754,10 +923,19 @@ fn image_uploader_options(widget: &Document) -> Document {
     let height: i32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
 
     let mut out = appearance_options(widget);
-    out.insert("allowed_extensions", get_str_any(widget, &["AllowedExtensions"]).unwrap_or_default());
+    out.insert(
+        "allowed_extensions",
+        get_str_any(widget, &["AllowedExtensions"]).unwrap_or_default(),
+    );
     out.insert("caption", extract_text(get_any(widget, &["LabelTemplate"])));
-    out.insert("editable", get_str_any(widget, &["Editable"]).unwrap_or_else(|| "Always".into()));
-    out.insert("max_file_size", get_i32_any(widget, &["MaxFileSize"]).unwrap_or(5));
+    out.insert(
+        "editable",
+        get_str_any(widget, &["Editable"]).unwrap_or_else(|| "Always".into()),
+    );
+    out.insert(
+        "max_file_size",
+        get_i32_any(widget, &["MaxFileSize"]).unwrap_or(5),
+    );
     out.insert("thumbnail_width", if width > 0 { width } else { 100 });
     out.insert("thumbnail_height", if height > 0 { height } else { 75 });
     out.insert("tab_index", get_i32_any(widget, &["TabIndex"]).unwrap_or(0));
@@ -766,7 +944,12 @@ fn image_uploader_options(widget: &Document) -> Document {
 
 fn menu_widget_options(widget: &Document) -> Document {
     let mut out = appearance_options(widget);
-    out.insert("menu", get_doc_any(widget, &["MenuSource"]).and_then(|m| get_str_any(&m, &["Menu"])).unwrap_or_default());
+    out.insert(
+        "menu",
+        get_doc_any(widget, &["MenuSource"])
+            .and_then(|m| get_str_any(&m, &["Menu"]))
+            .unwrap_or_default(),
+    );
     out.insert("tab_index", get_i32_any(widget, &["TabIndex"]).unwrap_or(0));
     out
 }
@@ -778,9 +961,10 @@ fn widget_type(ty: &str) -> Option<&'static str> {
         "Pages$TextArea" | "Forms$TextArea" => "text_area",
         "Pages$CheckBox" | "Forms$CheckBox" => "check_box",
         "Pages$DatePicker" | "Forms$DatePicker" => "date_picker",
-        "Pages$ReferenceSelector" | "Forms$ReferenceSelector" | "Pages$InputReferenceSetSelector" | "Forms$InputReferenceSetSelector" => {
-            "reference_selector"
-        }
+        "Pages$ReferenceSelector"
+        | "Forms$ReferenceSelector"
+        | "Pages$InputReferenceSetSelector"
+        | "Forms$InputReferenceSetSelector" => "reference_selector",
         "Pages$DynamicText" | "Forms$DynamicText" | "Pages$Label" | "Forms$Label" => "text",
         "Pages$DropDownWidget" | "Forms$DropDownWidget" | "Forms$DropDown" => "drop_down",
         "Forms$RadioButtonGroup" => "radio_button_group",
@@ -820,7 +1004,10 @@ fn widget_options(widget: &Document, widget_type: &str) -> Document {
             }
             let parameters = template_parameters(widget);
             if !parameters.is_empty() {
-                options.insert("parameters", parameters.into_iter().map(Bson::String).collect::<Vec<_>>());
+                options.insert(
+                    "parameters",
+                    parameters.into_iter().map(Bson::String).collect::<Vec<_>>(),
+                );
             }
             if widget_type == "text_area" {
                 if let Some(n) = get_i32_any(widget, &["NumberOfLines"]) {
@@ -828,7 +1015,10 @@ fn widget_options(widget: &Document, widget_type: &str) -> Document {
                 }
             }
             if widget_type == "radio_button_group" {
-                options.insert("horizontal", get_bool_any(widget, &["RenderHorizontal"]).unwrap_or(false));
+                options.insert(
+                    "horizontal",
+                    get_bool_any(widget, &["RenderHorizontal"]).unwrap_or(false),
+                );
             }
             options
         }
@@ -844,7 +1034,9 @@ fn local_name(name: &str) -> &str {
 fn action_arguments(settings: &Document) -> Document {
     let mut out = Document::new();
     for mapping in docs_any(settings, &["ParameterMappings"]) {
-        let Some(param) = get_str_any(&mapping, &["Parameter"]) else { continue };
+        let Some(param) = get_str_any(&mapping, &["Parameter"]) else {
+            continue;
+        };
         let value = get_str_any(&mapping, &["Expression", "Argument"]).unwrap_or_default();
         out.insert(local_name(&param), value);
     }
@@ -856,21 +1048,33 @@ fn parse_action(action: Option<&Document>) -> Option<Document> {
     let ty = get_str_any(action, &["$Type"])?;
     match ty.as_str() {
         "Pages$CallNanoflowClientAction" | "Forms$CallNanoflowClientAction" => {
-            let settings = get_doc_any(action, &["NanoflowSettings"]).unwrap_or_else(|| action.clone());
-            let handler = get_str_any(action, &["Nanoflow"]).or_else(|| get_str_any(&settings, &["Nanoflow"])).map(|n| local_name(&n).to_string());
+            let settings =
+                get_doc_any(action, &["NanoflowSettings"]).unwrap_or_else(|| action.clone());
+            let handler = get_str_any(action, &["Nanoflow"])
+                .or_else(|| get_str_any(&settings, &["Nanoflow"]))
+                .map(|n| local_name(&n).to_string());
             let handler = handler.filter(|h| !h.is_empty())?;
-            Some(mxrs_bson::doc! { "kind": "nanoflow", "handler": handler, "arguments": action_arguments(&settings) })
+            Some(
+                mxrs_bson::doc! { "kind": "nanoflow", "handler": handler, "arguments": action_arguments(&settings) },
+            )
         }
         "Pages$MicroflowClientAction" | "Forms$MicroflowAction" | "Forms$MicroflowClientAction" => {
-            let settings = get_doc_any(action, &["MicroflowSettings"]).unwrap_or_else(|| action.clone());
-            let handler = get_str_any(action, &["Microflow"]).or_else(|| get_str_any(&settings, &["Microflow"])).map(|n| local_name(&n).to_string());
+            let settings =
+                get_doc_any(action, &["MicroflowSettings"]).unwrap_or_else(|| action.clone());
+            let handler = get_str_any(action, &["Microflow"])
+                .or_else(|| get_str_any(&settings, &["Microflow"]))
+                .map(|n| local_name(&n).to_string());
             let handler = handler.filter(|h| !h.is_empty())?;
-            Some(mxrs_bson::doc! { "kind": "microflow", "handler": handler, "arguments": action_arguments(&settings) })
+            Some(
+                mxrs_bson::doc! { "kind": "microflow", "handler": handler, "arguments": action_arguments(&settings) },
+            )
         }
         "Pages$FormAction" | "Forms$FormAction" => {
             let settings = get_doc_any(action, &["FormSettings"]).unwrap_or_else(|| action.clone());
             let handler = get_str_any(&settings, &["Form"]).filter(|h| !h.is_empty())?;
-            Some(mxrs_bson::doc! { "kind": "page", "handler": handler, "arguments": action_arguments(&settings) })
+            Some(
+                mxrs_bson::doc! { "kind": "page", "handler": handler, "arguments": action_arguments(&settings) },
+            )
         }
         "Pages$SaveChangesClientAction" | "Forms$SaveChangesClientAction" => {
             Some(mxrs_bson::doc! { "kind": "action", "handler": "save_changes" })
@@ -878,7 +1082,9 @@ fn parse_action(action: Option<&Document>) -> Option<Document> {
         "Pages$CancelChangesClientAction" | "Forms$CancelChangesClientAction" => {
             Some(mxrs_bson::doc! { "kind": "action", "handler": "cancel_changes" })
         }
-        "Pages$DeleteClientAction" | "Forms$DeleteClientAction" => Some(mxrs_bson::doc! { "kind": "action", "handler": "delete" }),
+        "Pages$DeleteClientAction" | "Forms$DeleteClientAction" => {
+            Some(mxrs_bson::doc! { "kind": "action", "handler": "delete" })
+        }
         "Pages$ClosePageClientAction" | "Forms$ClosePageClientAction" => {
             Some(mxrs_bson::doc! { "kind": "action", "handler": "close_page" })
         }

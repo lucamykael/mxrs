@@ -27,7 +27,11 @@ fn round_trips_the_real_project_settings_unit_byte_identical() {
         .all_units()
         .unwrap()
         .into_iter()
-        .find(|u| mpr.parse_contents(u).map(|d| d.get_str("$Type").ok() == Some("Settings$ProjectSettings")).unwrap_or(false))
+        .find(|u| {
+            mpr.parse_contents(u)
+                .map(|d| d.get_str("$Type").ok() == Some("Settings$ProjectSettings"))
+                .unwrap_or(false)
+        })
         .expect("fixture must contain a Settings$ProjectSettings unit");
     let original = mpr.parse_contents(&unit).unwrap();
 

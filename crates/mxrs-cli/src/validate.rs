@@ -84,7 +84,10 @@ fn validate_unit_ids(units: &[RawUnit], report: &mut ValidateReport) {
             continue;
         }
         if !id_set.contains(u.container_id.as_str()) {
-            report.error(format!("unit {} references missing container {}", u.unit_id, u.container_id));
+            report.error(format!(
+                "unit {} references missing container {}",
+                u.unit_id, u.container_id
+            ));
         }
     }
 }
@@ -136,11 +139,17 @@ fn validate_contents(mpr: &MprFile, units: &[RawUnit], report: &mut ValidateRepo
         collect_nested_ids(&Bson::Document(doc), &mut nested_counts, &mut misordered);
         for (id, count) in &nested_counts {
             if *count > 1 {
-                report.error(format!("unit {} contains duplicate nested $ID {id}", u.unit_id));
+                report.error(format!(
+                    "unit {} contains duplicate nested $ID {id}",
+                    u.unit_id
+                ));
             }
         }
         for id in misordered {
-            report.error(format!("unit {} storage object {id} does not begin with $ID", u.unit_id));
+            report.error(format!(
+                "unit {} storage object {id} does not begin with $ID",
+                u.unit_id
+            ));
         }
     }
 }
@@ -149,7 +158,11 @@ fn validate_contents(mpr: &MprFile, units: &[RawUnit], report: &mut ValidateRepo
 /// carrying a `$ID` is counted (duplicates are a corruption signal — ids
 /// must be unique within a unit's content tree), and flagged if `$ID` isn't
 /// serialized as the document's first key (Mendix's storage convention).
-fn collect_nested_ids(value: &Bson, counts: &mut HashMap<String, u32>, misordered: &mut Vec<String>) {
+fn collect_nested_ids(
+    value: &Bson,
+    counts: &mut HashMap<String, u32>,
+    misordered: &mut Vec<String>,
+) {
     match value {
         Bson::Document(d) => {
             if let Some(id) = d.get("$ID").and_then(mxrs_bson::extract_id) {
@@ -221,14 +234,27 @@ mod tests {
 
         {
             let mut mpr = MprFile::open(&path, false).unwrap();
-            let module_unit = mpr.units_by_containment("Modules").unwrap().into_iter().next().unwrap();
+            let module_unit = mpr
+                .units_by_containment("Modules")
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
             let ghost_container = uuid::Uuid::new_v4().to_string();
-            mpr.relocate_unit(&module_unit.unit_id, &ghost_container, "Modules").unwrap();
+            mpr.relocate_unit(&module_unit.unit_id, &ghost_container, "Modules")
+                .unwrap();
         }
 
         let report = validate(&path).unwrap();
         assert!(!report.is_valid());
-        assert!(report.errors.iter().any(|e| e.contains("missing container")), "{:?}", report.errors);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("missing container")),
+            "{:?}",
+            report.errors
+        );
     }
 
     #[test]
@@ -248,13 +274,27 @@ mod tests {
         // on-disk file whose bytes no longer match the `Unit` row's
         // recorded `ContentsHash`.
         let mpr = MprFile::open(&path, true).unwrap();
-        let unit = mpr.units_by_containment("Modules").unwrap().into_iter().next().unwrap();
-        let content_path = mpr.content_path(&unit).expect("v2 storage has a content path");
+        let unit = mpr
+            .units_by_containment("Modules")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let content_path = mpr
+            .content_path(&unit)
+            .expect("v2 storage has a content path");
         drop(mpr);
         std::fs::write(&content_path, b"not valid bson content at all").unwrap();
 
         let report = validate(&path).unwrap();
         assert!(!report.is_valid());
-        assert!(report.errors.iter().any(|e| e.contains("ContentsHash mismatch")), "{:?}", report.errors);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("ContentsHash mismatch")),
+            "{:?}",
+            report.errors
+        );
     }
 }

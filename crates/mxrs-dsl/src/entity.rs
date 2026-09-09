@@ -10,7 +10,9 @@ pub struct EntityBuilder {
 
 impl EntityBuilder {
     pub(crate) fn new(name: impl Into<String>) -> Self {
-        EntityBuilder { decl: EntityDecl::new(name) }
+        EntityBuilder {
+            decl: EntityDecl::new(name),
+        }
     }
 
     pub(crate) fn into_decl(self) -> EntityDecl {
@@ -86,7 +88,11 @@ impl EntityBuilder {
         self.decl.associations.last_mut().expect("just pushed")
     }
 
-    fn push_attribute(&mut self, name: impl Into<String>, attribute_type: AttributeType) -> &mut Attribute {
+    fn push_attribute(
+        &mut self,
+        name: impl Into<String>,
+        attribute_type: AttributeType,
+    ) -> &mut Attribute {
         self.decl.attributes.push(Attribute {
             id: None,
             name: Some(name.into()),

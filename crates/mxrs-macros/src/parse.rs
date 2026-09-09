@@ -149,7 +149,11 @@ impl Parse for EntityInput {
                 attributes.push(content.parse()?);
             }
         }
-        Ok(EntityInput { name, attributes, associations })
+        Ok(EntityInput {
+            name,
+            attributes,
+            associations,
+        })
     }
 }
 
@@ -165,7 +169,11 @@ impl Parse for AttributeInput {
             None
         };
         input.parse::<Token![;]>()?;
-        Ok(AttributeInput { kind, name, default })
+        Ok(AttributeInput {
+            kind,
+            name,
+            default,
+        })
     }
 }
 
@@ -184,7 +192,11 @@ impl Parse for AssociationInput {
             ));
         }
         input.parse::<Token![;]>()?;
-        Ok(AssociationInput { name, target, association_type })
+        Ok(AssociationInput {
+            name,
+            target,
+            association_type,
+        })
     }
 }
 
@@ -193,6 +205,9 @@ fn expect_keyword(input: ParseStream, keyword: &str) -> Result<()> {
     if ident == keyword {
         Ok(())
     } else {
-        Err(syn::Error::new(ident.span(), format!("expected `{keyword}`, found `{ident}`")))
+        Err(syn::Error::new(
+            ident.span(),
+            format!("expected `{keyword}`, found `{ident}`"),
+        ))
     }
 }

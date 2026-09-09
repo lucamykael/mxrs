@@ -13,14 +13,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn sample_manifest() -> mxrs_typegen::Manifest {
     mxrs_typegen::Manifest {
         modules: vec![mxrs_typegen::ModuleManifest {
             name: "Sales".into(),
-            entities: vec![mxrs_typegen::EntityManifest { name: "Order".into(), attributes: vec!["Number".into()] }],
+            entities: vec![mxrs_typegen::EntityManifest {
+                name: "Order".into(),
+                attributes: vec!["Number".into()],
+            }],
         }],
     }
 }
@@ -37,15 +45,25 @@ fn try_compile(body: &str) -> Output {
     // Cargo's fingerprint cache reuse a stale (wrong) build result across
     // runs, silently turning "should fail to compile" tests into false
     // passes.
-    let unique: String =
-        dir.path().file_name().unwrap().to_string_lossy().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let unique: String = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
     let name = format!("typegen-refcheck-fixture-{unique}");
     let cargo_toml = format!(
         "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-ir = {{ path = {:?} }}\n",
         workspace_root().join("crates/mxrs-ir")
     );
     std::fs::write(dir.path().join("Cargo.toml"), cargo_toml).unwrap();
-    std::fs::write(dir.path().join("src/lib.rs"), format!("{markers}\n\n{body}\n")).unwrap();
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        format!("{markers}\n\n{body}\n"),
+    )
+    .unwrap();
 
     Command::new(env!("CARGO"))
         .arg("build")
@@ -60,7 +78,11 @@ fn a_reference_to_a_known_entity_marker_compiles() {
     let output = try_compile(
         "fn wants_entity<M: mxrs_ir::EntityMarker>() {}\npub fn use_it() { wants_entity::<Sales::Order>(); }",
     );
-    assert!(output.status.success(), "expected success, got:\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "expected success, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -68,9 +90,15 @@ fn a_reference_to_an_unknown_entity_fails_to_compile() {
     let output = try_compile(
         "fn wants_entity<M: mxrs_ir::EntityMarker>() {}\npub fn use_it() { wants_entity::<Sales::Ghost>(); }",
     );
-    assert!(!output.status.success(), "expected a compile failure for an unknown entity marker, but it compiled");
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for an unknown entity marker, but it compiled"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Ghost"), "expected the diagnostic to mention the unknown name, got:\n{stderr}");
+    assert!(
+        stderr.contains("Ghost"),
+        "expected the diagnostic to mention the unknown name, got:\n{stderr}"
+    );
 }
 
 #[test]
@@ -78,7 +106,11 @@ fn a_reference_to_a_known_attribute_marker_resolves_its_owning_entity() {
     let output = try_compile(
         "pub fn use_it() -> String { use mxrs_ir::{AttributeMarker, EntityMarker}; <Sales::Order_Number as AttributeMarker>::Entity::qualified_name() }",
     );
-    assert!(output.status.success(), "expected success, got:\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "expected success, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -86,5 +118,8 @@ fn a_reference_to_a_renamed_attribute_fails_to_compile() {
     let output = try_compile(
         "fn wants_attribute<M: mxrs_ir::AttributeMarker>() {}\npub fn use_it() { wants_attribute::<Sales::Order_Total>(); }",
     );
-    assert!(!output.status.success(), "expected a compile failure for a renamed/removed attribute marker, but it compiled");
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for a renamed/removed attribute marker, but it compiled"
+    );
 }

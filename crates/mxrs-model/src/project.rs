@@ -19,7 +19,9 @@ pub struct Project {
 
 impl Project {
     pub fn open(path: impl AsRef<Path>, readonly: bool) -> Result<Self> {
-        Ok(Project { mpr: MprFile::open(path, readonly)? })
+        Ok(Project {
+            mpr: MprFile::open(path, readonly)?,
+        })
     }
 
     pub fn mpr(&self) -> &MprFile {
@@ -27,7 +29,9 @@ impl Project {
     }
 
     pub fn name(&self) -> Result<Option<String>> {
-        let Some(root) = self.mpr.root_unit()? else { return Ok(None) };
+        let Some(root) = self.mpr.root_unit()? else {
+            return Ok(None);
+        };
         Ok(get_str_any(&self.mpr.parse_contents(&root)?, &["Name"]))
     }
 
@@ -36,7 +40,11 @@ impl Project {
     }
 
     pub fn modules(&self) -> Result<Vec<Module>> {
-        self.mpr.units_by_containment("Modules")?.iter().map(|raw| Module::load(&self.mpr, raw)).collect()
+        self.mpr
+            .units_by_containment("Modules")?
+            .iter()
+            .map(|raw| Module::load(&self.mpr, raw))
+            .collect()
     }
 
     pub fn navigation(&self) -> Result<Navigation> {

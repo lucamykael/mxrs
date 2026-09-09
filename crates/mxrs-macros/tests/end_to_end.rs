@@ -58,16 +58,29 @@ fn expands_to_a_project_decl_writable_and_readable_like_hand_written_dsl() {
 
     let entities = sales.entities();
     assert_eq!(entities.len(), 2);
-    let order = entities.iter().find(|e| e.name.as_deref() == Some("Order")).unwrap();
-    let number = order.attributes.iter().find(|a| a.name.as_deref() == Some("Number")).unwrap();
+    let order = entities
+        .iter()
+        .find(|e| e.name.as_deref() == Some("Order"))
+        .unwrap();
+    let number = order
+        .attributes
+        .iter()
+        .find(|a| a.name.as_deref() == Some("Number"))
+        .unwrap();
     assert_eq!(number.default_value.as_deref(), Some("A-0000"));
 
     let associations = sales.associations();
     assert_eq!(associations.len(), 1);
     assert_eq!(associations[0].name.as_deref(), Some("Order_Customer"));
     assert!(!associations[0].is_cross_module());
-    let customer = entities.iter().find(|e| e.name.as_deref() == Some("Customer")).unwrap();
-    assert_eq!(associations[0].to_entity_id.as_deref(), customer.id.as_deref());
+    let customer = entities
+        .iter()
+        .find(|e| e.name.as_deref() == Some("Customer"))
+        .unwrap();
+    assert_eq!(
+        associations[0].to_entity_id.as_deref(),
+        customer.id.as_deref()
+    );
 }
 
 #[test]
@@ -93,7 +106,10 @@ fn supports_a_cross_module_association_target() {
 
     let read = Project::open(&path, true).unwrap();
     let modules = read.modules().unwrap();
-    let sales = modules.iter().find(|m| m.name.as_deref() == Some("Sales")).unwrap();
+    let sales = modules
+        .iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
     let associations = sales.associations();
     assert_eq!(associations.len(), 1);
     assert!(associations[0].is_cross_module());
@@ -113,7 +129,10 @@ fn supports_a_reference_set_association() {
     };
     let sales = &definition.modules[0];
     let order = sales.entities.iter().find(|e| e.name == "Order").unwrap();
-    assert_eq!(order.associations[0].association_type, mxrs_model::association::AssociationType::ReferenceSet);
+    assert_eq!(
+        order.associations[0].association_type,
+        mxrs_model::association::AssociationType::ReferenceSet
+    );
     assert_eq!(order.associations[0].target, "Sales.Customer");
 }
 

@@ -52,7 +52,11 @@ pub fn detect_format(conn: &Connection, mpr_path: &Path) -> Result<StorageFormat
         return Ok(StorageFormat::V2);
     }
 
-    Ok(if dir.is_dir() { StorageFormat::V2 } else { StorageFormat::V1 })
+    Ok(if dir.is_dir() {
+        StorageFormat::V2
+    } else {
+        StorageFormat::V1
+    })
 }
 
 #[cfg(test)]

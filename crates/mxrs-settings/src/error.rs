@@ -9,7 +9,10 @@ pub enum SettingsError {
     UnsupportedComponent(String),
 
     #[error("unknown {method} property for {storage_type}")]
-    UnknownField { storage_type: String, method: String },
+    UnknownField {
+        storage_type: String,
+        method: String,
+    },
 
     #[error("field {storage_type}.{field} not set")]
     FieldNotSet { storage_type: String, field: String },
@@ -18,10 +21,18 @@ pub enum SettingsError {
     InvalidMarker,
 
     #[error("{storage_type}.{field} expects {expected}, got a different type")]
-    TypeMismatch { storage_type: String, field: String, expected: String },
+    TypeMismatch {
+        storage_type: String,
+        field: String,
+        expected: String,
+    },
 
     #[error("{storage_type}.{field}[{index}] has an incompatible value")]
-    InvalidCollectionItem { storage_type: String, field: String, index: usize },
+    InvalidCollectionItem {
+        storage_type: String,
+        field: String,
+        index: usize,
+    },
 
     #[error("project settings root must be Settings$ProjectSettings")]
     InvalidRoot,

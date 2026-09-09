@@ -42,19 +42,41 @@ pub enum ProjectTemplateError {
 pub fn project_template_units(version: &str) -> Result<Vec<TemplateUnit>, ProjectTemplateError> {
     let raw = match version {
         "11.12.1" => assets::PROJECT_TEMPLATE_11_12_1,
-        _ => return Err(ProjectTemplateError::UnsupportedVersion(version.to_string())),
+        _ => {
+            return Err(ProjectTemplateError::UnsupportedVersion(
+                version.to_string(),
+            ))
+        }
     };
 
     let manifest: serde_json::Value = serde_json::from_str(raw)?;
-    let units = manifest.get("units").and_then(|u| u.as_array()).cloned().unwrap_or_default();
+    let units = manifest
+        .get("units")
+        .and_then(|u| u.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     let mut out = Vec::with_capacity(units.len());
     for unit in units {
-        let name = unit.get("type").and_then(|v| v.as_str()).unwrap_or("<unnamed>").to_string();
-        let containment = unit.get("containment").and_then(|v| v.as_str()).unwrap_or("ProjectDocuments").to_string();
-        let contents_b64 = unit.get("contents").and_then(|v| v.as_str()).ok_or_else(|| ProjectTemplateError::Base64(name.clone()))?;
-        let bytes = base64::engine::general_purpose::STANDARD.decode(contents_b64).map_err(|_| ProjectTemplateError::Base64(name.clone()))?;
-        let doc = mxrs_bson::parse(&bytes).map_err(|e| ProjectTemplateError::Bson(name.clone(), e))?;
+        let name = unit
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unnamed>")
+            .to_string();
+        let containment = unit
+            .get("containment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ProjectDocuments")
+            .to_string();
+        let contents_b64 = unit
+            .get("contents")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProjectTemplateError::Base64(name.clone()))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(contents_b64)
+            .map_err(|_| ProjectTemplateError::Base64(name.clone()))?;
+        let doc =
+            mxrs_bson::parse(&bytes).map_err(|e| ProjectTemplateError::Bson(name.clone(), e))?;
         out.push(TemplateUnit { containment, doc });
     }
     Ok(out)
@@ -67,11 +89,16 @@ mod tests {
     #[test]
     fn loads_the_three_11_12_1_template_units() {
         let units = project_template_units("11.12.1").unwrap();
-        let types: Vec<&str> = units.iter().map(|u| u.doc.get_str("$Type").unwrap()).collect();
+        let types: Vec<&str> = units
+            .iter()
+            .map(|u| u.doc.get_str("$Type").unwrap())
+            .collect();
         assert!(types.contains(&"Settings$ProjectSettings"));
         assert!(types.contains(&"Texts$SystemTextCollection"));
         assert!(types.contains(&"Projects$ProjectConversion"));
-        assert!(units.iter().all(|u| u.containment == "ProjectDocuments" || u.containment == "ProjectConversion"));
+        assert!(units
+            .iter()
+            .all(|u| u.containment == "ProjectDocuments" || u.containment == "ProjectConversion"));
     }
 
     #[test]

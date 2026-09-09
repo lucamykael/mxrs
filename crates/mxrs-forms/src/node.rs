@@ -12,7 +12,8 @@ use std::rc::Rc;
 use crate::catalog::{Catalog, Property, Size, Type};
 use crate::error::{FormsError, Result};
 use crate::values::{
-    AttributeReference, Condition, DataType, EntityReference, EnumValue, Expression, Reference, Text, TextTemplate, XPathConstraint,
+    AttributeReference, Condition, DataType, EntityReference, EnumValue, Expression, Reference,
+    Text, TextTemplate, XPathConstraint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,7 +53,10 @@ pub struct Node {
 
 impl std::fmt::Debug for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Node").field("type_name", &self.type_name).field("assignments", &self.assignments).finish()
+        f.debug_struct("Node")
+            .field("type_name", &self.type_name)
+            .field("assignments", &self.assignments)
+            .finish()
     }
 }
 
@@ -67,14 +71,22 @@ impl Node {
         let type_name = type_name.into();
         let schema_type = catalog.fetch_type(&type_name)?;
         if schema_type.is_enum() {
-            return Err(FormsError::TypeIsEnum { type_name: schema_type.name.clone() });
+            return Err(FormsError::TypeIsEnum {
+                type_name: schema_type.name.clone(),
+            });
         }
         let resolved_name = schema_type.name.clone();
-        Ok(Self { catalog, type_name: resolved_name, assignments: Vec::new() })
+        Ok(Self {
+            catalog,
+            type_name: resolved_name,
+            assignments: Vec::new(),
+        })
     }
 
     pub fn schema_type(&self) -> &Type {
-        self.catalog.fetch_type(&self.type_name).expect("type_name was validated in Node::new")
+        self.catalog
+            .fetch_type(&self.type_name)
+            .expect("type_name was validated in Node::new")
     }
 
     pub fn catalog(&self) -> &Rc<Catalog> {
@@ -87,7 +99,11 @@ impl Node {
 
     pub fn fetch(&self, property_id: &str) -> Result<Option<&Value>> {
         let property = self.schema_type().fetch_property(property_id, true)?;
-        Ok(self.assignments.iter().find(|a| a.property.name == property.name).map(|a| &a.value))
+        Ok(self
+            .assignments
+            .iter()
+            .find(|a| a.property.name == property.name)
+            .map(|a| &a.value))
     }
 
     pub fn assigned(&self, property_id: &str) -> Result<bool> {
@@ -95,17 +111,30 @@ impl Node {
     }
 
     pub fn set(&mut self, property_id: &str, value: Value) -> Result<()> {
-        let property = self.schema_type().fetch_property(property_id, true)?.clone();
+        let property = self
+            .schema_type()
+            .fetch_property(property_id, true)?
+            .clone();
         let normalized = self.normalize(&property, value)?;
-        self.assignments.retain(|a| a.property.name != property.name);
-        self.assignments.push(Assignment { property, value: normalized });
+        self.assignments
+            .retain(|a| a.property.name != property.name);
+        self.assignments.push(Assignment {
+            property,
+            value: normalized,
+        });
         Ok(())
     }
 
     pub fn append(&mut self, property_id: &str, value: Value) -> Result<()> {
-        let property = self.schema_type().fetch_property(property_id, true)?.clone();
+        let property = self
+            .schema_type()
+            .fetch_property(property_id, true)?
+            .clone();
         if !property.many() {
-            return Err(FormsError::NotACollection { type_name: self.type_name.clone(), property: property.name });
+            return Err(FormsError::NotACollection {
+                type_name: self.type_name.clone(),
+                property: property.name,
+            });
         }
         let mut current = match self.fetch(&property.name)? {
             Some(Value::List(items)) => items.clone(),
@@ -116,8 +145,12 @@ impl Node {
     }
 
     pub fn unset(&mut self, property_id: &str) -> Result<()> {
-        let property = self.schema_type().fetch_property(property_id, true)?.clone();
-        self.assignments.retain(|a| a.property.name != property.name);
+        let property = self
+            .schema_type()
+            .fetch_property(property_id, true)?
+            .clone();
+        self.assignments
+            .retain(|a| a.property.name != property.name);
         Ok(())
     }
 
@@ -126,14 +159,23 @@ impl Node {
             return if property.optional {
                 Ok(Value::Null)
             } else {
-                Err(FormsError::UnexpectedNil { type_name: self.type_name.clone(), property: property.name.clone() })
+                Err(FormsError::UnexpectedNil {
+                    type_name: self.type_name.clone(),
+                    property: property.name.clone(),
+                })
             };
         }
         if property.many() {
             let Value::List(items) = value else {
-                return Err(FormsError::ExpectedArray { type_name: self.type_name.clone(), property: property.name.clone() });
+                return Err(FormsError::ExpectedArray {
+                    type_name: self.type_name.clone(),
+                    property: property.name.clone(),
+                });
             };
-            let normalized = items.into_iter().map(|item| self.normalize_one(property, item)).collect::<Result<Vec<_>>>()?;
+            let normalized = items
+                .into_iter()
+                .map(|item| self.normalize_one(property, item))
+                .collect::<Result<Vec<_>>>()?;
             return Ok(Value::List(normalized));
         }
         self.normalize_one(property, value)
@@ -174,7 +216,11 @@ impl Node {
         if ok {
             Ok(value)
         } else {
-            Err(FormsError::TypeMismatch { type_name: self.type_name.clone(), property: property.name.clone(), expected: property.type_name.clone() })
+            Err(FormsError::TypeMismatch {
+                type_name: self.type_name.clone(),
+                property: property.name.clone(),
+                expected: property.type_name.clone(),
+            })
         }
     }
 
@@ -183,36 +229,69 @@ impl Node {
             Value::Enum(ev) => ev.value.clone(),
             Value::String(s) => s.clone(),
             _ => {
-                return Err(FormsError::TypeMismatch { type_name: self.type_name.clone(), property: enum_type.name.clone(), expected: "an enum value".to_string() })
+                return Err(FormsError::TypeMismatch {
+                    type_name: self.type_name.clone(),
+                    property: enum_type.name.clone(),
+                    expected: "an enum value".to_string(),
+                })
             }
         };
-        let exact = enum_type.values.iter().find(|allowed| **allowed == candidate || crate::catalog::ruby_name(allowed) == crate::catalog::ruby_name(&candidate));
+        let exact = enum_type.values.iter().find(|allowed| {
+            **allowed == candidate
+                || crate::catalog::ruby_name(allowed) == crate::catalog::ruby_name(&candidate)
+        });
         match exact {
-            Some(exact) => Ok(Value::Enum(EnumValue { enum_type_name: enum_type.name.clone(), value: exact.clone() })),
-            None => Err(FormsError::InvalidEnumValue { enum_name: enum_type.name.clone(), value: candidate }),
+            Some(exact) => Ok(Value::Enum(EnumValue {
+                enum_type_name: enum_type.name.clone(),
+                value: exact.clone(),
+            })),
+            None => Err(FormsError::InvalidEnumValue {
+                enum_name: enum_type.name.clone(),
+                value: candidate,
+            }),
         }
     }
 
     fn normalize_node(&self, property: &Property, target: &Type, value: Value) -> Result<Value> {
         let Value::Node(node) = &value else {
-            return Err(FormsError::IncompatibleElement { type_name: self.type_name.clone(), property: property.name.clone(), target: target.name.clone() });
+            return Err(FormsError::IncompatibleElement {
+                type_name: self.type_name.clone(),
+                property: property.name.clone(),
+                target: target.name.clone(),
+            });
         };
         let mut allowed = vec![target.name.clone()];
         allowed.extend(property.targets.iter().cloned());
-        let compatible = allowed.iter().any(|candidate| node.type_name == *candidate || self.catalog.descendant(&node.type_name, candidate).unwrap_or(false));
+        let compatible = allowed.iter().any(|candidate| {
+            node.type_name == *candidate
+                || self
+                    .catalog
+                    .descendant(&node.type_name, candidate)
+                    .unwrap_or(false)
+        });
         if compatible {
             Ok(value)
         } else {
-            Err(FormsError::IncompatibleElement { type_name: self.type_name.clone(), property: property.name.clone(), target: target.name.clone() })
+            Err(FormsError::IncompatibleElement {
+                type_name: self.type_name.clone(),
+                property: property.name.clone(),
+                target: target.name.clone(),
+            })
         }
     }
 
     fn normalize_reference(&self, property: &Property, value: Value) -> Result<Value> {
-        let kind = property.reference.expect("is_reference() checked by caller");
+        let kind = property
+            .reference
+            .expect("is_reference() checked by caller");
         match value {
             Value::Reference(r) if r.kind == kind => Ok(Value::Reference(r)),
             Value::String(target) => Ok(Value::Reference(Reference { target, kind })),
-            _ => Err(FormsError::TypeMismatch { type_name: self.type_name.clone(), property: property.name.clone(), expected: "a reference".to_string() }),
+            _ => Err(FormsError::TypeMismatch {
+                type_name: self.type_name.clone(),
+                property: property.name.clone(),
+                expected: "a reference".to_string(),
+            }),
         }
     }
 }
@@ -235,7 +314,10 @@ mod tests {
     fn set_and_fetch_a_scalar_property() {
         let mut node = Node::new("Page", catalog()).unwrap();
         node.set("url", Value::String("orders".into())).unwrap();
-        assert_eq!(node.fetch("url").unwrap(), Some(&Value::String("orders".into())));
+        assert_eq!(
+            node.fetch("url").unwrap(),
+            Some(&Value::String("orders".into()))
+        );
     }
 
     #[test]
@@ -247,7 +329,9 @@ mod tests {
     #[test]
     fn set_rejects_wrong_scalar_type() {
         let mut node = Node::new("Page", catalog()).unwrap();
-        assert!(node.set("popupWidth", Value::String("not-an-int".into())).is_err());
+        assert!(node
+            .set("popupWidth", Value::String("not-an-int".into()))
+            .is_err());
         assert!(node.set("popupWidth", Value::Integer(400)).is_ok());
     }
 
@@ -256,7 +340,13 @@ mod tests {
         let mut node = Node::new("Page", catalog()).unwrap();
         node.set("url", Value::String("a".into())).unwrap();
         node.set("url", Value::String("b".into())).unwrap();
-        assert_eq!(node.assignments().iter().filter(|a| a.property.name == "url").count(), 1);
+        assert_eq!(
+            node.assignments()
+                .iter()
+                .filter(|a| a.property.name == "url")
+                .count(),
+            1
+        );
         assert_eq!(node.fetch("url").unwrap(), Some(&Value::String("b".into())));
     }
 
@@ -264,7 +354,15 @@ mod tests {
     fn append_requires_a_collection_property() {
         let mut node = Node::new("Page", catalog()).unwrap();
         assert!(node.append("url", Value::String("x".into())).is_err());
-        assert!(node.append("allowedRoles", Value::Reference(Reference { target: "Administrator".into(), kind: crate::catalog::ReferenceKind::ByName })).is_ok());
+        assert!(node
+            .append(
+                "allowedRoles",
+                Value::Reference(Reference {
+                    target: "Administrator".into(),
+                    kind: crate::catalog::ReferenceKind::ByName
+                })
+            )
+            .is_ok());
     }
 
     #[test]
@@ -278,8 +376,13 @@ mod tests {
     fn normalize_enum_accepts_exact_or_ruby_named_value() {
         let mut node = Node::new("Page", catalog()).unwrap();
         node.set("autofocus", Value::String("Off".into())).unwrap();
-        assert!(matches!(node.fetch("autofocus").unwrap(), Some(Value::Enum(_))));
-        assert!(node.set("autofocus", Value::String("NotAValue".into())).is_err());
+        assert!(matches!(
+            node.fetch("autofocus").unwrap(),
+            Some(Value::Enum(_))
+        ));
+        assert!(node
+            .set("autofocus", Value::String("NotAValue".into()))
+            .is_err());
     }
 
     #[test]

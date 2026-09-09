@@ -59,7 +59,10 @@ impl NativeFragmentStore {
         let digest = sha256_hex(&payload);
         let path = self.fragment_path(&digest)?;
 
-        let _guard = self.write_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.persist(&path, &payload, &digest)?;
         Ok(digest)
     }
@@ -110,11 +113,16 @@ impl NativeFragmentStore {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn is_valid_digest(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    s.len() == 64
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 fn verify_payload(payload: &[u8], digest: &str) -> Result<()> {
@@ -122,7 +130,10 @@ fn verify_payload(payload: &[u8], digest: &str) -> Result<()> {
     if actual == digest {
         Ok(())
     } else {
-        Err(FragmentStoreError::DigestMismatch { expected: digest.to_string(), actual })
+        Err(FragmentStoreError::DigestMismatch {
+            expected: digest.to_string(),
+            actual,
+        })
     }
 }
 
@@ -131,11 +142,18 @@ fn validate_types(document: &Document, expected: &[String], digest: &str) -> Res
         return Ok(());
     }
     let found = collect_types(document);
-    let missing: Vec<String> = expected.iter().filter(|t| !found.contains(*t)).cloned().collect();
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|t| !found.contains(*t))
+        .cloned()
+        .collect();
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(FragmentStoreError::MissingTypes { digest: digest.to_string(), missing })
+        Err(FragmentStoreError::MissingTypes {
+            digest: digest.to_string(),
+            missing,
+        })
     }
 }
 
@@ -159,7 +177,9 @@ fn collect_types_from_doc(doc: &Document, found: &mut std::collections::HashSet<
 fn collect_types_from_value(value: &Bson, found: &mut std::collections::HashSet<String>) {
     match value {
         Bson::Document(doc) => collect_types_from_doc(doc, found),
-        Bson::Array(items) => items.iter().for_each(|item| collect_types_from_value(item, found)),
+        Bson::Array(items) => items
+            .iter()
+            .for_each(|item| collect_types_from_value(item, found)),
         _ => {}
     }
 }
@@ -169,11 +189,18 @@ fn validate_hints(document: &Document, expected: &[String], digest: &str) -> Res
         return Ok(());
     }
     let found = collect_hints(document);
-    let missing: Vec<String> = expected.iter().filter(|h| !found.contains(*h)).cloned().collect();
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|h| !found.contains(*h))
+        .cloned()
+        .collect();
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(FragmentStoreError::MissingHints { digest: digest.to_string(), missing })
+        Err(FragmentStoreError::MissingHints {
+            digest: digest.to_string(),
+            missing,
+        })
     }
 }
 
@@ -199,21 +226,32 @@ fn collect_hints_from_doc(doc: &Document, found: &mut std::collections::HashSet<
 fn collect_hints_from_value(value: &Bson, found: &mut std::collections::HashSet<String>) {
     match value {
         Bson::Document(doc) => collect_hints_from_doc(doc, found),
-        Bson::Array(items) => items.iter().for_each(|item| collect_hints_from_value(item, found)),
+        Bson::Array(items) => items
+            .iter()
+            .for_each(|item| collect_hints_from_value(item, found)),
         _ => {}
     }
 }
 
 fn looks_like_hint_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    ["url", "uri", "endpoint", "host"].iter().any(|suffix| lower.ends_with(suffix))
+    ["url", "uri", "endpoint", "host"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
 }
 
-fn apply_overrides(document: &mut Document, overrides: &BTreeMap<String, Bson>, digest: &str) -> Result<()> {
+fn apply_overrides(
+    document: &mut Document,
+    overrides: &BTreeMap<String, Bson>,
+    digest: &str,
+) -> Result<()> {
     for (key, value) in overrides {
         let existing_is_scalar = document.get(key).is_some_and(is_scalar);
         if !existing_is_scalar || !is_scalar(value) {
-            return Err(FragmentStoreError::InvalidOverride { digest: digest.to_string(), key: key.clone() });
+            return Err(FragmentStoreError::InvalidOverride {
+                digest: digest.to_string(),
+                key: key.clone(),
+            });
         }
         document.insert(key.clone(), value.clone());
     }
@@ -288,7 +326,10 @@ mod tests {
         std::fs::write(&path, b"tampered bytes").unwrap();
 
         let result = store.fetch(&digest, &FetchOptions::default());
-        assert!(matches!(result, Err(FragmentStoreError::DigestMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(FragmentStoreError::DigestMismatch { .. })
+        ));
     }
 
     #[test]
@@ -297,12 +338,21 @@ mod tests {
         let document = doc! { "$Type": "Outer$Type", "Child": { "$Type": "Inner$Type" } };
         let digest = store.put(&document).unwrap();
 
-        let ok = FetchOptions { types: vec!["Outer$Type".into(), "Inner$Type".into()], ..Default::default() };
+        let ok = FetchOptions {
+            types: vec!["Outer$Type".into(), "Inner$Type".into()],
+            ..Default::default()
+        };
         assert!(store.fetch(&digest, &ok).is_ok());
 
-        let missing = FetchOptions { types: vec!["Nonexistent$Type".into()], ..Default::default() };
+        let missing = FetchOptions {
+            types: vec!["Nonexistent$Type".into()],
+            ..Default::default()
+        };
         let result = store.fetch(&digest, &missing);
-        assert!(matches!(result, Err(FragmentStoreError::MissingTypes { .. })));
+        assert!(matches!(
+            result,
+            Err(FragmentStoreError::MissingTypes { .. })
+        ));
     }
 
     #[test]
@@ -314,11 +364,20 @@ mod tests {
         };
         let digest = store.put(&document).unwrap();
 
-        let ok = FetchOptions { hints: vec!["https://example.test/api".into()], ..Default::default() };
+        let ok = FetchOptions {
+            hints: vec!["https://example.test/api".into()],
+            ..Default::default()
+        };
         assert!(store.fetch(&digest, &ok).is_ok());
 
-        let missing = FetchOptions { hints: vec!["https://not-there.test".into()], ..Default::default() };
-        assert!(matches!(store.fetch(&digest, &missing), Err(FragmentStoreError::MissingHints { .. })));
+        let missing = FetchOptions {
+            hints: vec!["https://not-there.test".into()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            store.fetch(&digest, &missing),
+            Err(FragmentStoreError::MissingHints { .. })
+        ));
     }
 
     #[test]
@@ -328,7 +387,10 @@ mod tests {
 
         let mut overrides = BTreeMap::new();
         overrides.insert("Name".to_string(), Bson::String("B".to_string()));
-        let options = FetchOptions { overrides, ..Default::default() };
+        let options = FetchOptions {
+            overrides,
+            ..Default::default()
+        };
 
         let result = store.fetch(&digest, &options).unwrap();
         assert_eq!(result.get_str("Name").unwrap(), "B");
@@ -342,9 +404,15 @@ mod tests {
 
         let mut overrides = BTreeMap::new();
         overrides.insert("Nonexistent".to_string(), Bson::String("x".to_string()));
-        let options = FetchOptions { overrides, ..Default::default() };
+        let options = FetchOptions {
+            overrides,
+            ..Default::default()
+        };
 
-        assert!(matches!(store.fetch(&digest, &options), Err(FragmentStoreError::InvalidOverride { .. })));
+        assert!(matches!(
+            store.fetch(&digest, &options),
+            Err(FragmentStoreError::InvalidOverride { .. })
+        ));
     }
 
     #[test]
@@ -354,9 +422,15 @@ mod tests {
 
         let mut overrides = BTreeMap::new();
         overrides.insert("Child".to_string(), Bson::String("x".to_string()));
-        let options = FetchOptions { overrides, ..Default::default() };
+        let options = FetchOptions {
+            overrides,
+            ..Default::default()
+        };
 
-        assert!(matches!(store.fetch(&digest, &options), Err(FragmentStoreError::InvalidOverride { .. })));
+        assert!(matches!(
+            store.fetch(&digest, &options),
+            Err(FragmentStoreError::InvalidOverride { .. })
+        ));
     }
 
     #[test]
@@ -365,9 +439,18 @@ mod tests {
         let digest = store.put(&doc! { "Name": "A" }).unwrap();
 
         let mut overrides = BTreeMap::new();
-        overrides.insert("Name".to_string(), Bson::Array(vec![Bson::String("x".to_string())]));
-        let options = FetchOptions { overrides, ..Default::default() };
+        overrides.insert(
+            "Name".to_string(),
+            Bson::Array(vec![Bson::String("x".to_string())]),
+        );
+        let options = FetchOptions {
+            overrides,
+            ..Default::default()
+        };
 
-        assert!(matches!(store.fetch(&digest, &options), Err(FragmentStoreError::InvalidOverride { .. })));
+        assert!(matches!(
+            store.fetch(&digest, &options),
+            Err(FragmentStoreError::InvalidOverride { .. })
+        ));
     }
 }

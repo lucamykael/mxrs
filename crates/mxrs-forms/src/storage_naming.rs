@@ -26,19 +26,32 @@ const TYPE_ALIASES: &[(&str, &str)] = &[
     ("TabContainer", "TabControl"),
 ];
 
-const LEGACY_TYPE_ALIASES: &[(&str, &str)] =
-    &[("FormForSpecialization", "PageForSpecialization"), ("NewGridDatabaseSource", "GridXPathSource"), ("NewListViewDatabaseSource", "ListViewXPathSource"), ("NewSelectorDatabaseSource", "SelectorXPathSource")];
+const LEGACY_TYPE_ALIASES: &[(&str, &str)] = &[
+    ("FormForSpecialization", "PageForSpecialization"),
+    ("NewGridDatabaseSource", "GridXPathSource"),
+    ("NewListViewDatabaseSource", "ListViewXPathSource"),
+    ("NewSelectorDatabaseSource", "SelectorXPathSource"),
+];
 
 /// `((declared_by, property name), storage field name)`.
 const ALIASES: &[((&str, &str), &str)] = &[
-    (("AssociationWidget", "selectPageSettings"), "PopupFormSettings"),
-    (("AttributeWidgetWithPlaceholder", "placeholderTemplate"), "Placeholder"),
+    (
+        ("AssociationWidget", "selectPageSettings"),
+        "PopupFormSettings",
+    ),
+    (
+        ("AttributeWidgetWithPlaceholder", "placeholderTemplate"),
+        "Placeholder",
+    ),
     (("Button", "caption"), "CaptionTemplate"),
     (("ControlBar", "items"), "NewButtons"),
     (("ControlBarButton", "caption"), "CaptionTemplate"),
     (("DataGrid", "caption"), "CaptionTemplate"),
     (("ColumnGrid", "tooltipPage"), "TooltipForm"),
-    (("DropDownSearchField", "allowMultipleSelect"), "AllowMultiSelect"),
+    (
+        ("DropDownSearchField", "allowMultipleSelect"),
+        "AllowMultiSelect",
+    ),
     (("GridControlBar", "defaultButton"), "DefaultButtonPointer"),
     (("GridColumn", "width"), "WidthValue"),
     (("GridNewButton", "pageSettings"), "FormSettings"),
@@ -52,8 +65,14 @@ const ALIASES: &[((&str, &str), &str)] = &[
     (("PageClientAction", "pageSettings"), "FormSettings"),
     (("PageSettings", "page"), "Form"),
     (("PageForSpecialization", "pageSettings"), "FormSettings"),
-    (("ReferenceSelector", "gotoPageSettings"), "GotoFormSettings"),
-    (("ReferenceSetSelector", "xPathConstraint"), "SelectableXPathConstraint"),
+    (
+        ("ReferenceSelector", "gotoPageSettings"),
+        "GotoFormSettings",
+    ),
+    (
+        ("ReferenceSetSelector", "xPathConstraint"),
+        "SelectableXPathConstraint",
+    ),
     (("ScrollContainer", "center"), "CenterRegion"),
     (("SnippetCall", "snippet"), "Form"),
     (("SnippetCallWidget", "snippetCall"), "FormCall"),
@@ -62,13 +81,34 @@ const ALIASES: &[((&str, &str), &str)] = &[
     (("TabContainer", "defaultPage"), "DefaultPagePointer"),
 ];
 
-const LEGACY_ALIASES: &[((&str, &str), &str)] =
-    &[(("DataView", "editability"), "Editable"), (("GridXPathSource", "xPathConstraint"), "DatabaseConstraints"), (("SelectorXPathSource", "xPathConstraint"), "DatabaseConstraints"), (("XPathSourceBase", "xPathConstraint"), "DatabaseConstraints")];
+const LEGACY_ALIASES: &[((&str, &str), &str)] = &[
+    (("DataView", "editability"), "Editable"),
+    (
+        ("GridXPathSource", "xPathConstraint"),
+        "DatabaseConstraints",
+    ),
+    (
+        ("SelectorXPathSource", "xPathConstraint"),
+        "DatabaseConstraints",
+    ),
+    (
+        ("XPathSourceBase", "xPathConstraint"),
+        "DatabaseConstraints",
+    ),
+];
 
 pub fn resolve(property: &Property) -> StorageProperty {
-    match ALIASES.iter().find(|((declared_by, name), _)| *declared_by == property.declared_by && *name == property.name) {
-        Some((_, alias)) => StorageProperty { name: (*alias).to_string(), observed: true },
-        None => StorageProperty { name: pascal_case(&property.name), observed: false },
+    match ALIASES.iter().find(|((declared_by, name), _)| {
+        *declared_by == property.declared_by && *name == property.name
+    }) {
+        Some((_, alias)) => StorageProperty {
+            name: (*alias).to_string(),
+            observed: true,
+        },
+        None => StorageProperty {
+            name: pascal_case(&property.name),
+            observed: false,
+        },
     }
 }
 
@@ -78,7 +118,9 @@ pub fn resolve(property: &Property) -> StorageProperty {
 /// probe an actual document.
 pub fn candidates(property: &Property) -> Vec<String> {
     let mut result = vec![resolve(property).name];
-    if let Some((_, legacy)) = LEGACY_ALIASES.iter().find(|((declared_by, name), _)| *declared_by == property.declared_by && *name == property.name) {
+    if let Some((_, legacy)) = LEGACY_ALIASES.iter().find(|((declared_by, name), _)| {
+        *declared_by == property.declared_by && *name == property.name
+    }) {
         result.push((*legacy).to_string());
     }
     result.push(pascal_case(&property.name));
@@ -95,14 +137,24 @@ pub fn pascal_case(name: &str) -> String {
 }
 
 pub fn storage_type_name(schema_name: &str) -> String {
-    TYPE_ALIASES.iter().find(|(schema, _)| *schema == schema_name).map(|(_, storage)| (*storage).to_string()).unwrap_or_else(|| schema_name.to_string())
+    TYPE_ALIASES
+        .iter()
+        .find(|(schema, _)| *schema == schema_name)
+        .map(|(_, storage)| (*storage).to_string())
+        .unwrap_or_else(|| schema_name.to_string())
 }
 
 pub fn schema_type_name(storage_name: &str) -> String {
-    if let Some((schema, _)) = LEGACY_TYPE_ALIASES.iter().find(|(_, storage)| *storage == storage_name) {
+    if let Some((schema, _)) = LEGACY_TYPE_ALIASES
+        .iter()
+        .find(|(_, storage)| *storage == storage_name)
+    {
         return (*schema).to_string();
     }
-    if let Some((schema, _)) = TYPE_ALIASES.iter().find(|(_, storage)| *storage == storage_name) {
+    if let Some((schema, _)) = TYPE_ALIASES
+        .iter()
+        .find(|(_, storage)| *storage == storage_name)
+    {
         return (*schema).to_string();
     }
     storage_name.to_string()
@@ -114,7 +166,17 @@ mod tests {
     use crate::catalog::{Cardinality, Property};
 
     fn property(declared_by: &str, name: &str) -> Property {
-        Property { name: name.to_string(), ruby_name: crate::catalog::ruby_name(name), declared_by: declared_by.to_string(), type_name: "string".into(), targets: vec![], cardinality: Cardinality::One, optional: false, default_value: None, reference: None }
+        Property {
+            name: name.to_string(),
+            ruby_name: crate::catalog::ruby_name(name),
+            declared_by: declared_by.to_string(),
+            type_name: "string".into(),
+            targets: vec![],
+            cardinality: Cardinality::One,
+            optional: false,
+            default_value: None,
+            reference: None,
+        }
     }
 
     #[test]

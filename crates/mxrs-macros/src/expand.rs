@@ -52,7 +52,8 @@ fn expand_module(module: &ModuleInput) -> TokenStream {
 fn expand_entity(entity: &EntityInput) -> TokenStream {
     let name = entity.name.to_string();
     let attr_stmts: Vec<TokenStream> = entity.attributes.iter().map(expand_attribute).collect();
-    let assoc_stmts: Vec<TokenStream> = entity.associations.iter().map(expand_association).collect();
+    let assoc_stmts: Vec<TokenStream> =
+        entity.associations.iter().map(expand_association).collect();
     quote! {
         m.entity(#name, |e| {
             #(#attr_stmts)*

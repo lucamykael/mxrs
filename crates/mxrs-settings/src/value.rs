@@ -55,7 +55,11 @@ pub struct BinaryAsset {
 
 impl BinaryAsset {
     pub fn from_bytes(bytes: Vec<u8>, subtype: BinarySubtype) -> Self {
-        Self { bytes, subtype, path: None }
+        Self {
+            bytes,
+            subtype,
+            path: None,
+        }
     }
 
     pub fn empty(subtype: BinarySubtype) -> Self {

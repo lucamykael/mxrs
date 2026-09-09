@@ -97,7 +97,10 @@ fn run_compare(mut args: Vec<String>) -> ExitCode {
                 })
             })
             .collect();
-        println!("{}", serde_json::json!({ "identical": result.is_identical(), "changes": changes }));
+        println!(
+            "{}",
+            serde_json::json!({ "identical": result.is_identical(), "changes": changes })
+        );
     } else if result.is_identical() {
         println!("[mxrs] OK");
     } else {

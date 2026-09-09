@@ -12,7 +12,11 @@ use mxrs_forms::{node::Value, Catalog, MprCodec};
 
 #[test]
 fn decodes_and_round_trips_a_native_forms_mprcodec_document() {
-    let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/native_page.bson")).unwrap();
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/native_page.bson"
+    ))
+    .unwrap();
     let document = mxrs_bson::parse(&bytes).unwrap();
 
     let catalog = Rc::new(Catalog::for_version("11.12.1").unwrap());

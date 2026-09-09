@@ -99,7 +99,10 @@ pub fn storage_hash(value: &Document, int64_properties: bool) -> Document {
     for key in ordered {
         // Safe: `key` was just read from `value.keys()`.
         let v = value.get(key).expect("key came from value.keys()");
-        result.insert(key.clone(), storage_value(v, Some(key.as_str()), int64_properties));
+        result.insert(
+            key.clone(),
+            storage_value(v, Some(key.as_str()), int64_properties),
+        );
     }
     result
 }

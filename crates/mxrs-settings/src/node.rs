@@ -23,7 +23,10 @@ impl Node {
     pub fn new(storage_type: impl Into<String>) -> Result<Self> {
         let storage_type = storage_type.into();
         catalog::method_for_type(&storage_type)?;
-        Ok(Self { storage_type, fields: Vec::new() })
+        Ok(Self {
+            storage_type,
+            fields: Vec::new(),
+        })
     }
 
     pub fn storage_type(&self) -> &str {
@@ -52,7 +55,10 @@ impl Node {
             .iter()
             .find(|(k, _)| k == canonical)
             .map(|(_, v)| v)
-            .ok_or_else(|| SettingsError::FieldNotSet { storage_type: self.storage_type.clone(), field: canonical.to_string() })
+            .ok_or_else(|| SettingsError::FieldNotSet {
+                storage_type: self.storage_type.clone(),
+                field: canonical.to_string(),
+            })
     }
 
     pub fn has_field(&self, canonical_field: &str) -> bool {
@@ -80,7 +86,10 @@ mod tests {
         let mut node = Node::new("Settings$ServerConfiguration").unwrap();
         node.set("HttpPortNumber", Value::Integer(8080)).unwrap();
         assert_eq!(node.fetch("HttpPortNumber").unwrap(), &Value::Integer(8080));
-        assert_eq!(node.fetch("http_port_number").unwrap(), &Value::Integer(8080));
+        assert_eq!(
+            node.fetch("http_port_number").unwrap(),
+            &Value::Integer(8080)
+        );
     }
 
     #[test]
@@ -92,7 +101,9 @@ mod tests {
     #[test]
     fn set_rejects_wrong_value_type() {
         let mut node = Node::new("Settings$ServerConfiguration").unwrap();
-        assert!(node.set("HttpPortNumber", Value::String("not-an-int".into())).is_err());
+        assert!(node
+            .set("HttpPortNumber", Value::String("not-an-int".into()))
+            .is_err());
     }
 
     #[test]
@@ -110,7 +121,10 @@ mod tests {
     #[test]
     fn set_rejects_incompatible_binary_asset_type() {
         let mut node = Node::new("Settings$Certificate").unwrap();
-        let result = node.set("Data", Value::Binary(crate::value::BinaryAsset::empty(BinarySubtype::Generic)));
+        let result = node.set(
+            "Data",
+            Value::Binary(crate::value::BinaryAsset::empty(BinarySubtype::Generic)),
+        );
         assert!(result.is_ok());
     }
 }

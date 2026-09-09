@@ -38,7 +38,10 @@ mod tests {
     #[test]
     fn system_model_seed_is_valid_base64() {
         // The asset wraps base64 across many lines; strip whitespace first.
-        let cleaned: String = SYSTEM_MODEL_SEED_11_12_1.chars().filter(|c| !c.is_whitespace()).collect();
+        let cleaned: String = SYSTEM_MODEL_SEED_11_12_1
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         let decoded = base64::engine::general_purpose::STANDARD.decode(cleaned);
         assert!(decoded.is_ok());
         assert!(!decoded.unwrap().is_empty());

@@ -15,14 +15,21 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
     let schema_hash = mxrs_schema::schema_hash(&project.mendix_version)
         .ok_or_else(|| WriterError::UnsupportedVersion(project.mendix_version.clone()))?;
     let mut mpr = MprFile::create(path, &project.mendix_version, schema_hash)?;
-    let root_id = mpr.root_unit()?.ok_or(WriterError::MissingRootUnit)?.unit_id;
+    let root_id = mpr
+        .root_unit()?
+        .ok_or(WriterError::MissingRootUnit)?
+        .unit_id;
 
     scaffold::write_default_project_units(&mut mpr, &root_id, &project.mendix_version)?;
 
     let known_entities: HashSet<String> = project
         .modules
         .iter()
-        .flat_map(|m| m.entities.iter().map(move |e| format!("{}.{}", m.name, e.name)))
+        .flat_map(|m| {
+            m.entities
+                .iter()
+                .map(move |e| format!("{}.{}", m.name, e.name))
+        })
         .collect();
 
     for decl in &project.modules {

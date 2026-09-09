@@ -77,7 +77,10 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
 /// source, and writes it to `out_path` — the convenience entry point a
 /// downstream `build.rs` calls. Does not itself print
 /// `cargo:rerun-if-changed` (a `build.rs` concern, not this library's).
-pub fn generate_from_path(manifest_path: impl AsRef<Path>, out_path: impl AsRef<Path>) -> Result<(), TypegenError> {
+pub fn generate_from_path(
+    manifest_path: impl AsRef<Path>,
+    out_path: impl AsRef<Path>,
+) -> Result<(), TypegenError> {
     let manifest = Manifest::from_path(manifest_path)?;
     let source = generate(&manifest)?;
     std::fs::write(out_path, source)?;

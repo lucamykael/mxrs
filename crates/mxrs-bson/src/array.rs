@@ -27,10 +27,16 @@ fn as_marker(value: &Bson) -> Option<i32> {
 /// `nil`/`[]` input.
 pub fn parse_array(raw: Option<&[Bson]>) -> ParsedArray {
     let Some(raw) = raw else {
-        return ParsedArray { marker: 3, items: vec![] };
+        return ParsedArray {
+            marker: 3,
+            items: vec![],
+        };
     };
     if raw.is_empty() {
-        return ParsedArray { marker: 3, items: vec![] };
+        return ParsedArray {
+            marker: 3,
+            items: vec![],
+        };
     }
 
     match as_marker(&raw[0]) {
@@ -67,8 +73,20 @@ mod tests {
 
     #[test]
     fn defaults_to_marker_3_for_nil_or_empty() {
-        assert_eq!(parse_array(None), ParsedArray { marker: 3, items: vec![] });
-        assert_eq!(parse_array(Some(&[])), ParsedArray { marker: 3, items: vec![] });
+        assert_eq!(
+            parse_array(None),
+            ParsedArray {
+                marker: 3,
+                items: vec![]
+            }
+        );
+        assert_eq!(
+            parse_array(Some(&[])),
+            ParsedArray {
+                marker: 3,
+                items: vec![]
+            }
+        );
     }
 
     #[test]

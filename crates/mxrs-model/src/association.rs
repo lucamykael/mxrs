@@ -123,13 +123,16 @@ impl Association {
         Association {
             id: get_id_any(doc, &["$ID"]),
             name: get_str_any(doc, &["Name", "name"]),
-            documentation: get_str_any(doc, &["Documentation", "documentation"]).unwrap_or_default(),
+            documentation: get_str_any(doc, &["Documentation", "documentation"])
+                .unwrap_or_default(),
             from_entity_id: get_id_any(doc, &["ParentPointer", "ParentID", "parentId"]),
             to_entity_id,
             association_type: AssociationType::from_str(
                 &get_str_any(doc, &["Type", "type"]).unwrap_or_else(|| "Reference".into()),
             ),
-            owner: Owner::from_str(&get_str_any(doc, &["Owner", "owner"]).unwrap_or_else(|| "Default".into())),
+            owner: Owner::from_str(
+                &get_str_any(doc, &["Owner", "owner"]).unwrap_or_else(|| "Default".into()),
+            ),
             storage_format: StorageFormat::from_str(
                 &get_str_any(doc, &["StorageFormat"]).unwrap_or_else(|| "Column".into()),
             ),
@@ -146,11 +149,16 @@ impl Association {
     /// a `Child` qualified-name field instead of `ChildID`, no editor
     /// connection-point fields (mirrors mxrb's `cross_association_doc`).
     pub fn is_cross_module(&self) -> bool {
-        self.to_entity_id.as_deref().is_some_and(|s| s.contains('.'))
+        self.to_entity_id
+            .as_deref()
+            .is_some_and(|s| s.contains('.'))
     }
 
     pub fn to_bson(&self) -> Document {
-        let id = self.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = self
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         if self.is_cross_module() {
             return doc! {
                 "$ID": id,
@@ -193,7 +201,9 @@ impl Association {
         let Some(behavior) = &self.delete_behavior else {
             return DeleteAction::NoAction;
         };
-        DeleteAction::from_str(&get_str_any(behavior, &[lower, upper]).unwrap_or_else(|| "NoAction".into()))
+        DeleteAction::from_str(
+            &get_str_any(behavior, &[lower, upper]).unwrap_or_else(|| "NoAction".into()),
+        )
     }
 }
 
@@ -264,7 +274,10 @@ mod tests {
         };
         let assoc = Association::from_bson(&d);
         assert_eq!(assoc.parent_delete_behavior(), DeleteAction::Delete);
-        assert_eq!(assoc.child_delete_behavior(), DeleteAction::DeleteMeIfNotUsed);
+        assert_eq!(
+            assoc.child_delete_behavior(),
+            DeleteAction::DeleteMeIfNotUsed
+        );
     }
 
     #[test]
@@ -293,12 +306,18 @@ mod tests {
         };
         assert!(assoc.is_cross_module());
         let out = assoc.to_bson();
-        assert_eq!(out.get_str("$Type").unwrap(), "DomainModels$CrossAssociation");
+        assert_eq!(
+            out.get_str("$Type").unwrap(),
+            "DomainModels$CrossAssociation"
+        );
         assert_eq!(out.get_str("Child").unwrap(), "Sales.Customer");
         assert!(!out.contains_key("ChildID"));
 
         let round_tripped = Association::from_bson(&out);
-        assert_eq!(round_tripped.to_entity_id.as_deref(), Some("Sales.Customer"));
+        assert_eq!(
+            round_tripped.to_entity_id.as_deref(),
+            Some("Sales.Customer")
+        );
         assert_eq!(round_tripped.name.as_deref(), Some("Order_Customer"));
     }
 
@@ -317,6 +336,9 @@ mod tests {
             export_level: "Hidden".into(),
         };
         assert!(!assoc.is_cross_module());
-        assert_eq!(assoc.to_bson().get_str("$Type").unwrap(), "DomainModels$Association");
+        assert_eq!(
+            assoc.to_bson().get_str("$Type").unwrap(),
+            "DomainModels$Association"
+        );
     }
 }

@@ -23,7 +23,10 @@ impl Menu {
         let collection = get_doc_any(doc, &["ItemCollection"]).unwrap_or_default();
         Menu {
             name: get_str_any(doc, &["Name"]),
-            items: docs_any(&collection, &["Items"]).iter().map(parse_menu_item).collect(),
+            items: docs_any(&collection, &["Items"])
+                .iter()
+                .map(parse_menu_item)
+                .collect(),
         }
     }
 }
@@ -35,14 +38,23 @@ fn parse_menu_item(doc: &Document) -> MenuItem {
         page: get_doc_any(doc, &["Action"])
             .and_then(|a| get_doc_any(&a, &["FormSettings"]))
             .and_then(|f| get_str_any(&f, &["Form"])),
-        items: docs_any(doc, &["Items"]).iter().map(parse_menu_item).collect(),
+        items: docs_any(doc, &["Items"])
+            .iter()
+            .map(parse_menu_item)
+            .collect(),
     }
 }
 
 fn extract_text(doc: &Document, keys: &[&str]) -> String {
-    let Some(obj) = get_doc_any(doc, keys) else { return String::new() };
-    let translation = docs_any(&obj, &["Items", "Translations"]).into_iter().next();
-    let Some(translation) = translation else { return String::new() };
+    let Some(obj) = get_doc_any(doc, keys) else {
+        return String::new();
+    };
+    let translation = docs_any(&obj, &["Items", "Translations"])
+        .into_iter()
+        .next();
+    let Some(translation) = translation else {
+        return String::new();
+    };
     get_str_any(&translation, &["Text", "Translation"]).unwrap_or_default()
 }
 

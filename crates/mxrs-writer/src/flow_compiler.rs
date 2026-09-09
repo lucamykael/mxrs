@@ -13,17 +13,33 @@
 use mxrs_bson::{doc, Bson, Document};
 use mxrs_ir::flow::{Activity, Member};
 
-pub fn build_microflow_graph(activities: &[Activity], return_expression: Option<&str>) -> (Vec<Document>, Vec<Document>) {
+pub fn build_microflow_graph(
+    activities: &[Activity],
+    return_expression: Option<&str>,
+) -> (Vec<Document>, Vec<Document>) {
     let mut objects = Vec::new();
     let mut flows = Vec::new();
 
     let start_id = uuid::Uuid::new_v4().to_string();
-    objects.push(flow_object_doc(&start_id, "Microflows$StartEvent", 50, 100, "20;20"));
+    objects.push(flow_object_doc(
+        &start_id,
+        "Microflows$StartEvent",
+        50,
+        100,
+        "20;20",
+    ));
 
     let mut prev_id = Some(start_id);
     let mut x = 190;
     for activity in activities {
-        let (next_id, next_x) = process_activity(activity, prev_id.as_deref(), &mut objects, &mut flows, x, 100);
+        let (next_id, next_x) = process_activity(
+            activity,
+            prev_id.as_deref(),
+            &mut objects,
+            &mut flows,
+            x,
+            100,
+        );
         prev_id = next_id;
         x = next_x;
     }
@@ -53,8 +69,22 @@ fn process_activity(
     x: i32,
     y: i32,
 ) -> (Option<String>, i32) {
-    if let Activity::Decision { condition, true_branch, false_branch } = activity {
-        return process_decision(condition, true_branch, false_branch, prev_id, objects, flows, x, y);
+    if let Activity::Decision {
+        condition,
+        true_branch,
+        false_branch,
+    } = activity
+    {
+        return process_decision(
+            condition,
+            true_branch,
+            false_branch,
+            prev_id,
+            objects,
+            flows,
+            x,
+            y,
+        );
     }
 
     let act_id = uuid::Uuid::new_v4().to_string();
@@ -91,15 +121,37 @@ fn process_decision(
     let x_branch = x + 140;
     let x_merge = x + 140 * (branch_width + 1);
 
-    let true_result = process_decision_branch(true_branch, &split_id, "true", objects, flows, x_branch, y);
-    let false_result = process_decision_branch(false_branch, &split_id, "false", objects, flows, x_branch, y + 150);
+    let true_result =
+        process_decision_branch(true_branch, &split_id, "true", objects, flows, x_branch, y);
+    let false_result = process_decision_branch(
+        false_branch,
+        &split_id,
+        "false",
+        objects,
+        flows,
+        x_branch,
+        y + 150,
+    );
 
     let merge_id = uuid::Uuid::new_v4().to_string();
-    objects.push(flow_object_doc(&merge_id, "Microflows$ExclusiveMerge", x_merge, y, "40;40"));
+    objects.push(flow_object_doc(
+        &merge_id,
+        "Microflows$ExclusiveMerge",
+        x_merge,
+        y,
+        "40;40",
+    ));
     for (result, case_value) in [(&true_result, "true"), (&false_result, "false")] {
         match &result.first {
             None => flows.push(decision_flow_doc(&split_id, &merge_id, case_value)),
-            Some(_) => flows.push(sequence_flow_doc(result.last.as_deref().expect("non-empty branch has a last id"), &merge_id, None)),
+            Some(_) => flows.push(sequence_flow_doc(
+                result
+                    .last
+                    .as_deref()
+                    .expect("non-empty branch has a last id"),
+                &merge_id,
+                None,
+            )),
         }
     }
     (Some(merge_id), x_merge + 140)
@@ -119,18 +171,28 @@ fn process_decision_branch(
     let mut previous: Option<String> = None;
     for activity in activities {
         let before = objects.len();
-        let (next_id, next_x) = process_activity(activity, previous.as_deref(), objects, flows, x, y);
+        let (next_id, next_x) =
+            process_activity(activity, previous.as_deref(), objects, flows, x, y);
         let created_first = objects[before].get_str("$ID").ok().map(str::to_string);
         if first.is_none() {
             first = created_first.clone();
         }
         if previous.is_none() {
-            flows.push(decision_flow_doc(split_id, created_first.as_deref().expect("activity always assigns an $ID"), case_value));
+            flows.push(decision_flow_doc(
+                split_id,
+                created_first
+                    .as_deref()
+                    .expect("activity always assigns an $ID"),
+                case_value,
+            ));
         }
         previous = next_id;
         x = next_x;
     }
-    BranchResult { first, last: previous }
+    BranchResult {
+        first,
+        last: previous,
+    }
 }
 
 fn split_condition_doc(condition: &str) -> Document {
@@ -178,7 +240,12 @@ fn build_activity(activity: &Activity, id: &str, x: i32, y: i32) -> Document {
 
 fn activity_action_doc(activity: &Activity) -> Document {
     match activity {
-        Activity::CreateObject { variable, entity, members, commit } => doc! {
+        Activity::CreateObject {
+            variable,
+            entity,
+            members,
+            commit,
+        } => doc! {
             "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$CreateChangeAction",
             "Commit": if *commit { "Yes" } else { "No" },
             "Entity": entity.clone(),
@@ -187,7 +254,12 @@ fn activity_action_doc(activity: &Activity) -> Document {
             "RefreshInClient": false,
             "VariableName": variable.clone(),
         },
-        Activity::ChangeObject { variable, entity, members, commit } => doc! {
+        Activity::ChangeObject {
+            variable,
+            entity,
+            members,
+            commit,
+        } => doc! {
             "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$ChangeAction",
             "ChangeVariableName": variable.clone(),
             "Commit": if *commit { "Yes" } else { "No" },
@@ -208,7 +280,12 @@ fn activity_action_doc(activity: &Activity) -> Document {
             "ErrorHandlingType": "Rollback",
             "RefreshInClient": false,
         },
-        Activity::CallMicroflow { name, result_variable, use_return, mappings } => {
+        Activity::CallMicroflow {
+            name,
+            result_variable,
+            use_return,
+            mappings,
+        } => {
             let mapping_docs: Vec<Bson> = mappings
                 .iter()
                 .map(|m| {
@@ -232,13 +309,23 @@ fn activity_action_doc(activity: &Activity) -> Document {
                 },
             }
         }
-        Activity::Decision { .. } => unreachable!("Decision is handled by process_activity, never reaches build_activity"),
+        Activity::Decision { .. } => {
+            unreachable!("Decision is handled by process_activity, never reaches build_activity")
+        }
     }
 }
 
 fn change_action_item_doc(member: &Member, entity: &str) -> Document {
-    let association = member.association.as_deref().map(|a| qualified_association_identifier(a, entity)).unwrap_or_default();
-    let attribute = member.attribute.as_deref().map(|a| qualified_attribute_identifier(a, entity)).unwrap_or_default();
+    let association = member
+        .association
+        .as_deref()
+        .map(|a| qualified_association_identifier(a, entity))
+        .unwrap_or_default();
+    let attribute = member
+        .attribute
+        .as_deref()
+        .map(|a| qualified_attribute_identifier(a, entity))
+        .unwrap_or_default();
     doc! {
         "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$ChangeActionItem",
         "Association": association,
@@ -286,11 +373,16 @@ mod tests {
 
     #[test]
     fn a_single_activity_wires_start_activity_end() {
-        let activities = vec![Activity::Commit { variable: "order".into() }];
+        let activities = vec![Activity::Commit {
+            variable: "order".into(),
+        }];
         let (objects, flows) = build_microflow_graph(&activities, Some("$order"));
         assert_eq!(objects.len(), 3); // StartEvent, ActionActivity, EndEvent
         assert_eq!(flows.len(), 2);
-        assert_eq!(objects[0].get_str("$Type").unwrap(), "Microflows$StartEvent");
+        assert_eq!(
+            objects[0].get_str("$Type").unwrap(),
+            "Microflows$StartEvent"
+        );
         assert_eq!(objects[2].get_str("$Type").unwrap(), "Microflows$EndEvent");
         assert_eq!(objects[2].get_str("ReturnValue").unwrap(), "$order");
     }
@@ -305,9 +397,13 @@ mod tests {
         }];
         let (objects, _) = build_microflow_graph(&activities, None);
         let action = objects[1].get_document("Action").unwrap();
-        assert_eq!(action.get_str("$Type").unwrap(), "Microflows$CreateChangeAction");
+        assert_eq!(
+            action.get_str("$Type").unwrap(),
+            "Microflows$CreateChangeAction"
+        );
         assert_eq!(action.get_str("Commit").unwrap(), "Yes");
-        let items = mxrs_bson::parse_array(action.get_array("Items").ok().map(|a| a.as_slice())).items;
+        let items =
+            mxrs_bson::parse_array(action.get_array("Items").ok().map(|a| a.as_slice())).items;
         let item = items[0].as_document().unwrap();
         assert_eq!(item.get_str("Attribute").unwrap(), "Sales.Order.Number");
         assert_eq!(item.get_str("Value").unwrap(), "'A-1'");
@@ -317,11 +413,16 @@ mod tests {
     fn decision_with_empty_else_branch_connects_split_directly_to_merge() {
         let activities = vec![Activity::Decision {
             condition: "$order/Total > 0".into(),
-            true_branch: vec![Activity::Commit { variable: "order".into() }],
+            true_branch: vec![Activity::Commit {
+                variable: "order".into(),
+            }],
             false_branch: vec![],
         }];
         let (objects, flows) = build_microflow_graph(&activities, None);
-        let types: Vec<&str> = objects.iter().map(|o| o.get_str("$Type").unwrap()).collect();
+        let types: Vec<&str> = objects
+            .iter()
+            .map(|o| o.get_str("$Type").unwrap())
+            .collect();
         assert!(types.contains(&"Microflows$ExclusiveSplit"));
         assert!(types.contains(&"Microflows$ExclusiveMerge"));
         // false branch has no activity, so its flow goes straight from the

@@ -35,7 +35,9 @@ pub struct Microflow {
 impl Microflow {
     pub fn from_bson(doc: &Document) -> Self {
         let return_doc = get_doc_any(doc, &["MicroflowReturnType", "ReturnType"]);
-        let return_type = return_doc.as_ref().and_then(|r| get_str_any(r, &["$Type", "Type"]));
+        let return_type = return_doc
+            .as_ref()
+            .and_then(|r| get_str_any(r, &["$Type", "Type"]));
 
         let obj_col = get_doc_any(doc, &["ObjectCollection"]).unwrap_or_default();
         let objects = docs_any(&obj_col, &["Objects", "objects"]);
@@ -51,9 +53,12 @@ impl Microflow {
         Microflow {
             id: get_id_any(doc, &["$ID"]),
             name: get_str_any(doc, &["Name", "name"]),
-            documentation: get_str_any(doc, &["Documentation", "documentation"]).unwrap_or_default(),
-            return_variable_name: get_str_any(doc, &["ReturnVariableName"]).unwrap_or_else(|| "ReturnValue".into()),
-            allow_concurrent_execution: get_bool_any(doc, &["AllowConcurrentExecution"]).unwrap_or(true),
+            documentation: get_str_any(doc, &["Documentation", "documentation"])
+                .unwrap_or_default(),
+            return_variable_name: get_str_any(doc, &["ReturnVariableName"])
+                .unwrap_or_else(|| "ReturnValue".into()),
+            allow_concurrent_execution: get_bool_any(doc, &["AllowConcurrentExecution"])
+                .unwrap_or(true),
             apply_entity_access: get_bool_any(doc, &["ApplyEntityAccess"]).unwrap_or(false),
             mark_as_used: get_bool_any(doc, &["MarkAsUsed"]).unwrap_or(false),
             excluded: get_bool_any(doc, &["Excluded"]).unwrap_or(false),
@@ -68,7 +73,10 @@ impl Microflow {
     }
 
     pub fn to_bson(&self) -> Document {
-        let id = self.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = self
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         mxrs_bson::doc! {
             "$ID": id,
             "$Type": "Microflows$Microflow",

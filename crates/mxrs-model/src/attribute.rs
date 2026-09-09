@@ -85,8 +85,8 @@ impl Attribute {
         let (attribute_type, length, localize_date, enumeration) = match &type_doc {
             Some(t) => {
                 let storage_type = get_str_any(t, &["$Type"]).unwrap_or_default();
-                let attribute_type =
-                    AttributeType::from_storage_type(&storage_type).unwrap_or(AttributeType::String);
+                let attribute_type = AttributeType::from_storage_type(&storage_type)
+                    .unwrap_or(AttributeType::String);
                 let length = get_i32_any(t, &["length", "Length"]);
                 let localize_date = get_bool_any(t, &["localizeDate", "LocalizeDate"]);
                 let enumeration = get_str_any(t, &["enumeration", "Enumeration"])
@@ -104,11 +104,13 @@ impl Attribute {
         Attribute {
             id: get_id_any(doc, &["$ID"]),
             name: get_str_any(doc, &["name", "Name"]),
-            documentation: get_str_any(doc, &["documentation", "Documentation"]).unwrap_or_default(),
+            documentation: get_str_any(doc, &["documentation", "Documentation"])
+                .unwrap_or_default(),
             attribute_type,
             default_value,
             data_storage_guid: get_id_any(doc, &["dataStorageGuid", "DataStorageGuid"]),
-            export_level: get_str_any(doc, &["exportLevel", "ExportLevel"]).unwrap_or_else(|| "Hidden".into()),
+            export_level: get_str_any(doc, &["exportLevel", "ExportLevel"])
+                .unwrap_or_else(|| "Hidden".into()),
             raw_type_doc: type_doc,
             raw_value_doc,
             length,
@@ -120,7 +122,10 @@ impl Attribute {
     }
 
     pub fn to_bson(&self) -> Document {
-        let id = self.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = self
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let storage_type = self.attribute_type.storage_type();
         let mut type_doc = doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": storage_type };
         if matches!(self.attribute_type, AttributeType::String) {
@@ -153,9 +158,14 @@ impl Attribute {
 /// name-indexed attribute list.
 pub fn apply_validation_rules(attributes: &mut [Attribute], rules: &[Document]) {
     for rule in rules {
-        let Some(attr_ref) = get_str_any(rule, &["Attribute"]) else { continue };
+        let Some(attr_ref) = get_str_any(rule, &["Attribute"]) else {
+            continue;
+        };
         let short_name = attr_ref.rsplit('.').next().unwrap_or(&attr_ref);
-        let Some(attribute) = attributes.iter_mut().find(|a| a.name.as_deref() == Some(short_name)) else {
+        let Some(attribute) = attributes
+            .iter_mut()
+            .find(|a| a.name.as_deref() == Some(short_name))
+        else {
             continue;
         };
         let kind = get_doc_any(rule, &["RuleInfo"])

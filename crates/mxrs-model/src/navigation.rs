@@ -65,10 +65,15 @@ impl NavigationProfile {
             app_icon: get_doc_any(doc, &["AppIcon"]),
             app_title: text_translations(get_doc_any(doc, &["AppTitle"]).as_ref()),
             home_page: get_doc_any(doc, &["HomePage"]).and_then(|h| reference(&h, &["Page"])),
-            home_microflow: get_doc_any(doc, &["HomePage"]).and_then(|h| reference(&h, &["Microflow"])),
-            sign_in_page: get_doc_any(doc, &["LoginPageSettings"]).and_then(|s| reference(&s, &["Form"])),
+            home_microflow: get_doc_any(doc, &["HomePage"])
+                .and_then(|h| reference(&h, &["Microflow"])),
+            sign_in_page: get_doc_any(doc, &["LoginPageSettings"])
+                .and_then(|s| reference(&s, &["Form"])),
             role_homes,
-            menu_items: docs_any(&menu, &["Items"]).iter().map(navigation_item).collect(),
+            menu_items: docs_any(&menu, &["Items"])
+                .iter()
+                .map(navigation_item)
+                .collect(),
         }
     }
 }
@@ -80,10 +85,18 @@ pub struct Navigation {
 
 impl Navigation {
     pub fn from_bson(raw_document: Option<&Document>) -> Self {
-        let Some(raw) = raw_document else { return Navigation::default() };
+        let Some(raw) = raw_document else {
+            return Navigation::default();
+        };
         let modern = docs_any(raw, &["Profiles"]);
-        let documents = if modern.is_empty() { legacy_profile_documents(raw) } else { modern };
-        Navigation { profiles: documents.iter().map(NavigationProfile::from_bson).collect() }
+        let documents = if modern.is_empty() {
+            legacy_profile_documents(raw)
+        } else {
+            modern
+        };
+        Navigation {
+            profiles: documents.iter().map(NavigationProfile::from_bson).collect(),
+        }
     }
 
     pub fn empty(&self) -> bool {
@@ -114,7 +127,9 @@ fn reference(doc: &Document, keys: &[&str]) -> Option<String> {
 }
 
 fn text_translations(text: Option<&Document>) -> std::collections::BTreeMap<String, String> {
-    let Some(text) = text else { return Default::default() };
+    let Some(text) = text else {
+        return Default::default();
+    };
     docs_any(text, &["Translations", "Items"])
         .iter()
         .filter_map(|t| {
@@ -134,9 +149,13 @@ fn navigation_item(doc: &Document) -> NavigationItem {
     NavigationItem {
         caption: text_translations(get_doc_any(doc, &["Caption"]).as_ref()),
         page: get_doc_any(&action, &["FormSettings"]).and_then(|s| reference(&s, &["Form"])),
-        microflow: get_doc_any(&action, &["MicroflowSettings"]).and_then(|s| reference(&s, &["Microflow"])),
+        microflow: get_doc_any(&action, &["MicroflowSettings"])
+            .and_then(|s| reference(&s, &["Microflow"])),
         icon: get_doc_any(doc, &["Icon"]).and_then(|i| get_str_any(&i, &["Code"])),
-        items: docs_any(doc, &["Items"]).iter().map(navigation_item).collect(),
+        items: docs_any(doc, &["Items"])
+            .iter()
+            .map(navigation_item)
+            .collect(),
     }
 }
 

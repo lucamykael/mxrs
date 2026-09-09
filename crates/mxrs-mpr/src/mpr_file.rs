@@ -181,19 +181,19 @@ impl MprFile {
     // ── Metadata ─────────────────────────────────────────────────────────
 
     pub fn mendix_version(&self) -> Result<Option<String>> {
-        if let Ok(v) = self
-            .conn
-            .query_row("SELECT _ProductVersion FROM _MetaData LIMIT 1", [], |row| {
-                row.get::<_, Option<String>>(0)
-            })
+        if let Ok(v) =
+            self.conn
+                .query_row("SELECT _ProductVersion FROM _MetaData LIMIT 1", [], |row| {
+                    row.get::<_, Option<String>>(0)
+                })
         {
             return Ok(v);
         }
-        if let Ok(v) = self
-            .conn
-            .query_row("SELECT MendixVersion FROM _MetaData LIMIT 1", [], |row| {
-                row.get::<_, Option<String>>(0)
-            })
+        if let Ok(v) =
+            self.conn
+                .query_row("SELECT MendixVersion FROM _MetaData LIMIT 1", [], |row| {
+                    row.get::<_, Option<String>>(0)
+                })
         {
             return Ok(v);
         }
@@ -244,7 +244,10 @@ impl MprFile {
 
     pub fn unit(&self, uuid: &str) -> Result<Option<RawUnit>> {
         let blob = mxrs_bson::uuid_to_blob(uuid)?.to_vec();
-        let sql = format!("SELECT {} FROM Unit WHERE UnitID = ?1", self.unit_select_columns()?);
+        let sql = format!(
+            "SELECT {} FROM Unit WHERE UnitID = ?1",
+            self.unit_select_columns()?
+        );
         self.query_optional_unit(&sql, rusqlite::params![blob])
     }
 
@@ -340,7 +343,13 @@ impl MprFile {
         let has_contents = format::contents_column(&self.conn)?;
         let conflicts = conflicts_column(&self.conn)?;
 
-        let mut columns: Vec<&str> = vec!["UnitID", "ContainerID", "ContainmentName", "TreeConflict", "ContentsHash"];
+        let mut columns: Vec<&str> = vec![
+            "UnitID",
+            "ContainerID",
+            "ContainmentName",
+            "TreeConflict",
+            "ContentsHash",
+        ];
         let mut values: Vec<SqlValue> = vec![
             SqlValue::Blob(unit_blob),
             SqlValue::Blob(parent_blob),
@@ -367,7 +376,8 @@ impl MprFile {
             columns.join(", "),
             placeholders.join(", ")
         );
-        self.conn.execute(&sql, rusqlite::params_from_iter(values.iter()))?;
+        self.conn
+            .execute(&sql, rusqlite::params_from_iter(values.iter()))?;
 
         if self.format == StorageFormat::V2 {
             self.write_v2_unit(&uuid, &bson_bytes)?;
@@ -424,7 +434,10 @@ impl MprFile {
             return Err(MprError::ReadOnly);
         }
         let blob = mxrs_bson::uuid_to_blob(uuid)?.to_vec();
-        self.conn.execute("DELETE FROM Unit WHERE UnitID = ?1", rusqlite::params![blob])?;
+        self.conn.execute(
+            "DELETE FROM Unit WHERE UnitID = ?1",
+            rusqlite::params![blob],
+        )?;
         let removed = if self.format == StorageFormat::V2 {
             self.delete_v2_unit(uuid)?
         } else {
@@ -434,7 +447,12 @@ impl MprFile {
         Ok(removed)
     }
 
-    pub fn relocate_unit(&mut self, uuid: &str, container_uuid: &str, containment_name: &str) -> Result<()> {
+    pub fn relocate_unit(
+        &mut self,
+        uuid: &str,
+        container_uuid: &str,
+        containment_name: &str,
+    ) -> Result<()> {
         if self.readonly {
             return Err(MprError::ReadOnly);
         }
@@ -547,11 +565,15 @@ impl MprFile {
         let backup = journal_dir.join("original").join(&relative);
         let existed = path.is_file();
 
-        self.v2_transaction.as_mut().unwrap().applied.push(crate::transaction::AppliedEntry {
-            path: path.clone(),
-            backup: backup.clone(),
-            existed,
-        });
+        self.v2_transaction
+            .as_mut()
+            .unwrap()
+            .applied
+            .push(crate::transaction::AppliedEntry {
+                path: path.clone(),
+                backup: backup.clone(),
+                existed,
+            });
 
         if existed {
             if let Some(parent) = backup.parent() {
@@ -560,7 +582,13 @@ impl MprFile {
             std::fs::rename(&path, &backup)?;
         }
 
-        let bytes = self.v2_transaction.as_ref().unwrap().writes.get(uuid).cloned();
+        let bytes = self
+            .v2_transaction
+            .as_ref()
+            .unwrap()
+            .writes
+            .get(uuid)
+            .cloned();
         if let Some(bytes) = bytes {
             mxunit::write_atomic(&path, &bytes)?;
         }
@@ -568,7 +596,9 @@ impl MprFile {
     }
 
     fn rollback_v2_transaction(&mut self) {
-        let Some(state) = &self.v2_transaction else { return };
+        let Some(state) = &self.v2_transaction else {
+            return;
+        };
         for entry in state.applied.iter().rev() {
             let _ = std::fs::remove_file(&entry.path);
             if entry.existed && entry.backup.is_file() {
@@ -581,7 +611,11 @@ impl MprFile {
     }
 
     fn cleanup_v2_transaction(&mut self) {
-        if let Some(dir) = self.v2_transaction.as_ref().and_then(|s| s.journal_dir.clone()) {
+        if let Some(dir) = self
+            .v2_transaction
+            .as_ref()
+            .and_then(|s| s.journal_dir.clone())
+        {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
@@ -634,10 +668,13 @@ impl MprFile {
     }
 
     fn register_v2_transaction_marker(&mut self, id: &str) -> Result<()> {
-        self.conn
-            .execute_batch("CREATE TABLE IF NOT EXISTS _MxrbFileTransaction (ID TEXT PRIMARY KEY NOT NULL)")?;
-        self.conn
-            .execute("INSERT INTO _MxrbFileTransaction (ID) VALUES (?1)", rusqlite::params![id])?;
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _MxrbFileTransaction (ID TEXT PRIMARY KEY NOT NULL)",
+        )?;
+        self.conn.execute(
+            "INSERT INTO _MxrbFileTransaction (ID) VALUES (?1)",
+            rusqlite::params![id],
+        )?;
         Ok(())
     }
 
@@ -652,12 +689,15 @@ impl MprFile {
         if !has_table {
             return;
         }
-        let _ = self
-            .conn
-            .execute("DELETE FROM _MxrbFileTransaction WHERE ID = ?1", rusqlite::params![id]);
+        let _ = self.conn.execute(
+            "DELETE FROM _MxrbFileTransaction WHERE ID = ?1",
+            rusqlite::params![id],
+        );
         let count: i64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM _MxrbFileTransaction", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM _MxrbFileTransaction", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(1);
         if count == 0 {
             let _ = self.conn.execute_batch("DROP TABLE _MxrbFileTransaction");
@@ -683,7 +723,11 @@ impl MprFile {
 
     fn backup_inner(&mut self, dest_path: &Path) -> Result<()> {
         let dest_str = dest_path.to_string_lossy().into_owned();
-        if self.conn.execute("VACUUM INTO ?1", rusqlite::params![dest_str]).is_err() {
+        if self
+            .conn
+            .execute("VACUUM INTO ?1", rusqlite::params![dest_str])
+            .is_err()
+        {
             let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(FULL)");
             std::fs::copy(&self.path, dest_path)?;
         }
@@ -722,8 +766,9 @@ impl MprFile {
 
         std::fs::copy(backup_path, &self.path)?;
         let flags = OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_READ_WRITE;
-        self.conn = Connection::open_with_flags(&self.path, flags)
-            .map_err(|e| MprError::NotSqlite(format!("cannot open {}: {e}", self.path.display())))?;
+        self.conn = Connection::open_with_flags(&self.path, flags).map_err(|e| {
+            MprError::NotSqlite(format!("cannot open {}: {e}", self.path.display()))
+        })?;
 
         if needs_snapshot {
             std::fs::create_dir_all(self.contents_dir())?;
@@ -755,7 +800,9 @@ impl MprFile {
             |r| r.get(0),
         )?;
         if unit_table_count == 0 {
-            return Err(MprError::MissingUnitTable(backup_path.display().to_string()));
+            return Err(MprError::MissingUnitTable(
+                backup_path.display().to_string(),
+            ));
         }
 
         let has_contents_column = format::contents_column(&backup_conn)?;
@@ -784,8 +831,10 @@ impl MprFile {
 
         let mut live_files = Vec::new();
         Self::walk_mxunit(&dir, &mut live_files)?;
-        let live_relative: Vec<PathBuf> =
-            live_files.iter().map(|p| p.strip_prefix(&dir).unwrap().to_path_buf()).collect();
+        let live_relative: Vec<PathBuf> = live_files
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().to_path_buf())
+            .collect();
 
         for relative in &snapshot_relative {
             let destination = dir.join(relative);
@@ -814,7 +863,9 @@ impl MprFile {
         } else {
             "NULL AS Contents"
         };
-        Ok(format!("UnitID, ContainerID, ContainmentName, ContentsHash, {contents}"))
+        Ok(format!(
+            "UnitID, ContainerID, ContainmentName, ContentsHash, {contents}"
+        ))
     }
 
     fn query_units<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<Vec<RawUnit>> {
@@ -827,7 +878,11 @@ impl MprFile {
         Ok(result)
     }
 
-    fn query_optional_unit<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<Option<RawUnit>> {
+    fn query_optional_unit<P: rusqlite::Params>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> Result<Option<RawUnit>> {
         let mut stmt = self.conn.prepare(sql)?;
         let mut rows = stmt.query_map(params, row_to_raw_unit)?;
         rows.next().transpose().map_err(MprError::from)
@@ -895,7 +950,8 @@ impl MprFile {
         }
 
         let manifest_bytes = std::fs::read(self.transaction_manifest_path())?;
-        let manifest: crate::transaction::TransactionManifest = serde_json::from_slice(&manifest_bytes)?;
+        let manifest: crate::transaction::TransactionManifest =
+            serde_json::from_slice(&manifest_bytes)?;
 
         let has_marker_table = self.tables()?.iter().any(|t| t == "_MxrbFileTransaction");
         let committed = has_marker_table
@@ -916,7 +972,10 @@ impl MprFile {
         Ok(())
     }
 
-    fn restore_interrupted_v2_files(&self, entries: &[crate::transaction::ManifestEntry]) -> Result<()> {
+    fn restore_interrupted_v2_files(
+        &self,
+        entries: &[crate::transaction::ManifestEntry],
+    ) -> Result<()> {
         let dir = self.contents_dir();
         let journal_dir = self.transaction_journal_dir();
         for entry in entries.iter().rev() {
@@ -949,7 +1008,11 @@ impl MprFile {
             .execute_batch("CREATE TABLE IF NOT EXISTS _Transaction (LastTransactionID TEXT)")?;
         let existing: Option<String> = self
             .conn
-            .query_row("SELECT LastTransactionID FROM _Transaction LIMIT 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT LastTransactionID FROM _Transaction LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
             .ok()
             .flatten();
         if existing.as_deref().unwrap_or("").is_empty() {
@@ -964,7 +1027,11 @@ impl MprFile {
     fn write_mpr_name(&self) -> Result<()> {
         let dir = self.contents_dir();
         let target = dir.join("mprname");
-        let expected = self.path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let expected = self
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if target.is_file() && std::fs::read(&target).ok().as_deref() == Some(expected.as_bytes()) {
             return Ok(());
         }
@@ -1076,15 +1143,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("not-a-db.mpr");
         std::fs::write(&path, b"not a sqlite file").unwrap();
-        assert!(matches!(MprFile::open(&path, false), Err(MprError::NotSqlite(_))));
+        assert!(matches!(
+            MprFile::open(&path, false),
+            Err(MprError::NotSqlite(_))
+        ));
     }
 
     #[test]
     fn rejects_sqlite_files_without_a_unit_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.mpr");
-        Connection::open(&path).unwrap().execute_batch("CREATE TABLE Other (x)").unwrap();
-        assert!(matches!(MprFile::open(&path, false), Err(MprError::MissingUnitTable(_))));
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE Other (x)")
+            .unwrap();
+        assert!(matches!(
+            MprFile::open(&path, false),
+            Err(MprError::MissingUnitTable(_))
+        ));
     }
 
     #[test]
@@ -1099,7 +1175,10 @@ mod tests {
             )
             .unwrap();
         // No mprcontents/ directory created.
-        assert!(matches!(MprFile::open(&mpr_path, false), Err(MprError::IncompletePackage(_))));
+        assert!(matches!(
+            MprFile::open(&mpr_path, false),
+            Err(MprError::IncompletePackage(_))
+        ));
     }
 
     fn root_doc(uuid: &str) -> mxrs_bson::Document {
@@ -1131,14 +1210,22 @@ mod tests {
 
         let root_uuid = uuid::Uuid::new_v4().to_string();
         let inserted = mpr
-            .insert_unit(&root_uuid, "Documents", root_doc(&root_uuid), Some(&root_uuid))
+            .insert_unit(
+                &root_uuid,
+                "Documents",
+                root_doc(&root_uuid),
+                Some(&root_uuid),
+            )
             .unwrap();
         assert_eq!(inserted, root_uuid);
 
         let root = mpr.root_unit().unwrap().unwrap();
         assert_eq!(root.unit_id, root_uuid);
         assert_eq!(root.container_id, root_uuid);
-        assert_eq!(mpr.parse_contents(&root).unwrap().get_str("Name").unwrap(), "Test");
+        assert_eq!(
+            mpr.parse_contents(&root).unwrap().get_str("Name").unwrap(),
+            "Test"
+        );
         assert_eq!(mpr.write_stats().inserted, 1);
     }
 
@@ -1148,11 +1235,21 @@ mod tests {
         let path = create_v2_fixture(dir.path());
         let mut mpr = MprFile::open(&path, false).unwrap();
         let root_uuid = uuid::Uuid::new_v4().to_string();
-        mpr.insert_unit(&root_uuid, "Documents", root_doc(&root_uuid), Some(&root_uuid))
-            .unwrap();
+        mpr.insert_unit(
+            &root_uuid,
+            "Documents",
+            root_doc(&root_uuid),
+            Some(&root_uuid),
+        )
+        .unwrap();
 
         let uuid = mpr
-            .insert_unit(&root_uuid, "Documents", mxrs_bson::doc! { "$Type": "X", "Name": "child" }, None)
+            .insert_unit(
+                &root_uuid,
+                "Documents",
+                mxrs_bson::doc! { "$Type": "X", "Name": "child" },
+                None,
+            )
             .unwrap();
         let unit = mpr.unit(&uuid).unwrap().unwrap();
         let doc = mpr.parse_contents(&unit).unwrap();
@@ -1169,10 +1266,20 @@ mod tests {
         let path = create_v2_fixture(dir.path());
         let mut mpr = MprFile::open(&path, false).unwrap();
         let root_uuid = uuid::Uuid::new_v4().to_string();
-        mpr.insert_unit(&root_uuid, "Documents", root_doc(&root_uuid), Some(&root_uuid))
-            .unwrap();
+        mpr.insert_unit(
+            &root_uuid,
+            "Documents",
+            root_doc(&root_uuid),
+            Some(&root_uuid),
+        )
+        .unwrap();
         let child_uuid = mpr
-            .insert_unit(&root_uuid, "Modules", mxrs_bson::doc! { "$Type": "Projects$Module", "Name": "Sales" }, None)
+            .insert_unit(
+                &root_uuid,
+                "Modules",
+                mxrs_bson::doc! { "$Type": "Projects$Module", "Name": "Sales" },
+                None,
+            )
             .unwrap();
 
         let children = mpr.children_of(&root_uuid).unwrap();
@@ -1192,17 +1299,29 @@ mod tests {
         let path = create_v2_fixture(dir.path());
         let mut mpr = MprFile::open(&path, false).unwrap();
         let uuid = mpr
-            .insert_unit(&uuid::Uuid::new_v4().to_string(), "Documents", mxrs_bson::doc! { "Name": "A" }, None)
+            .insert_unit(
+                &uuid::Uuid::new_v4().to_string(),
+                "Documents",
+                mxrs_bson::doc! { "Name": "A" },
+                None,
+            )
             .unwrap();
 
-        let changed = mpr.update_unit(&uuid, mxrs_bson::doc! { "$ID": uuid.clone(), "Name": "A" }).unwrap();
+        let changed = mpr
+            .update_unit(&uuid, mxrs_bson::doc! { "$ID": uuid.clone(), "Name": "A" })
+            .unwrap();
         assert!(!changed);
         assert_eq!(mpr.write_stats().skipped, 1);
 
-        let changed = mpr.update_unit(&uuid, mxrs_bson::doc! { "$ID": uuid.clone(), "Name": "B" }).unwrap();
+        let changed = mpr
+            .update_unit(&uuid, mxrs_bson::doc! { "$ID": uuid.clone(), "Name": "B" })
+            .unwrap();
         assert!(changed);
         let unit = mpr.unit(&uuid).unwrap().unwrap();
-        assert_eq!(mpr.parse_contents(&unit).unwrap().get_str("Name").unwrap(), "B");
+        assert_eq!(
+            mpr.parse_contents(&unit).unwrap().get_str("Name").unwrap(),
+            "B"
+        );
     }
 
     #[test]
@@ -1211,9 +1330,18 @@ mod tests {
         let path = create_v2_fixture(dir.path());
         let mut mpr = MprFile::open(&path, false).unwrap();
         let uuid = mpr
-            .insert_unit(&uuid::Uuid::new_v4().to_string(), "Documents", mxrs_bson::doc! { "Name": "A" }, None)
+            .insert_unit(
+                &uuid::Uuid::new_v4().to_string(),
+                "Documents",
+                mxrs_bson::doc! { "Name": "A" },
+                None,
+            )
             .unwrap();
-        let content_path = mpr.unit(&uuid).unwrap().map(|u| mpr.content_path(&u).unwrap()).unwrap();
+        let content_path = mpr
+            .unit(&uuid)
+            .unwrap()
+            .map(|u| mpr.content_path(&u).unwrap())
+            .unwrap();
         assert!(content_path.is_file());
 
         let removed = mpr.delete_unit(&uuid).unwrap();
@@ -1245,12 +1373,22 @@ mod tests {
         let path = create_v2_fixture(dir.path());
         MprFile::open(&path, false)
             .unwrap()
-            .insert_unit(&uuid::Uuid::new_v4().to_string(), "Documents", mxrs_bson::doc! { "Name": "A" }, None)
+            .insert_unit(
+                &uuid::Uuid::new_v4().to_string(),
+                "Documents",
+                mxrs_bson::doc! { "Name": "A" },
+                None,
+            )
             .unwrap();
 
         let mut mpr = MprFile::open(&path, true).unwrap();
         assert!(mpr.readonly());
-        let result = mpr.insert_unit(&uuid::Uuid::new_v4().to_string(), "Documents", mxrs_bson::doc! {}, None);
+        let result = mpr.insert_unit(
+            &uuid::Uuid::new_v4().to_string(),
+            "Documents",
+            mxrs_bson::doc! {},
+            None,
+        );
         assert!(matches!(result, Err(MprError::ReadOnly)));
     }
 
@@ -1294,7 +1432,11 @@ mod tests {
 
         assert_eq!(mpr.all_units().unwrap().len(), 2);
         assert!(!mpr.transaction_journal_dir().exists());
-        assert!(!mpr.tables().unwrap().iter().any(|t| t == "_MxrbFileTransaction"));
+        assert!(!mpr
+            .tables()
+            .unwrap()
+            .iter()
+            .any(|t| t == "_MxrbFileTransaction"));
     }
 
     #[test]
@@ -1335,21 +1477,33 @@ mod tests {
         let path = create_v2_fixture(dir.path());
         let mut mpr = MprFile::open(&path, false).unwrap();
         let uuid = mpr
-            .insert_unit(&uuid::Uuid::new_v4().to_string(), "Documents", mxrs_bson::doc! { "Name": "A" }, None)
+            .insert_unit(
+                &uuid::Uuid::new_v4().to_string(),
+                "Documents",
+                mxrs_bson::doc! { "Name": "A" },
+                None,
+            )
             .unwrap();
 
         let backup_path = dir.path().join("Test.mpr.bak");
         mpr.backup(&backup_path).unwrap();
 
-        mpr.update_unit(&uuid, mxrs_bson::doc! { "$ID": uuid.clone(), "Name": "B" }).unwrap();
+        mpr.update_unit(&uuid, mxrs_bson::doc! { "$ID": uuid.clone(), "Name": "B" })
+            .unwrap();
         assert_eq!(
-            mpr.parse_contents(&mpr.unit(&uuid).unwrap().unwrap()).unwrap().get_str("Name").unwrap(),
+            mpr.parse_contents(&mpr.unit(&uuid).unwrap().unwrap())
+                .unwrap()
+                .get_str("Name")
+                .unwrap(),
             "B"
         );
 
         mpr.restore_from(&backup_path).unwrap();
         assert_eq!(
-            mpr.parse_contents(&mpr.unit(&uuid).unwrap().unwrap()).unwrap().get_str("Name").unwrap(),
+            mpr.parse_contents(&mpr.unit(&uuid).unwrap().unwrap())
+                .unwrap()
+                .get_str("Name")
+                .unwrap(),
             "A"
         );
 
@@ -1369,16 +1523,33 @@ mod tests {
         let (uuid, original_bytes) = {
             let mut mpr = MprFile::open(&path, false).unwrap();
             let uuid = mpr
-                .insert_unit(&uuid::Uuid::new_v4().to_string(), "Documents", mxrs_bson::doc! { "Name": "A" }, None)
+                .insert_unit(
+                    &uuid::Uuid::new_v4().to_string(),
+                    "Documents",
+                    mxrs_bson::doc! { "Name": "A" },
+                    None,
+                )
                 .unwrap();
-            let bytes = std::fs::read(mpr.content_path(&mpr.unit(&uuid).unwrap().unwrap()).unwrap()).unwrap();
+            let bytes = std::fs::read(
+                mpr.content_path(&mpr.unit(&uuid).unwrap().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
             (uuid, bytes)
         };
 
-        simulate_interrupted_v2_transaction(&path, &uuid, &original_bytes, b"new-but-uncommitted", false);
+        simulate_interrupted_v2_transaction(
+            &path,
+            &uuid,
+            &original_bytes,
+            b"new-but-uncommitted",
+            false,
+        );
 
         let mpr = MprFile::open(&path, false).unwrap();
-        let live_path = mpr.content_path(&mpr.unit(&uuid).unwrap().unwrap()).unwrap();
+        let live_path = mpr
+            .content_path(&mpr.unit(&uuid).unwrap().unwrap())
+            .unwrap();
         assert_eq!(std::fs::read(live_path).unwrap(), original_bytes);
         assert!(!mpr.transaction_journal_dir().exists());
     }
@@ -1393,19 +1564,40 @@ mod tests {
         let (uuid, original_bytes) = {
             let mut mpr = MprFile::open(&path, false).unwrap();
             let uuid = mpr
-                .insert_unit(&uuid::Uuid::new_v4().to_string(), "Documents", mxrs_bson::doc! { "Name": "A" }, None)
+                .insert_unit(
+                    &uuid::Uuid::new_v4().to_string(),
+                    "Documents",
+                    mxrs_bson::doc! { "Name": "A" },
+                    None,
+                )
                 .unwrap();
-            let bytes = std::fs::read(mpr.content_path(&mpr.unit(&uuid).unwrap().unwrap()).unwrap()).unwrap();
+            let bytes = std::fs::read(
+                mpr.content_path(&mpr.unit(&uuid).unwrap().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
             (uuid, bytes)
         };
 
-        simulate_interrupted_v2_transaction(&path, &uuid, &original_bytes, b"new-and-committed", true);
+        simulate_interrupted_v2_transaction(
+            &path,
+            &uuid,
+            &original_bytes,
+            b"new-and-committed",
+            true,
+        );
 
         let mpr = MprFile::open(&path, false).unwrap();
-        let live_path = mpr.content_path(&mpr.unit(&uuid).unwrap().unwrap()).unwrap();
+        let live_path = mpr
+            .content_path(&mpr.unit(&uuid).unwrap().unwrap())
+            .unwrap();
         assert_eq!(std::fs::read(live_path).unwrap(), b"new-and-committed");
         assert!(!mpr.transaction_journal_dir().exists());
-        assert!(!mpr.tables().unwrap().iter().any(|t| t == "_MxrbFileTransaction"));
+        assert!(!mpr
+            .tables()
+            .unwrap()
+            .iter()
+            .any(|t| t == "_MxrbFileTransaction"));
     }
 
     /// Hand-builds the on-disk state a crash would leave behind, bypassing
@@ -1444,14 +1636,23 @@ mod tests {
                 action: crate::transaction::ManifestAction::Write,
             }],
         };
-        std::fs::write(journal_dir.join("journal.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        std::fs::write(
+            journal_dir.join("journal.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
 
         if committed {
             let conn = Connection::open(mpr_path).unwrap();
-            conn.execute_batch("CREATE TABLE IF NOT EXISTS _MxrbFileTransaction (ID TEXT PRIMARY KEY NOT NULL)")
-                .unwrap();
-            conn.execute("INSERT INTO _MxrbFileTransaction (ID) VALUES (?1)", rusqlite::params![id])
-                .unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _MxrbFileTransaction (ID TEXT PRIMARY KEY NOT NULL)",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO _MxrbFileTransaction (ID) VALUES (?1)",
+                rusqlite::params![id],
+            )
+            .unwrap();
         }
     }
 }

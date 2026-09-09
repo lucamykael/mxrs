@@ -17,5 +17,6 @@ fn main() {
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo during a build.rs run");
     let out_path = std::path::Path::new(&out_dir).join("mxrs_markers.rs");
-    mxrs_typegen::generate_from_path(manifest_path, &out_path).expect("tests/fixtures/manifest.json should generate valid marker source");
+    mxrs_typegen::generate_from_path(manifest_path, &out_path)
+        .expect("tests/fixtures/manifest.json should generate valid marker source");
 }

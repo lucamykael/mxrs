@@ -70,9 +70,19 @@ pub fn build_domain_model(
     let mut associations = Vec::new();
     let mut cross_associations = Vec::new();
     for decl in decls {
-        let from_id = entity_ids.get(&decl.name).expect("just inserted above").clone();
+        let from_id = entity_ids
+            .get(&decl.name)
+            .expect("just inserted above")
+            .clone();
         for assoc in &decl.associations {
-            let built = resolve_association(assoc, module_name, &from_id, &entity_ids, known_entities, None)?;
+            let built = resolve_association(
+                assoc,
+                module_name,
+                &from_id,
+                &entity_ids,
+                known_entities,
+                None,
+            )?;
             if built.is_cross_module() {
                 cross_associations.push(built);
             } else {
@@ -81,7 +91,15 @@ pub fn build_domain_model(
         }
     }
 
-    Ok((DomainModel { documentation: String::new(), entities, associations, cross_associations }, entity_ids))
+    Ok((
+        DomainModel {
+            documentation: String::new(),
+            entities,
+            associations,
+            cross_associations,
+        },
+        entity_ids,
+    ))
 }
 
 /// Re-syncs the association graph of an *existing* domain model against a
@@ -128,13 +146,21 @@ pub fn synchronize_domain_associations(
         _ => HashMap::new(),
     };
 
-    let missing: Vec<String> =
-        entities.iter().map(|e| e.name.clone()).filter(|name| !entity_ids.contains_key(name)).collect();
+    let missing: Vec<String> = entities
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|name| !entity_ids.contains_key(name))
+        .collect();
     if !missing.is_empty() {
-        return Err(WriterError::EntitiesMissingFromDomainModel { module_name: module_name.to_string(), missing });
+        return Err(WriterError::EntitiesMissingFromDomainModel {
+            module_name: module_name.to_string(),
+            missing,
+        });
     }
-    let owned_ids: HashSet<&str> =
-        entities.iter().filter_map(|e| entity_ids.get(&e.name).map(String::as_str)).collect();
+    let owned_ids: HashSet<&str> = entities
+        .iter()
+        .filter_map(|e| entity_ids.get(&e.name).map(String::as_str))
+        .collect();
 
     let associations_key = native_key(&doc, "associations", "Associations");
     let cross_key = native_key(&doc, "crossAssociations", "CrossAssociations");
@@ -153,18 +179,29 @@ pub fn synchronize_domain_associations(
 
     let is_owned = |item: &Bson| -> bool {
         match item {
-            Bson::Document(d) => {
-                Association::from_bson(d).from_entity_id.is_some_and(|id| owned_ids.contains(id.as_str()))
-            }
+            Bson::Document(d) => Association::from_bson(d)
+                .from_entity_id
+                .is_some_and(|id| owned_ids.contains(id.as_str())),
             _ => false,
         }
     };
-    let mut new_local: Vec<Bson> = local_raw.items.into_iter().filter(|b| !is_owned(b)).collect();
-    let mut new_cross: Vec<Bson> = cross_raw.items.into_iter().filter(|b| !is_owned(b)).collect();
+    let mut new_local: Vec<Bson> = local_raw
+        .items
+        .into_iter()
+        .filter(|b| !is_owned(b))
+        .collect();
+    let mut new_cross: Vec<Bson> = cross_raw
+        .items
+        .into_iter()
+        .filter(|b| !is_owned(b))
+        .collect();
 
     let mut declared_names: HashSet<String> = HashSet::new();
     for entity in entities {
-        let from_id = entity_ids.get(&entity.name).expect("validated present above").clone();
+        let from_id = entity_ids
+            .get(&entity.name)
+            .expect("validated present above")
+            .clone();
         for assoc in &entity.associations {
             if !declared_names.insert(assoc.name.clone()) {
                 return Err(WriterError::DuplicateAssociation {
@@ -174,7 +211,14 @@ pub fn synchronize_domain_associations(
             }
 
             let prior = previous_by_name.get(&assoc.name);
-            let built = resolve_association(assoc, module_name, &from_id, &entity_ids, known_entities, prior)?;
+            let built = resolve_association(
+                assoc,
+                module_name,
+                &from_id,
+                &entity_ids,
+                known_entities,
+                prior,
+            )?;
 
             if built.is_cross_module() {
                 new_cross.push(Bson::Document(built.to_bson()));
@@ -184,8 +228,14 @@ pub fn synchronize_domain_associations(
         }
     }
 
-    doc.insert(associations_key, Bson::Array(mxrs_bson::build_array(new_local, local_raw.marker)));
-    doc.insert(cross_key, Bson::Array(mxrs_bson::build_array(new_cross, cross_raw.marker)));
+    doc.insert(
+        associations_key,
+        Bson::Array(mxrs_bson::build_array(new_local, local_raw.marker)),
+    );
+    doc.insert(
+        cross_key,
+        Bson::Array(mxrs_bson::build_array(new_cross, cross_raw.marker)),
+    );
     mpr.update_unit(&dm_id, doc)?;
     Ok(())
 }
@@ -227,7 +277,10 @@ fn resolve_association(
 ) -> Result<Association> {
     let (target_module, target_name) = association_target(&assoc.target, module_name);
     let to_entity_id = if target_module == module_name {
-        entity_ids.get(&target_name).cloned().ok_or_else(|| WriterError::UnknownAssociationTarget(assoc.target.clone()))?
+        entity_ids
+            .get(&target_name)
+            .cloned()
+            .ok_or_else(|| WriterError::UnknownAssociationTarget(assoc.target.clone()))?
     } else {
         let qualified = format!("{target_module}.{target_name}");
         if !known_entities.contains(&qualified) {
@@ -246,7 +299,9 @@ fn resolve_association(
         owner: assoc.owner,
         storage_format: assoc.storage_format,
         delete_behavior: prior.and_then(|p| p.delete_behavior.clone()),
-        export_level: prior.map(|p| p.export_level.clone()).unwrap_or_else(|| "Hidden".into()),
+        export_level: prior
+            .map(|p| p.export_level.clone())
+            .unwrap_or_else(|| "Hidden".into()),
     })
 }
 
@@ -326,7 +381,12 @@ fn reconcile_attribute_doc(decl: &Attribute, previous: Option<&Document>) -> Doc
     match previous {
         Some(prev) => {
             let prior = Attribute::from_bson(prev);
-            Attribute { id: prior.id, data_storage_guid: prior.data_storage_guid, ..decl.clone() }.to_bson()
+            Attribute {
+                id: prior.id,
+                data_storage_guid: prior.data_storage_guid,
+                ..decl.clone()
+            }
+            .to_bson()
         }
         None => decl.to_bson(),
     }
@@ -342,7 +402,13 @@ fn reconcile_attribute_doc(decl: &Attribute, previous: Option<&Document>) -> Doc
 /// surface to round-trip those fields — see its doc comment). Only `name`,
 /// `documentation`, and the reconciled `attributes` array are overwritten.
 /// Mirrors `Writer#entity_doc`, narrowed the same way `fresh_entity` is.
-fn build_entity_doc(module_name: &str, decl: &EntityDecl, previous: Option<&Document>, id: String, index: usize) -> Document {
+fn build_entity_doc(
+    module_name: &str,
+    decl: &EntityDecl,
+    previous: Option<&Document>,
+    id: String,
+    index: usize,
+) -> Document {
     let Some(prev) = previous else {
         return fresh_entity(module_name, decl, id).to_bson();
     };
@@ -368,11 +434,17 @@ fn build_entity_doc(module_name: &str, decl: &EntityDecl, previous: Option<&Docu
         .attributes
         .iter()
         .map(|a| {
-            let prior = a.name.as_deref().and_then(|name| prev_attrs_by_name.get(name));
+            let prior = a
+                .name
+                .as_deref()
+                .and_then(|name| prev_attrs_by_name.get(name));
             Bson::Document(reconcile_attribute_doc(a, prior))
         })
         .collect();
-    out.insert(attrs_key, Bson::Array(mxrs_bson::build_array(new_attrs, prev_attrs_raw.marker)));
+    out.insert(
+        attrs_key,
+        Bson::Array(mxrs_bson::build_array(new_attrs, prev_attrs_raw.marker)),
+    );
     let _ = index; // reserved: mxrb positions brand-new entities by index; fresh_entity already defaults to (0, 0)
     out
 }
@@ -428,7 +500,10 @@ pub fn synchronize_domain_entities(
     let mut new_items = Vec::with_capacity(entities.len());
     for (index, decl) in entities.iter().enumerate() {
         if !declared_names.insert(decl.name.clone()) {
-            return Err(WriterError::DuplicateEntity { module_name: module_name.to_string(), name: decl.name.clone() });
+            return Err(WriterError::DuplicateEntity {
+                module_name: module_name.to_string(),
+                name: decl.name.clone(),
+            });
         }
 
         let previous = existing_by_name.get(&decl.name);
@@ -437,10 +512,19 @@ pub fn synchronize_domain_entities(
             None => uuid::Uuid::new_v4().to_string(),
         };
         entity_ids.insert(decl.name.clone(), id.clone());
-        new_items.push(Bson::Document(build_entity_doc(module_name, decl, previous, id, index)));
+        new_items.push(Bson::Document(build_entity_doc(
+            module_name,
+            decl,
+            previous,
+            id,
+            index,
+        )));
     }
 
-    doc.insert(entities_key, Bson::Array(mxrs_bson::build_array(new_items, existing_raw.marker)));
+    doc.insert(
+        entities_key,
+        Bson::Array(mxrs_bson::build_array(new_items, existing_raw.marker)),
+    );
     mpr.update_unit(&dm_id, doc)?;
     Ok(entity_ids)
 }

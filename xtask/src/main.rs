@@ -27,8 +27,12 @@ fn main() {
     let command = args.next();
     let result = match command.as_deref() {
         Some("fixture-gen") => {
-            let name = args.next().expect("usage: fixture-gen <name> <dsl_source.rb>");
-            let source = args.next().expect("usage: fixture-gen <name> <dsl_source.rb>");
+            let name = args
+                .next()
+                .expect("usage: fixture-gen <name> <dsl_source.rb>");
+            let source = args
+                .next()
+                .expect("usage: fixture-gen <name> <dsl_source.rb>");
             fixture_gen(&name, Path::new(&source))
         }
         Some("oracle-diff") => {
@@ -36,7 +40,9 @@ fn main() {
             oracle_diff(Path::new(&fixture_dir))
         }
         _ => {
-            eprintln!("usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir>>");
+            eprintln!(
+                "usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir>>"
+            );
             std::process::exit(2);
         }
     };
@@ -61,7 +67,13 @@ fn fixture_gen(name: &str, dsl_source: &Path) -> Result<(), String> {
     fs::create_dir_all(&build_dir).map_err(|e| e.to_string())?;
     let built_mpr = build_dir.join(format!("{name}.mpr"));
 
-    run_bundle(&["exec", "mxrb", "generate", &path_str(&dsl_source), &path_str(&built_mpr)])?;
+    run_bundle(&[
+        "exec",
+        "mxrb",
+        "generate",
+        &path_str(&dsl_source),
+        &path_str(&built_mpr),
+    ])?;
 
     let migrate_script = format!(
         "require 'mxrb'; mpr = Mxrb::IO::MprFile.open('{}', readonly: false); \
@@ -74,7 +86,10 @@ fn fixture_gen(name: &str, dsl_source: &Path) -> Result<(), String> {
     let _ = fs::remove_dir_all(&fixture_dir);
     fs::create_dir_all(&fixture_dir).map_err(|e| e.to_string())?;
     fs::copy(&built_mpr, fixture_dir.join(format!("{name}.mpr"))).map_err(|e| e.to_string())?;
-    copy_dir_recursive(&build_dir.join("mprcontents"), &fixture_dir.join("mprcontents"))?;
+    copy_dir_recursive(
+        &build_dir.join("mprcontents"),
+        &fixture_dir.join("mprcontents"),
+    )?;
     fs::copy(dsl_source, fixture_dir.join("source.rb")).map_err(|e| e.to_string())?;
 
     write_manifest(&fixture_dir)?;
@@ -107,9 +122,18 @@ fn oracle_diff(fixture_dir: &Path) -> Result<(), String> {
     }
 
     let (total, rewritten) = round_trip_all_units(&resaved_mpr)?;
-    println!("[xtask] oracle-diff: {total} unit(s), {rewritten} rewritten (byte-identical: {})", total - rewritten);
+    println!(
+        "[xtask] oracle-diff: {total} unit(s), {rewritten} rewritten (byte-identical: {})",
+        total - rewritten
+    );
 
-    let compare = run_bundle_capture(&["exec", "mxrb", "compare", &path_str(&original_mpr), &path_str(&resaved_mpr)])?;
+    let compare = run_bundle_capture(&[
+        "exec",
+        "mxrb",
+        "compare",
+        &path_str(&original_mpr),
+        &path_str(&resaved_mpr),
+    ])?;
     print!("{}", compare.stdout);
     let _ = fs::remove_dir_all(&work_dir);
 
@@ -137,7 +161,9 @@ fn round_trip_all_units(mpr_path: &Path) -> Result<(usize, usize), String> {
     let mut rewritten = 0;
     for unit in units {
         let doc: Document = mpr.parse_contents(&unit).map_err(|e| e.to_string())?;
-        let changed = mpr.update_unit(&unit.unit_id, doc).map_err(|e| e.to_string())?;
+        let changed = mpr
+            .update_unit(&unit.unit_id, doc)
+            .map_err(|e| e.to_string())?;
         if changed {
             rewritten += 1;
         }
@@ -146,7 +172,11 @@ fn round_trip_all_units(mpr_path: &Path) -> Result<(usize, usize), String> {
 }
 
 fn find_mpr_file(dir: &Path) -> Option<PathBuf> {
-    fs::read_dir(dir).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| p.extension().and_then(|e| e.to_str()) == Some("mpr"))
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("mpr"))
 }
 
 struct BundleOutput {
@@ -157,7 +187,11 @@ struct BundleOutput {
 fn run_bundle(args: &[&str]) -> Result<(), String> {
     let output = run_bundle_capture(args)?;
     if !output.success {
-        return Err(format!("command failed: bundle {}\n{}", args.join(" "), output.stdout));
+        return Err(format!(
+            "command failed: bundle {}\n{}",
+            args.join(" "),
+            output.stdout
+        ));
     }
     Ok(())
 }
@@ -170,7 +204,10 @@ fn run_bundle_capture(args: &[&str]) -> Result<BundleOutput, String> {
         .map_err(|e| format!("failed to spawn bundle: {e}"))?;
     let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    Ok(BundleOutput { success: output.status.success(), stdout: combined })
+    Ok(BundleOutput {
+        success: output.status.success(),
+        stdout: combined,
+    })
 }
 
 fn path_str(path: &Path) -> String {
@@ -188,12 +225,19 @@ fn write_manifest(fixture_dir: &Path) -> Result<(), String> {
 
     let mut manifest = String::new();
     for file in &files {
-        let relative = file.strip_prefix(fixture_dir).unwrap().to_string_lossy().replace('\\', "/");
+        let relative = file
+            .strip_prefix(fixture_dir)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         if relative == "manifest.sha256" {
             continue;
         }
         let bytes = fs::read(file).map_err(|e| e.to_string())?;
-        let digest: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        let digest: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         manifest.push_str(&format!("{digest}  {relative}\n"));
     }
     fs::write(fixture_dir.join("manifest.sha256"), manifest).map_err(|e| e.to_string())

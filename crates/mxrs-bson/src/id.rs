@@ -59,7 +59,10 @@ mod tests {
 
     #[test]
     fn extracts_from_plain_string() {
-        assert_eq!(extract_id(&Bson::String(UUID.to_string())), Some(UUID.to_string()));
+        assert_eq!(
+            extract_id(&Bson::String(UUID.to_string())),
+            Some(UUID.to_string())
+        );
     }
 
     #[test]

@@ -30,19 +30,31 @@ pub enum FormsError {
     ExpectedArray { type_name: String, property: String },
 
     #[error("{type_name}.{property} expects {expected}, got a different type")]
-    TypeMismatch { type_name: String, property: String, expected: String },
+    TypeMismatch {
+        type_name: String,
+        property: String,
+        expected: String,
+    },
 
     #[error("invalid {enum_name} value {value:?}")]
     InvalidEnumValue { enum_name: String, value: String },
 
     #[error("{type_name}.{property} expects {target} element")]
-    IncompatibleElement { type_name: String, property: String, target: String },
+    IncompatibleElement {
+        type_name: String,
+        property: String,
+        target: String,
+    },
 
     #[error("not a Forms storage type: {0:?}")]
     NotAFormsStorageType(String),
 
     #[error("unmapped {type_name} storage field(s) at {path}: {fields}")]
-    UnsupportedStorageProperty { type_name: String, path: String, fields: String },
+    UnsupportedStorageProperty {
+        type_name: String,
+        path: String,
+        fields: String,
+    },
 
     #[error("unresolved storage reference at {path}: requires a semantic resolver")]
     UnresolvedStorageReference { path: String },

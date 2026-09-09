@@ -40,15 +40,24 @@ fn generated_markers_drive_project_macro_associations_end_to_end() {
     let read = Project::open(&path, true).unwrap();
     let modules = read.modules().unwrap();
     assert_eq!(modules.len(), 2);
-    let sales = modules.iter().find(|m| m.name.as_deref() == Some("Sales")).unwrap();
+    let sales = modules
+        .iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
 
     let entities = sales.entities();
     assert_eq!(entities.len(), 2);
     let associations = sales.associations();
     assert_eq!(associations.len(), 1);
     assert!(!associations[0].is_cross_module());
-    let customer = entities.iter().find(|e| e.name.as_deref() == Some("Customer")).unwrap();
-    assert_eq!(associations[0].to_entity_id.as_deref(), customer.id.as_deref());
+    let customer = entities
+        .iter()
+        .find(|e| e.name.as_deref() == Some("Customer"))
+        .unwrap();
+    assert_eq!(
+        associations[0].to_entity_id.as_deref(),
+        customer.id.as_deref()
+    );
 }
 
 #[test]

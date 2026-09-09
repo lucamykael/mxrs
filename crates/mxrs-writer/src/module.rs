@@ -35,14 +35,26 @@ pub fn write_module(
         menus: vec![],
         module_roles: vec![],
     };
-    mpr.insert_unit(project_root_id, "Modules", module.to_bson(), Some(&module_id))?;
+    mpr.insert_unit(
+        project_root_id,
+        "Modules",
+        module.to_bson(),
+        Some(&module_id),
+    )?;
 
-    let (domain_model, _entity_ids) = domain::build_domain_model(&decl.name, &decl.entities, known_entities)?;
+    let (domain_model, _entity_ids) =
+        domain::build_domain_model(&decl.name, &decl.entities, known_entities)?;
     let domain_model_id = uuid::Uuid::new_v4().to_string();
-    mpr.insert_unit(&module_id, "DomainModel", domain_model.to_bson(&domain_model_id), Some(&domain_model_id))?;
+    mpr.insert_unit(
+        &module_id,
+        "DomainModel",
+        domain_model.to_bson(&domain_model_id),
+        Some(&domain_model_id),
+    )?;
 
     for mf in &decl.microflows {
-        let (objects, flows) = flow_compiler::build_microflow_graph(&mf.activities, mf.return_expression.as_deref());
+        let (objects, flows) =
+            flow_compiler::build_microflow_graph(&mf.activities, mf.return_expression.as_deref());
         let microflow = Microflow {
             id: None,
             name: Some(mf.name.clone()),

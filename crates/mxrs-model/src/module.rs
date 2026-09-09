@@ -49,11 +49,17 @@ pub struct Module {
 
 impl Module {
     pub fn entities(&self) -> &[Entity] {
-        self.domain_model.as_ref().map(|d| d.entities.as_slice()).unwrap_or(&[])
+        self.domain_model
+            .as_ref()
+            .map(|d| d.entities.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn associations(&self) -> Vec<&Association> {
-        self.domain_model.as_ref().map(|d| d.all_associations().collect()).unwrap_or_default()
+        self.domain_model
+            .as_ref()
+            .map(|d| d.all_associations().collect())
+            .unwrap_or_default()
     }
 
     pub fn load(mpr: &MprFile, raw: &RawUnit) -> Result<Module> {

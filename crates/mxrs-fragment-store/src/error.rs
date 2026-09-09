@@ -12,10 +12,16 @@ pub enum FragmentStoreError {
     DigestMismatch { expected: String, actual: String },
 
     #[error("native fragment {digest} is missing declared type(s): {}", missing.join(", "))]
-    MissingTypes { digest: String, missing: Vec<String> },
+    MissingTypes {
+        digest: String,
+        missing: Vec<String>,
+    },
 
     #[error("native fragment {digest} is missing declared hint(s): {}", missing.join(", "))]
-    MissingHints { digest: String, missing: Vec<String> },
+    MissingHints {
+        digest: String,
+        missing: Vec<String>,
+    },
 
     #[error("invalid native fragment override {key:?} for {digest}")]
     InvalidOverride { digest: String, key: String },

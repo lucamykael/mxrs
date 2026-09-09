@@ -11,14 +11,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn try_compile(body: &str) -> Output {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
-    let unique: String =
-        dir.path().file_name().unwrap().to_string_lossy().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let unique: String = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
     let name = format!("macros-diagnostics-fixture-{unique}");
     let cargo_toml = format!(
         "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\nmxrs-model = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\n",
@@ -54,9 +65,15 @@ fn an_unknown_attribute_kind_fails_with_a_message_naming_it() {
         }
         "#,
     );
-    assert!(!output.status.success(), "expected a compile failure for an unknown attribute kind");
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for an unknown attribute kind"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("blob"), "expected the diagnostic to name the bad kind, got:\n{stderr}");
+    assert!(
+        stderr.contains("blob"),
+        "expected the diagnostic to name the bad kind, got:\n{stderr}"
+    );
 }
 
 #[test]
@@ -76,9 +93,15 @@ fn an_unknown_association_type_fails_with_a_message_naming_it() {
         }
         "#,
     );
-    assert!(!output.status.success(), "expected a compile failure for an unknown association type");
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for an unknown association type"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Bogus"), "expected the diagnostic to name the bad association type, got:\n{stderr}");
+    assert!(
+        stderr.contains("Bogus"),
+        "expected the diagnostic to name the bad association type, got:\n{stderr}"
+    );
 }
 
 /// The actual point of wiring `mxrs-dsl` to require `Ref<M>`: a target
@@ -108,9 +131,15 @@ fn an_association_target_naming_an_undeclared_marker_type_fails_to_compile() {
         }
         "#,
     );
-    assert!(!output.status.success(), "expected a compile failure for an undeclared marker type");
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for an undeclared marker type"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Ghost"), "expected the diagnostic to name the unresolved marker, got:\n{stderr}");
+    assert!(
+        stderr.contains("Ghost"),
+        "expected the diagnostic to name the unresolved marker, got:\n{stderr}"
+    );
 }
 
 #[test]
@@ -129,5 +158,8 @@ fn a_missing_semicolon_fails_to_compile() {
         }
         "#,
     );
-    assert!(!output.status.success(), "expected a compile failure for a missing semicolon");
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for a missing semicolon"
+    );
 }

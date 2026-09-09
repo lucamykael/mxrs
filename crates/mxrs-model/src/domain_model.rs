@@ -22,7 +22,10 @@ impl DomainModel {
     /// separate query. Callers already have that name via `Module`, so it's
     /// threaded in rather than re-fetched here.
     pub fn from_bson(doc: &Document, module_name: Option<&str>) -> Self {
-        let mut entities: Vec<Entity> = docs_any(doc, &["entities", "Entities"]).iter().map(Entity::from_bson).collect();
+        let mut entities: Vec<Entity> = docs_any(doc, &["entities", "Entities"])
+            .iter()
+            .map(Entity::from_bson)
+            .collect();
         if let Some(module_name) = module_name {
             for entity in &mut entities {
                 if entity.qualified_name.is_none() {
@@ -33,12 +36,18 @@ impl DomainModel {
             }
         }
 
-        let associations = docs_any(doc, &["associations", "Associations"]).iter().map(Association::from_bson).collect();
-        let cross_associations =
-            docs_any(doc, &["crossAssociations", "CrossAssociations"]).iter().map(Association::from_bson).collect();
+        let associations = docs_any(doc, &["associations", "Associations"])
+            .iter()
+            .map(Association::from_bson)
+            .collect();
+        let cross_associations = docs_any(doc, &["crossAssociations", "CrossAssociations"])
+            .iter()
+            .map(Association::from_bson)
+            .collect();
 
         DomainModel {
-            documentation: get_str_any(doc, &["documentation", "Documentation"]).unwrap_or_default(),
+            documentation: get_str_any(doc, &["documentation", "Documentation"])
+                .unwrap_or_default(),
             entities,
             associations,
             cross_associations,
@@ -46,7 +55,9 @@ impl DomainModel {
     }
 
     pub fn all_associations(&self) -> impl Iterator<Item = &Association> {
-        self.associations.iter().chain(self.cross_associations.iter())
+        self.associations
+            .iter()
+            .chain(self.cross_associations.iter())
     }
 
     pub fn to_bson(&self, id: &str) -> Document {
@@ -72,7 +83,10 @@ mod tests {
         let entity = doc! { "$ID": uuid::Uuid::new_v4().to_string(), "name": "Order" };
         let d = doc! { "entities": mxrs_bson::build_array(vec![Bson::Document(entity)], 3) };
         let dm = DomainModel::from_bson(&d, Some("Sales"));
-        assert_eq!(dm.entities[0].qualified_name.as_deref(), Some("Sales.Order"));
+        assert_eq!(
+            dm.entities[0].qualified_name.as_deref(),
+            Some("Sales.Order")
+        );
     }
 
     #[test]

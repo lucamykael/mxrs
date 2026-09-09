@@ -4,7 +4,9 @@
 use mxrs_bson::{doc, Document};
 
 use crate::attribute::{apply_validation_rules, Attribute};
-use crate::support::{docs_any, get_any, get_bool_any, get_doc_any, get_i32_any, get_id_any, get_str_any, items_any};
+use crate::support::{
+    docs_any, get_any, get_bool_any, get_doc_any, get_i32_any, get_id_any, get_str_any, items_any,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Location {
@@ -95,15 +97,25 @@ impl Entity {
         let oql_query = get_str_any(doc, &["oqlQuery", "OqlQuery", "OQLQuery"])
             .or_else(|| source.as_ref().and_then(|s| get_str_any(s, &["Oql"])));
 
-        let generalization = get_doc_any(doc, &["generalization", "Generalization", "maybeGeneralization", "MaybeGeneralization"]);
+        let generalization = get_doc_any(
+            doc,
+            &[
+                "generalization",
+                "Generalization",
+                "maybeGeneralization",
+                "MaybeGeneralization",
+            ],
+        );
         let persistable = generalization
             .as_ref()
             .and_then(|g| get_bool_any(g, &["persistable", "Persistable"]))
             .unwrap_or(true);
         let system_members = parse_system_members(generalization.as_ref());
 
-        let mut attributes: Vec<Attribute> =
-            docs_any(doc, &["attributes", "Attributes"]).iter().map(Attribute::from_bson).collect();
+        let mut attributes: Vec<Attribute> = docs_any(doc, &["attributes", "Attributes"])
+            .iter()
+            .map(Attribute::from_bson)
+            .collect();
         let validation_rules = docs_any(doc, &["validationRules", "ValidationRules"]);
         apply_validation_rules(&mut attributes, &validation_rules);
 
@@ -111,18 +123,26 @@ impl Entity {
         let raw_indexes = docs_any(doc, &["indexes", "Indexes"]);
         let indexes = normalize_indexes(raw_indexes, &attributes, qualified_name.as_deref());
 
-        let access_rules = docs_any(doc, &["accessRules", "AccessRules"]).iter().map(parse_access_rule).collect();
-        let lifecycle = docs_any(doc, &["eventHandlers", "EventHandlers"]).iter().map(parse_lifecycle).collect();
+        let access_rules = docs_any(doc, &["accessRules", "AccessRules"])
+            .iter()
+            .map(parse_access_rule)
+            .collect();
+        let lifecycle = docs_any(doc, &["eventHandlers", "EventHandlers"])
+            .iter()
+            .map(parse_lifecycle)
+            .collect();
 
         Entity {
             id: get_id_any(doc, &["$ID"]),
             name: get_str_any(doc, &["name", "Name"]),
             qualified_name,
-            documentation: get_str_any(doc, &["documentation", "Documentation"]).unwrap_or_default(),
+            documentation: get_str_any(doc, &["documentation", "Documentation"])
+                .unwrap_or_default(),
             persistable,
             location: parse_location(get_any(doc, &["location", "Location"])),
             data_storage_guid: get_id_any(doc, &["dataStorageGuid", "DataStorageGuid"]),
-            export_level: get_str_any(doc, &["exportLevel", "ExportLevel"]).unwrap_or_else(|| "Hidden".into()),
+            export_level: get_str_any(doc, &["exportLevel", "ExportLevel"])
+                .unwrap_or_else(|| "Hidden".into()),
             generalization,
             access_rules,
             indexes,
@@ -142,7 +162,11 @@ impl Entity {
     }
 
     pub fn oql_view(&self) -> bool {
-        let source_type = self.source.as_ref().and_then(|s| get_str_any(s, &["$Type"])).unwrap_or_default();
+        let source_type = self
+            .source
+            .as_ref()
+            .and_then(|s| get_str_any(s, &["$Type"]))
+            .unwrap_or_default();
         let native_type = self.native_type.as_deref().unwrap_or("");
         native_type.to_lowercase().contains("viewentity")
             || source_type.to_lowercase().contains("oqlviewentitysource")
@@ -155,7 +179,10 @@ impl Entity {
     }
 
     pub fn to_bson(&self) -> Document {
-        let id = self.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = self
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         doc! {
             "$ID": id,
             "$Type": "DomainModels$EntityImpl",
@@ -193,7 +220,9 @@ impl Entity {
 }
 
 fn parse_system_members(generalization: Option<&Document>) -> SystemMembers {
-    let Some(g) = generalization else { return SystemMembers::default() };
+    let Some(g) = generalization else {
+        return SystemMembers::default();
+    };
     SystemMembers {
         owner: get_bool_any(g, &["hasOwner", "HasOwnerAttr"]).unwrap_or(false),
         created_date: get_bool_any(g, &["hasCreatedDate", "HasCreatedDateAttr"]).unwrap_or(false),
@@ -210,14 +239,19 @@ fn parse_location(value: Option<&mxrs_bson::Bson>) -> Location {
             let y = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
             Location { x, y }
         }
-        Some(mxrs_bson::Bson::Document(d)) => {
-            Location { x: get_i32_any(d, &["x"]).unwrap_or(0), y: get_i32_any(d, &["y"]).unwrap_or(0) }
-        }
+        Some(mxrs_bson::Bson::Document(d)) => Location {
+            x: get_i32_any(d, &["x"]).unwrap_or(0),
+            y: get_i32_any(d, &["y"]).unwrap_or(0),
+        },
         _ => Location { x: 0, y: 0 },
     }
 }
 
-fn normalize_indexes(mut indexes: Vec<Document>, attributes: &[Attribute], qualified_name: Option<&str>) -> Vec<Document> {
+fn normalize_indexes(
+    mut indexes: Vec<Document>,
+    attributes: &[Attribute],
+    qualified_name: Option<&str>,
+) -> Vec<Document> {
     let names_by_id: std::collections::HashMap<&str, &str> = attributes
         .iter()
         .filter_map(|a| Some((a.id.as_deref()?, a.name.as_deref()?)))
@@ -262,11 +296,18 @@ fn parse_access_rule(doc: &Document) -> AccessRule {
         .map(|m| {
             let association_ref = get_str_any(m, &["Association"]).unwrap_or_default();
             let (attr_ref, kind) = if association_ref.is_empty() {
-                (get_str_any(m, &["Attribute"]).unwrap_or_default(), AccessMemberKind::Attribute)
+                (
+                    get_str_any(m, &["Attribute"]).unwrap_or_default(),
+                    AccessMemberKind::Attribute,
+                )
             } else {
                 (association_ref, AccessMemberKind::Association)
             };
-            let name = attr_ref.rsplit(['/', '.']).next().unwrap_or(&attr_ref).to_string();
+            let name = attr_ref
+                .rsplit(['/', '.'])
+                .next()
+                .unwrap_or(&attr_ref)
+                .to_string();
             AccessMember {
                 id: get_id_any(m, &["$ID"]),
                 name,
@@ -283,7 +324,8 @@ fn parse_access_rule(doc: &Document) -> AccessRule {
         create: get_bool_any(doc, &["AllowCreate"]).unwrap_or(false),
         delete: get_bool_any(doc, &["AllowDelete"]).unwrap_or(false),
         documentation: get_str_any(doc, &["Documentation"]).unwrap_or_default(),
-        default_rights: get_str_any(doc, &["DefaultMemberAccessRights"]).unwrap_or_else(|| "None".into()),
+        default_rights: get_str_any(doc, &["DefaultMemberAccessRights"])
+            .unwrap_or_else(|| "None".into()),
         members,
         xpath: get_str_any(doc, &["XPathConstraint"]).unwrap_or_default(),
         xpath_caption: get_str_any(doc, &["XPathConstraintCaption"]),
@@ -291,9 +333,17 @@ fn parse_access_rule(doc: &Document) -> AccessRule {
 }
 
 fn parse_lifecycle(doc: &Document) -> LifecycleCallback {
-    let moment = get_str_any(doc, &["Moment"]).unwrap_or_default().to_lowercase();
-    let event = get_str_any(doc, &["Event"]).unwrap_or_default().to_lowercase();
-    let combined = [moment, event].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("_");
+    let moment = get_str_any(doc, &["Moment"])
+        .unwrap_or_default()
+        .to_lowercase();
+    let event = get_str_any(doc, &["Event"])
+        .unwrap_or_default()
+        .to_lowercase();
+    let combined = [moment, event]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
     LifecycleCallback {
         id: get_id_any(doc, &["$ID"]),
         event: combined,
@@ -379,7 +429,8 @@ mod tests {
 
     #[test]
     fn oql_view_detected_from_native_type() {
-        let d = doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "DomainModels$ViewEntity" };
+        let d =
+            doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "DomainModels$ViewEntity" };
         let e = Entity::from_bson(&d);
         assert!(e.oql_view());
     }

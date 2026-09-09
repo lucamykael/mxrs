@@ -7,7 +7,9 @@ pub struct FlowBuilder {
 
 impl FlowBuilder {
     pub(crate) fn new(name: impl Into<String>) -> Self {
-        FlowBuilder { decl: MicroflowDecl::new(name) }
+        FlowBuilder {
+            decl: MicroflowDecl::new(name),
+        }
     }
 
     pub(crate) fn into_decl(self) -> MicroflowDecl {
@@ -26,7 +28,12 @@ impl FlowBuilder {
         members: Vec<Member>,
         commit: bool,
     ) -> &mut Self {
-        self.decl.activities.push(Activity::CreateObject { variable: variable.into(), entity: entity.into(), members, commit });
+        self.decl.activities.push(Activity::CreateObject {
+            variable: variable.into(),
+            entity: entity.into(),
+            members,
+            commit,
+        });
         self
     }
 
@@ -37,17 +44,26 @@ impl FlowBuilder {
         members: Vec<Member>,
         commit: bool,
     ) -> &mut Self {
-        self.decl.activities.push(Activity::ChangeObject { variable: variable.into(), entity: entity.into(), members, commit });
+        self.decl.activities.push(Activity::ChangeObject {
+            variable: variable.into(),
+            entity: entity.into(),
+            members,
+            commit,
+        });
         self
     }
 
     pub fn commit(&mut self, variable: impl Into<String>) -> &mut Self {
-        self.decl.activities.push(Activity::Commit { variable: variable.into() });
+        self.decl.activities.push(Activity::Commit {
+            variable: variable.into(),
+        });
         self
     }
 
     pub fn delete_object(&mut self, variable: impl Into<String>) -> &mut Self {
-        self.decl.activities.push(Activity::DeleteObject { variable: variable.into() });
+        self.decl.activities.push(Activity::DeleteObject {
+            variable: variable.into(),
+        });
         self
     }
 
@@ -58,7 +74,12 @@ impl FlowBuilder {
         use_return: bool,
         mappings: Vec<MicroflowCallMapping>,
     ) -> &mut Self {
-        self.decl.activities.push(Activity::CallMicroflow { name: name.into(), result_variable, use_return, mappings });
+        self.decl.activities.push(Activity::CallMicroflow {
+            name: name.into(),
+            result_variable,
+            use_return,
+            mappings,
+        });
         self
     }
 

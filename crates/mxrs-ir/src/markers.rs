@@ -119,6 +119,9 @@ mod tests {
     #[test]
     fn attribute_marker_names_its_owning_entity() {
         assert_eq!(OrderNumber::NAME, "Number");
-        assert_eq!(<OrderNumber as AttributeMarker>::Entity::qualified_name(), "Sales.Order");
+        assert_eq!(
+            <OrderNumber as AttributeMarker>::Entity::qualified_name(),
+            "Sales.Order"
+        );
     }
 }

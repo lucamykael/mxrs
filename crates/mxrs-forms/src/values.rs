@@ -29,11 +29,19 @@ pub struct BinaryAsset {
 
 impl BinaryAsset {
     pub fn from_bytes(data: Vec<u8>, subtype: BinarySubtype) -> Self {
-        Self { data: Some(data), subtype, source_path: None }
+        Self {
+            data: Some(data),
+            subtype,
+            source_path: None,
+        }
     }
 
     pub fn read_path(path: impl Into<String>, subtype: BinarySubtype) -> Self {
-        Self { data: None, subtype, source_path: Some(path.into()) }
+        Self {
+            data: None,
+            subtype,
+            source_path: Some(path.into()),
+        }
     }
 
     pub fn empty(subtype: BinarySubtype) -> Self {
@@ -51,7 +59,11 @@ impl BinaryAsset {
     }
 
     pub fn at(&self, path: impl Into<String>) -> Self {
-        Self { data: None, subtype: self.subtype, source_path: Some(path.into()) }
+        Self {
+            data: None,
+            subtype: self.subtype,
+            source_path: Some(path.into()),
+        }
     }
 }
 
@@ -66,11 +78,19 @@ impl Text {
     }
 
     pub fn from_plain(text: impl Into<String>) -> Self {
-        Self { translations: vec![Translation { language: None, text: text.into() }] }
+        Self {
+            translations: vec![Translation {
+                language: None,
+                text: text.into(),
+            }],
+        }
     }
 
     pub fn to_display_string(&self) -> String {
-        self.translations.first().map(|t| t.text.clone()).unwrap_or_default()
+        self.translations
+            .first()
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -81,7 +101,9 @@ pub struct Expression {
 
 impl Expression {
     pub fn new(source: impl Into<String>) -> Self {
-        Self { source: source.into() }
+        Self {
+            source: source.into(),
+        }
     }
 }
 
@@ -100,12 +122,23 @@ pub struct EntityReference {
 
 impl EntityReference {
     pub fn direct(entity: impl Into<String>) -> Self {
-        Self { entity: entity.into(), steps: Vec::new(), indirect: false }
+        Self {
+            entity: entity.into(),
+            steps: Vec::new(),
+            indirect: false,
+        }
     }
 
     pub fn through(steps: Vec<EntityPathStep>) -> Self {
-        let entity = steps.last().map(|s| s.destination_entity.clone()).unwrap_or_default();
-        Self { entity, steps, indirect: true }
+        let entity = steps
+            .last()
+            .map(|s| s.destination_entity.clone())
+            .unwrap_or_default();
+        Self {
+            entity,
+            steps,
+            indirect: true,
+        }
     }
 }
 
@@ -123,7 +156,10 @@ pub struct DataType {
 
 impl DataType {
     pub fn build(name: impl Into<String>, target: Option<String>) -> Self {
-        Self { name: name.into(), target }
+        Self {
+            name: name.into(),
+            target,
+        }
     }
     pub fn object(entity: impl Into<String>) -> Self {
         Self::build("Object", Some(entity.into()))
@@ -144,7 +180,10 @@ pub struct Condition {
 
 impl Condition {
     pub fn when_value(attribute_value: impl Into<String>, visible: bool) -> Self {
-        Self { attribute_value: attribute_value.into(), editable_visible: visible }
+        Self {
+            attribute_value: attribute_value.into(),
+            editable_visible: visible,
+        }
     }
 }
 
@@ -161,7 +200,15 @@ pub struct TextTemplate {
 
 impl TextTemplate {
     pub fn build(text: Text, parameters: Vec<String>) -> Self {
-        Self { text, parameters: parameters.into_iter().map(|p| TemplateParameter { expression: Expression::new(p) }).collect() }
+        Self {
+            text,
+            parameters: parameters
+                .into_iter()
+                .map(|p| TemplateParameter {
+                    expression: Expression::new(p),
+                })
+                .collect(),
+        }
     }
 }
 

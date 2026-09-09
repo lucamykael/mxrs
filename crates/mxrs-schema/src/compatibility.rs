@@ -98,7 +98,9 @@ fn project_node(node: &mut Document) {
 }
 
 fn delete_empty_event_handlers(node: &mut Document) {
-    let Some(Bson::Array(items)) = node.get("EventHandlers") else { return };
+    let Some(Bson::Array(items)) = node.get("EventHandlers") else {
+        return;
+    };
     if mxrs_bson::parse_array(Some(items)).items.is_empty() {
         node.remove("EventHandlers");
     }
@@ -123,11 +125,19 @@ fn strip_v1_traces_suffix(endpoint: &str) -> String {
 }
 
 fn project_settings(node: &mut Document) {
-    let Some(Bson::Array(settings)) = node.get_mut("Settings") else { return };
+    let Some(Bson::Array(settings)) = node.get_mut("Settings") else {
+        return;
+    };
     let present: std::collections::HashSet<String> = mxrs_bson::parse_array(Some(settings))
         .items
         .iter()
-        .filter_map(|part| if let Bson::Document(d) = part { d.get_str("$Type").ok().map(str::to_string) } else { None })
+        .filter_map(|part| {
+            if let Bson::Document(d) = part {
+                d.get_str("$Type").ok().map(str::to_string)
+            } else {
+                None
+            }
+        })
         .collect();
 
     for (type_name, defaults) in project_setting_defaults() {
@@ -146,7 +156,10 @@ fn project_settings(node: &mut Document) {
 
 fn project_setting_defaults() -> Vec<(&'static str, Vec<(&'static str, Bson)>)> {
     vec![
-        ("Settings$JarDeploymentSettings", vec![("Exclusions", Bson::Array(vec![Bson::Int32(2)]))]),
+        (
+            "Settings$JarDeploymentSettings",
+            vec![("Exclusions", Bson::Array(vec![Bson::Int32(2)]))],
+        ),
         (
             "Settings$DistributionSettings",
             vec![
@@ -180,12 +193,16 @@ fn deletions_for(type_name: &str) -> &'static [&'static str] {
         "Projects$ModuleImpl" => &["AppStorePackageId"],
         "Settings$IntegrationProjectSettingsPart" => &["ObsoleteEnableUrlEncoding"],
         "Settings$ModelSettings" => &["JavaVersion"],
-        "Settings$WorkflowsProjectSettingsPart" => &["UsertaskOnStateChangeEvent", "WorkflowOnStateChangeEvent"],
+        "Settings$WorkflowsProjectSettingsPart" => {
+            &["UsertaskOnStateChangeEvent", "WorkflowOnStateChangeEvent"]
+        }
         _ => &[],
     }
 }
 
-fn replacement_for(type_name: &str) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {
+fn replacement_for(
+    type_name: &str,
+) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {
     match type_name {
         "Forms$Page" => Some(("ExportLevel", &[("Public", "Hidden")])),
         _ => None,
@@ -217,12 +234,18 @@ fn defaults_for(type_name: &str) -> Vec<(&'static str, Bson)> {
         "Forms$NoAction" => vec![("DisabledDuringExecution", Bson::Boolean(true))],
         "Forms$Page" => vec![("Autofocus", Bson::String("Off".to_string()))],
         "Forms$PageParameter" => {
-            vec![("DefaultValue", Bson::String(String::new())), ("IsRequired", Bson::Boolean(true))]
+            vec![
+                ("DefaultValue", Bson::String(String::new())),
+                ("IsRequired", Bson::Boolean(true)),
+            ]
         }
         "Forms$PageVariable" => vec![("SubKey", Bson::String(String::new()))],
         "Forms$SnippetParameterMapping" => vec![("Argument", Bson::String(String::new()))],
         "Forms$WebUIProjectSettingsPart" => {
-            vec![("EnableNewStringBehavior", Bson::Boolean(false)), ("EnableRspackBundler", Bson::Boolean(false))]
+            vec![
+                ("EnableNewStringBehavior", Bson::Boolean(false)),
+                ("EnableRspackBundler", Bson::Boolean(false)),
+            ]
         }
         "Menus$MenuItem" => vec![("AlternativeText", Bson::Null)],
         "Microflows$Nanoflow" => vec![("UseListParameterByReference", Bson::Boolean(true))],
@@ -236,10 +259,15 @@ fn defaults_for(type_name: &str) -> Vec<(&'static str, Bson)> {
             ("PackageId", Bson::String(String::new())),
         ],
         "Settings$ModelSettings" => {
-            vec![("DecimalScale", Bson::Int32(8)), ("JavaMajorVersion", Bson::String("21".to_string()))]
+            vec![
+                ("DecimalScale", Bson::Int32(8)),
+                ("JavaMajorVersion", Bson::String("21".to_string())),
+            ]
         }
         "Settings$ServerConfiguration" => vec![("OpenTelemetry", Bson::Null)],
-        "Settings$WorkflowsProjectSettingsPart" => vec![("Groups", Bson::Array(vec![Bson::Int32(2)]))],
+        "Settings$WorkflowsProjectSettingsPart" => {
+            vec![("Groups", Bson::Array(vec![Bson::Int32(2)]))]
+        }
         _ => vec![],
     }
 }
@@ -279,7 +307,8 @@ mod tests {
 
     #[test]
     fn deletes_removed_fields() {
-        let mut document = doc! { "$Type": "DomainModels$EntityImpl", "IsRemote": true, "RemoteSource": "x" };
+        let mut document =
+            doc! { "$Type": "DomainModels$EntityImpl", "IsRemote": true, "RemoteSource": "x" };
         apply_document("11.12.1", &mut document);
         assert!(!document.contains_key("IsRemote"));
         assert!(!document.contains_key("RemoteSource"));
@@ -287,7 +316,8 @@ mod tests {
 
     #[test]
     fn removes_empty_event_handlers_but_keeps_non_empty() {
-        let mut empty = doc! { "$Type": "DomainModels$EntityImpl", "EventHandlers": [Bson::Int32(3)] };
+        let mut empty =
+            doc! { "$Type": "DomainModels$EntityImpl", "EventHandlers": [Bson::Int32(3)] };
         apply_document("11.12.1", &mut empty);
         assert!(!empty.contains_key("EventHandlers"));
 
@@ -321,9 +351,15 @@ mod tests {
             "Endpoint": "https://collector.example/v1/traces"
         };
         apply_document("11.12.1", &mut document);
-        assert_eq!(document.get_str("$Type").unwrap(), "Settings$OpenTelemetryConfiguration");
+        assert_eq!(
+            document.get_str("$Type").unwrap(),
+            "Settings$OpenTelemetryConfiguration"
+        );
         assert_ne!(document.get_str("$ID").unwrap(), "old-id");
-        assert_eq!(document.get_str("Endpoint").unwrap(), "https://collector.example");
+        assert_eq!(
+            document.get_str("Endpoint").unwrap(),
+            "https://collector.example"
+        );
         assert!(matches!(document.get("Logs"), Some(Bson::Null)));
     }
 
@@ -340,11 +376,22 @@ mod tests {
 
     #[test]
     fn adds_missing_project_setting_parts() {
-        let mut document = doc! { "$Type": "Settings$ProjectSettings", "Settings": [Bson::Int32(3)] };
+        let mut document =
+            doc! { "$Type": "Settings$ProjectSettings", "Settings": [Bson::Int32(3)] };
         apply_document("11.12.1", &mut document);
-        let Some(Bson::Array(settings)) = document.get("Settings") else { panic!("expected array") };
-        let types: Vec<&str> =
-            settings.iter().filter_map(|b| if let Bson::Document(d) = b { d.get_str("$Type").ok() } else { None }).collect();
+        let Some(Bson::Array(settings)) = document.get("Settings") else {
+            panic!("expected array")
+        };
+        let types: Vec<&str> = settings
+            .iter()
+            .filter_map(|b| {
+                if let Bson::Document(d) = b {
+                    d.get_str("$Type").ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert!(types.contains(&"Settings$JarDeploymentSettings"));
         assert!(types.contains(&"Settings$DistributionSettings"));
     }
@@ -356,8 +403,12 @@ mod tests {
             "Children": [{ "$Type": "Forms$Page", "Name": "Nested" }]
         };
         apply_document("11.12.1", &mut document);
-        let Some(Bson::Array(children)) = document.get("Children") else { panic!("expected array") };
-        let Bson::Document(child) = &children[0] else { panic!("expected document") };
+        let Some(Bson::Array(children)) = document.get("Children") else {
+            panic!("expected array")
+        };
+        let Bson::Document(child) = &children[0] else {
+            panic!("expected document")
+        };
         assert_eq!(child.get_str("Autofocus").unwrap(), "Off");
     }
 }

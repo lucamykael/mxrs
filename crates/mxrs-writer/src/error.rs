@@ -18,7 +18,10 @@ pub enum WriterError {
     MissingDomainModel(String),
 
     #[error("entities missing from domain model of module {module_name:?}: {missing:?}")]
-    EntitiesMissingFromDomainModel { module_name: String, missing: Vec<String> },
+    EntitiesMissingFromDomainModel {
+        module_name: String,
+        missing: Vec<String>,
+    },
 
     #[error("duplicate association {module_name}.{name:?} declared while synchronizing")]
     DuplicateAssociation { module_name: String, name: String },
