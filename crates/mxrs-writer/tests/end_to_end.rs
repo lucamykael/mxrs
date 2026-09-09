@@ -854,3 +854,117 @@ fn synchronize_domain_model_adds_an_entity_and_an_association_to_it_in_one_pass(
         customer.id.as_deref()
     );
 }
+
+#[test]
+fn synchronize_microflows_preserves_id_on_a_name_match_and_upserts_new_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("SyncMicroflows.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.entity("Order", |_e| {});
+        m.microflow("ACT_A", |f| {
+            f.return_value("1");
+        });
+    });
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let before = Project::open(&path, true).unwrap();
+    let sales = before
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    let module_id = sales.id.clone();
+    let original_id = sales.microflows[0].id.clone().unwrap();
+
+    // Re-declare ACT_A with a different body (same name -> same $ID) and
+    // add a brand-new ACT_B.
+    let mut redeclare = ProjectBuilder::new("11.12.1");
+    redeclare.module("Sales", |m| {
+        m.microflow("ACT_A", |f| {
+            f.return_value("2");
+        });
+        m.microflow("ACT_B", |f| {
+            f.return_value("3");
+        });
+    });
+    let microflows = redeclare.build().modules.remove(0).microflows;
+
+    let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+    mxrs_writer::documents::synchronize_microflows(&mut mpr, &module_id, &microflows).unwrap();
+    drop(mpr);
+
+    let after = Project::open(&path, true).unwrap();
+    let sales = after
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert_eq!(sales.microflows.len(), 2);
+    let act_a = sales
+        .microflows
+        .iter()
+        .find(|f| f.name.as_deref() == Some("ACT_A"))
+        .unwrap();
+    assert_eq!(act_a.id.as_deref(), Some(original_id.as_str()));
+    let act_b = sales
+        .microflows
+        .iter()
+        .find(|f| f.name.as_deref() == Some("ACT_B"))
+        .unwrap();
+    assert_ne!(act_b.id.as_deref(), Some(original_id.as_str()));
+}
+
+/// Unlike domain-model entity/association sync, microflow sync is
+/// upsert-only: a microflow that already exists but isn't named in a given
+/// `synchronize_microflows` call is left alone, not deleted — matching
+/// mxrb's own `write_documents` (see `documents.rs`'s doc comment).
+#[test]
+fn synchronize_microflows_does_not_delete_an_undeclared_existing_microflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("SyncMicroflowsUpsertOnly.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.entity("Order", |_e| {});
+        m.microflow("ACT_Keep", |f| {
+            f.return_value("1");
+        });
+    });
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let before = Project::open(&path, true).unwrap();
+    let module_id = before
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap()
+        .id;
+
+    let mut redeclare = ProjectBuilder::new("11.12.1");
+    redeclare.module("Sales", |m| {
+        m.microflow("ACT_New", |f| {
+            f.return_value("2");
+        });
+    });
+    let microflows = redeclare.build().modules.remove(0).microflows;
+
+    let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+    mxrs_writer::documents::synchronize_microflows(&mut mpr, &module_id, &microflows).unwrap();
+    drop(mpr);
+
+    let after = Project::open(&path, true).unwrap();
+    let sales = after
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    let names: Vec<Option<&str>> = sales.microflows.iter().map(|f| f.name.as_deref()).collect();
+    assert!(names.contains(&Some("ACT_Keep")));
+    assert!(names.contains(&Some("ACT_New")));
+}

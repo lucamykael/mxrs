@@ -15,9 +15,12 @@
 //! and generalization targets have no `EntityDecl` DSL surface yet, so an
 //! existing entity's values for those survive untouched rather than being
 //! reconciled (see `domain`'s module doc). The microflow slice of
-//! `synchronize_ruby_documents!` (upserting a `Documents` unit by name
-//! instead of always inserting a new one) is still not ported. **Not
-//! ported at all**: pages/widgets, menus, enumerations/constants, and every
+//! `synchronize_ruby_documents!` — upserting a `Documents` unit by name
+//! instead of always inserting a new one — is ported too, in
+//! `documents::synchronize_microflows` (upsert-only, unlike the domain
+//! model: a microflow absent from a given call isn't deleted, matching
+//! mxrb's own `write_documents`). **Not ported at all**: pages/widgets,
+//! menus, enumerations/constants, and every
 //! other document type `Module` supports beyond microflows; DSL-level
 //! customization of security/navigation content (`scaffold` writes sane,
 //! empty defaults for both, matching what `mxrb generate` produces for a
@@ -27,6 +30,7 @@
 //! `Navigation$NavigationDocument` scaffold *are* ported (see `domain` and
 //! `scaffold` module docs).
 
+pub mod documents;
 pub mod domain;
 pub mod error;
 pub mod flow_compiler;
