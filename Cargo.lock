@@ -428,6 +428,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-macros"
+version = "0.1.0"
+dependencies = [
+ "mxrs-dsl",
+ "mxrs-model",
+ "mxrs-writer",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "tempfile",
+]
+
+[[package]]
 name = "mxrs-model"
 version = "0.1.0"
 dependencies = [
