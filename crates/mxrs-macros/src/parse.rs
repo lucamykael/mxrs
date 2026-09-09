@@ -1,18 +1,26 @@
 //! Parses `project! { ... }`'s custom grammar. Deliberately narrower than
-//! `mxrs-dsl`'s full builder surface for this first pass: entity
-//! documentation/`persistable` and module-level microflows are not part of
-//! the grammar yet — widen incrementally, the same way every other "first
-//! slice" in this codebase has (see `mxrs-writer`'s and `mxrs-typegen`'s
-//! crate docs for the same pattern).
+//! `mxrs-dsl`'s full builder surface for this first pass: a module-level
+//! microflow's body only covers a `return` statement (no
+//! create/change-object, decisions, or microflow calls — the full activity
+//! DSL is a much larger custom grammar than a first slice needs), and
+//! there's no escape hatch to the native/pluggable widget surface yet.
+//! Widen incrementally, the same way every other "first slice" in this
+//! codebase has (see `mxrs-writer`'s and `mxrs-typegen`'s crate docs for the
+//! same pattern).
 //!
 //! Grammar (informally):
 //! ```text
-//! project!   := <string-lit> "," <module>*
-//! module     := "module" <ident> "{" <entity>* "}"
-//! entity     := "entity" <ident> "{" (<attribute> | <association>)* "}"
+//! project!   := <string-lit> "," <module-item>*
+//! module     := "module" <ident> "{" <module-item>* "}"
+//! module-item:= <entity> | <microflow>
+//! entity     := "entity" <ident> "{" <entity-item>* "}"
+//! entity-item:= <attribute> | <association>
+//!             | "documentation" <string-lit> ";"
+//!             | "persistable" <bool-lit> ";"
 //! attribute  := <attr-kind> <ident> ("=" <expr>)? ";"
 //! attr-kind  := "string" | "integer" | "long" | "decimal" | "boolean" | "datetime" | "autonumber"
 //! association:= "association" <ident> "->" <rust-path> "as" <ident> ";"
+//! microflow  := "microflow" <ident> "{" "return" <expr> ";" "}"
 //! ```
 //!
 //! `<rust-path>` (an association's target) is a real Rust type path — e.g.
@@ -37,12 +45,20 @@ pub struct ProjectInput {
 pub struct ModuleInput {
     pub name: Ident,
     pub entities: Vec<EntityInput>,
+    pub microflows: Vec<MicroflowInput>,
 }
 
 pub struct EntityInput {
     pub name: Ident,
+    pub documentation: Option<LitStr>,
+    pub persistable: Option<syn::LitBool>,
     pub attributes: Vec<AttributeInput>,
     pub associations: Vec<AssociationInput>,
+}
+
+pub struct MicroflowInput {
+    pub name: Ident,
+    pub return_expression: syn::Expr,
 }
 
 pub enum AttrKind {
@@ -126,10 +142,20 @@ impl Parse for ModuleInput {
         let content;
         braced!(content in input);
         let mut entities = Vec::new();
+        let mut microflows = Vec::new();
         while !content.is_empty() {
-            entities.push(content.parse()?);
+            let peeked: Ident = content.fork().parse()?;
+            if peeked == "microflow" {
+                microflows.push(content.parse()?);
+            } else {
+                entities.push(content.parse()?);
+            }
         }
-        Ok(ModuleInput { name, entities })
+        Ok(ModuleInput {
+            name,
+            entities,
+            microflows,
+        })
     }
 }
 
@@ -139,20 +165,56 @@ impl Parse for EntityInput {
         let name: Ident = input.parse()?;
         let content;
         braced!(content in input);
+        let mut documentation: Option<LitStr> = None;
+        let mut persistable: Option<syn::LitBool> = None;
         let mut attributes = Vec::new();
         let mut associations = Vec::new();
         while !content.is_empty() {
             let peeked: Ident = content.fork().parse()?;
             if peeked == "association" {
                 associations.push(content.parse()?);
+            } else if peeked == "documentation" {
+                content.parse::<Ident>()?;
+                let lit: LitStr = content.parse()?;
+                content.parse::<Token![;]>()?;
+                if documentation.is_some() {
+                    return Err(syn::Error::new(lit.span(), "duplicate `documentation`"));
+                }
+                documentation = Some(lit);
+            } else if peeked == "persistable" {
+                content.parse::<Ident>()?;
+                let lit: syn::LitBool = content.parse()?;
+                content.parse::<Token![;]>()?;
+                if persistable.is_some() {
+                    return Err(syn::Error::new(lit.span(), "duplicate `persistable`"));
+                }
+                persistable = Some(lit);
             } else {
                 attributes.push(content.parse()?);
             }
         }
         Ok(EntityInput {
             name,
+            documentation,
+            persistable,
             attributes,
             associations,
+        })
+    }
+}
+
+impl Parse for MicroflowInput {
+    fn parse(input: ParseStream) -> Result<Self> {
+        expect_keyword(input, "microflow")?;
+        let name: Ident = input.parse()?;
+        let content;
+        braced!(content in input);
+        content.parse::<Token![return]>()?;
+        let return_expression: syn::Expr = content.parse()?;
+        content.parse::<Token![;]>()?;
+        Ok(MicroflowInput {
+            name,
+            return_expression,
         })
     }
 }

@@ -157,3 +157,50 @@ fn a_target_path_resolves_via_a_local_use_import() {
     let order = sales.entities.iter().find(|e| e.name == "Order").unwrap();
     assert_eq!(order.associations[0].target, "Sales.Customer");
 }
+
+#[test]
+fn supports_entity_documentation_and_persistable() {
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Order {
+                documentation "A customer order";
+                persistable false;
+                string Number;
+            }
+        }
+    };
+    let order = &definition.modules[0].entities[0];
+    assert_eq!(order.documentation, "A customer order");
+    assert!(!order.persistable);
+}
+
+#[test]
+fn supports_a_module_level_microflow_with_a_return_statement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Microflow.mpr");
+
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Order {
+                string Number;
+            }
+            microflow ACT_GetConstant {
+                return "42";
+            }
+        }
+    };
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let sales = read
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert_eq!(sales.microflows.len(), 1);
+    assert_eq!(sales.microflows[0].name.as_deref(), Some("ACT_GetConstant"));
+}

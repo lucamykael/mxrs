@@ -21,11 +21,22 @@
 //! the *macro call site's* scope, not this crate's — it has to name a
 //! marker type implementing `mxrs_ir::EntityMarker` that's actually
 //! visible there (via `use`, a fully-qualified path, ...).
+//!
+//! Entity `documentation`/`persistable` are optional — the generated
+//! statement is only emitted when declared (`Option<TokenStream>` renders
+//! to nothing for `None`, same trick `quote!` gives any `Option<T:
+//! ToTokens>` for free), leaving `mxrs-dsl`'s own defaults (empty
+//! documentation, persistable) in place otherwise. A module-level
+//! `microflow` only ever emits a single `f.return_value(...)` call — see
+//! `parse`'s doc comment for the narrower-than-`mxrs-dsl` grammar this
+//! implies (no create/change-object, decisions, or microflow calls yet).
 
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::parse::{AssociationInput, AttributeInput, EntityInput, ModuleInput, ProjectInput};
+use crate::parse::{
+    AssociationInput, AttributeInput, EntityInput, MicroflowInput, ModuleInput, ProjectInput,
+};
 
 pub fn expand(input: &ProjectInput) -> TokenStream {
     let version = &input.version;
@@ -42,22 +53,45 @@ pub fn expand(input: &ProjectInput) -> TokenStream {
 fn expand_module(module: &ModuleInput) -> TokenStream {
     let name = module.name.to_string();
     let entity_stmts: Vec<TokenStream> = module.entities.iter().map(expand_entity).collect();
+    let microflow_stmts: Vec<TokenStream> =
+        module.microflows.iter().map(expand_microflow).collect();
     quote! {
         __mxrs_project.module(#name, |m| {
             #(#entity_stmts)*
+            #(#microflow_stmts)*
         });
     }
 }
 
 fn expand_entity(entity: &EntityInput) -> TokenStream {
     let name = entity.name.to_string();
+    let documentation_stmt = entity
+        .documentation
+        .as_ref()
+        .map(|doc| quote! { e.documentation(#doc); });
+    let persistable_stmt = entity
+        .persistable
+        .as_ref()
+        .map(|value| quote! { e.persistable(#value); });
     let attr_stmts: Vec<TokenStream> = entity.attributes.iter().map(expand_attribute).collect();
     let assoc_stmts: Vec<TokenStream> =
         entity.associations.iter().map(expand_association).collect();
     quote! {
         m.entity(#name, |e| {
+            #documentation_stmt
+            #persistable_stmt
             #(#attr_stmts)*
             #(#assoc_stmts)*
+        });
+    }
+}
+
+fn expand_microflow(microflow: &MicroflowInput) -> TokenStream {
+    let name = microflow.name.to_string();
+    let return_expression = &microflow.return_expression;
+    quote! {
+        m.microflow(#name, |f| {
+            f.return_value(#return_expression);
         });
     }
 }

@@ -163,3 +163,48 @@ fn a_missing_semicolon_fails_to_compile() {
         "expected a compile failure for a missing semicolon"
     );
 }
+
+#[test]
+fn a_duplicate_documentation_field_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    entity Order {
+                        documentation "first";
+                        documentation "second";
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for a duplicate `documentation` field"
+    );
+}
+
+#[test]
+fn a_microflow_missing_a_return_keyword_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    microflow ACT_Broken {
+                        "42";
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for a microflow body missing `return`"
+    );
+}
