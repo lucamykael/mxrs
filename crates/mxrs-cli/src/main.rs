@@ -1,9 +1,11 @@
-//! Thin CLI dispatcher over `mxrs_cli`'s `validate`/`compare` — mirrors
-//! `bin/mxrb`'s `when "validate"`/`when "compare"` cases (`mxrb validate`,
-//! `mxrb compare`), narrowed the same way the library crate is (see
-//! `lib.rs`'s doc comment for what's not ported yet: `export`, `--json`
-//! output is supported but no `preflight`/`pack`/`portable`/`mda`/
+//! Thin CLI dispatcher over `mxrs_cli`'s `validate`/`compare`/`inspect` —
+//! mirrors `bin/mxrb`'s `when "validate"`/`when "compare"` cases (`mxrb
+//! validate`, `mxrb compare`), narrowed the same way the library crate is
+//! (see `lib.rs`'s doc comment for what's not ported yet: `export`,
+//! `--json` output is supported but no `preflight`/`pack`/`portable`/`mda`/
 //! `diagram-er` — those depend on Phase 5 packaging, which doesn't exist).
+//! `inspect` has no `bin/mxrb` equivalent — it's a new single-file front
+//! end onto `compare`'s existing snapshot machinery (see `lib.rs`).
 
 use std::process::ExitCode;
 
@@ -12,6 +14,7 @@ fn main() -> ExitCode {
     match args.next().as_deref() {
         Some("validate") => run_validate(args.collect()),
         Some("compare") => run_compare(args.collect()),
+        Some("inspect") => run_inspect(args.collect()),
         Some(other) => {
             eprintln!("[mxrs] error: unknown command {other:?}");
             usage();
@@ -27,6 +30,7 @@ fn main() -> ExitCode {
 fn usage() {
     eprintln!("Usage: mxrs validate <file.mpr> [--json]");
     eprintln!("       mxrs compare <left.mpr> <right.mpr> [--json]");
+    eprintln!("       mxrs inspect <file.mpr> [--json]");
 }
 
 fn run_validate(mut args: Vec<String>) -> ExitCode {
@@ -115,6 +119,30 @@ fn run_compare(mut args: Vec<String>) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+fn run_inspect(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let Some(path) = args.first() else {
+        eprintln!("[mxrs] error: usage: mxrs inspect <file.mpr> [--json]");
+        return ExitCode::FAILURE;
+    };
+
+    let snapshot = match mxrs_cli::inspect::inspect(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[mxrs] error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if json {
+        println!("{snapshot}");
+    } else {
+        print!("{}", mxrs_cli::inspect::summarize(&snapshot));
+    }
+
+    ExitCode::SUCCESS
 }
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
