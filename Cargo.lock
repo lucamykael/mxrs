@@ -476,6 +476,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-typegen"
+version = "0.1.0"
+dependencies = [
+ "mxrs-ir",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "mxrs-writer"
 version = "0.1.0"
 dependencies = [
