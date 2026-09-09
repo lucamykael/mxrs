@@ -3,18 +3,23 @@
 //! Phase 3's domain-model + microflow subset — see
 //! `decisions/mxrs-rust-rewrite-plan.md` in this project's ai-memory.
 //!
-//! **Not ported** (deliberately, for this pass): `writer.rb`'s incremental
-//! `synchronize_ruby_*!` re-sync machinery (rewriting an *existing* project
-//! while preserving unrelated content/GUIDs across regenerations — this
-//! crate only creates brand-new projects); pages/widgets, menus,
-//! enumerations/constants, and every other document type `Module` supports
-//! beyond microflows; DSL-level customization of security/navigation
-//! content (`scaffold` writes sane, empty defaults for both, matching what
-//! `mxrb generate` produces for a brand-new project, but there's no DSL
-//! surface yet to configure user roles, guest access, or navigation
-//! profiles). Cross-module associations and the default `ProjectSettings`/
-//! `Security$ProjectSecurity`/`Navigation$NavigationDocument` scaffold
-//! *are* ported (see `domain` and `scaffold` module docs).
+//! **Partially ported**: `writer.rb`'s incremental `synchronize_ruby_*!`
+//! re-sync machinery (rewriting an *existing* project while preserving
+//! unrelated content/GUIDs across regenerations) now covers domain-model
+//! **associations** only (`domain::synchronize_domain_associations`, mirrors
+//! `synchronize_ruby_domain_associations!`) — entity structures
+//! (add/rename/remove attributes or entities) and the microflow slice of
+//! `synchronize_ruby_documents!` are still not ported; both are a
+//! precondition-compatible superset of what's here, not a replacement for
+//! it. **Not ported at all**: pages/widgets, menus, enumerations/constants,
+//! and every other document type `Module` supports beyond microflows;
+//! DSL-level customization of security/navigation content (`scaffold`
+//! writes sane, empty defaults for both, matching what `mxrb generate`
+//! produces for a brand-new project, but there's no DSL surface yet to
+//! configure user roles, guest access, or navigation profiles). Cross-module
+//! associations and the default `ProjectSettings`/`Security$ProjectSecurity`/
+//! `Navigation$NavigationDocument` scaffold *are* ported (see `domain` and
+//! `scaffold` module docs).
 
 pub mod domain;
 pub mod error;

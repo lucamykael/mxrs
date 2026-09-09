@@ -14,6 +14,15 @@ pub enum WriterError {
     #[error("cross-module association target {0:?} does not match any entity declared anywhere in the project (expected \"Module.Entity\")")]
     UnknownCrossModuleAssociationTarget(String),
 
+    #[error("module {0:?} has no DomainModel unit to synchronize")]
+    MissingDomainModel(String),
+
+    #[error("entities missing from domain model of module {module_name:?}: {missing:?}")]
+    EntitiesMissingFromDomainModel { module_name: String, missing: Vec<String> },
+
+    #[error("duplicate association {module_name}.{name:?} declared while synchronizing")]
+    DuplicateAssociation { module_name: String, name: String },
+
     #[error("BSON codec error: {0}")]
     Bson(#[from] mxrs_bson::BsonCodecError),
 
