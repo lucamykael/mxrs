@@ -265,6 +265,32 @@ impl ProjectFlowIndex {
                             },
                         );
                     }
+                    // Cross-module associations live in a separate array with a
+                    // different child-reference shape: `Child` already holds the
+                    // dotted `"Module.Entity"` qualified name directly (see
+                    // `mxrs_model::Association::is_cross_module`/`to_bson`), not an
+                    // id needing `entity_qualified_name_by_id` resolution like
+                    // `ChildPointer`/`ChildID` above.
+                    for association in
+                        array_docs(&document, &["CrossAssociations", "crossAssociations"])
+                    {
+                        let Some(name) = get_str_any(&association, &["Name", "name"]) else {
+                            continue;
+                        };
+                        let parent_id = get_id_any(&association, &["ParentPointer", "ParentID"]);
+                        let child_name = get_str_any(&association, &["Child", "child"]);
+                        let reference_set = get_str_any(&association, &["Type", "type"]).as_deref()
+                            == Some("ReferenceSet");
+                        index.associations.insert(
+                            format!("{module_name}.{name}"),
+                            AssociationInfo {
+                                parent: parent_id
+                                    .and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
+                                child: child_name,
+                                reference_set,
+                            },
+                        );
+                    }
                 }
                 _ => {}
             }
