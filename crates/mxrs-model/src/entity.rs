@@ -58,6 +58,10 @@ pub struct LifecycleCallback {
     pub handler: String,
     pub pass_event_object: bool,
     pub raise_error_on_false: bool,
+    /// Original editor document. The summarized fields above power the
+    /// ergonomic API; compiler passes use this copy so unknown Runtime
+    /// fields and nested text references survive lowering.
+    pub raw: Document,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +73,7 @@ pub struct Entity {
     pub persistable: bool,
     pub location: Location,
     pub data_storage_guid: Option<String>,
+    pub image: Option<String>,
     pub export_level: String,
     /// Raw `generalization`/`Generalization` sub-document.
     pub generalization: Option<Document>,
@@ -127,7 +132,7 @@ impl Entity {
             .iter()
             .map(parse_access_rule)
             .collect();
-        let lifecycle = docs_any(doc, &["eventHandlers", "EventHandlers"])
+        let lifecycle = docs_any(doc, &["eventHandlers", "EventHandlers", "Events"])
             .iter()
             .map(parse_lifecycle)
             .collect();
@@ -140,7 +145,8 @@ impl Entity {
                 .unwrap_or_default(),
             persistable,
             location: parse_location(get_any(doc, &["location", "Location"])),
-            data_storage_guid: get_id_any(doc, &["dataStorageGuid", "DataStorageGuid"]),
+            data_storage_guid: get_id_any(doc, &["dataStorageGuid", "DataStorageGuid", "GUID"]),
+            image: get_str_any(doc, &["image", "Image"]),
             export_level: get_str_any(doc, &["exportLevel", "ExportLevel"])
                 .unwrap_or_else(|| "Hidden".into()),
             generalization,
@@ -199,7 +205,7 @@ impl Entity {
             "accessRules": mxrs_bson::build_array(vec![], 3),
             "source": mxrs_bson::Bson::Null,
             "exportLevel": self.export_level.clone(),
-            "image": "",
+            "image": self.image.clone().unwrap_or_default(),
             "imageData": "",
         }
     }
@@ -350,10 +356,14 @@ fn parse_lifecycle(doc: &Document) -> LifecycleCallback {
         handler: get_str_any(doc, &["Microflow"]).unwrap_or_default(),
         pass_event_object: get_bool_any(doc, &["PassEventObject"]).unwrap_or(true),
         raise_error_on_false: get_bool_any(doc, &["RaiseErrorOnFalse"]).unwrap_or(false),
+        raw: doc.clone(),
     }
 }
 
 fn lifecycle_bson(callback: &LifecycleCallback) -> mxrs_bson::Bson {
+    if !callback.raw.is_empty() {
+        return mxrs_bson::Bson::Document(callback.raw.clone());
+    }
     let mut parts = callback.event.splitn(2, '_');
     let moment = parts.next().unwrap_or_default();
     let event = parts.next().unwrap_or_default();
@@ -433,6 +443,34 @@ mod tests {
             doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "DomainModels$ViewEntity" };
         let e = Entity::from_bson(&d);
         assert!(e.oql_view());
+    }
+
+    #[test]
+    fn retains_image_guid_and_raw_lifecycle_documents_for_compiler_passes() {
+        let guid = uuid::Uuid::new_v4().to_string();
+        let event = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "DomainModels$EventHandler",
+            "Moment": "Before",
+            "Event": "Create",
+            "Microflow": "Sales.ACT_BeforeCreate",
+            "OpaqueRuntimeField": true,
+        };
+        let d = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "Name": "Order",
+            "GUID": guid.clone(),
+            "Image": "Sales.OrderIcon",
+            "Events": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(event)], 3),
+        };
+        let entity = Entity::from_bson(&d);
+        assert_eq!(entity.data_storage_guid.as_deref(), Some(guid.as_str()));
+        assert_eq!(entity.image.as_deref(), Some("Sales.OrderIcon"));
+        assert_eq!(entity.lifecycle.len(), 1);
+        assert!(entity.lifecycle[0]
+            .raw
+            .get_bool("OpaqueRuntimeField")
+            .unwrap());
     }
 
     #[test]

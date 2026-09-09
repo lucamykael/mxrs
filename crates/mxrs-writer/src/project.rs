@@ -70,6 +70,8 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
                 // an empty one first, same as `write_module` inserts one
                 // right after the bare module unit for fresh creation.
                 let empty_domain_model = mxrs_model::DomainModel {
+                    id: None,
+                    native_type: None,
                     documentation: String::new(),
                     entities: vec![],
                     associations: vec![],

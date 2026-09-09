@@ -106,6 +106,11 @@ pub struct Association {
     pub association_type: AssociationType,
     pub owner: Owner,
     pub storage_format: StorageFormat,
+    /// Opaque editor fields copied verbatim into Runtime shape by the domain
+    /// compiler. Their representation belongs to the versioned schema, not
+    /// to association behavior.
+    pub source: Option<mxrs_bson::Bson>,
+    pub guid: Option<mxrs_bson::Bson>,
     /// Raw `DeleteBehavior` sub-document, kept for lossless inspection.
     pub delete_behavior: Option<Document>,
     pub export_level: String,
@@ -136,6 +141,8 @@ impl Association {
             storage_format: StorageFormat::from_str(
                 &get_str_any(doc, &["StorageFormat"]).unwrap_or_else(|| "Column".into()),
             ),
+            source: get_any(doc, &["Source", "source"]).cloned(),
+            guid: get_any(doc, &["GUID", "guid", "DataStorageGuid", "dataStorageGuid"]).cloned(),
             delete_behavior: get_doc_any(doc, &["DeleteBehavior", "deleteBehavior"]),
             export_level: get_str_any(doc, &["ExportLevel"]).unwrap_or_else(|| "Hidden".into()),
         }
@@ -160,7 +167,7 @@ impl Association {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         if self.is_cross_module() {
-            return doc! {
+            let mut out = doc! {
                 "$ID": id,
                 "$Type": "DomainModels$CrossAssociation",
                 "Name": self.name.clone(),
@@ -173,8 +180,15 @@ impl Association {
                 "DeleteBehavior": self.delete_behavior.clone().unwrap_or_else(default_delete_behavior),
                 "ExportLevel": self.export_level.clone(),
             };
+            if let Some(source) = &self.source {
+                out.insert("Source", source.clone());
+            }
+            if let Some(guid) = &self.guid {
+                out.insert("GUID", guid.clone());
+            }
+            return out;
         }
-        doc! {
+        let mut out = doc! {
             "$ID": id,
             "$Type": "DomainModels$Association",
             "Name": self.name.clone(),
@@ -186,7 +200,14 @@ impl Association {
             "StorageFormat": self.storage_format.as_str(),
             "DeleteBehavior": self.delete_behavior.clone().unwrap_or_else(default_delete_behavior),
             "ExportLevel": self.export_level.clone(),
+        };
+        if let Some(source) = &self.source {
+            out.insert("Source", source.clone());
         }
+        if let Some(guid) = &self.guid {
+            out.insert("GUID", guid.clone());
+        }
+        out
     }
 
     pub fn parent_delete_behavior(&self) -> DeleteAction {
@@ -291,6 +312,26 @@ mod tests {
     }
 
     #[test]
+    fn retains_opaque_source_and_guid_fields() {
+        let guid = uuid::Uuid::new_v4().to_string();
+        let d = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "Name": "Order_Customer",
+            "Source": "Sales.Order",
+            "GUID": guid.clone(),
+        };
+        let association = Association::from_bson(&d);
+        assert_eq!(
+            association.source,
+            Some(mxrs_bson::Bson::String("Sales.Order".into()))
+        );
+        assert_eq!(association.guid, Some(mxrs_bson::Bson::String(guid)));
+        let serialized = association.to_bson();
+        assert_eq!(serialized.get_str("Source").unwrap(), "Sales.Order");
+        assert!(serialized.contains_key("GUID"));
+    }
+
+    #[test]
     fn cross_module_association_serializes_as_cross_association_with_child_field() {
         let assoc = Association {
             id: None,
@@ -301,6 +342,8 @@ mod tests {
             association_type: AssociationType::Reference,
             owner: Owner::Default,
             storage_format: StorageFormat::Column,
+            source: None,
+            guid: None,
             delete_behavior: None,
             export_level: "Hidden".into(),
         };
@@ -332,6 +375,8 @@ mod tests {
             association_type: AssociationType::Reference,
             owner: Owner::Default,
             storage_format: StorageFormat::Column,
+            source: None,
+            guid: None,
             delete_behavior: None,
             export_level: "Hidden".into(),
         };

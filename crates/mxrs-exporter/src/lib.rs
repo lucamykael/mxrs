@@ -477,6 +477,8 @@ mod tests {
             app_store_version: None,
             export_level: "Hidden".to_string(),
             domain_model: Some(mxrs_model::DomainModel {
+                id: None,
+                native_type: None,
                 documentation: String::new(),
                 entities,
                 associations: vec![],

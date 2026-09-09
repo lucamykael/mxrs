@@ -93,6 +93,8 @@ pub fn build_domain_model(
 
     Ok((
         DomainModel {
+            id: None,
+            native_type: None,
             documentation: String::new(),
             entities,
             associations,
@@ -298,6 +300,8 @@ fn resolve_association(
         association_type: assoc.association_type,
         owner: assoc.owner,
         storage_format: assoc.storage_format,
+        source: prior.and_then(|p| p.source.clone()),
+        guid: prior.and_then(|p| p.guid.clone()),
         delete_behavior: prior.and_then(|p| p.delete_behavior.clone()),
         export_level: prior
             .map(|p| p.export_level.clone())
@@ -349,6 +353,7 @@ fn fresh_entity(module_name: &str, decl: &EntityDecl, id: String) -> Entity {
         persistable: decl.persistable,
         location: Location { x: 0, y: 0 },
         data_storage_guid: None,
+        image: None,
         export_level: "Hidden".into(),
         generalization: None,
         access_rules: vec![],

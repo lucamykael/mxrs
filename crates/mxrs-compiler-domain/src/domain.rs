@@ -24,24 +24,10 @@
 //!   fields already collapsed that distinction (defaults `false` either
 //!   way), so this crate recomputes the walk directly off the raw doc
 //!   instead of reusing those fields.
-//! - Two fields `mxrs-model::Entity`/`Association` don't retain at all —
-//!   `Entity`'s icon `Image` and `Association`'s `Source`/`GUID` — compile
-//!   to an empty/null placeholder here rather than being silently invented;
-//!   narrow now, widen later, same as every other "first slice" in this
-//!   codebase.
-//!
-//! **Known gap, loud not silent**: OQL view entities
-//! (`Entity::oql_view()`) aren't compiled — `compile_module` returns
-//! [`CompilerError::UnsupportedOqlViewEntity`] rather than guessing at the
-//! `ViewEntitySourceDocument` cross-reference resolution
-//! `domain_document_compiler.rb#compile_entity_source` does (that needs a
-//! project-wide document lookup this first pass doesn't build).
-//! Entity-level lifecycle event handlers (`Entity.lifecycle`) compile to an
-//! always-empty `Events` array for the same reason: `mxrs-model` only
-//! retains a summarized `LifecycleCallback`, not the raw Runtime-shaped
-//! event-handler document `domain_document_compiler.rb` passes through
-//! unchanged, and re-inventing that shape from the summary risks producing
-//! a document Runtime doesn't actually recognize.
+//! - `mxrs-model` retains the raw fields whose Runtime representation is
+//!   opaque (`Image`, association `Source`/`GUID`, and lifecycle handler
+//!   documents), while this pass builds a project-wide index for OQL
+//!   view-source resolution.
 
 use std::collections::HashMap;
 
@@ -49,11 +35,14 @@ use mxrs_bson::{doc, Binary, BinarySubtype, Bson, Document};
 use mxrs_model::{Attribute, AttributeType, DomainModel, Entity, Module, Project};
 
 use crate::security::SecurityCompiler;
-use crate::support::{array_docs, get_any, get_bool_any, get_str_any, new_id};
+use crate::support::{
+    array_docs, get_any, get_bool_any, get_id_any, get_str_any, new_id, plain_value,
+};
 use crate::CompilerError;
 
 pub struct DomainCompiler<'a> {
     entities_by_qualified_name: HashMap<&'a str, &'a Entity>,
+    oql_by_qualified_name: HashMap<String, String>,
     security: SecurityCompiler,
 }
 
@@ -76,6 +65,7 @@ impl<'a> DomainCompiler<'a> {
         }
         Ok(DomainCompiler {
             entities_by_qualified_name,
+            oql_by_qualified_name: index_oql_sources(project, modules)?,
             security: SecurityCompiler::new(project)?,
         })
     }
@@ -112,7 +102,8 @@ impl<'a> DomainCompiler<'a> {
             .map(|association| self.security.association(association, module_name))
             .collect();
         Ok(doc! {
-            "$Type": "DomainModels$DomainModel",
+            "$ID": domain_model.id.clone().unwrap_or_else(new_id),
+            "$Type": domain_model.native_type.clone().unwrap_or_else(|| "DomainModels$DomainModel".to_string()),
             "Entities": entities?,
             "Associations": associations,
             "CrossAssociations": cross_associations,
@@ -124,24 +115,11 @@ impl<'a> DomainCompiler<'a> {
         entity: &Entity,
         module_name: &str,
     ) -> Result<Document, CompilerError> {
-        if entity.oql_view() {
-            return Err(CompilerError::UnsupportedOqlViewEntity(
-                entity
-                    .qualified_name
-                    .clone()
-                    .unwrap_or_else(|| entity.name.clone().unwrap_or_default()),
-            ));
-        }
         let name = entity.name.clone().unwrap_or_default();
         let mut result = self.entity_content(entity);
-        result.insert(
-            "Source",
-            entity.source.clone().map_or(Bson::Null, Bson::Document),
-        );
+        result.insert("Source", self.compile_entity_source(entity)?);
         result.insert("GUID", entity.data_storage_guid.clone().unwrap_or_default());
-        // `Entity` doesn't retain the icon/image reference at all — see
-        // this module's doc comment.
-        result.insert("Image", "");
+        result.insert("Image", entity.image.clone().unwrap_or_default());
         result.insert(
             "QualifiedName",
             entity
@@ -160,12 +138,52 @@ impl<'a> DomainCompiler<'a> {
             "MaybeGeneralization": self.compile_generalization(entity),
             "Attributes": entity.attributes.iter().map(compile_attribute).collect::<Vec<_>>(),
             "ValidationRules": entity.validation_rules.iter().map(compile_validation).collect::<Vec<_>>(),
-            // See this module's doc comment: not reconstructed from the
-            // summarized `LifecycleCallback` list.
-            "Events": Vec::<Document>::new(),
+            "Events": entity.lifecycle.iter().map(|callback| match plain_value(Bson::Document(callback.raw.clone())) {
+                Bson::Document(document) => document,
+                _ => unreachable!("plain_value preserves documents"),
+            }).collect::<Vec<_>>(),
             "Indexes": entity.indexes.iter().map(compile_index).collect::<Vec<_>>(),
             "AccessRules": entity.access_rules.iter().map(|rule| self.security.access_rule(rule)).collect::<Vec<_>>(),
         }
+    }
+
+    fn compile_entity_source(&self, entity: &Entity) -> Result<Bson, CompilerError> {
+        let Some(source) = entity.source.as_ref() else {
+            return Ok(Bson::Null);
+        };
+        let source_type = get_str_any(source, &["$Type"]).unwrap_or_default();
+        if source_type != "DomainModels$OqlViewEntitySource" {
+            return Ok(plain_value(Bson::Document(source.clone())));
+        }
+
+        let qualified_name =
+            get_str_any(source, &["SourceDocument", "sourceDocument"]).unwrap_or_default();
+        let entity_name = entity
+            .qualified_name
+            .clone()
+            .or_else(|| entity.name.clone())
+            .unwrap_or_default();
+        let oql = self
+            .oql_by_qualified_name
+            .get(&qualified_name)
+            .ok_or_else(|| CompilerError::MissingOqlViewSource {
+                entity: entity_name,
+                source_name: qualified_name.clone(),
+            })?;
+        let mut compiled = Document::new();
+        for (output_key, input_keys) in [
+            ("$ID", &["$ID"][..]),
+            ("$Type", &["$Type"][..]),
+            ("SourceDocument", &["SourceDocument", "sourceDocument"][..]),
+        ] {
+            if let Some(value) = get_any(source, input_keys) {
+                compiled.insert(output_key, value.clone());
+            }
+        }
+        compiled.insert("OqlRuntime", oql.clone());
+        compiled.insert("SourceDocumentName", qualified_name);
+        compiled.insert("SourceType", "OQL");
+        Ok(Bson::Document(compiled))
     }
 
     fn compile_generalization(&self, entity: &Entity) -> Document {
@@ -185,7 +203,7 @@ impl<'a> DomainCompiler<'a> {
             .unwrap_or_else(|| "DomainModels$NoGeneralization".to_string());
         let flags = self.generalization_flags(generalization, &type_name, 0);
         let mut result = doc! {
-            "$ID": get_str_any(generalization, &["$ID"]).unwrap_or_else(new_id),
+            "$ID": get_id_any(generalization, &["$ID"]).unwrap_or_else(new_id),
             "$Type": type_name.clone(),
         };
         if type_name == "DomainModels$NoGeneralization" {
@@ -260,6 +278,61 @@ impl<'a> DomainCompiler<'a> {
     }
 }
 
+fn index_oql_sources(
+    project: &Project,
+    modules: &[Module],
+) -> Result<HashMap<String, String>, CompilerError> {
+    let units = project.all_units()?;
+    let parent_by_id: HashMap<String, String> = units
+        .iter()
+        .map(|unit| (unit.unit_id.clone(), unit.container_id.clone()))
+        .collect();
+    let module_name_by_id: HashMap<String, String> = modules
+        .iter()
+        .filter_map(|module| Some((module.id.clone(), module.name.clone()?)))
+        .collect();
+    let mut result = HashMap::new();
+    for unit in &units {
+        let document = project
+            .mpr()
+            .parse_contents(unit)
+            .map_err(mxrs_model::ModelError::from)?;
+        if get_str_any(&document, &["$Type"]).as_deref()
+            != Some("DomainModels$ViewEntitySourceDocument")
+        {
+            continue;
+        }
+        let Some(module_name) =
+            owning_module_name(&unit.container_id, &parent_by_id, &module_name_by_id)
+        else {
+            continue;
+        };
+        let name = get_str_any(&document, &["Name", "name"]).unwrap_or_default();
+        let oql = get_str_any(&document, &["Oql", "oql", "OQL"]).unwrap_or_default();
+        result.insert(format!("{module_name}.{name}"), oql);
+    }
+    Ok(result)
+}
+
+fn owning_module_name(
+    container_id: &str,
+    parent_by_id: &HashMap<String, String>,
+    module_name_by_id: &HashMap<String, String>,
+) -> Option<String> {
+    let mut current = container_id;
+    for _ in 0..64 {
+        if let Some(name) = module_name_by_id.get(current) {
+            return Some(name.clone());
+        }
+        let parent = parent_by_id.get(current)?;
+        if parent == current {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
 struct GeneralizationFlags {
     persistable: bool,
     has_created_date: bool,
@@ -286,7 +359,7 @@ fn compile_attribute(attribute: &Attribute) -> Document {
     doc! {
         "$ID": attribute.id.clone().unwrap_or_else(new_id),
         "$Type": "DomainModels$Attribute",
-        "Value": attribute.raw_value_doc.clone().map_or_else(default_value_doc, Bson::Document),
+        "Value": attribute.raw_value_doc.clone().map_or_else(default_value_doc, |document| plain_value(Bson::Document(document))),
         "Type": compile_attribute_type(attribute),
         "Name": attribute.name.clone().unwrap_or_default(),
         "GUID": attribute.data_storage_guid.clone().unwrap_or_default(),
@@ -303,6 +376,10 @@ fn compile_attribute_type(attribute: &Attribute) -> Document {
     let mut result = attribute.raw_type_doc.clone().unwrap_or_else(|| {
         doc! { "$ID": new_id(), "$Type": attribute.attribute_type.storage_type() }
     });
+    result = match plain_value(Bson::Document(result)) {
+        Bson::Document(document) => document,
+        _ => unreachable!("plain_value preserves documents"),
+    };
     if attribute.attribute_type == AttributeType::String && get_any(&result, &["Length"]).is_none()
     {
         result.insert(
@@ -324,23 +401,23 @@ fn compile_validation(rule: &Document) -> Document {
         _ => None,
     });
     doc! {
-        "$ID": get_str_any(rule, &["$ID"]).unwrap_or_else(new_id),
+        "$ID": get_id_any(rule, &["$ID"]).unwrap_or_else(new_id),
         "$Type": get_str_any(rule, &["$Type"]).unwrap_or_else(|| "DomainModels$ValidationRule".to_string()),
         "Message": message.map_or_else(
             || doc! { "$ID": new_id(), "$Type": "Texts$Text" },
             |m| doc! {
-                "$ID": get_str_any(&m, &["$ID"]).unwrap_or_default(),
+                "$ID": get_id_any(&m, &["$ID"]).unwrap_or_default(),
                 "$Type": get_str_any(&m, &["$Type"]).unwrap_or_default(),
             },
         ),
-        "RuleInfo": get_any(rule, &["RuleInfo"]).cloned().unwrap_or(Bson::Null),
+        "RuleInfo": get_any(rule, &["RuleInfo"]).cloned().map(plain_value).unwrap_or(Bson::Null),
         "Attribute": get_str_any(rule, &["Attribute"]).unwrap_or_default(),
     }
 }
 
 fn compile_index(index: &Document) -> Document {
     doc! {
-        "$ID": get_str_any(index, &["$ID"]).unwrap_or_else(new_id),
+        "$ID": get_id_any(index, &["$ID"]).unwrap_or_else(new_id),
         "$Type": get_str_any(index, &["$Type"]).unwrap_or_else(|| "DomainModels$Index".to_string()),
         "Attributes": array_docs(index, &["Attributes"]).iter().map(compile_indexed_attribute).collect::<Vec<_>>(),
         "GUID": get_str_any(index, &["GUID"]).unwrap_or_default(),
@@ -349,7 +426,10 @@ fn compile_index(index: &Document) -> Document {
 }
 
 fn compile_indexed_attribute(attribute: &Document) -> Document {
-    let mut result = attribute.clone();
+    let mut result = match plain_value(Bson::Document(attribute.clone())) {
+        Bson::Document(document) => document,
+        _ => unreachable!("plain_value preserves documents"),
+    };
     if get_any(&result, &["AssociationPointer"]).is_none() {
         result.insert("AssociationPointer", zero_association_pointer());
     }
@@ -377,6 +457,7 @@ mod tests {
     fn compiler_without_security<'a>(entities: &'a [(&'a str, &'a Entity)]) -> DomainCompiler<'a> {
         DomainCompiler {
             entities_by_qualified_name: entities.iter().copied().collect(),
+            oql_by_qualified_name: HashMap::new(),
             security: SecurityCompiler::new_without_security(),
         }
     }
@@ -477,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oql_view_entity_is_a_loud_unsupported_error() {
+    fn a_missing_oql_view_source_is_a_loud_error() {
         let e = entity(
             "Sales.Report",
             doc! { "source": { "$Type": "DomainModels$OqlViewEntitySource", "SourceDocument": "Sales.ReportSource" } },
@@ -485,7 +566,8 @@ mod tests {
         let compiler = compiler_without_security(&[]);
         let err = compiler.compile_entity(&e, "Sales").unwrap_err();
         assert!(
-            matches!(err, CompilerError::UnsupportedOqlViewEntity(name) if name == "Sales.Report")
+            matches!(err, CompilerError::MissingOqlViewSource { entity, source_name }
+                if entity == "Sales.Report" && source_name == "Sales.ReportSource")
         );
     }
 

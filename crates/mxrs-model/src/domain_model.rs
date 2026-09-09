@@ -5,10 +5,12 @@ use mxrs_bson::Document;
 
 use crate::association::Association;
 use crate::entity::Entity;
-use crate::support::{docs_any, get_str_any};
+use crate::support::{docs_any, get_id_any, get_str_any};
 
 #[derive(Debug, Clone)]
 pub struct DomainModel {
+    pub id: Option<String>,
+    pub native_type: Option<String>,
     pub documentation: String,
     pub entities: Vec<Entity>,
     pub associations: Vec<Association>,
@@ -46,6 +48,8 @@ impl DomainModel {
             .collect();
 
         DomainModel {
+            id: get_id_any(doc, &["$ID"]),
+            native_type: get_str_any(doc, &["$Type"]),
             documentation: get_str_any(doc, &["documentation", "Documentation"])
                 .unwrap_or_default(),
             entities,
@@ -63,7 +67,7 @@ impl DomainModel {
     pub fn to_bson(&self, id: &str) -> Document {
         mxrs_bson::doc! {
             "$ID": id,
-            "$Type": "DomainModels$DomainModel",
+            "$Type": self.native_type.clone().unwrap_or_else(|| "DomainModels$DomainModel".to_string()),
             "entities": mxrs_bson::build_array(self.entities.iter().map(|e| mxrs_bson::Bson::Document(e.to_bson())).collect(), 3),
             "associations": mxrs_bson::build_array(self.associations.iter().map(|a| mxrs_bson::Bson::Document(a.to_bson())).collect(), 3),
             "crossAssociations": mxrs_bson::build_array(self.cross_associations.iter().map(|a| mxrs_bson::Bson::Document(a.to_bson())).collect(), 3),

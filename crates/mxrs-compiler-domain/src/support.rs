@@ -21,6 +21,10 @@ pub fn get_str_any(doc: &Document, keys: &[&str]) -> Option<String> {
     }
 }
 
+pub fn get_id_any(doc: &Document, keys: &[&str]) -> Option<String> {
+    get_any(doc, keys).and_then(mxrs_bson::extract_id)
+}
+
 pub fn get_bool_any(doc: &Document, keys: &[&str]) -> Option<bool> {
     match get_any(doc, keys)? {
         Bson::Boolean(b) => Some(*b),
@@ -77,4 +81,25 @@ pub fn string_list(doc: &Document, keys: &[&str]) -> Vec<String> {
 
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Removes Mendix's leading array markers recursively, matching mxrb's
+/// `ModelValues#plain_value` before editor documents enter Runtime shape.
+pub fn plain_value(value: Bson) -> Bson {
+    match value {
+        Bson::Document(document) => Bson::Document(
+            document
+                .into_iter()
+                .map(|(key, value)| (key, plain_value(value)))
+                .collect(),
+        ),
+        Bson::Array(items) => Bson::Array(
+            mxrs_bson::parse_array(Some(&items))
+                .items
+                .into_iter()
+                .map(plain_value)
+                .collect(),
+        ),
+        other => other,
+    }
 }

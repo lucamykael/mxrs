@@ -83,6 +83,10 @@ fn compiles_entities_attributes_and_associations_to_runtime_shape() {
         compiled.get_str("$Type").unwrap(),
         "DomainModels$DomainModel"
     );
+    assert_eq!(
+        compiled.get_str("$ID").unwrap(),
+        sales.domain_model.as_ref().unwrap().id.as_deref().unwrap()
+    );
 
     let entities = compiled.get_array("Entities").unwrap();
     assert_eq!(entities.len(), 2);
@@ -217,4 +221,118 @@ fn resolves_module_roles_to_user_roles_via_the_default_security_scaffold() {
     };
     assert_eq!(member.get_str("Attribute").unwrap(), "Sales.Order/Number");
     assert_eq!(member.get_str("Association").unwrap(), "");
+}
+
+#[test]
+fn resolves_oql_views_and_preserves_opaque_domain_runtime_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Oql.mpr");
+    write_fixture(&path);
+
+    let project = Project::open(&path, true).unwrap();
+    let sales_id = project
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|module| module.name.as_deref() == Some("Sales"))
+        .unwrap()
+        .id;
+    drop(project);
+
+    let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+    let domain_unit = mpr
+        .units_by_containment("DomainModel")
+        .unwrap()
+        .into_iter()
+        .find(|unit| unit.container_id == sales_id)
+        .unwrap();
+    let mut domain = mpr.parse_contents(&domain_unit).unwrap();
+    let entities = domain.get_array_mut("entities").unwrap();
+    let order = entities
+        .iter_mut()
+        .filter_map(Bson::as_document_mut)
+        .find(|entity| entity.get_str("name").ok() == Some("Order"))
+        .unwrap();
+    order.insert("$Type", "DomainModels$ViewEntity");
+    order.insert("dataStorageGuid", "order-guid");
+    order.insert("image", "Sales.OrderIcon");
+    order.insert(
+        "source",
+        mxrs_bson::doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "DomainModels$OqlViewEntitySource",
+            "SourceDocument": "Sales.OrderSource",
+        },
+    );
+    order.insert(
+        "eventHandlers",
+        mxrs_bson::build_array(
+            vec![Bson::Document(mxrs_bson::doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "DomainModels$EventHandler",
+                "Moment": "Before",
+                "Event": "Create",
+                "Microflow": "Sales.ACT_BeforeCreate",
+                "Messages": mxrs_bson::build_array(vec![Bson::String("kept".into())], 3),
+            })],
+            3,
+        ),
+    );
+    let associations = domain.get_array_mut("associations").unwrap();
+    let association = associations
+        .iter_mut()
+        .filter_map(Bson::as_document_mut)
+        .next()
+        .unwrap();
+    association.insert("Source", "Sales.Order");
+    association.insert("GUID", "association-guid");
+    mpr.update_unit(&domain_unit.unit_id, domain).unwrap();
+    mpr.insert_unit(
+        &sales_id,
+        "Documents",
+        mxrs_bson::doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "DomainModels$ViewEntitySourceDocument",
+            "Name": "OrderSource",
+            "Oql": "SELECT Number FROM Sales.Order",
+        },
+        None,
+    )
+    .unwrap();
+    drop(mpr);
+
+    let project = Project::open(&path, true).unwrap();
+    let modules = project.modules().unwrap();
+    let compiler = DomainCompiler::new(&project, &modules).unwrap();
+    let sales = modules
+        .iter()
+        .find(|module| module.name.as_deref() == Some("Sales"))
+        .unwrap();
+    let compiled = compiler.compile_module(sales).unwrap().unwrap();
+    let entities = compiled.get_array("Entities").unwrap();
+    let order = entities
+        .iter()
+        .filter_map(Bson::as_document)
+        .find(|entity| entity.get_str("UnqualifiedName").ok() == Some("Order"))
+        .unwrap();
+    assert_eq!(order.get_str("GUID").unwrap(), "order-guid");
+    assert_eq!(order.get_str("Image").unwrap(), "Sales.OrderIcon");
+    let source = order.get_document("Source").unwrap();
+    assert_eq!(
+        source.get_str("OqlRuntime").unwrap(),
+        "SELECT Number FROM Sales.Order"
+    );
+    assert_eq!(source.get_str("SourceType").unwrap(), "OQL");
+    let events = order.get_array("Events").unwrap();
+    let event = events[0].as_document().unwrap();
+    assert_eq!(event.get_array("Messages").unwrap().len(), 1);
+    assert_eq!(
+        event.get_array("Messages").unwrap()[0].as_str(),
+        Some("kept")
+    );
+
+    let associations = compiled.get_array("Associations").unwrap();
+    let association = associations[0].as_document().unwrap();
+    assert_eq!(association.get_str("Source").unwrap(), "Sales.Order");
+    assert_eq!(association.get_str("GUID").unwrap(), "association-guid");
 }

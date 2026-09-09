@@ -399,6 +399,7 @@ dependencies = [
  "mxrs-dsl",
  "mxrs-ir",
  "mxrs-model",
+ "mxrs-mpr",
  "mxrs-writer",
  "tempfile",
  "thiserror",

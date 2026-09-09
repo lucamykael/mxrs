@@ -12,7 +12,9 @@ use mxrs_bson::{doc, Bson, Document};
 use mxrs_model::entity::{AccessMember, AccessMemberKind, AccessRule};
 use mxrs_model::{Association, Project};
 
-use crate::support::{array_docs, get_doc_any, get_str_any, new_id, stable_dedup, string_list};
+use crate::support::{
+    array_docs, get_doc_any, get_id_any, get_str_any, new_id, stable_dedup, string_list,
+};
 use crate::CompilerError;
 
 pub struct SecurityCompiler {
@@ -93,12 +95,8 @@ impl SecurityCompiler {
             "$ID": id,
             "$Type": editor.get_str("$Type").unwrap_or("DomainModels$Association").to_string(),
             "DeleteBehavior": delete_behavior(association.delete_behavior.as_ref()),
-            // Neither field is retained by mxrs-model::Association (no
-            // `Source`/`GUID` fields on the struct) — narrowed the same
-            // way `mxrs-model::Entity`'s missing `Image` field is in
-            // `domain.rs`'s `compile_entity`, not silently invented.
-            "Source": Bson::Null,
-            "GUID": Bson::Null,
+            "Source": association.source.clone().unwrap_or(Bson::Null),
+            "GUID": association.guid.clone().unwrap_or(Bson::Null),
             "Type": editor.get_str("Type").unwrap_or("Reference").to_string(),
             "Owner": editor.get_str("Owner").unwrap_or("Default").to_string(),
             "StorageFormat": editor.get_str("StorageFormat").unwrap_or("Column").to_string(),
@@ -126,7 +124,7 @@ fn delete_behavior(source: Option<&Document>) -> Document {
     let default = default_delete_behavior();
     let source = source.unwrap_or(&default);
     doc! {
-        "$ID": get_str_any(source, &["$ID"]).unwrap_or_default(),
+        "$ID": get_id_any(source, &["$ID"]).unwrap_or_default(),
         "$Type": get_str_any(source, &["$Type"]).unwrap_or_else(|| "DomainModels$DeleteBehavior".to_string()),
         "ParentErrorMessage": text_reference(get_doc_any(source, &["ParentErrorMessage", "parentErrorMessage"])),
         "ChildErrorMessage": text_reference(get_doc_any(source, &["ChildErrorMessage", "childErrorMessage"])),
@@ -151,7 +149,7 @@ fn default_delete_behavior() -> Document {
 fn text_reference(source: Option<Document>) -> Bson {
     match source {
         Some(d) => Bson::Document(doc! {
-            "$ID": get_str_any(&d, &["$ID"]).unwrap_or_default(),
+            "$ID": get_id_any(&d, &["$ID"]).unwrap_or_default(),
             "$Type": get_str_any(&d, &["$Type"]).unwrap_or_default(),
         }),
         None => Bson::Null,
