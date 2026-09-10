@@ -462,6 +462,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-compiler-widgets"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-dsl",
+ "mxrs-ir",
+ "mxrs-model",
+ "mxrs-mpr",
+ "mxrs-schema",
+ "mxrs-writer",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "mxrs-dsl"
 version = "0.1.0"
 dependencies = [

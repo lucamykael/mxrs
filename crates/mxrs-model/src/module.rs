@@ -29,6 +29,20 @@ pub struct ModuleRole {
     pub description: String,
 }
 
+/// `$Type`s the artifact document compiler (`mxrs-compiler-widgets`)
+/// handles that live under a module's own `Documents`/`Folders` tree
+/// (unlike `DomainModels$ViewEntitySourceDocument`, which is domain-model-
+/// scoped, not module-document-scoped, and so isn't collected here).
+pub const ARTIFACT_UNIT_TYPES: &[&str] = &[
+    "Enumerations$Enumeration",
+    "Images$ImageCollection",
+    "RegularExpressions$RegularExpression",
+    "ScheduledEvents$ScheduledEvent",
+    "CustomIcons$CustomIconCollection",
+    "Forms$Layout",
+    "Forms$Snippet",
+];
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub id: String,
@@ -45,6 +59,12 @@ pub struct Module {
     pub rules: Vec<Microflow>,
     pub menus: Vec<Menu>,
     pub module_roles: Vec<ModuleRole>,
+    /// Raw (undecoded) documents for [`ARTIFACT_UNIT_TYPES`] — kept as raw
+    /// BSON rather than a parsed struct because `mxrs-compiler-widgets`'
+    /// `ArtifactCompiler` needs the lossless source document, the same
+    /// reason `mxrs-compiler-flow` operates on raw documents rather than a
+    /// parsed model for flow graphs.
+    pub artifact_units: Vec<Document>,
 }
 
 impl Module {
@@ -81,14 +101,17 @@ impl Module {
         let mut nanoflows = Vec::new();
         let mut rules = Vec::new();
         let mut menus = Vec::new();
+        let mut artifact_units = Vec::new();
         for unit in collect_documents(mpr, &raw.unit_id)? {
             let d = mpr.parse_contents(&unit)?;
-            match get_str_any(&d, &["$Type"]).as_deref() {
+            let type_name = get_str_any(&d, &["$Type"]);
+            match type_name.as_deref() {
                 Some("Pages$Page") | Some("Forms$Page") => pages.push(Page::from_bson(&d)),
                 Some("Microflows$Microflow") => microflows.push(Microflow::from_bson(&d)),
                 Some("Microflows$Nanoflow") => nanoflows.push(Microflow::from_bson(&d)),
                 Some("Microflows$Rule") => rules.push(Microflow::from_bson(&d)),
                 Some("Menus$MenuDocument") => menus.push(Menu::from_bson(&d)),
+                Some(t) if ARTIFACT_UNIT_TYPES.contains(&t) => artifact_units.push(d),
                 _ => {}
             }
         }
@@ -126,6 +149,7 @@ impl Module {
             rules,
             menus,
             module_roles,
+            artifact_units,
         })
     }
 

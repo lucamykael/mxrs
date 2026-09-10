@@ -180,6 +180,7 @@ fn a_module_without_a_domain_model_compiles_to_none() {
         rules: vec![],
         menus: vec![],
         module_roles: vec![],
+        artifact_units: vec![],
     };
     assert!(compiler.compile_module(&module).unwrap().is_none());
 }

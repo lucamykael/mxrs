@@ -490,6 +490,7 @@ mod tests {
             rules: vec![],
             menus: vec![],
             module_roles: vec![],
+            artifact_units: vec![],
         }
     }
 

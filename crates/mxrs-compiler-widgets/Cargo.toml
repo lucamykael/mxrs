@@ -1,0 +1,21 @@
+[package]
+name = "mxrs-compiler-widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Compiles Navigation/Settings/Artifact editor-shape documents into Mendix Runtime shape — Phase 5's third compiler crate, 'shell' sub-step."
+
+[dependencies]
+mxrs-bson = { path = "../mxrs-bson" }
+mxrs-model = { path = "../mxrs-model" }
+mxrs-schema = { path = "../mxrs-schema" }
+thiserror.workspace = true
+
+[dev-dependencies]
+mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-ir = { path = "../mxrs-ir" }
+mxrs-mpr = { path = "../mxrs-mpr" }
+mxrs-writer = { path = "../mxrs-writer" }
+tempfile = "3.27.0"

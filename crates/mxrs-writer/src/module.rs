@@ -82,6 +82,7 @@ pub(crate) fn insert_bare_module(
         rules: vec![],
         menus: vec![],
         module_roles: vec![],
+        artifact_units: vec![],
     };
     mpr.insert_unit(
         project_root_id,
