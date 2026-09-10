@@ -1211,5 +1211,100 @@
     "$Type",
     "ListVariableName",
     "VariableName"
+  ],
+  "Microflows$BreakEvent": [
+    "$ID",
+    "$Type"
+  ],
+  "Microflows$Contains": [
+    "$ID",
+    "$Type",
+    "ListName",
+    "SecondListOrObjectName"
+  ],
+  "Microflows$ContinueEvent": [
+    "$ID",
+    "$Type"
+  ],
+  "Microflows$ErrorEvent": [
+    "$ID",
+    "$Type"
+  ],
+  "Microflows$ExportXmlAction": [
+    "$ID",
+    "$Type",
+    "ResultHandling",
+    "OutputMethod",
+    "ErrorHandlingType",
+    "IsValidationRequired"
+  ],
+  "Microflows$Filter": [
+    "$ID",
+    "$Type",
+    "ListName",
+    "Expression",
+    "Attribute",
+    "Association"
+  ],
+  "Microflows$FilterByExpression": [
+    "$ID",
+    "$Type",
+    "ListName",
+    "Expression"
+  ],
+  "Microflows$Find": [
+    "$ID",
+    "$Type",
+    "ListName",
+    "Expression",
+    "Attribute",
+    "Association"
+  ],
+  "Microflows$Head": [
+    "$ID",
+    "$Type",
+    "ListName"
+  ],
+  "Microflows$Intersect": [
+    "$ID",
+    "$Type",
+    "ListName",
+    "SecondListOrObjectName"
+  ],
+  "Microflows$Union": [
+    "$ID",
+    "$Type",
+    "ListName",
+    "SecondListOrObjectName"
+  ],
+  "Microflows$ListRange": [
+    "$ID",
+    "$Type",
+    "CustomRange",
+    "ListName"
+  ],
+  "Microflows$Equals": [
+    "$ID",
+    "$Type",
+    "ListName",
+    "SecondListOrObjectName"
+  ],
+  "Microflows$RollbackAction": [
+    "$ID",
+    "$Type",
+    "ErrorHandlingType",
+    "RollbackVariableName",
+    "RefreshInClient"
+  ],
+  "Queues$QueueSettings": [
+    "$ID",
+    "$Type",
+    "Retry",
+    "Queue"
+  ],
+  "ExportXmlAction$StringExport": [
+    "$ID",
+    "$Type",
+    "OutputVariableName"
   ]
 }
