@@ -1018,14 +1018,15 @@ impl<'a> NanoflowCompiler<'a> {
         Some(JsValue::object(entries))
     }
 
-    /// `Sort`, `Head`, `Find`, `Filter`, `FilterByExpression`, and
-    /// `FindByExpression` are implemented — every `NewOperation` kind
-    /// observed in real models. The remaining Runtime-known kinds
-    /// (`Intersect`, `Union`, `Contains`, `ListRange`, `Equals`) stay
-    /// unsupported rather than guessed at: none appeared in either
-    /// acceptance project, so there's no real example to check a compiled
-    /// shape against. Not in mxrb's allow-listed activity set, same as
-    /// [`Self::compile_retrieve`].
+    /// `Sort`, `Head`, `Find`, `Filter`, `FilterByExpression`,
+    /// `FindByExpression`, `Union`, `Intersect`, `Subtract`, `Contains`,
+    /// `Equals`, and `ListRange` are implemented — every `NewOperation`
+    /// kind observed in real models (a later acceptance pass turned up
+    /// real `Union`/`Intersect`/`Contains`/`Equals`/`ListRange`/`Subtract`
+    /// examples that an earlier session hadn't seen yet). `Subtract` isn't
+    /// even in the Runtime-known kinds this comment used to list — found
+    /// alongside the others. None of these are in mxrb's allow-listed
+    /// activity set, same as [`Self::compile_retrieve`].
     fn compile_list_operation(
         &mut self,
         action: &Document,
@@ -1134,6 +1135,65 @@ impl<'a> NanoflowCompiler<'a> {
                     ("outputVar", JsValue::Str(output)),
                     ("listVar", JsValue::Str(list_name)),
                     ("condition", condition.into()),
+                ]))
+            }
+            // `Union`/`Intersect`/`Subtract` are the two-list set
+            // operations (list result); `Contains`/`Equals` share the
+            // identical `ListName`/`SecondListOrObjectName` shape but
+            // produce a boolean instead of a list. `SecondListOrObjectName`
+            // is named that way in the Runtime schema because it accepts
+            // either a list or a single-object variable — both are just a
+            // variable reference from this compiler's point of view, so no
+            // extra handling is needed to tell them apart. None of these
+            // are in mxrb's own nanoflow allow-list (like `Sort`/`Head`/
+            // `Find`/`Filter` above, this is an intentional addition beyond
+            // the verbatim port — see the module doc comment).
+            "Microflows$Union" | "Microflows$Intersect" | "Microflows$Subtract"
+            | "Microflows$Contains" | "Microflows$Equals" => {
+                let list_name = get_str_any(&operation, &["ListName"]).unwrap_or_default();
+                let second = get_str_any(&operation, &["SecondListOrObjectName"]).unwrap_or_default();
+                if list_name.is_empty() || second.is_empty() {
+                    self.mark_unsupported(flow_name, &operation_type, action);
+                    return None;
+                }
+                let instruction_type = match operation_type.as_str() {
+                    "Microflows$Union" => "unionList",
+                    "Microflows$Intersect" => "intersectList",
+                    "Microflows$Subtract" => "subtractList",
+                    "Microflows$Contains" => "listContains",
+                    _ => "listEquals",
+                };
+                Some(JsValue::object(vec![
+                    ("type", JsValue::Str(instruction_type.to_string())),
+                    ("label", JsValue::Str(model_id_of(node))),
+                    ("outputVar", JsValue::Str(output)),
+                    ("listVar", JsValue::Str(list_name)),
+                    ("secondListVar", JsValue::Str(second)),
+                ]))
+            }
+            // `Range` pages a list with limit/offset expressions — the
+            // editor's `CustomRange` (`SingleObject` always false for this
+            // use, unlike the retrieve-source `Range` polymorphism the
+            // BSON pipeline's `compile_custom_range` handles) is the only
+            // shape observed in real models.
+            "Microflows$ListRange" => {
+                let list_name = get_str_any(&operation, &["ListName"]).unwrap_or_default();
+                let range = get_doc_any(&operation, &["CustomRange"]).unwrap_or_default();
+                let limit_raw = get_str_any(&range, &["LimitExpression"]).unwrap_or_default();
+                let offset_raw = get_str_any(&range, &["OffsetExpression"]).unwrap_or_default();
+                if list_name.is_empty() || limit_raw.is_empty() || offset_raw.is_empty() {
+                    self.mark_unsupported(flow_name, &operation_type, action);
+                    return None;
+                }
+                let limit = self.expression_for(&limit_raw);
+                let offset = self.expression_for(&offset_raw);
+                Some(JsValue::object(vec![
+                    ("type", JsValue::Str("listRange".to_string())),
+                    ("label", JsValue::Str(model_id_of(node))),
+                    ("outputVar", JsValue::Str(output)),
+                    ("listVar", JsValue::Str(list_name)),
+                    ("limit", limit.into()),
+                    ("offset", offset.into()),
                 ]))
             }
             _ => {

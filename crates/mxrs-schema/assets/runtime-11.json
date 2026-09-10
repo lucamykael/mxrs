@@ -1078,6 +1078,18 @@
     "MappingVariableName",
     "ContentTypeRuntime"
   ],
+  "Microflows$FormDataRequestHandling": [
+    "$ID",
+    "$Type",
+    "Parts"
+  ],
+  "Microflows$FormDataPart": [
+    "$ID",
+    "$Type",
+    "HeaderEntries",
+    "Key",
+    "Value"
+  ],
   "Microflows$ResultHandling": [
     "$ID",
     "$Type",
