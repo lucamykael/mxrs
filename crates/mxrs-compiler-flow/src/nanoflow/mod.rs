@@ -53,7 +53,7 @@ use std::path::Path;
 use mxrs_bson::{Bson, Document};
 use sha2::{Digest, Sha256};
 
-use crate::support::{array_docs, get_any, get_doc_any, get_str_any, ProjectFlowIndex};
+use crate::support::{array_docs, get_any, get_doc_any, get_str_any, AssociationInfo, ProjectFlowIndex};
 use expression::{leading_variable_name, parse_expression, Expression};
 use js_value::JsValue;
 
@@ -87,6 +87,7 @@ struct CompiledProgram {
 pub struct NanoflowCompiler<'a> {
     nanoflows: &'a HashMap<String, Document>,
     javascript_actions: &'a HashMap<String, Document>,
+    associations: &'a HashMap<String, AssociationInfo>,
     project_root: Option<&'a Path>,
     programs: HashMap<String, Option<CompiledProgram>>,
     flow_stack: Vec<String>,
@@ -105,6 +106,7 @@ impl<'a> NanoflowCompiler<'a> {
         NanoflowCompiler {
             nanoflows: &index.nanoflows,
             javascript_actions: &index.javascript_actions,
+            associations: &index.associations,
             project_root,
             programs: HashMap::new(),
             flow_stack: Vec::new(),
@@ -303,6 +305,20 @@ impl<'a> NanoflowCompiler<'a> {
                 .into_iter()
                 .collect(),
             "Microflows$ActionActivity" => {
+                // A disabled activity is a real, valid model (Studio Pro
+                // lets an activity sit disabled with no action configured
+                // at all) — the Runtime skips it entirely rather than
+                // executing whatever `Action` it might still carry, so
+                // this doesn't dispatch on `action_type` at all. A `noop`
+                // is emitted rather than an empty instruction list so
+                // `compile_graph_node`'s trailing-jump logic still runs —
+                // an empty list means "no instructions AND no jump" there.
+                if get_any(node, &["Disabled"]) == Some(&Bson::Boolean(true)) {
+                    return vec![JsValue::object(vec![
+                        ("type", JsValue::Str("noop".to_string())),
+                        ("label", JsValue::Str(model_id_of(node))),
+                    ])];
+                }
                 let action = get_doc_any(node, &["Action"]).unwrap_or_default();
                 let action_type = get_str_any(&action, &["$Type"]).unwrap_or_default();
                 match action_type.as_str() {
@@ -345,6 +361,34 @@ impl<'a> NanoflowCompiler<'a> {
                     }
                     "Microflows$CommitAction" => self
                         .compile_commit(&action, node, true, flow_name)
+                        .into_iter()
+                        .collect(),
+                    "Microflows$RetrieveAction" => self
+                        .compile_retrieve(&action, node, flow_name)
+                        .into_iter()
+                        .collect(),
+                    "Microflows$DeleteAction" => self
+                        .compile_delete(&action, node, flow_name)
+                        .into_iter()
+                        .collect(),
+                    "Microflows$RollbackAction" => self
+                        .compile_rollback(&action, node, flow_name)
+                        .into_iter()
+                        .collect(),
+                    "Microflows$CreateListAction" => self
+                        .compile_create_list(&action, node, flow_name)
+                        .into_iter()
+                        .collect(),
+                    "Microflows$ChangeListAction" => self
+                        .compile_change_list(&action, node, flow_name)
+                        .into_iter()
+                        .collect(),
+                    "Microflows$ListOperationsAction" => self
+                        .compile_list_operation(&action, node, flow_name)
+                        .into_iter()
+                        .collect(),
+                    "Microflows$AggregateAction" => self
+                        .compile_aggregate(&action, node, flow_name)
                         .into_iter()
                         .collect(),
                     other => {
@@ -460,10 +504,25 @@ impl<'a> NanoflowCompiler<'a> {
         let items = array_docs(action, &["Items"]);
         let mut out = Vec::new();
         for (index, item) in items.iter().enumerate() {
-            let attribute = get_str_any(item, &["Attribute"]).unwrap_or_default();
-            let member = attribute.rsplit('.').next().unwrap_or_default().to_string();
             let item_type = get_str_any(item, &["Type"]);
-            if member.is_empty() || item_type.as_deref() != Some("Set") {
+            // Changing a plain attribute populates `Attribute`; changing a
+            // `Reference`/`ReferenceSet` association instead leaves
+            // `Attribute` empty and populates `Association` — true for
+            // `Set` (a `Reference`'s single related object) just as much as
+            // `Add`/`Remove` (a `ReferenceSet`'s members), so every `Type`
+            // falls back to `Association` the same way.
+            let qualified = get_str_any(item, &["Attribute"])
+                .filter(|a| !a.is_empty())
+                .or_else(|| get_str_any(item, &["Association"]))
+                .unwrap_or_default();
+            let member = qualified.rsplit('.').next().unwrap_or_default().to_string();
+            let instruction_type = match item_type.as_deref() {
+                Some("Set") => "changeObject",
+                Some("Add") => "addReference",
+                Some("Remove") => "removeReference",
+                _ => "",
+            };
+            if member.is_empty() || instruction_type.is_empty() {
                 let item_type_name = get_str_any(item, &["$Type"]).unwrap_or_default();
                 self.mark_unsupported(flow_name, &item_type_name, item);
                 continue;
@@ -476,7 +535,7 @@ impl<'a> NanoflowCompiler<'a> {
                 format!("{label}${index}")
             };
             out.push(JsValue::object(vec![
-                ("type", JsValue::Str("changeObject".to_string())),
+                ("type", JsValue::Str(instruction_type.to_string())),
                 ("label", JsValue::Str(item_label)),
                 ("inputVar", JsValue::Str(variable.to_string())),
                 ("member", JsValue::Str(member)),
@@ -671,9 +730,8 @@ impl<'a> NanoflowCompiler<'a> {
         node: &Document,
         flow_name: &str,
     ) -> Option<JsValue> {
-        let attribute = get_str_any(action, &["Attribute"]).unwrap_or_default();
-        let member = attribute.rsplit('.').next().unwrap_or_default().to_string();
-        if member.is_empty() {
+        let input = get_str_any(action, &["ValidationVariableName"]).unwrap_or_default();
+        if input.is_empty() {
             self.mark_unsupported(
                 flow_name,
                 &get_str_any(action, &["$Type"]).unwrap_or_default(),
@@ -681,17 +739,23 @@ impl<'a> NanoflowCompiler<'a> {
             );
             return None;
         }
+        // An empty `Attribute` is a real, general (not field-specific)
+        // validation message — not the "missing data" signal it is for
+        // `change_instructions`'s attribute/association fields, so no
+        // `member` entry rather than falling back to unsupported.
+        let attribute = get_str_any(action, &["Attribute"]).unwrap_or_default();
+        let member = attribute.rsplit('.').next().unwrap_or_default().to_string();
         let text = self.text_template_expression(action, "FeedbackTemplate");
-        Some(JsValue::object(vec![
+        let mut entries = vec![
             ("type", JsValue::Str("showValidation".to_string())),
             ("label", JsValue::Str(model_id_of(node))),
-            (
-                "inputVar",
-                JsValue::Str(get_str_any(action, &["ValidationVariableName"]).unwrap_or_default()),
-            ),
-            ("member", JsValue::Str(member)),
-            ("text", text),
-        ]))
+            ("inputVar", JsValue::Str(input)),
+        ];
+        if !member.is_empty() {
+            entries.push(("member", JsValue::Str(member)));
+        }
+        entries.push(("text", text));
+        Some(JsValue::object(entries))
     }
 
     fn compile_log(&mut self, action: &Document, node: &Document, flow_name: &str) -> JsValue {
@@ -746,6 +810,337 @@ impl<'a> NanoflowCompiler<'a> {
             entries.push(("label", JsValue::Str(model_id_of(node))));
         }
         Some(JsValue::object(entries))
+    }
+
+    /// `Microflows$RetrieveAction` isn't in mxrb's own allow-listed activity
+    /// set — `nanoflow_program_compiler.rb`'s `compile_node` has no case for
+    /// it at all, so this is an intentional addition beyond the verbatim
+    /// port, not a gap the Ruby closes elsewhere. Two known simplifications:
+    /// an `XpathConstraint` is carried through as an opaque string rather
+    /// than translated to JS (it's a distinct grammar from this module's
+    /// `expression` mini-language — a future runtime consuming this IR
+    /// needs its own XPath evaluator); and a plain `Reference` association's
+    /// list-vs-single cardinality isn't resolved by traversal direction the
+    /// way [`crate::FlowNodeCompiler::association_retrieve_type`] does for
+    /// the BSON pipeline, since that needs full variable-type tracking this
+    /// module doesn't have — only `reference_set` associations (always a
+    /// list from either side) get `"list": true` here.
+    fn compile_retrieve(
+        &mut self,
+        action: &Document,
+        node: &Document,
+        flow_name: &str,
+    ) -> Option<JsValue> {
+        let output = get_str_any(action, &["ResultVariableName"]).unwrap_or_default();
+        let source = get_doc_any(action, &["RetrieveSource"]).unwrap_or_default();
+        let source_type = get_str_any(&source, &["$Type"]).unwrap_or_default();
+        if output.is_empty() {
+            self.mark_unsupported(flow_name, &source_type, action);
+            return None;
+        }
+        match source_type.as_str() {
+            "Microflows$DatabaseRetrieveSource" => {
+                let entity = get_str_any(&source, &["Entity"]).unwrap_or_default();
+                if entity.is_empty() {
+                    self.mark_unsupported(flow_name, &source_type, action);
+                    return None;
+                }
+                let single_object = get_doc_any(&source, &["Range"])
+                    .map(|r| get_any(&r, &["SingleObject"]) == Some(&Bson::Boolean(true)))
+                    .unwrap_or(false);
+                let constraint = get_str_any(&source, &["XpathConstraint"]).unwrap_or_default();
+                let mut entries = vec![
+                    ("type", JsValue::Str("retrieveByEntity".to_string())),
+                    ("label", JsValue::Str(model_id_of(node))),
+                    ("outputVar", JsValue::Str(output)),
+                    ("objectType", JsValue::Str(entity)),
+                    ("singleObject", JsValue::Bool(single_object)),
+                ];
+                if !constraint.is_empty() {
+                    entries.push(("constraint", JsValue::Str(constraint)));
+                }
+                Some(JsValue::object(entries))
+            }
+            "Microflows$AssociationRetrieveSource" => {
+                let association_id = get_str_any(&source, &["AssociationId"]).unwrap_or_default();
+                let start = get_str_any(&source, &["StartVariableName"]).unwrap_or_default();
+                if association_id.is_empty() || start.is_empty() {
+                    self.mark_unsupported(flow_name, &source_type, action);
+                    return None;
+                }
+                let list = self
+                    .associations
+                    .get(&association_id)
+                    .map(|a| a.reference_set)
+                    .unwrap_or(false);
+                Some(JsValue::object(vec![
+                    ("type", JsValue::Str("retrieveByAssociation".to_string())),
+                    ("label", JsValue::Str(model_id_of(node))),
+                    ("outputVar", JsValue::Str(output)),
+                    ("inputVar", JsValue::Str(start)),
+                    ("association", JsValue::Str(association_id)),
+                    ("list", JsValue::Bool(list)),
+                ]))
+            }
+            _ => {
+                self.mark_unsupported(flow_name, &source_type, action);
+                None
+            }
+        }
+    }
+
+    /// Not in mxrb's allow-listed activity set, same as [`Self::compile_retrieve`].
+    fn compile_delete(
+        &mut self,
+        action: &Document,
+        node: &Document,
+        flow_name: &str,
+    ) -> Option<JsValue> {
+        let input = get_str_any(action, &["DeleteVariableName"]).unwrap_or_default();
+        if input.is_empty() {
+            self.mark_unsupported(flow_name, "Microflows$DeleteAction", action);
+            return None;
+        }
+        Some(JsValue::object(vec![
+            ("type", JsValue::Str("deleteObject".to_string())),
+            ("label", JsValue::Str(model_id_of(node))),
+            ("inputVar", JsValue::Str(input)),
+        ]))
+    }
+
+    /// Not in mxrb's allow-listed activity set, same as [`Self::compile_retrieve`].
+    fn compile_rollback(
+        &mut self,
+        action: &Document,
+        node: &Document,
+        flow_name: &str,
+    ) -> Option<JsValue> {
+        let input = get_str_any(action, &["RollbackVariableName"]).unwrap_or_default();
+        if input.is_empty() {
+            self.mark_unsupported(flow_name, "Microflows$RollbackAction", action);
+            return None;
+        }
+        Some(JsValue::object(vec![
+            ("type", JsValue::Str("rollbackObject".to_string())),
+            ("label", JsValue::Str(model_id_of(node))),
+            ("inputVar", JsValue::Str(input)),
+        ]))
+    }
+
+    /// Not in mxrb's allow-listed activity set, same as [`Self::compile_retrieve`].
+    fn compile_create_list(
+        &mut self,
+        action: &Document,
+        node: &Document,
+        flow_name: &str,
+    ) -> Option<JsValue> {
+        let output = get_str_any(action, &["VariableName"]).unwrap_or_default();
+        let entity = get_str_any(action, &["Entity"]).unwrap_or_default();
+        if output.is_empty() || entity.is_empty() {
+            self.mark_unsupported(flow_name, "Microflows$CreateListAction", action);
+            return None;
+        }
+        Some(JsValue::object(vec![
+            ("type", JsValue::Str("createList".to_string())),
+            ("label", JsValue::Str(model_id_of(node))),
+            ("outputVar", JsValue::Str(output)),
+            ("objectType", JsValue::Str(entity)),
+        ]))
+    }
+
+    /// Only the `Add`/`Remove` operations observed in real models are
+    /// implemented — not in mxrb's allow-listed activity set, same as
+    /// [`Self::compile_retrieve`].
+    fn compile_change_list(
+        &mut self,
+        action: &Document,
+        node: &Document,
+        flow_name: &str,
+    ) -> Option<JsValue> {
+        let input = get_str_any(action, &["ChangeVariableName"]).unwrap_or_default();
+        let op_type = get_str_any(action, &["Type"]);
+        let instruction_type = match op_type.as_deref() {
+            Some("Add") => "addToList",
+            Some("Remove") => "removeFromList",
+            _ => "",
+        };
+        if input.is_empty() || instruction_type.is_empty() {
+            self.mark_unsupported(flow_name, "Microflows$ChangeListAction", action);
+            return None;
+        }
+        let raw = get_str_any(action, &["Value"]).unwrap_or_default();
+        let value = self.expression_for(&raw);
+        Some(JsValue::object(vec![
+            ("type", JsValue::Str(instruction_type.to_string())),
+            ("label", JsValue::Str(model_id_of(node))),
+            ("inputVar", JsValue::Str(input)),
+            ("value", value.into()),
+        ]))
+    }
+
+    /// Only `UseExpression: false` is implemented — `Count` needs no
+    /// `Attribute`, `Sum`/`Average`/`Min`/`Max` need one. The custom-reduce
+    /// path (`UseExpression: true`, folding `Expression` over the list
+    /// starting from `ReduceInitialValueExpression`) stays unsupported: no
+    /// real example appeared in either acceptance project to confirm the
+    /// accumulator-variable convention against. Not in mxrb's allow-listed
+    /// activity set, same as [`Self::compile_retrieve`].
+    fn compile_aggregate(
+        &mut self,
+        action: &Document,
+        node: &Document,
+        flow_name: &str,
+    ) -> Option<JsValue> {
+        let output = get_str_any(action, &["VariableName"]).unwrap_or_default();
+        let list_name = get_str_any(action, &["AggregateVariableName"]).unwrap_or_default();
+        let function = get_str_any(action, &["AggregateFunction"]).unwrap_or_default();
+        let use_expression = get_any(action, &["UseExpression"]) == Some(&Bson::Boolean(true));
+        if output.is_empty() || list_name.is_empty() || use_expression {
+            self.mark_unsupported(flow_name, "Microflows$AggregateAction", action);
+            return None;
+        }
+        let mut entries = vec![
+            ("type", JsValue::Str("aggregateList".to_string())),
+            ("label", JsValue::Str(model_id_of(node))),
+            ("outputVar", JsValue::Str(output)),
+            ("listVar", JsValue::Str(list_name)),
+            ("function", JsValue::Str(function.to_lowercase())),
+        ];
+        if function != "Count" {
+            let attribute = get_str_any(action, &["Attribute"]).unwrap_or_default();
+            let member = attribute.rsplit('.').next().unwrap_or_default().to_string();
+            if member.is_empty() {
+                self.mark_unsupported(flow_name, "Microflows$AggregateAction", action);
+                return None;
+            }
+            entries.push(("attribute", JsValue::Str(member)));
+        }
+        Some(JsValue::object(entries))
+    }
+
+    /// `Sort`, `Head`, `Find`, `Filter`, `FilterByExpression`, and
+    /// `FindByExpression` are implemented — every `NewOperation` kind
+    /// observed in real models. The remaining Runtime-known kinds
+    /// (`Intersect`, `Union`, `Contains`, `ListRange`, `Equals`) stay
+    /// unsupported rather than guessed at: none appeared in either
+    /// acceptance project, so there's no real example to check a compiled
+    /// shape against. Not in mxrb's allow-listed activity set, same as
+    /// [`Self::compile_retrieve`].
+    fn compile_list_operation(
+        &mut self,
+        action: &Document,
+        node: &Document,
+        flow_name: &str,
+    ) -> Option<JsValue> {
+        let output = get_str_any(action, &["ResultVariableName"]).unwrap_or_default();
+        let operation = get_doc_any(action, &["NewOperation"]).unwrap_or_default();
+        let operation_type = get_str_any(&operation, &["$Type"]).unwrap_or_default();
+        if output.is_empty() {
+            self.mark_unsupported(flow_name, &operation_type, action);
+            return None;
+        }
+        match operation_type.as_str() {
+            "Microflows$Sort" => {
+                let list_name = get_str_any(&operation, &["ListName"]).unwrap_or_default();
+                if list_name.is_empty() {
+                    self.mark_unsupported(flow_name, &operation_type, action);
+                    return None;
+                }
+                let sortings_list = get_doc_any(&operation, &["Sortings"]).unwrap_or_default();
+                let sortings: Vec<JsValue> = array_docs(&sortings_list, &["Sortings"])
+                    .iter()
+                    .map(|sorting| {
+                        let attribute = get_doc_any(sorting, &["AttributeRef"])
+                            .and_then(|a| get_str_any(&a, &["Attribute"]))
+                            .unwrap_or_default();
+                        let ascending =
+                            get_str_any(sorting, &["SortOrder"]).as_deref() != Some("Descending");
+                        JsValue::object(vec![
+                            ("attribute", JsValue::Str(attribute)),
+                            ("ascending", JsValue::Bool(ascending)),
+                        ])
+                    })
+                    .collect();
+                Some(JsValue::object(vec![
+                    ("type", JsValue::Str("sortList".to_string())),
+                    ("label", JsValue::Str(model_id_of(node))),
+                    ("outputVar", JsValue::Str(output)),
+                    ("listVar", JsValue::Str(list_name)),
+                    ("sortings", JsValue::Array(sortings)),
+                ]))
+            }
+            "Microflows$Head" => {
+                let list_name = get_str_any(&operation, &["ListName"]).unwrap_or_default();
+                if list_name.is_empty() {
+                    self.mark_unsupported(flow_name, &operation_type, action);
+                    return None;
+                }
+                Some(JsValue::object(vec![
+                    ("type", JsValue::Str("listHead".to_string())),
+                    ("label", JsValue::Str(model_id_of(node))),
+                    ("outputVar", JsValue::Str(output)),
+                    ("listVar", JsValue::Str(list_name)),
+                ]))
+            }
+            // `Find`/`Filter` compare a named attribute against a value
+            // expression for every item; `Find` returns the first match,
+            // `Filter` every match. Same qualified-name-to-member
+            // convention as `change_instructions`.
+            "Microflows$Find" | "Microflows$Filter" => {
+                let list_name = get_str_any(&operation, &["ListName"]).unwrap_or_default();
+                let attribute = get_str_any(&operation, &["Attribute"]).unwrap_or_default();
+                let member = attribute.rsplit('.').next().unwrap_or_default().to_string();
+                if list_name.is_empty() || member.is_empty() {
+                    self.mark_unsupported(flow_name, &operation_type, action);
+                    return None;
+                }
+                let raw = get_str_any(&operation, &["Expression"]).unwrap_or_default();
+                let value = self.expression_for(&raw);
+                let instruction_type = if operation_type == "Microflows$Find" {
+                    "findInList"
+                } else {
+                    "filterList"
+                };
+                Some(JsValue::object(vec![
+                    ("type", JsValue::Str(instruction_type.to_string())),
+                    ("label", JsValue::Str(model_id_of(node))),
+                    ("outputVar", JsValue::Str(output)),
+                    ("listVar", JsValue::Str(list_name)),
+                    ("attribute", JsValue::Str(member)),
+                    ("value", value.into()),
+                ]))
+            }
+            // `FilterByExpression`/`FindByExpression` evaluate a boolean
+            // expression per item, bound to the implicit `$currentObject`
+            // variable — the same `expression` mini-language every other
+            // expression field in this module already uses, so no special
+            // handling needed beyond routing it through `expression_for`.
+            "Microflows$FilterByExpression" | "Microflows$FindByExpression" => {
+                let list_name = get_str_any(&operation, &["ListName"]).unwrap_or_default();
+                let raw = get_str_any(&operation, &["Expression"]).unwrap_or_default();
+                if list_name.is_empty() || raw.is_empty() {
+                    self.mark_unsupported(flow_name, &operation_type, action);
+                    return None;
+                }
+                let condition = self.expression_for(&raw);
+                let instruction_type = if operation_type == "Microflows$FindByExpression" {
+                    "findInListByExpression"
+                } else {
+                    "filterListByExpression"
+                };
+                Some(JsValue::object(vec![
+                    ("type", JsValue::Str(instruction_type.to_string())),
+                    ("label", JsValue::Str(model_id_of(node))),
+                    ("outputVar", JsValue::Str(output)),
+                    ("listVar", JsValue::Str(list_name)),
+                    ("condition", condition.into()),
+                ]))
+            }
+            _ => {
+                self.mark_unsupported(flow_name, &operation_type, action);
+                None
+            }
+        }
     }
 
     fn compile_split(
