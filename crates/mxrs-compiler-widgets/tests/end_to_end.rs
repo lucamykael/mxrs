@@ -133,3 +133,18 @@ fn compiling_a_settings_document_through_the_artifact_path_fails_loudly() {
         mxrs_compiler_widgets::CompilerError::UnsupportedArtifactType { .. }
     ));
 }
+
+#[test]
+fn builds_the_project_scoped_page_and_web_operation_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("WebOperations.mpr");
+    write_fixture(&path);
+
+    let project = Project::open(&path, true).unwrap();
+    let compiler = WidgetsCompiler::for_project(&project, &[]).unwrap();
+
+    // The minimal writer fixture has no page yet, but exercises the actual
+    // raw-unit/module/security indexing path rather than the in-memory test
+    // constructor used by the focused operation tests.
+    assert!(compiler.compile_web_operations().is_empty());
+}

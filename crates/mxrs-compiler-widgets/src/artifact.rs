@@ -13,7 +13,7 @@ use mxrs_bson::{Bson, Document, doc};
 
 use crate::CompilerError;
 use crate::image_format::image_format;
-use crate::support::{array_items, build_array, get, plain_document_field, to_s};
+use mxrs_compiler_support::{array_items, build_array, get, plain_document_field, to_s};
 
 /// `$Type`s compiled via the shallow `{$ID, $Type, Name, QualifiedName}`
 /// shape ([`named`]) — mirrors mxrb's `NAME_ONLY_TYPES`.

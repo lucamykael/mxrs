@@ -1,36 +1,31 @@
-//! Phase 5's third compiler crate — the "shell" sub-step of
-//! `mxrs-compiler-widgets`'s four-part roadmap slice (see
-//! `decisions/mxrs-rust-rewrite-plan.md` in this project's ai-memory):
-//! compiles Navigation/Settings/Artifact editor-shape documents into
-//! Mendix Runtime shape, sibling to `mxrs-compiler-domain`/
-//! `mxrs-compiler-flow`. Ports three `mxrb` files:
-//!
+//! Compiles project shell and page infrastructure documents into Mendix
+//! Runtime shape, sibling to `mxrs-compiler-domain`/`mxrs-compiler-flow`.
+//! The ported surface covers:
 //! - `lib/mxrb/compiler/navigation_document_compiler.rb` (93 lines) — `navigation`
 //! - `lib/mxrb/compiler/settings_document_compiler.rb` (45 lines) — `settings`
 //! - `lib/mxrb/compiler/artifact_document_compiler.rb` (102 lines) — `artifact`
 //!   (plus `compiler/model_values.rb#image_format`/`#image_bytes` — `image_format`)
+//! - `page_document_compiler.rb` — page Runtime metadata
+//! - `web_operation_compiler.rb` — the project-wide operation catalog
 //!
-//! Deliberately **not** in this slice (the next sub-step of the same
-//! roadmap entry): `PageDocumentCompiler`, `WebOperationCompiler` (its
-//! `operation_id`/`menu_operation_id` currently lives, temporarily, in
-//! `mxrs-compiler-flow`'s `nanoflow` module — see that module's own doc
-//! comment for why, and move it here once page compilation starts), and
-//! every bundle compiler (`page_bundle_compiler.rb`/`legacy_page_builder.rb`
-//! most of all — deliberately held to last in the roadmap, not this
-//! crate's problem yet).
+//! Widget bundle generation remains the next roadmap slice.
 
 mod artifact;
 mod image_format;
 mod navigation;
+mod page_document;
 mod settings;
-mod support;
+mod web_operation;
 
 use mxrs_bson::Document;
 use mxrs_schema::RuntimeModelSchema;
 
 pub use artifact::{ArtifactCompiler, NAME_ONLY_TYPES, TYPES};
+pub use mxrs_compiler_support::{menu_operation_id, operation_id};
 pub use navigation::NavigationCompiler;
+pub use page_document::PageDocumentCompiler;
 pub use settings::SettingsCompiler;
+pub use web_operation::{DATA_GRID_WIDGET_ID, WebOperationCompiler};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompilerError {
@@ -47,17 +42,24 @@ pub enum CompilerError {
     ArtifactOutsideModule { name: String },
     #[error("cannot determine format for image {name:?}")]
     CannotDetermineImageFormat { name: String },
+    #[error("unsupported page root {type_name:?}")]
+    UnsupportedPageRoot { type_name: String },
+    #[error("unsupported Runtime data type {type_name:?}")]
+    UnsupportedDataType { type_name: String },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }
 
-/// Project-scoped entry point, mirroring `mxrs_compiler_flow::FlowCompiler`'s
-/// facade shape (build once, compile many). Unlike `FlowCompiler`, this
-/// facade doesn't take a `&Project` — Navigation/Settings/Artifact each
-/// compile a single already-located source document with no cross-flow
-/// indexing needed; a project-wide accessor will be worth adding once page/
-/// widget compilation (which *does* need cross-references, e.g. resolving
-/// page/microflow targets) joins this crate.
+/// Facade for document compilation and the project-wide operation catalog.
+/// Use [`WidgetsCompiler::for_project`] when page security or cross-document
+/// web-operation resolution is required; [`WidgetsCompiler::new`] remains a
+/// lightweight path for isolated Navigation/Settings/Artifact compilation.
 pub struct WidgetsCompiler {
     schema: RuntimeModelSchema,
+    page: PageDocumentCompiler,
+    web_operations: Option<WebOperationCompiler>,
 }
 
 impl WidgetsCompiler {
@@ -68,6 +70,19 @@ impl WidgetsCompiler {
     pub fn new(existing_runtime_documents: &[Document]) -> Result<Self, CompilerError> {
         Ok(WidgetsCompiler {
             schema: RuntimeModelSchema::for_11(existing_runtime_documents)?,
+            page: PageDocumentCompiler::without_security(),
+            web_operations: None,
+        })
+    }
+
+    pub fn for_project(
+        project: &mxrs_model::Project,
+        existing_runtime_documents: &[Document],
+    ) -> Result<Self, CompilerError> {
+        Ok(Self {
+            schema: RuntimeModelSchema::for_11(existing_runtime_documents)?,
+            page: PageDocumentCompiler::new(project)?,
+            web_operations: Some(WebOperationCompiler::new(project)?),
         })
     }
 
@@ -85,5 +100,20 @@ impl WidgetsCompiler {
         module_name: Option<&str>,
     ) -> Result<Document, CompilerError> {
         ArtifactCompiler::compile(source, module_name)
+    }
+
+    pub fn compile_page(
+        &self,
+        source: &Document,
+        module_name: &str,
+    ) -> Result<Document, CompilerError> {
+        self.page.compile(source, module_name)
+    }
+
+    pub fn compile_web_operations(&self) -> Vec<Document> {
+        self.web_operations
+            .as_ref()
+            .map(WebOperationCompiler::compile)
+            .unwrap_or_default()
     }
 }

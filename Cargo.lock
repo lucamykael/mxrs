@@ -497,6 +497,7 @@ name = "mxrs-compiler-domain"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-compiler-support",
  "mxrs-dsl",
  "mxrs-ir",
  "mxrs-model",
@@ -512,6 +513,7 @@ name = "mxrs-compiler-flow"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-compiler-support",
  "mxrs-dsl",
  "mxrs-expr",
  "mxrs-ir",
@@ -527,16 +529,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-compiler-support"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-model",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
 name = "mxrs-compiler-widgets"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-compiler-support",
  "mxrs-dsl",
  "mxrs-ir",
  "mxrs-model",
  "mxrs-mpr",
  "mxrs-schema",
  "mxrs-writer",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

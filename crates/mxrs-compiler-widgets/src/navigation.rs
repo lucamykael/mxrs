@@ -12,7 +12,7 @@ use mxrs_bson::{Bson, Document, doc};
 use mxrs_schema::RuntimeModelSchema;
 
 use crate::CompilerError;
-use crate::support::{
+use mxrs_compiler_support::{
     array_items, build_array, get, plain_array_field, plain_document_field, to_s,
 };
 

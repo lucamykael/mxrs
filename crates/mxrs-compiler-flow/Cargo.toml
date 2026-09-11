@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
+mxrs-compiler-support = { path = "../mxrs-compiler-support" }
 mxrs-model = { path = "../mxrs-model" }
 mxrs-schema = { path = "../mxrs-schema" }
 thiserror.workspace = true

@@ -13,8 +13,8 @@ use mxrs_model::entity::{AccessMember, AccessMemberKind, AccessRule};
 use mxrs_model::{Association, Project};
 
 use crate::CompilerError;
-use crate::support::{
-    array_docs, get_doc_any, get_id_any, get_str_any, new_id, stable_dedup, string_list,
+use mxrs_compiler_support::{
+    get_doc_any, get_id_any, get_str_any, new_id, project_role_map, stable_dedup,
 };
 
 pub struct SecurityCompiler {
@@ -165,24 +165,4 @@ fn runtime_delete_behavior(value: String) -> String {
     } else {
         value
     }
-}
-
-fn project_role_map(project: &Project) -> Result<HashMap<String, Vec<String>>, CompilerError> {
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
-    let units = project.all_units()?;
-    let security_doc = units.iter().find_map(|unit| {
-        let doc = project.mpr().parse_contents(unit).ok()?;
-        (get_str_any(&doc, &["$Type"]).as_deref() == Some("Security$ProjectSecurity"))
-            .then_some(doc)
-    });
-    let Some(doc) = security_doc else {
-        return Ok(map);
-    };
-    for role in array_docs(&doc, &["UserRoles"]) {
-        let name = get_str_any(&role, &["Name"]).unwrap_or_default();
-        for module_role in string_list(&role, &["ModuleRoles"]) {
-            map.entry(module_role).or_default().push(name.clone());
-        }
-    }
-    Ok(map)
 }

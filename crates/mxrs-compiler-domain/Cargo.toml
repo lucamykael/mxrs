@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
+mxrs-compiler-support = { path = "../mxrs-compiler-support" }
 mxrs-model = { path = "../mxrs-model" }
 thiserror.workspace = true
 uuid = { version = "1", features = ["v4"] }

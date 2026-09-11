@@ -6,43 +6,15 @@
 //! functions with no other state, unlike every other file in this crate.
 
 use mxrs_bson::Document;
+use mxrs_compiler_support::runtime_data_type;
 
 use crate::CompilerError;
 use crate::support::get_str_any;
 
 /// `document` is `None` for a void return (`runtime_data_types.rb:16-17`).
 pub fn data_type(document: Option<&Document>) -> Result<String, CompilerError> {
-    let Some(document) = document else {
-        return Ok("Void".to_string());
-    };
-    let type_name = get_str_any(document, &["$Type"]).unwrap_or_default();
-    Ok(match type_name.as_str() {
-        "DataTypes$VoidType" => "Void".to_string(),
-        "DataTypes$StringType" => "String".to_string(),
-        "DataTypes$BooleanType" => "Boolean".to_string(),
-        "DataTypes$IntegerType" => "Integer".to_string(),
-        "DataTypes$DecimalType" => "Decimal".to_string(),
-        "DataTypes$DateTimeType" => "DateTime".to_string(),
-        "DataTypes$ObjectType" => get_str_any(document, &["Entity"]).unwrap_or_default(),
-        "DataTypes$ListType" => {
-            format!(
-                "[{}]",
-                get_str_any(document, &["Entity"]).unwrap_or_default()
-            )
-        }
-        "DataTypes$EnumerationType" => {
-            format!(
-                "#{}",
-                get_str_any(document, &["Enumeration"]).unwrap_or_default()
-            )
-        }
-        "DataTypes$UnknownType" => "Unknown".to_string(),
-        other => {
-            return Err(CompilerError::UnsupportedDataType {
-                type_name: other.to_string(),
-            });
-        }
-    })
+    runtime_data_type(document)
+        .map_err(|type_name| CompilerError::UnsupportedDataType { type_name })
 }
 
 /// `true` iff `value` is a document whose `$Type` starts with

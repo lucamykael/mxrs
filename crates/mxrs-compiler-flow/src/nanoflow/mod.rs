@@ -35,12 +35,9 @@
 //!   not `nil`) — this port skips that trailing jump in that one narrow
 //!   edge case. Not expected to matter in practice (a `ChangeAction` with
 //!   zero real member changes is itself a degenerate model).
-//! - `WebOperationCompiler.operation_id`/`menu_operation_id`
-//!   (`lib/mxrb/compiler/web_operation_compiler.rb:14-23`) is ported ahead
-//!   of its own future crate (`mxrs-compiler-widgets`) purely because
-//!   `compile_microflow_call`/`compile_commit` need byte-identical IDs —
-//!   see [`operation_id`]. Move it there (not reimplement it again) once
-//!   that crate exists.
+//! - Web operation IDs come from `mxrs-compiler-support` and are reexported
+//!   by `mxrs-compiler-widgets`, so flow and page artifacts share one
+//!   byte-identical algorithm without a cyclic compiler dependency.
 //! - `compile_split`'s `targets` map doesn't dedupe a (invalid/degenerate)
 //!   model with two flows sharing the same case value the way Ruby's
 //!   `to_h` would (last one wins) — an edge case not worth the extra
@@ -58,6 +55,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use mxrs_bson::{Bson, Document};
+use mxrs_compiler_support::operation_id;
 use sha2::{Digest, Sha256};
 
 use crate::support::{
@@ -1806,44 +1804,6 @@ fn short_hash(input: &str) -> String {
     hex[..12].to_string()
 }
 
-/// Ports `WebOperationCompiler.operation_id` (`web_operation_compiler.rb:
-/// 14-17`) — see this module's doc comment for why it lives here for now.
-/// `Base64.strict_encode64(SHA256.digest(seed).byteslice(0,16))
-/// .delete_suffix('==')`: standard (not URL-safe) base64 of the digest's
-/// first 16 raw bytes, then the always-exactly-2 padding characters a
-/// 16-byte input produces are stripped.
-fn operation_id(a: &str, b: &str) -> String {
-    let seed = format!("{a}/{b}");
-    let digest = Sha256::digest(seed.as_bytes());
-    base64_standard(&digest[0..16])
-        .trim_end_matches("==")
-        .to_string()
-}
-
-fn base64_standard(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[((n >> 6) & 0x3F) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[(n & 0x3F) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2080,16 +2040,5 @@ mod tests {
         let first = compiler.reference("Sales.ACT_Do").unwrap();
         let second = compiler.reference("Sales.ACT_Do").unwrap();
         assert_eq!(first, second);
-    }
-
-    #[test]
-    fn operation_id_matches_base64_of_the_sha256_prefix() {
-        let id = operation_id("Sales.MyPage", "widget1");
-        assert_eq!(
-            id.len(),
-            22,
-            "16 bytes of base64 minus the always-present '==' padding is 22 chars"
-        );
-        assert!(!id.contains('='));
     }
 }

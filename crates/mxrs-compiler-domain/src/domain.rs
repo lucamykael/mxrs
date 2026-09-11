@@ -36,7 +36,7 @@ use mxrs_model::{Attribute, AttributeType, DomainModel, Entity, Module, Project}
 
 use crate::CompilerError;
 use crate::security::SecurityCompiler;
-use crate::support::{
+use mxrs_compiler_support::{
     array_docs, get_any, get_bool_any, get_id_any, get_str_any, new_id, plain_value,
 };
 

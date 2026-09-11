@@ -10,7 +10,7 @@ use mxrs_bson::{Bson, Document, doc};
 use mxrs_schema::RuntimeModelSchema;
 
 use crate::CompilerError;
-use crate::support::{array_items, build_array, get};
+use mxrs_compiler_support::{array_items, build_array, get};
 
 pub struct SettingsCompiler<'a> {
     schema: &'a RuntimeModelSchema,

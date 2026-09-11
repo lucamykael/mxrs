@@ -4,7 +4,7 @@
 use mxrs_bson::{Bson, Document};
 
 use crate::CompilerError;
-use crate::support::{get, to_s};
+use mxrs_compiler_support::{get, to_s};
 
 fn image_bytes(value: &Bson) -> Vec<u8> {
     match value {

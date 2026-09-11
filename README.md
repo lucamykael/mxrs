@@ -13,7 +13,7 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-19 crates + a dev-only `xtask` harness, ~31k lines of Rust, 392 tests
+21 crates + a dev-only `xtask` harness, ~34k lines of Rust, 412 tests
 passing. Two independent pipelines share only the compiled model as input:
 
 **Writer path** (DSL definition → `.mpr`, what Studio Pro opens):
@@ -24,10 +24,11 @@ incremental re-sync) → `mxrs-exporter` (`.mpr` → editable Rust source, the
 other half of the round trip).
 
 **Compiler path** (an already-persisted model → Runtime shape → deployment):
-`mxrs-model` → `mxrs-compiler-domain` (entities/security) →
+`mxrs-model` → `mxrs-compiler-support` (shared normalization/identity) →
+`mxrs-compiler-domain` (entities/security) →
 `mxrs-compiler-flow` (microflow/nanoflow/code-action) →
-`mxrs-compiler-widgets` (navigation/settings/artifact so far — page/widget
-bundle compilation is the largest remaining body of work in the project) →
+`mxrs-compiler-widgets` (page metadata/web operations/navigation/settings/
+artifact; widget bundles remain) →
 `mxrs-javagen` (generated Java proxies). Materializers/packaging
 (`mxrs-materializers`, `mxrs-packager`) and the runtime/OQL/semantic/scaffold
 subsystems are not started yet.

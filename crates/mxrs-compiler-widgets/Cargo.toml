@@ -5,16 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Compiles Navigation/Settings/Artifact editor-shape documents into Mendix Runtime shape — Phase 5's third compiler crate, 'shell' sub-step."
+description = "Compiles page metadata, web operations, navigation, settings, and artifact documents into Mendix Runtime shape."
 
 [lints]
 workspace = true
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
+mxrs-compiler-support = { path = "../mxrs-compiler-support" }
 mxrs-model = { path = "../mxrs-model" }
 mxrs-schema = { path = "../mxrs-schema" }
 thiserror.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 mxrs-dsl = { path = "../mxrs-dsl" }
