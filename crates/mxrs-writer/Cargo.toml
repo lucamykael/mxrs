@@ -22,4 +22,5 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-expr = { path = "../mxrs-expr" }
 tempfile = "3.27.0"

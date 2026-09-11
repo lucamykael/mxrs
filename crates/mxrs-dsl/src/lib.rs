@@ -13,9 +13,21 @@
 //! (macro sugar) build on top of it.
 //!
 //! ```
-//! use mxrs_dsl::ProjectBuilder;
-//! use mxrs_ir::Member;
-//! use mxrs_ir::AssociationType;
+//! use mxrs_dsl::{ProjectBuilder, string};
+//! use mxrs_expr::{MxString, TypedAttributeMarker, attribute};
+//! use mxrs_ir::{AttributeMarker, EntityMarker, Ref};
+//!
+//! struct Order;
+//! impl EntityMarker for Order {
+//!     const MODULE: &'static str = "Sales";
+//!     const NAME: &'static str = "Order";
+//! }
+//! struct OrderNumber;
+//! impl AttributeMarker for OrderNumber {
+//!     type Entity = Order;
+//!     const NAME: &'static str = "Number";
+//! }
+//! impl TypedAttributeMarker for OrderNumber { type Value = MxString; }
 //!
 //! let mut project = ProjectBuilder::new("11.12.1");
 //! project.module("Sales", |m| {
@@ -24,8 +36,13 @@
 //!         e.decimal("Total");
 //!     });
 //!     m.microflow("ACT_CreateOrder", |f| {
-//!         f.create_object("order", "Sales.Order", vec![Member::attribute("Number", "'A-1'")], true);
-//!         f.return_value("$order");
+//!         let order = f.create_object(
+//!             "order",
+//!             Ref::<Order>::new(),
+//!             vec![attribute::<OrderNumber>(string("A-1"))],
+//!             true,
+//!         );
+//!         f.return_value(order);
 //!     });
 //! });
 //! let definition = project.build();
@@ -38,6 +55,10 @@ mod module;
 mod project;
 
 pub use entity::EntityBuilder;
-pub use flow::FlowBuilder;
+pub use flow::{CallArgument, FlowBuilder};
 pub use module::ModuleBuilder;
+pub use mxrs_expr::{
+    Expr, ListVar, MxBool, MxDecimal, MxFloat, MxInteger, MxLong, MxString, Var, boolean, decimal,
+    float, integer, long, string,
+};
 pub use project::ProjectBuilder;

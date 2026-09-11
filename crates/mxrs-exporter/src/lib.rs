@@ -43,12 +43,9 @@
 //!   (same gap `mxrs-writer`'s own doc comment already names) — not
 //!   emitted.
 //!
-//! Marker types (`EntityMarker` impls `EntityBuilder::association`
-//! requires for its target) are emitted inline in the same file, one
-//! per entity, in a `markers` module mirroring the project's own
-//! module/entity nesting — self-contained, no `build.rs`/manifest
-//! required to compile the output (`mxrs-typegen`'s codegen path is a
-//! separate, more typed way to get markers; this pass doesn't need it).
+//! Marker types are emitted by `project!` from these same entity
+//! declarations, so exported source is self-contained without a second
+//! schema manifest or a generated marker module.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -207,16 +204,13 @@ fn render(mendix_version: &str, modules: &[Module]) -> String {
     let _ = writeln!(out, "//!");
     let _ = writeln!(
         out,
-        "//! Depends on `mxrs-macros`, `mxrs-ir`, and `mxrs-dsl`"
+        "//! Depends on `mxrs-macros`, `mxrs-expr`, `mxrs-ir`, and `mxrs-dsl`"
     );
     let _ = writeln!(
         out,
         "//! (the `project! {{}}` macro's own expansion needs the latter two"
     );
     let _ = writeln!(out, "//! in scope — see `mxrs-macros`' crate doc).");
-    out.push('\n');
-
-    out.push_str(&render_markers(modules));
     out.push('\n');
 
     let _ = writeln!(out, "pub fn build() -> ::mxrs_ir::ProjectDecl {{");
@@ -240,36 +234,6 @@ fn index_entities_by_id(modules: &[Module]) -> HashMap<String, String> {
         }
     }
     by_id
-}
-
-fn render_markers(modules: &[Module]) -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "#[allow(non_snake_case, dead_code)]");
-    let _ = writeln!(out, "pub mod markers {{");
-    for module in modules {
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
-        let _ = writeln!(out, "    pub mod {} {{", sanitize_ident(module_name));
-        for entity in module.entities() {
-            let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
-            let ident = sanitize_ident(entity_name);
-            let _ = writeln!(out, "        pub struct {ident};");
-            let _ = writeln!(out, "        impl ::mxrs_ir::EntityMarker for {ident} {{");
-            let _ = writeln!(
-                out,
-                "            const MODULE: &'static str = {:?};",
-                module_name
-            );
-            let _ = writeln!(
-                out,
-                "            const NAME: &'static str = {:?};",
-                entity_name
-            );
-            let _ = writeln!(out, "        }}");
-        }
-        let _ = writeln!(out, "    }}");
-    }
-    let _ = writeln!(out, "}}");
-    out
 }
 
 fn render_module(module: &Module, entity_qualified_name_by_id: &HashMap<String, String>) -> String {
@@ -386,7 +350,7 @@ fn render_entity(
         };
         let _ = writeln!(
             out,
-            "                association {} -> markers::{target_path} as {assoc_type};",
+            "                association {} -> {target_path} as {assoc_type};",
             sanitize_ident(assoc_name)
         );
     }
@@ -613,9 +577,7 @@ mod tests {
         assert!(source.contains("string Name"));
         assert!(source.contains("string Number"));
         assert!(source.contains("persistable true"));
-        assert!(
-            source.contains("association Order_Customer -> markers::Sales::Customer as Reference")
-        );
+        assert!(source.contains("association Order_Customer -> Sales::Customer as Reference"));
     }
 
     #[test]
@@ -641,13 +603,9 @@ mod tests {
         mxrs_writer::write_project(&path, &builder.build()).unwrap();
 
         let source = export_project(&path).unwrap();
-        assert!(source.contains("pub mod markers"));
-        assert!(source.contains("pub struct Order"));
-        assert!(source.contains("pub struct Customer"));
+        assert!(!source.contains("pub mod markers"));
         assert!(source.contains("string Number = \"A-0\""));
-        assert!(
-            source.contains("association Order_Customer -> markers::Sales::Customer as Reference")
-        );
+        assert!(source.contains("association Order_Customer -> Sales::Customer as Reference"));
         assert!(source.contains("::mxrs_macros::project!"));
     }
 

@@ -57,7 +57,7 @@ mod tests {
             });
             m.entity("Customer", |_e| {});
             m.microflow("ACT_Do", |f| {
-                f.return_value("1");
+                f.return_value(mxrs_dsl::integer(1));
             });
         });
         mxrs_writer::write_project(&path, &project.build()).unwrap();

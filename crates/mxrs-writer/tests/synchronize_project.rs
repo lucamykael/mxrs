@@ -23,7 +23,7 @@ fn fresh_projects_with_the_same_logical_name_reuse_all_unit_identities() {
             entity.string("Number");
         });
         module.microflow("ACT_Order", |flow| {
-            flow.return_value("empty");
+            flow.return_value(mxrs_dsl::string(""));
         });
     });
     let declaration = declaration.build();
@@ -158,7 +158,7 @@ fn synchronize_project_upserts_a_microflow_by_name() {
     let mut initial = ProjectBuilder::new("11.12.1");
     initial.module("Sales", |m| {
         m.microflow("ACT_GetConstant", |f| {
-            f.return_value("1");
+            f.return_value(mxrs_dsl::integer(1));
         });
     });
     mxrs_writer::write_project(&path, &initial.build()).unwrap();
@@ -166,7 +166,7 @@ fn synchronize_project_upserts_a_microflow_by_name() {
     let mut updated = ProjectBuilder::new("11.12.1");
     updated.module("Sales", |m| {
         m.microflow("ACT_GetConstant", |f| {
-            f.return_value("2");
+            f.return_value(mxrs_dsl::integer(2));
         });
     });
     mxrs_writer::synchronize_project(&path, &updated.build()).unwrap();

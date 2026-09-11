@@ -13,44 +13,29 @@
 //! attr-kind  := "string" | "integer" | "long" | "float" | "decimal" | "boolean"
 //!             | "datetime" | "autonumber" | "hash_string" | "binary" | "enumeration"
 //! association:= "association" <ident> "->" <rust-path> "as" <ident> ";"
-//! microflow  := "microflow" <ident> "{" <flow-item>* ("return" <expr> ";")? "}"
-//! flow-item  := <create> | <change> | <delete> | <commit> | <call> | <if>
-//! create     := "create" <ident> "=" <expr> "{" <member>* "}" "commit"? ";"
-//! change     := "change" <ident> "=" <expr> "{" <member>* "}" "commit"? ";"
+//! microflow  := "microflow" <ident> "{" <flow-item>* <rescue>? ("return" <expr> ";")? "}"
+//! flow-item  := <create> | <create-list> | <change> | <delete> | <commit> | <call> | <if>
+//!             | <for> | <while> | "break" ";" | "continue" ";"
+//! create     := "create" <ident> "=" <rust-path> "{" <member>* "}" "commit"? ";"
+//! change     := "change" <ident> "{" <member>* "}" "commit"? ";"
+//! create-list:= "create_list" <ident> "=" <rust-path> ";"
 //! delete     := "delete" <ident> ";"
 //! commit     := "commit" <ident> ";"
 //! call       := "call" <string-lit> ("(" <mapping> ("," <mapping>)* ","? ")")? ("->" <ident>)? ";"
 //! if         := "if" <expr> "{" <flow-item>* "}" "else" "{" <flow-item>* "}"
+//! for        := "for" <ident> "in" <ident> "{" <flow-item>* "}"
+//! while      := "while" <expr> "{" <flow-item>* "}"
+//! rescue     := "rescue" "{" <flow-item>* "}"
 //! member     := "assoc"? <ident> "=" <expr> ";"
 //! mapping    := <ident> ":" <expr>
 //! ```
 //!
-//! `<rust-path>` (an association's target) is a real Rust type path — e.g.
-//! `Customer` or `markers::CRM::Account` — resolving to a marker type
-//! implementing `mxrs_ir::EntityMarker`, exactly what
-//! `mxrs_dsl::EntityBuilder::association` requires since `mxrs-dsl` was
-//! wired to reject raw strings there. This is deliberately *not* a
-//! Mendix-style dotted `Module.Entity` name parsed and re-joined by this
-//! crate (an earlier version of this grammar did that): the target now has
-//! to be something that resolves in the caller's own scope the same way
-//! any other Rust path would (via `use`, a fully-qualified path, ...),
-//! because it expands directly into `Ref::<#target>::new()`.
-//!
-//! A `create`/`change` statement's entity, an `if`'s condition, and a
-//! `member`'s value are all a `syn::Expr` rather than a further custom
-//! grammar — same trick already used by `microflow`'s `return` statement: a
-//! plain Rust string literal (e.g. `"Sales.Order"`, `"$order/Total > 0"`)
-//! is itself a valid `Expr` that satisfies the `impl Into<String>` these
-//! expand into, so this crate doesn't need its own expression-parsing
-//! grammar for Mendix expressions. This intentionally mirrors
-//! `mxrs-dsl::FlowBuilder`'s own scope: entity names in `create`/`change`
-//! are plain strings, not `EntityMarker`-checked
-//! (`FlowBuilder::create_object`/`change_object` take `impl Into<String>`
-//! for `entity`, same as this macro emits) — widening that to compile-time
-//! checking is a separate, larger `mxrs-dsl` change, not something this
-//! macro can do on its own without inventing a capability `mxrs-dsl` itself
-//! doesn't already expose (the non-negotiable rule from the plan's DSL/
-//! macro track section).
+//! Entity and member markers are generated from the declarations in this
+//! same invocation. A create therefore names `Sales::Order`, binds a typed
+//! `Var<Sales::Order>`, and later expressions can use `order.total()`.
+//! Attribute assignments and Boolean conditions are ordinary Rust
+//! expressions checked against `mxrs-expr`; raw Mendix expression strings
+//! do not cross this authoring boundary.
 //!
 //! A `call`'s microflow name is a `syn::LitStr`, not a general `Expr` like
 //! the others — deliberately narrower, because the obvious grammar
@@ -72,11 +57,9 @@
 //! this grammar — narrow now, widen later, same pattern as everywhere else
 //! in this codebase.
 //!
-//! Still not covered by this grammar (no escape hatch to the native/
-//! pluggable widget surface, and no loops/rescue blocks in microflow
-//! bodies) — widen incrementally, the same way every other "first slice" in
-//! this codebase has (see `mxrs-writer`'s and `mxrs-typegen`'s crate docs
-//! for the same pattern).
+//! The grammar intentionally has no native BSON or raw-expression escape
+//! hatch; unsupported authoring concepts fail closed until typed support is
+//! added.
 
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
@@ -104,6 +87,7 @@ pub struct EntityInput {
 pub struct MicroflowInput {
     pub name: Ident,
     pub activities: Vec<FlowItem>,
+    pub rescue_activities: Vec<FlowItem>,
     pub return_expression: Option<Expr>,
 }
 
@@ -113,15 +97,18 @@ pub struct MicroflowInput {
 pub enum FlowItem {
     Create {
         variable: Ident,
-        entity: Expr,
+        entity: syn::Path,
         members: Vec<MemberInput>,
         commit: bool,
     },
     Change {
         variable: Ident,
-        entity: Expr,
         members: Vec<MemberInput>,
         commit: bool,
+    },
+    CreateList {
+        variable: Ident,
+        entity: syn::Path,
     },
     Delete {
         variable: Ident,
@@ -139,6 +126,17 @@ pub enum FlowItem {
         then_branch: Vec<FlowItem>,
         else_branch: Vec<FlowItem>,
     },
+    LoopOver {
+        iterator: Ident,
+        list: Ident,
+        activities: Vec<FlowItem>,
+    },
+    While {
+        condition: Expr,
+        activities: Vec<FlowItem>,
+    },
+    Break,
+    Continue,
 }
 
 pub struct MemberInput {
@@ -314,6 +312,7 @@ impl Parse for MicroflowInput {
         let content;
         braced!(content in input);
         let mut activities = Vec::new();
+        let mut rescue_activities = Vec::new();
         let mut return_expression: Option<Expr> = None;
         while !content.is_empty() {
             if content.peek(Token![return]) {
@@ -329,13 +328,29 @@ impl Parse for MicroflowInput {
                         content.error("`return` must be the last statement in a microflow body")
                     );
                 }
+            } else if peek_keyword(&content, "rescue") {
+                let rescue_keyword: Ident = content.parse()?;
+                if !rescue_activities.is_empty() {
+                    return Err(syn::Error::new(rescue_keyword.span(), "duplicate `rescue`"));
+                }
+                let rescue_content;
+                braced!(rescue_content in content);
+                while !rescue_content.is_empty() {
+                    rescue_activities.push(rescue_content.parse()?);
+                }
+                if !content.is_empty() && !content.peek(Token![return]) {
+                    return Err(content.error("`rescue` must be the last activity block"));
+                }
             } else {
                 activities.push(content.parse()?);
             }
         }
+        validate_loop_control(&activities, false)?;
+        validate_loop_control(&rescue_activities, false)?;
         Ok(MicroflowInput {
             name,
             activities,
+            rescue_activities,
             return_expression,
         })
     }
@@ -346,9 +361,26 @@ impl Parse for FlowItem {
         if input.peek(Token![if]) {
             return parse_if(input);
         }
+        if input.peek(Token![for]) {
+            return parse_loop_over(input);
+        }
+        if input.peek(Token![while]) {
+            return parse_while(input);
+        }
+        if input.peek(Token![break]) {
+            input.parse::<Token![break]>()?;
+            input.parse::<Token![;]>()?;
+            return Ok(FlowItem::Break);
+        }
+        if input.peek(Token![continue]) {
+            input.parse::<Token![continue]>()?;
+            input.parse::<Token![;]>()?;
+            return Ok(FlowItem::Continue);
+        }
         let keyword: Ident = input.fork().parse()?;
         match keyword.to_string().as_str() {
             "create" => parse_create_or_change(input, true),
+            "create_list" => parse_create_list(input),
             "change" => parse_create_or_change(input, false),
             "delete" => {
                 input.parse::<Ident>()?;
@@ -366,18 +398,31 @@ impl Parse for FlowItem {
             other => Err(syn::Error::new(
                 keyword.span(),
                 format!(
-                    "unknown microflow statement `{other}` (expected one of: create, change, delete, commit, call, if, return)"
+                    "unknown microflow statement `{other}` (expected one of: create, create_list, change, delete, commit, call, if, for, while, break, continue, return)"
                 ),
             )),
         }
     }
 }
 
+fn parse_create_list(input: ParseStream) -> Result<FlowItem> {
+    input.parse::<Ident>()?;
+    let variable = input.parse()?;
+    input.parse::<Token![=]>()?;
+    let entity = input.parse()?;
+    input.parse::<Token![;]>()?;
+    Ok(FlowItem::CreateList { variable, entity })
+}
+
 fn parse_create_or_change(input: ParseStream, is_create: bool) -> Result<FlowItem> {
     input.parse::<Ident>()?; // consumes "create"/"change"
     let variable: Ident = input.parse()?;
-    input.parse::<Token![=]>()?;
-    let entity: Expr = input.call(Expr::parse_without_eager_brace)?;
+    let entity = if is_create {
+        input.parse::<Token![=]>()?;
+        Some(input.parse::<syn::Path>()?)
+    } else {
+        None
+    };
     let content;
     braced!(content in input);
     let mut members = Vec::new();
@@ -394,18 +439,76 @@ fn parse_create_or_change(input: ParseStream, is_create: bool) -> Result<FlowIte
     Ok(if is_create {
         FlowItem::Create {
             variable,
-            entity,
+            entity: entity.expect("create parsed an entity"),
             members,
             commit,
         }
     } else {
         FlowItem::Change {
             variable,
-            entity,
             members,
             commit,
         }
     })
+}
+
+fn parse_loop_over(input: ParseStream) -> Result<FlowItem> {
+    input.parse::<Token![for]>()?;
+    let iterator: Ident = input.parse()?;
+    input.parse::<Token![in]>()?;
+    let list: Ident = input.parse()?;
+    let content;
+    braced!(content in input);
+    let mut activities = Vec::new();
+    while !content.is_empty() {
+        activities.push(content.parse()?);
+    }
+    Ok(FlowItem::LoopOver {
+        iterator,
+        list,
+        activities,
+    })
+}
+
+fn parse_while(input: ParseStream) -> Result<FlowItem> {
+    input.parse::<Token![while]>()?;
+    let condition = input.call(Expr::parse_without_eager_brace)?;
+    let content;
+    braced!(content in input);
+    let mut activities = Vec::new();
+    while !content.is_empty() {
+        activities.push(content.parse()?);
+    }
+    Ok(FlowItem::While {
+        condition,
+        activities,
+    })
+}
+
+fn validate_loop_control(items: &[FlowItem], inside_loop: bool) -> Result<()> {
+    for item in items {
+        match item {
+            FlowItem::Break | FlowItem::Continue if !inside_loop => {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "`break` and `continue` are only valid inside a microflow loop",
+                ));
+            }
+            FlowItem::LoopOver { activities, .. } | FlowItem::While { activities, .. } => {
+                validate_loop_control(activities, true)?;
+            }
+            FlowItem::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                validate_loop_control(then_branch, inside_loop)?;
+                validate_loop_control(else_branch, inside_loop)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn parse_call(input: ParseStream) -> Result<FlowItem> {

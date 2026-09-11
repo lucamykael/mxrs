@@ -1,10 +1,5 @@
-//! The full-pipeline proof: `mxrs-typegen` generates marker types from
-//! `tests/fixtures/manifest.json` (via this crate's own `build.rs`) →
-//! `project! {}` references them by path in association targets →
-//! `mxrs-writer` persists the result → `mxrs-model` reads it back. Every
-//! other test in this crate hand-writes its marker types directly; this one
-//! proves the *generated* ones work identically, closing the loop between
-//! Phase 4 and Phase 8.
+//! Compatibility coverage for the old manifest-generated marker path plus
+//! the self-hosted markers now emitted by `project!` itself.
 
 include!(concat!(env!("OUT_DIR"), "/mxrs_markers.rs"));
 
@@ -12,7 +7,7 @@ use mxrs_macros::project;
 use mxrs_model::Project;
 
 #[test]
-fn generated_markers_drive_project_macro_associations_end_to_end() {
+fn self_hosted_macro_markers_coexist_with_typegen_output() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Generated.mpr");
 

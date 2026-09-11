@@ -32,9 +32,10 @@ fn try_compile(body: &str) -> Output {
         .collect();
     let name = format!("macros-diagnostics-fixture-{unique}");
     let cargo_toml = format!(
-        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\n",
+        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\nmxrs-expr = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\n",
         workspace_root().join("crates/mxrs-macros"),
         workspace_root().join("crates/mxrs-dsl"),
+        workspace_root().join("crates/mxrs-expr"),
         workspace_root().join("crates/mxrs-ir"),
     );
     std::fs::write(dir.path().join("Cargo.toml"), cargo_toml).unwrap();
@@ -321,5 +322,108 @@ fn an_unknown_microflow_statement_fails_with_a_message_naming_it() {
     assert!(
         stderr.contains("unknown microflow statement `rollback`"),
         "expected the error to name the bad keyword, got: {stderr}"
+    );
+}
+
+#[test]
+fn assigning_a_string_to_a_decimal_attribute_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    entity Order { decimal Total; }
+                    microflow ACT_Broken {
+                        create order = Sales::Order { Total = "not a decimal"; };
+                        return order;
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a typed assignment failure"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IntoExpr<MxDecimal>"),
+        "unexpected diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn using_an_unbound_flow_variable_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    entity Order {}
+                    microflow ACT_Broken { commit missing; }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected an unbound variable failure"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing"),
+        "unexpected diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn break_outside_a_loop_is_rejected_by_the_macro() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales { microflow ACT_Broken { break; } }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected an invalid break failure"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("only valid inside a microflow loop"),
+        "unexpected diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
+fn iterating_an_unbound_list_fails_at_the_list_name() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    entity Order {}
+                    microflow ACT_Broken {
+                        for current in missing { commit current; }
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown list variable `missing`"),
+        "unexpected diagnostic:\n{stderr}"
     );
 }

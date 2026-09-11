@@ -23,6 +23,7 @@ mxrs-typegen = { path = "../mxrs-typegen" }
 
 [dev-dependencies]
 mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-expr = { path = "../mxrs-expr" }
 mxrs-ir = { path = "../mxrs-ir" }
 mxrs-model = { path = "../mxrs-model" }
 mxrs-writer = { path = "../mxrs-writer" }

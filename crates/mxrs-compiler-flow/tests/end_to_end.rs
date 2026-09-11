@@ -9,8 +9,24 @@
 use mxrs_bson::Document;
 use mxrs_compiler_flow::FlowCompiler;
 use mxrs_dsl::ProjectBuilder;
-use mxrs_ir::Member;
+use mxrs_expr::{MxString, TypedAttributeMarker, attribute, string};
+use mxrs_ir::{AttributeMarker, EntityMarker, Ref};
 use mxrs_model::Project;
+
+struct Order;
+impl EntityMarker for Order {
+    const MODULE: &'static str = "Sales";
+    const NAME: &'static str = "Order";
+}
+
+struct OrderNumber;
+impl AttributeMarker for OrderNumber {
+    type Entity = Order;
+    const NAME: &'static str = "Number";
+}
+impl TypedAttributeMarker for OrderNumber {
+    type Value = MxString;
+}
 
 fn raw_microflow(project: &Project, name: &str) -> Document {
     project
@@ -37,20 +53,20 @@ fn compiles_a_real_microflow_with_create_commit_decision_and_return() {
             e.string("Number");
         });
         m.microflow("ACT_CreateOrder", |f| {
-            f.create_object(
+            let order = f.create_object(
                 "order",
-                "Sales.Order",
-                vec![Member::attribute("Number", "'A-1'")],
+                Ref::<Order>::new(),
+                vec![attribute::<OrderNumber>(string("A-1"))],
                 false,
             );
             f.decision(
-                "$order/Number != empty",
+                order.attribute::<OrderNumber>().ne(string("")),
                 |t| {
-                    t.commit("order");
+                    t.commit(&order);
                 },
                 |_otherwise| {},
             );
-            f.return_value("$order");
+            f.return_value(order);
         });
     });
     mxrs_writer::write_project(&path, &builder.build()).unwrap();

@@ -12,3 +12,4 @@ workspace = true
 
 [dependencies]
 mxrs-ir = { path = "../mxrs-ir" }
+mxrs-expr = { path = "../mxrs-expr" }

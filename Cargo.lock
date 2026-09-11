@@ -513,6 +513,7 @@ version = "0.1.0"
 dependencies = [
  "mxrs-bson",
  "mxrs-dsl",
+ "mxrs-expr",
  "mxrs-ir",
  "mxrs-model",
  "mxrs-mpr",
@@ -544,6 +545,7 @@ dependencies = [
 name = "mxrs-dsl"
 version = "0.1.0"
 dependencies = [
+ "mxrs-expr",
  "mxrs-ir",
 ]
 
@@ -561,6 +563,13 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "mxrs-expr"
+version = "0.1.0"
+dependencies = [
+ "mxrs-ir",
 ]
 
 [[package]]
@@ -618,6 +627,7 @@ name = "mxrs-macros"
 version = "0.1.0"
 dependencies = [
  "mxrs-dsl",
+ "mxrs-expr",
  "mxrs-ir",
  "mxrs-model",
  "mxrs-typegen",
@@ -694,6 +704,7 @@ version = "0.1.0"
 dependencies = [
  "mxrs-bson",
  "mxrs-dsl",
+ "mxrs-expr",
  "mxrs-identity",
  "mxrs-ir",
  "mxrs-model",

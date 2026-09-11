@@ -874,7 +874,7 @@ mod tests {
         let right = dir.path().join("Right.mpr");
         let mk_flow = |m: &mut mxrs_dsl::ModuleBuilder| {
             m.microflow("ACT_Do", |f| {
-                f.return_value("1");
+                f.return_value(mxrs_dsl::integer(1));
             });
         };
         let mut left_project = mxrs_dsl::ProjectBuilder::new("11.12.1");

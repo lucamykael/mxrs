@@ -21,6 +21,7 @@ regex = "1"
 
 [dev-dependencies]
 mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-expr = { path = "../mxrs-expr" }
 mxrs-ir = { path = "../mxrs-ir" }
 mxrs-mpr = { path = "../mxrs-mpr" }
 mxrs-writer = { path = "../mxrs-writer" }

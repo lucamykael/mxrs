@@ -31,8 +31,9 @@ fn try_compile(body: &str) -> Output {
         .collect();
     let name = format!("exporter-fixture-{unique}");
     let cargo_toml = format!(
-        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\n",
+        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-expr = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\n",
         workspace_root().join("crates/mxrs-macros"),
+        workspace_root().join("crates/mxrs-expr"),
         workspace_root().join("crates/mxrs-ir"),
         workspace_root().join("crates/mxrs-dsl"),
     );

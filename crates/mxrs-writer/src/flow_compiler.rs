@@ -15,6 +15,7 @@ use mxrs_ir::flow::{Activity, Member};
 
 pub fn build_microflow_graph(
     activities: &[Activity],
+    rescue_activities: &[Activity],
     return_expression: Option<&str>,
 ) -> (Vec<Document>, Vec<Document>) {
     let mut objects = Vec::new();
@@ -31,7 +32,16 @@ pub fn build_microflow_graph(
 
     let mut prev_id = Some(start_id);
     let mut x = 190;
-    for activity in activities {
+    let mut rescue_origin = None;
+    for (index, activity) in activities.iter().enumerate() {
+        if prev_id.is_none() {
+            break;
+        }
+        let error_handling = if !rescue_activities.is_empty() && index + 1 == activities.len() {
+            "CustomWithoutRollBack"
+        } else {
+            "Rollback"
+        };
         let (next_id, next_x) = process_activity(
             activity,
             prev_id.as_deref(),
@@ -39,7 +49,11 @@ pub fn build_microflow_graph(
             &mut flows,
             x,
             100,
+            error_handling,
         );
+        if index + 1 == activities.len() {
+            rescue_origin = next_id.clone();
+        }
         prev_id = next_id;
         x = next_x;
     }
@@ -53,12 +67,24 @@ pub fn build_microflow_graph(
         flows.push(sequence_flow_doc(&prev, &end_id, None));
     }
 
+    if let Some(origin) = rescue_origin {
+        build_rescue_branch(
+            &origin,
+            rescue_activities,
+            &mut objects,
+            &mut flows,
+            190,
+            250,
+        );
+    }
+
     (objects, flows)
 }
 
 struct BranchResult {
     first: Option<String>,
     last: Option<String>,
+    terminal: bool,
 }
 
 fn process_activity(
@@ -68,6 +94,7 @@ fn process_activity(
     flows: &mut Vec<Document>,
     x: i32,
     y: i32,
+    error_handling: &str,
 ) -> (Option<String>, i32) {
     if let Activity::Decision {
         condition,
@@ -87,12 +114,58 @@ fn process_activity(
         );
     }
 
+    match activity {
+        Activity::LoopOver {
+            list_variable,
+            iterator,
+            activities,
+        } => {
+            return process_loop(
+                LoopSource::Iterable(list_variable, iterator),
+                activities,
+                prev_id,
+                objects,
+                flows,
+                x,
+                y,
+            );
+        }
+        Activity::WhileLoop {
+            condition,
+            activities,
+        } => {
+            return process_loop(
+                LoopSource::While(condition),
+                activities,
+                prev_id,
+                objects,
+                flows,
+                x,
+                y,
+            );
+        }
+        _ => {}
+    }
+
     let act_id = uuid::Uuid::new_v4().to_string();
-    objects.push(build_activity(activity, &act_id, x, y));
+    let terminal_type = match activity {
+        Activity::BreakLoop => Some("Microflows$BreakEvent"),
+        Activity::ContinueLoop => Some("Microflows$ContinueEvent"),
+        _ => None,
+    };
+    if let Some(ty) = terminal_type {
+        objects.push(flow_object_doc(&act_id, ty, x, y, "20;20"));
+    } else {
+        objects.push(build_activity(activity, &act_id, x, y, error_handling));
+    }
     if let Some(prev) = prev_id {
         flows.push(sequence_flow_doc(prev, &act_id, None));
     }
-    (Some(act_id), x + 140)
+    if terminal_type.is_some() {
+        (None, x + 140)
+    } else {
+        (Some(act_id), x + 140)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -133,6 +206,9 @@ fn process_decision(
         y + 150,
     );
 
+    if true_result.terminal && false_result.terminal {
+        return (None, x_merge + 140);
+    }
     let merge_id = uuid::Uuid::new_v4().to_string();
     objects.push(flow_object_doc(
         &merge_id,
@@ -144,14 +220,15 @@ fn process_decision(
     for (result, case_value) in [(&true_result, "true"), (&false_result, "false")] {
         match &result.first {
             None => flows.push(decision_flow_doc(&split_id, &merge_id, case_value)),
-            Some(_) => flows.push(sequence_flow_doc(
+            Some(_) if !result.terminal => flows.push(sequence_flow_doc(
                 result
                     .last
                     .as_deref()
-                    .expect("non-empty branch has a last id"),
+                    .expect("non-terminal branch has a last id"),
                 &merge_id,
                 None,
             )),
+            Some(_) => {}
         }
     }
     (Some(merge_id), x_merge + 140)
@@ -169,10 +246,21 @@ fn process_decision_branch(
 ) -> BranchResult {
     let mut first: Option<String> = None;
     let mut previous: Option<String> = None;
+    let mut terminal = false;
     for activity in activities {
+        if terminal {
+            break;
+        }
         let before = objects.len();
-        let (next_id, next_x) =
-            process_activity(activity, previous.as_deref(), objects, flows, x, y);
+        let (next_id, next_x) = process_activity(
+            activity,
+            previous.as_deref(),
+            objects,
+            flows,
+            x,
+            y,
+            "Rollback",
+        );
         let created_first = objects[before].get_str("$ID").ok().map(str::to_string);
         if first.is_none() {
             first = created_first.clone();
@@ -187,11 +275,126 @@ fn process_decision_branch(
             ));
         }
         previous = next_id;
+        terminal = previous.is_none();
         x = next_x;
     }
     BranchResult {
         first,
         last: previous,
+        terminal,
+    }
+}
+
+enum LoopSource<'a> {
+    Iterable(&'a str, &'a str),
+    While(&'a str),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_loop(
+    source: LoopSource<'_>,
+    activities: &[Activity],
+    prev_id: Option<&str>,
+    objects: &mut Vec<Document>,
+    flows: &mut Vec<Document>,
+    x: i32,
+    y: i32,
+) -> (Option<String>, i32) {
+    let loop_id = uuid::Uuid::new_v4().to_string();
+    let mut inner_objects = Vec::new();
+    let mut inner_previous: Option<String> = None;
+    let mut inner_x = 50;
+    for activity in activities {
+        if !inner_objects.is_empty() && inner_previous.is_none() {
+            break;
+        }
+        let (next, next_x) = process_activity(
+            activity,
+            inner_previous.as_deref(),
+            &mut inner_objects,
+            flows,
+            inner_x,
+            100,
+            "Rollback",
+        );
+        inner_previous = next;
+        inner_x = next_x;
+    }
+    let source_doc = match source {
+        LoopSource::Iterable(list, iterator) => doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Microflows$IterableList",
+            "ListVariableName": list,
+            "VariableName": iterator,
+        },
+        LoopSource::While(condition) => doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Microflows$WhileLoopCondition",
+            "WhileExpression": condition,
+        },
+    };
+    let mut loop_doc = flow_object_doc(&loop_id, "Microflows$LoopedActivity", x, y, "300;200");
+    loop_doc.insert("ErrorHandlingType", "Rollback");
+    loop_doc.insert("LoopSource", source_doc);
+    loop_doc.insert(
+        "ObjectCollection",
+        doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Microflows$MicroflowObjectCollection",
+            "Objects": mxrs_bson::build_array(inner_objects.into_iter().map(Bson::Document).collect(), 2),
+        },
+    );
+    objects.push(loop_doc);
+    if let Some(previous) = prev_id {
+        flows.push(sequence_flow_doc(previous, &loop_id, None));
+    }
+    (Some(loop_id), x + 140)
+}
+
+fn build_rescue_branch(
+    origin_id: &str,
+    activities: &[Activity],
+    objects: &mut Vec<Document>,
+    flows: &mut Vec<Document>,
+    mut x: i32,
+    y: i32,
+) {
+    let mut previous: Option<String> = None;
+    let mut started = false;
+    for activity in activities {
+        if started && previous.is_none() {
+            break;
+        }
+        let before = objects.len();
+        let (next, next_x) = process_activity(
+            activity,
+            previous.as_deref(),
+            objects,
+            flows,
+            x,
+            y,
+            "Rollback",
+        );
+        let created = objects[before]
+            .get_str("$ID")
+            .expect("rescue activity assigns an id")
+            .to_string();
+        if !started {
+            let mut error_flow = sequence_flow_doc(origin_id, &created, None);
+            error_flow.insert("IsErrorHandler", true);
+            flows.push(error_flow);
+        }
+        started = true;
+        previous = next;
+        x = next_x;
+    }
+    if let Some(previous) = previous {
+        let end_id = uuid::Uuid::new_v4().to_string();
+        let mut end = flow_object_doc(&end_id, "Microflows$EndEvent", x, y, "20;20");
+        end.insert("Documentation", "");
+        end.insert("ReturnValue", "");
+        objects.push(end);
+        flows.push(sequence_flow_doc(&previous, &end_id, None));
     }
 }
 
@@ -228,17 +431,17 @@ fn flow_object_doc(id: &str, ty: &str, x: i32, y: i32, size: &str) -> Document {
     doc! { "$ID": id, "$Type": ty, "RelativeMiddlePoint": format!("{x};{y}"), "Size": size }
 }
 
-fn build_activity(activity: &Activity, id: &str, x: i32, y: i32) -> Document {
+fn build_activity(activity: &Activity, id: &str, x: i32, y: i32, error_handling: &str) -> Document {
     let mut doc = flow_object_doc(id, "Microflows$ActionActivity", x, y, "120;60");
     doc.insert("Documentation", "");
     doc.insert("AutoGenerateCaption", true);
     doc.insert("BackgroundColor", "Default");
     doc.insert("Caption", "Activity");
-    doc.insert("Action", activity_action_doc(activity));
+    doc.insert("Action", activity_action_doc(activity, error_handling));
     doc
 }
 
-fn activity_action_doc(activity: &Activity) -> Document {
+fn activity_action_doc(activity: &Activity, error_handling: &str) -> Document {
     match activity {
         Activity::CreateObject {
             variable,
@@ -249,7 +452,7 @@ fn activity_action_doc(activity: &Activity) -> Document {
             "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$CreateChangeAction",
             "Commit": if *commit { "Yes" } else { "No" },
             "Entity": entity.clone(),
-            "ErrorHandlingType": "Rollback",
+            "ErrorHandlingType": error_handling,
             "Items": mxrs_bson::build_array(members.iter().map(|m| Bson::Document(change_action_item_doc(m, entity))).collect(), 2),
             "RefreshInClient": false,
             "VariableName": variable.clone(),
@@ -263,22 +466,28 @@ fn activity_action_doc(activity: &Activity) -> Document {
             "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$ChangeAction",
             "ChangeVariableName": variable.clone(),
             "Commit": if *commit { "Yes" } else { "No" },
-            "ErrorHandlingType": "Rollback",
+            "ErrorHandlingType": error_handling,
             "Items": mxrs_bson::build_array(members.iter().map(|m| Bson::Document(change_action_item_doc(m, entity))).collect(), 2),
             "RefreshInClient": false,
         },
         Activity::Commit { variable } => doc! {
             "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$CommitAction",
             "CommitVariableName": variable.clone(),
-            "ErrorHandlingType": "Rollback",
+            "ErrorHandlingType": error_handling,
             "RefreshInClient": false,
             "WithEvents": true,
         },
         Activity::DeleteObject { variable } => doc! {
             "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$DeleteAction",
             "DeleteVariableName": variable.clone(),
-            "ErrorHandlingType": "Rollback",
+            "ErrorHandlingType": error_handling,
             "RefreshInClient": false,
+        },
+        Activity::CreateList { variable, entity } => doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$CreateListAction",
+            "Entity": entity.clone(),
+            "ErrorHandlingType": error_handling,
+            "VariableName": variable.clone(),
         },
         Activity::CallMicroflow {
             name,
@@ -299,7 +508,7 @@ fn activity_action_doc(activity: &Activity) -> Document {
                 .collect();
             doc! {
                 "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$MicroflowCallAction",
-                "ErrorHandlingType": "Rollback",
+                "ErrorHandlingType": error_handling,
                 "UseReturnVariable": *use_return,
                 "ResultVariableName": result_variable.clone().unwrap_or_default(),
                 "MicroflowCall": doc! {
@@ -309,8 +518,12 @@ fn activity_action_doc(activity: &Activity) -> Document {
                 },
             }
         }
-        Activity::Decision { .. } => {
-            unreachable!("Decision is handled by process_activity, never reaches build_activity")
+        Activity::Decision { .. }
+        | Activity::LoopOver { .. }
+        | Activity::WhileLoop { .. }
+        | Activity::BreakLoop
+        | Activity::ContinueLoop => {
+            unreachable!("control-flow activities are handled before build_activity")
         }
     }
 }
@@ -376,7 +589,7 @@ mod tests {
         let activities = vec![Activity::Commit {
             variable: "order".into(),
         }];
-        let (objects, flows) = build_microflow_graph(&activities, Some("$order"));
+        let (objects, flows) = build_microflow_graph(&activities, &[], Some("$order"));
         assert_eq!(objects.len(), 3); // StartEvent, ActionActivity, EndEvent
         assert_eq!(flows.len(), 2);
         assert_eq!(
@@ -395,7 +608,7 @@ mod tests {
             members: vec![Member::attribute("Number", "'A-1'")],
             commit: true,
         }];
-        let (objects, _) = build_microflow_graph(&activities, None);
+        let (objects, _) = build_microflow_graph(&activities, &[], None);
         let action = objects[1].get_document("Action").unwrap();
         assert_eq!(
             action.get_str("$Type").unwrap(),
@@ -418,7 +631,7 @@ mod tests {
             }],
             false_branch: vec![],
         }];
-        let (objects, flows) = build_microflow_graph(&activities, None);
+        let (objects, flows) = build_microflow_graph(&activities, &[], None);
         let types: Vec<&str> = objects
             .iter()
             .map(|o| o.get_str("$Type").unwrap())

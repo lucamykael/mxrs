@@ -33,8 +33,11 @@ pub fn write_module(
     )?;
 
     for mf in &decl.microflows {
-        let (objects, flows) =
-            flow_compiler::build_microflow_graph(&mf.activities, mf.return_expression.as_deref());
+        let (objects, flows) = flow_compiler::build_microflow_graph(
+            &mf.activities,
+            &mf.rescue_activities,
+            mf.return_expression.as_deref(),
+        );
         let microflow = Microflow {
             id: Some(identity.artifact_id(
                 ArtifactKind::Microflow,

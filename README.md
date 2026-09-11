@@ -13,12 +13,12 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-18 crates + a dev-only `xtask` harness, ~30k lines of Rust, 386 tests
+19 crates + a dev-only `xtask` harness, ~31k lines of Rust, 392 tests
 passing. Two independent pipelines share only the compiled model as input:
 
 **Writer path** (DSL definition → `.mpr`, what Studio Pro opens):
 `mxrs-bson` → `mxrs-mpr` / `mxrs-fragment-store` / `mxrs-schema` →
-`mxrs-forms` / `mxrs-settings` → `mxrs-model` → `mxrs-ir` → `mxrs-dsl` →
+`mxrs-forms` / `mxrs-settings` → `mxrs-model` → `mxrs-ir` → `mxrs-expr` → `mxrs-dsl` →
 `mxrs-macros` (`project! {}` sugar) → `mxrs-writer` (fresh creation +
 incremental re-sync) → `mxrs-exporter` (`.mpr` → editable Rust source, the
 other half of the round trip).

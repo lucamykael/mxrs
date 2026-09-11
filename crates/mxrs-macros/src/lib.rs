@@ -4,18 +4,6 @@
 //!
 //! ```
 //! # fn main() {
-//! // A marker type per referenceable entity — hand-written here; in a real
-//! // project these come from `mxrs-typegen`'s build.rs codegen. An
-//! // association's target (after `->`) is this kind of Rust path, not a
-//! // Mendix-style dotted name — see `parse`'s doc comment.
-//! mod markers {
-//!     pub struct Customer;
-//!     impl mxrs_ir::EntityMarker for Customer {
-//!         const MODULE: &'static str = "Sales";
-//!         const NAME: &'static str = "Customer";
-//!     }
-//! }
-//!
 //! let definition = mxrs_macros::project! {
 //!     "11.12.1",
 //!     module Sales {
@@ -25,7 +13,7 @@
 //!         entity Order {
 //!             string Number = "A-0000";
 //!             decimal Total;
-//!             association Order_Customer -> markers::Customer as Reference;
+//!             association Order_Customer -> Sales::Customer as Reference;
 //!         }
 //!     }
 //! };
@@ -53,7 +41,10 @@ use crate::parse::ProjectInput;
 #[proc_macro]
 pub fn project(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as ProjectInput);
-    expand::expand(&parsed).into()
+    match expand::expand(&parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
 }
 
 #[proc_macro_derive(MxEntity, attributes(mx_entity, mx_attribute))]

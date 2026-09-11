@@ -5,13 +5,9 @@
 //! `mxrs_model::Microflow` stores — `mxrs-writer` is what compiles this IR
 //! into that BSON graph, mirroring `Writer#build_microflow_graph`.
 //!
-//! Scoped activity set for this pass (mirrors mxrb's `activity_action_doc`
-//! dispatch, narrowed to the plan's "minimal microflow" ask for Phase 3):
-//! create/change/delete object, commit, call microflow, and a two-branch
-//! decision. Not yet ported: retrieve (by source/association), create/change
-//! variable, show message, loops, rescue blocks — same "widen incrementally"
-//! precedent already used for `mxrs-forms`'s widget catalog and
-//! `mxrs-model`'s page widgets.
+//! The authoring builders keep expressions and variables typed; this IR is
+//! their storage-independent lowered form and therefore stores only the
+//! canonical Mendix source and lexical variable names needed by writers.
 
 /// A single attribute or association assignment inside a create/change
 /// object activity. `value` is a raw Mendix expression string (e.g. `"'A-1'"`
@@ -70,6 +66,10 @@ pub enum Activity {
     DeleteObject {
         variable: String,
     },
+    CreateList {
+        variable: String,
+        entity: String,
+    },
     CallMicroflow {
         name: String,
         result_variable: Option<String>,
@@ -81,6 +81,17 @@ pub enum Activity {
         true_branch: Vec<Activity>,
         false_branch: Vec<Activity>,
     },
+    LoopOver {
+        list_variable: String,
+        iterator: String,
+        activities: Vec<Activity>,
+    },
+    WhileLoop {
+        condition: String,
+        activities: Vec<Activity>,
+    },
+    BreakLoop,
+    ContinueLoop,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +99,9 @@ pub struct MicroflowDecl {
     pub name: String,
     pub documentation: String,
     pub activities: Vec<Activity>,
+    /// Activities reached by the custom error-handler edge from the last
+    /// main activity. Empty means the microflow has no rescue branch.
+    pub rescue_activities: Vec<Activity>,
     /// The microflow's `return` expression (e.g. `"$order"`), or `None` for
     /// a void return.
     pub return_expression: Option<String>,
@@ -99,6 +113,7 @@ impl MicroflowDecl {
             name: name.into(),
             documentation: String::new(),
             activities: vec![],
+            rescue_activities: vec![],
             return_expression: None,
         }
     }

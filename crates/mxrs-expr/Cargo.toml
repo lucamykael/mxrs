@@ -1,0 +1,15 @@
+[package]
+name = "mxrs-expr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Typed authoring expressions and bound variables for Mendix flows."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-ir = { path = "../mxrs-ir" }

@@ -43,7 +43,7 @@ fn expands_to_a_project_decl_writable_and_readable_like_hand_written_dsl() {
             entity Order {
                 string Number = "A-0000";
                 decimal Total;
-                association Order_Customer -> markers::Sales::Customer as Reference;
+                association Order_Customer -> Sales::Customer as Reference;
             }
         }
     };
@@ -129,7 +129,7 @@ fn supports_a_cross_module_association_target() {
         "11.12.1",
         module Sales {
             entity Order {
-                association Order_Account -> markers::CRM::Account as Reference;
+                association Order_Account -> CRM::Account as Reference;
             }
         },
         module CRM {
@@ -160,7 +160,7 @@ fn supports_a_reference_set_association() {
         module Sales {
             entity Customer {}
             entity Order {
-                association Order_Customers -> markers::Sales::Customer as ReferenceSet;
+                association Order_Customers -> Sales::Customer as ReferenceSet;
             }
         }
     };
@@ -173,20 +173,14 @@ fn supports_a_reference_set_association() {
     assert_eq!(order.associations[0].target, "Sales.Customer");
 }
 
-/// Resolving the target path via a local `use` (rather than a fully
-/// qualified path in the macro invocation itself) proves the target is
-/// genuinely resolved in the *call site's* scope, ordinary Rust name
-/// resolution and all — not something this crate special-cases.
 #[test]
-fn a_target_path_resolves_via_a_local_use_import() {
-    use markers::Sales::Customer;
-
+fn self_hosted_markers_resolve_same_module_targets() {
     let definition = project! {
         "11.12.1",
         module Sales {
             entity Customer {}
             entity Order {
-                association Order_Customer -> Customer as Reference;
+                association Order_Customer -> Sales::Customer as Reference;
             }
         }
     };
@@ -224,7 +218,7 @@ fn supports_a_module_level_microflow_with_a_return_statement() {
                 string Number;
             }
             microflow ACT_GetConstant {
-                return "42";
+                return mxrs_expr::integer(42);
             }
         }
     };
@@ -255,19 +249,19 @@ fn supports_the_full_widened_microflow_grammar() {
                 decimal Total;
             }
             microflow ACT_ProcessOrder {
-                create order = "Sales.Order" {
-                    Number = "'A-1'";
+                create order = Sales::Order {
+                    Number = "A-1";
                 } commit;
-                change order = "Sales.Order" {
-                    Total = "100";
+                change order {
+                    Total = 100.0;
                 };
-                if "$order/Total > 0" {
+                if order.total().gt(0.0) {
                     commit order;
-                    call "Sales.ACT_Notify" (OrderNumber: "$order/Number") -> notified;
+                    call "Sales.ACT_Notify" (OrderNumber: order.number()) -> notified;
                 } else {
                     delete order;
                 }
-                return "$order";
+                return order;
             }
         }
     };
@@ -307,14 +301,15 @@ fn supports_an_association_member_in_a_create_statement() {
             }
             entity Order {
                 string Number;
-                association ToCustomer -> markers::Sales::Customer as Reference;
+                association ToCustomer -> Sales::Customer as Reference;
             }
             microflow ACT_CreateOrder {
-                create order = "Sales.Order" {
-                    Number = "'A-1'";
-                    assoc ToCustomer = "$customer";
+                create customer = Sales::Customer {};
+                create order = Sales::Order {
+                    Number = "A-1";
+                    assoc ToCustomer = customer;
                 } commit;
-                return "$order";
+                return order;
             }
         }
     };
@@ -330,4 +325,67 @@ fn supports_an_association_member_in_a_create_statement() {
         .unwrap();
     assert_eq!(sales.microflows.len(), 1);
     assert!(!sales.microflows[0].objects.is_empty());
+}
+
+#[test]
+fn supports_typed_loops_and_a_rescue_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ControlFlow.mpr");
+
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Order { boolean Processed; }
+            microflow ACT_ProcessSafely {
+                create order = Sales::Order { Processed = false; };
+                create_list orders = Sales::Order;
+                for current in orders {
+                    change current { Processed = true; };
+                    break;
+                }
+                while mxrs_expr::boolean(false) {
+                    continue;
+                }
+                commit order;
+                rescue {
+                    call "Sales.ACT_LogFailure";
+                }
+                return order;
+            }
+        }
+    };
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+    let read = Project::open(&path, true).unwrap();
+    let flow = &read.modules().unwrap()[0].microflows[0];
+    let loops: Vec<_> = flow
+        .objects
+        .iter()
+        .filter(|object| object.get_str("$Type").ok() == Some("Microflows$LoopedActivity"))
+        .collect();
+    assert_eq!(loops.len(), 2);
+    assert!(
+        flow.flows
+            .iter()
+            .any(|edge| edge.get_bool("IsErrorHandler").ok() == Some(true))
+    );
+    let commit = flow
+        .objects
+        .iter()
+        .find(|object| {
+            object
+                .get_document("Action")
+                .and_then(|action| action.get_str("$Type"))
+                .ok()
+                == Some("Microflows$CommitAction")
+        })
+        .unwrap();
+    assert_eq!(
+        commit
+            .get_document("Action")
+            .unwrap()
+            .get_str("ErrorHandlingType")
+            .unwrap(),
+        "CustomWithoutRollBack"
+    );
 }

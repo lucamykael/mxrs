@@ -5,10 +5,10 @@
 //! `mxrs-writer`'s crate doc for what's deliberately not covered yet
 //! (ProjectSettings/Security/Navigation scaffolding).
 
-use mxrs_dsl::ProjectBuilder;
+use mxrs_dsl::{CallArgument, ProjectBuilder, decimal, integer, string};
+use mxrs_expr::attribute;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
-use mxrs_ir::flow::MicroflowCallMapping;
-use mxrs_ir::{AssociationOwner, AssociationStorage, AssociationType, AttributeType, Member, Ref};
+use mxrs_ir::{AssociationOwner, AssociationStorage, AssociationType, AttributeType, Ref};
 use mxrs_model::Project;
 use mxrs_model::association::{AssociationType as ModelAssociationType, Owner as ModelOwner};
 use mxrs_model::attribute::AttributeType as ModelAttributeType;
@@ -18,7 +18,7 @@ use mxrs_model::attribute::AttributeType as ModelAttributeType;
 /// `EntityMarker`) covering every entity these tests declare associations
 /// to. `mxrs-typegen`'s own crate proves the codegen path; this proves the
 /// trait contract alone is enough for `EntityBuilder::association` to work.
-#[allow(dead_code, non_snake_case)]
+#[allow(dead_code, non_snake_case, non_camel_case_types)]
 mod markers {
     pub mod Sales {
         pub struct Customer;
@@ -30,6 +30,22 @@ mod markers {
         impl mxrs_ir::EntityMarker for Order {
             const MODULE: &'static str = "Sales";
             const NAME: &'static str = "Order";
+        }
+        pub struct Order_Number;
+        impl mxrs_ir::AttributeMarker for Order_Number {
+            type Entity = Order;
+            const NAME: &'static str = "Number";
+        }
+        impl mxrs_expr::TypedAttributeMarker for Order_Number {
+            type Value = mxrs_expr::MxString;
+        }
+        pub struct Order_Total;
+        impl mxrs_ir::AttributeMarker for Order_Total {
+            type Entity = Order;
+            const NAME: &'static str = "Total";
+        }
+        impl mxrs_expr::TypedAttributeMarker for Order_Total {
+            type Value = mxrs_expr::MxDecimal;
         }
     }
     pub mod CRM {
@@ -119,22 +135,21 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
             .owner = AssociationOwner::Default;
         });
         m.microflow("ACT_CreateOrder", |f| {
-            f.create_object(
+            let order = f.create_object(
                 "order",
-                "Sales.Order",
-                vec![Member::attribute("Number", "'A-1'")],
+                Ref::<markers::Sales::Order>::new(),
+                vec![attribute::<markers::Sales::Order_Number>(string("A-1"))],
                 false,
             );
             f.change_object(
-                "order",
-                "Sales.Order",
-                vec![Member::attribute("Total", "100")],
+                &order,
+                vec![attribute::<markers::Sales::Order_Total>(decimal(100.0))],
                 false,
             );
             f.decision(
-                "$order/Total > 0",
+                order.attribute::<markers::Sales::Order_Total>().gt(0.0),
                 |t| {
-                    t.commit("order");
+                    t.commit(&order);
                 },
                 |_f| {},
             );
@@ -142,12 +157,9 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
                 "Sales.ACT_Notify",
                 None,
                 false,
-                vec![MicroflowCallMapping {
-                    parameter: "Order".into(),
-                    value: "$order".into(),
-                }],
+                vec![CallArgument::new("Order", order.clone())],
             );
-            f.return_value("$order");
+            f.return_value(order);
         });
     });
     let definition = project.build();
@@ -927,7 +939,7 @@ fn synchronize_microflows_preserves_id_on_a_name_match_and_upserts_new_ones() {
     project.module("Sales", |m| {
         m.entity("Order", |_e| {});
         m.microflow("ACT_A", |f| {
-            f.return_value("1");
+            f.return_value(integer(1));
         });
     });
     mxrs_writer::write_project(&path, &project.build()).unwrap();
@@ -947,10 +959,10 @@ fn synchronize_microflows_preserves_id_on_a_name_match_and_upserts_new_ones() {
     let mut redeclare = ProjectBuilder::new("11.12.1");
     redeclare.module("Sales", |m| {
         m.microflow("ACT_A", |f| {
-            f.return_value("2");
+            f.return_value(integer(2));
         });
         m.microflow("ACT_B", |f| {
-            f.return_value("3");
+            f.return_value(integer(3));
         });
     });
     let microflows = redeclare.build().modules.remove(0).microflows;
@@ -994,7 +1006,7 @@ fn synchronize_microflows_does_not_delete_an_undeclared_existing_microflow() {
     project.module("Sales", |m| {
         m.entity("Order", |_e| {});
         m.microflow("ACT_Keep", |f| {
-            f.return_value("1");
+            f.return_value(integer(1));
         });
     });
     mxrs_writer::write_project(&path, &project.build()).unwrap();
@@ -1011,7 +1023,7 @@ fn synchronize_microflows_does_not_delete_an_undeclared_existing_microflow() {
     let mut redeclare = ProjectBuilder::new("11.12.1");
     redeclare.module("Sales", |m| {
         m.microflow("ACT_New", |f| {
-            f.return_value("2");
+            f.return_value(integer(2));
         });
     });
     let microflows = redeclare.build().modules.remove(0).microflows;

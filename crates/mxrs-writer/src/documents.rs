@@ -78,6 +78,7 @@ pub(crate) fn synchronize_microflows_with_identity(
     for decl in microflows {
         let (objects, flows) = flow_compiler::build_microflow_graph(
             &decl.activities,
+            &decl.rescue_activities,
             decl.return_expression.as_deref(),
         );
         let existing_id = existing_by_name.get(&decl.name).cloned();
