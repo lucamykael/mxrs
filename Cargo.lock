@@ -1207,6 +1207,7 @@ dependencies = [
  "mxrs-bson",
  "mxrs-exporter",
  "mxrs-mpr",
+ "mxrs-schema",
  "sha2",
 ]
 

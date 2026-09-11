@@ -8,7 +8,9 @@
 //!   cargo run -p xtask -- fixture-gen <name> <dsl_source.rb>
 //!   cargo run -p xtask -- oracle-diff <fixture_dir>
 //!   cargo run -p xtask -- noise-audit
+//!   cargo run -p xtask -- mxbuild-oracle <app_dir>
 
+mod mxbuild_oracle;
 mod noise_audit;
 
 use std::fs;
@@ -49,9 +51,13 @@ fn main() {
                 .to_path_buf();
             noise_audit::noise_audit(&root)
         }
+        Some("mxbuild-oracle") => {
+            let app_dir = args.next().expect("usage: mxbuild-oracle <app_dir>");
+            mxbuild_oracle::mxbuild_oracle(Path::new(&app_dir))
+        }
         _ => {
             eprintln!(
-                "usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir> | noise-audit>"
+                "usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir> | noise-audit | mxbuild-oracle <app_dir>>"
             );
             std::process::exit(2);
         }

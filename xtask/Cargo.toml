@@ -15,4 +15,5 @@ workspace = true
 mxrs-bson = { path = "../crates/mxrs-bson" }
 mxrs-exporter = { path = "../crates/mxrs-exporter" }
 mxrs-mpr = { path = "../crates/mxrs-mpr" }
+mxrs-schema = { path = "../crates/mxrs-schema" }
 sha2 = "0.10"
