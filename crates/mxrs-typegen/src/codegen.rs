@@ -196,7 +196,7 @@ fn emit_association<'a>(
     .unwrap();
     writeln!(
         out,
-        "        const ASSOCIATION_TYPE: mxrs_model::association::AssociationType = mxrs_model::association::AssociationType::{association_type_variant};"
+        "        const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::{association_type_variant};"
     )
     .unwrap();
     out.push_str("    }\n");
@@ -405,7 +405,7 @@ mod tests {
         assert!(out.contains("type From = Order;"));
         assert!(out.contains("type To = Customer;"));
         assert!(out.contains(
-            "const ASSOCIATION_TYPE: mxrs_model::association::AssociationType = mxrs_model::association::AssociationType::Reference;"
+            "const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;"
         ));
     }
 

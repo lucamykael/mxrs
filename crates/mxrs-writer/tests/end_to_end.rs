@@ -8,9 +8,10 @@
 use mxrs_dsl::ProjectBuilder;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
 use mxrs_ir::flow::MicroflowCallMapping;
-use mxrs_ir::{Member, Ref};
+use mxrs_ir::{AssociationOwner, AssociationStorage, AssociationType, AttributeType, Member, Ref};
 use mxrs_model::Project;
-use mxrs_model::association::{AssociationType, Owner, StorageFormat};
+use mxrs_model::association::{AssociationType as ModelAssociationType, Owner as ModelOwner};
+use mxrs_model::attribute::AttributeType as ModelAttributeType;
 
 /// Hand-written marker types (not `mxrs-typegen`-generated — these tests
 /// don't need a manifest/build.rs, just something implementing
@@ -41,6 +42,62 @@ mod markers {
 }
 
 #[test]
+fn lowers_every_ir_attribute_type_at_the_storage_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("AttributeTypes.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Demo", |module| {
+        module.entity("Record", |entity| {
+            entity.string("StringValue");
+            entity.integer("IntegerValue");
+            entity.long("LongValue");
+            entity.float("FloatValue");
+            entity.decimal("DecimalValue");
+            entity.boolean("BooleanValue");
+            entity.datetime("DateTimeValue");
+            entity.autonumber("AutoNumberValue");
+            entity.hash_string("HashStringValue");
+            entity.binary("BinaryValue");
+            entity.enumeration("EnumValue", "Demo.State");
+        });
+    });
+
+    let definition = project.build();
+    let declared = &definition.modules[0].entities[0].attributes;
+    assert_eq!(declared[3].attribute_type, AttributeType::Float);
+    assert_eq!(declared[8].attribute_type, AttributeType::HashString);
+    assert_eq!(declared[9].attribute_type, AttributeType::Binary);
+    assert_eq!(declared[10].attribute_type, AttributeType::Enumeration);
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+    let read = Project::open(&path, true).unwrap();
+    let module = &read.modules().unwrap()[0];
+    let attributes = &module.entities()[0].attributes;
+    let actual: Vec<ModelAttributeType> = attributes
+        .iter()
+        .map(|attribute| attribute.attribute_type)
+        .collect();
+    assert_eq!(
+        actual,
+        vec![
+            ModelAttributeType::String,
+            ModelAttributeType::Integer,
+            ModelAttributeType::Long,
+            ModelAttributeType::Float,
+            ModelAttributeType::Decimal,
+            ModelAttributeType::Boolean,
+            ModelAttributeType::DateTime,
+            ModelAttributeType::AutoNumber,
+            ModelAttributeType::HashString,
+            ModelAttributeType::Binary,
+            ModelAttributeType::Enum,
+        ]
+    );
+    assert_eq!(attributes[10].enumeration.as_deref(), Some("Demo.State"));
+}
+
+#[test]
 fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Written.mpr");
@@ -59,7 +116,7 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
                 Ref::<markers::Sales::Customer>::new(),
                 AssociationType::Reference,
             )
-            .owner = Owner::Default;
+            .owner = AssociationOwner::Default;
         });
         m.microflow("ACT_CreateOrder", |f| {
             f.create_object(
@@ -159,7 +216,7 @@ fn writes_a_cross_module_association_that_reads_back_as_a_qualified_name() {
                 Ref::<markers::CRM::Account>::new(),
                 AssociationType::Reference,
             )
-            .owner = Owner::Default;
+            .owner = AssociationOwner::Default;
         });
     });
     project.module("CRM", |m| {
@@ -347,7 +404,7 @@ fn synchronize_domain_associations_preserves_ids_adds_and_removes() {
                 Ref::<markers::Sales::Customer>::new(),
                 AssociationType::Reference,
             )
-            .owner = Owner::Default;
+            .owner = AssociationOwner::Default;
         });
     });
     mxrs_writer::write_project(&path, &project.build()).unwrap();
@@ -385,16 +442,16 @@ fn synchronize_domain_associations_preserves_ids_adds_and_removes() {
                     name: "Order_Customer".into(),
                     target: "Customer".into(),
                     association_type: AssociationType::Reference,
-                    owner: Owner::Default,
-                    storage_format: StorageFormat::Column,
+                    owner: AssociationOwner::Default,
+                    storage: AssociationStorage::Column,
                     documentation: "updated docs".into(),
                 },
                 AssociationDecl {
                     name: "Order_Customer_Set".into(),
                     target: "Customer".into(),
                     association_type: AssociationType::ReferenceSet,
-                    owner: Owner::Both,
-                    storage_format: StorageFormat::Table,
+                    owner: AssociationOwner::Both,
+                    storage: AssociationStorage::Table,
                     documentation: String::new(),
                 },
             ],
@@ -453,8 +510,8 @@ fn synchronize_domain_associations_preserves_ids_adds_and_removes() {
         .iter()
         .find(|a| a.name.as_deref() == Some("Order_Customer_Set"))
         .unwrap();
-    assert_eq!(added.association_type, AssociationType::ReferenceSet);
-    assert_eq!(added.owner, Owner::Both);
+    assert_eq!(added.association_type, ModelAssociationType::ReferenceSet);
+    assert_eq!(added.owner, ModelOwner::Both);
 
     // Second sync drops `Order_Customer_Set` again; `Order_Customer` keeps its id.
     let entities = vec![
@@ -464,8 +521,8 @@ fn synchronize_domain_associations_preserves_ids_adds_and_removes() {
                 name: "Order_Customer".into(),
                 target: "Customer".into(),
                 association_type: AssociationType::Reference,
-                owner: Owner::Default,
-                storage_format: StorageFormat::Column,
+                owner: AssociationOwner::Default,
+                storage: AssociationStorage::Column,
                 documentation: "updated docs".into(),
             }],
             ..EntityDecl::new("Order")

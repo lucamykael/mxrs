@@ -30,7 +30,7 @@
 //!
 //! Scope of this pass: only entity name (`#[mx_entity(name = "...")]`,
 //! defaults to the struct's own name) and per-field attributes
-//! (`#[mx_attribute(kind = "...", default = "...")]`, Mendix attribute name
+//! (`#[mx_attribute(kind = "...", default = "...", enumeration = "Module.Enum")]`, Mendix attribute name
 //! defaults to the field name converted to `PascalCase`) — no associations,
 //! documentation, or `persistable` yet (`project! {}`'s own grammar has
 //! those; this front end doesn't mirror the full set on its first pass,
@@ -40,6 +40,12 @@
 
 use quote::quote;
 use syn::spanned::Spanned;
+
+struct ParsedAttribute {
+    kind: String,
+    default: Option<syn::Expr>,
+    enumeration: Option<String>,
+}
 
 pub fn expand_derive(input: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
@@ -64,19 +70,41 @@ pub fn expand_derive(input: &syn::DeriveInput) -> syn::Result<proc_macro2::Token
             .ident
             .as_ref()
             .expect("named field always has an ident");
-        let Some((kind, default)) = parse_mx_attribute(&field.attrs)? else {
+        let Some(attribute) = parse_mx_attribute(&field.attrs)? else {
             return Err(syn::Error::new_spanned(
                 field,
                 "field is missing #[mx_attribute(kind = \"...\")] (every field MxEntity sees needs one)",
             ));
         };
+        let ParsedAttribute {
+            kind,
+            default,
+            enumeration,
+        } = attribute;
         let method = attribute_kind_method(&kind, field)?;
         let mendix_name = to_pascal_case(&field_ident.to_string());
+        let builder = if kind == "enumeration" {
+            let enumeration = enumeration.ok_or_else(|| {
+                syn::Error::new_spanned(
+                    field,
+                    "enumeration attributes require `enumeration = \"Module.Enum\"`",
+                )
+            })?;
+            quote! { e.#method(#mendix_name, #enumeration) }
+        } else {
+            if enumeration.is_some() {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "`enumeration` is only valid when `kind = \"enumeration\"`",
+                ));
+            }
+            quote! { e.#method(#mendix_name) }
+        };
         attribute_stmts.push(match default {
             Some(expr) => {
-                quote! { e.#method(#mendix_name).default_value = Some((#expr).to_string()); }
+                quote! { #builder.default_value = Some((#expr).to_string()); }
             }
-            None => quote! { e.#method(#mendix_name); },
+            None => quote! { #builder; },
         });
     }
 
@@ -120,15 +148,14 @@ fn parse_mx_entity_name(attrs: &[syn::Attribute], struct_name: &syn::Ident) -> s
 /// (the caller turns that into a "missing attribute" error — distinct from
 /// a malformed one, which `parse_nested_meta` already reports with its own
 /// span-accurate message).
-fn parse_mx_attribute(
-    attrs: &[syn::Attribute],
-) -> syn::Result<Option<(String, Option<syn::Expr>)>> {
+fn parse_mx_attribute(attrs: &[syn::Attribute]) -> syn::Result<Option<ParsedAttribute>> {
     for attr in attrs {
         if !attr.path().is_ident("mx_attribute") {
             continue;
         }
         let mut kind: Option<String> = None;
         let mut default: Option<syn::Expr> = None;
+        let mut enumeration: Option<String> = None;
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("kind") {
                 let lit: syn::LitStr = meta.value()?.parse()?;
@@ -137,8 +164,14 @@ fn parse_mx_attribute(
             } else if meta.path.is_ident("default") {
                 default = Some(meta.value()?.parse()?);
                 Ok(())
+            } else if meta.path.is_ident("enumeration") {
+                let lit: syn::LitStr = meta.value()?.parse()?;
+                enumeration = Some(lit.value());
+                Ok(())
             } else {
-                Err(meta.error("unknown #[mx_attribute(...)] key, expected `kind` or `default`"))
+                Err(meta.error(
+                    "unknown #[mx_attribute(...)] key, expected `kind`, `default`, or `enumeration`",
+                ))
             }
         })?;
         let Some(kind) = kind else {
@@ -147,7 +180,11 @@ fn parse_mx_attribute(
                 "#[mx_attribute(...)] requires `kind = \"...\"`",
             ));
         };
-        return Ok(Some((kind, default)));
+        return Ok(Some(ParsedAttribute {
+            kind,
+            default,
+            enumeration,
+        }));
     }
     Ok(None)
 }
@@ -157,15 +194,19 @@ fn attribute_kind_method(kind: &str, field: &syn::Field) -> syn::Result<syn::Ide
         "string" => "string",
         "integer" => "integer",
         "long" => "long",
+        "float" => "float",
         "decimal" => "decimal",
         "boolean" => "boolean",
         "datetime" => "datetime",
         "autonumber" => "autonumber",
+        "hash_string" => "hash_string",
+        "binary" => "binary",
+        "enumeration" => "enumeration",
         other => {
             return Err(syn::Error::new_spanned(
                 field,
                 format!(
-                    "unknown attribute kind `{other}` (expected one of: string, integer, long, decimal, boolean, datetime, autonumber)"
+                    "unknown attribute kind `{other}` (expected one of: string, integer, long, float, decimal, boolean, datetime, autonumber, hash_string, binary, enumeration)"
                 ),
             ));
         }

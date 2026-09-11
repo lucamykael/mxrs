@@ -9,6 +9,3 @@ description = "Storage-independent declaration types (project/module/entity/micr
 
 [lints]
 workspace = true
-
-[dependencies]
-mxrs-model = { path = "../mxrs-model" }

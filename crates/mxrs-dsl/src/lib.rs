@@ -15,7 +15,7 @@
 //! ```
 //! use mxrs_dsl::ProjectBuilder;
 //! use mxrs_ir::Member;
-//! use mxrs_model::association::AssociationType;
+//! use mxrs_ir::AssociationType;
 //!
 //! let mut project = ProjectBuilder::new("11.12.1");
 //! project.module("Sales", |m| {

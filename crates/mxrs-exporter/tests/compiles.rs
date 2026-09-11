@@ -31,17 +31,17 @@ fn try_compile(body: &str) -> Output {
         .collect();
     let name = format!("exporter-fixture-{unique}");
     let cargo_toml = format!(
-        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\nmxrs-model = {{ path = {:?} }}\n",
+        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\n",
         workspace_root().join("crates/mxrs-macros"),
         workspace_root().join("crates/mxrs-ir"),
         workspace_root().join("crates/mxrs-dsl"),
-        workspace_root().join("crates/mxrs-model"),
     );
     std::fs::write(dir.path().join("Cargo.toml"), cargo_toml).unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), body).unwrap();
 
     std::process::Command::new(env!("CARGO"))
         .arg("build")
+        .arg("--offline")
         .current_dir(dir.path())
         .env("CARGO_TARGET_DIR", workspace_root().join("target"))
         .output()
@@ -65,7 +65,7 @@ fn exported_source_compiles_as_a_standalone_crate() {
             e.association(
                 "Order_Customer",
                 mxrs_ir::Ref::<markers::Customer>::new(),
-                mxrs_model::association::AssociationType::Reference,
+                mxrs_ir::AssociationType::Reference,
             );
         });
     });

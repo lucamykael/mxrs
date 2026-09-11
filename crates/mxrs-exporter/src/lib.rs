@@ -28,12 +28,9 @@
 //!   what it's given (see its own doc comment) — so writing an exported
 //!   file straight back through `synchronize_project` leaves every
 //!   existing microflow on disk untouched, not deleted.
-//! - **Unsupported attribute types are rejected by the safe entry point and
-//!   commented by the lossy entry point**: `project! {}`'s grammar covers seven attribute kinds
-//!   (string/integer/long/decimal/boolean/datetime/autonumber);
-//!   `Float`/`HashString`/`Binary`/`Enum` attributes get a `// TODO` line
-//!   naming the attribute and its real type instead of vanishing from the
-//!   output.
+//! - **All eleven attribute types are represented** by `project! {}`:
+//!   string/integer/long/float/decimal/boolean/datetime/autonumber,
+//!   hash-string, binary, and enumeration.
 //! - **Association `Owner`/`StorageFormat`/`Documentation` aren't
 //!   round-tripped** — not an exporter gap specifically, `project! {}`'s
 //!   own grammar has no syntax for them yet (`EntityBuilder::association`
@@ -206,14 +203,11 @@ fn render(mendix_version: &str, modules: &[Module]) -> String {
         out,
         "//! (microflows, association Owner/StorageFormat, entity indexes/"
     );
-    let _ = writeln!(
-        out,
-        "//! access rules/lifecycle, unsupported attribute types)."
-    );
+    let _ = writeln!(out, "//! access rules/lifecycle).");
     let _ = writeln!(out, "//!");
     let _ = writeln!(
         out,
-        "//! Depends on `mxrs-macros`, `mxrs-ir`, `mxrs-dsl`, and `mxrs-model`"
+        "//! Depends on `mxrs-macros`, `mxrs-ir`, and `mxrs-dsl`"
     );
     let _ = writeln!(
         out,
@@ -342,11 +336,16 @@ fn render_entity(
                     .filter(|v| !v.is_empty())
                     .map(|v| format!(" = {v:?}"))
                     .unwrap_or_default();
-                let _ = writeln!(
-                    out,
-                    "                {keyword} {}{default};",
-                    sanitize_ident(attribute_name)
-                );
+                let name = sanitize_ident(attribute_name);
+                if attribute.attribute_type == AttributeType::Enum {
+                    let enumeration = attribute.enumeration.as_deref().unwrap_or("");
+                    let _ = writeln!(
+                        out,
+                        "                {keyword} {name}({enumeration:?}){default};"
+                    );
+                } else {
+                    let _ = writeln!(out, "                {keyword} {name}{default};");
+                }
             }
             None => {
                 let _ = writeln!(
@@ -401,14 +400,14 @@ fn project_attr_keyword(attribute_type: AttributeType) -> Option<&'static str> {
         AttributeType::String => Some("string"),
         AttributeType::Integer => Some("integer"),
         AttributeType::Long => Some("long"),
+        AttributeType::Float => Some("float"),
         AttributeType::Decimal => Some("decimal"),
         AttributeType::Boolean => Some("boolean"),
         AttributeType::DateTime => Some("datetime"),
         AttributeType::AutoNumber => Some("autonumber"),
-        AttributeType::Float
-        | AttributeType::HashString
-        | AttributeType::Binary
-        | AttributeType::Enum => None,
+        AttributeType::HashString => Some("hash_string"),
+        AttributeType::Binary => Some("binary"),
+        AttributeType::Enum => Some("enumeration"),
     }
 }
 
@@ -449,14 +448,22 @@ mod tests {
     }
 
     #[test]
-    fn project_attr_keyword_covers_the_grammars_seven_kinds_and_gaps_the_rest() {
+    fn project_attr_keyword_covers_all_model_attribute_kinds() {
         assert_eq!(project_attr_keyword(AttributeType::String), Some("string"));
         assert_eq!(
             project_attr_keyword(AttributeType::AutoNumber),
             Some("autonumber")
         );
-        assert_eq!(project_attr_keyword(AttributeType::Float), None);
-        assert_eq!(project_attr_keyword(AttributeType::Enum), None);
+        assert_eq!(project_attr_keyword(AttributeType::Float), Some("float"));
+        assert_eq!(
+            project_attr_keyword(AttributeType::HashString),
+            Some("hash_string")
+        );
+        assert_eq!(project_attr_keyword(AttributeType::Binary), Some("binary"));
+        assert_eq!(
+            project_attr_keyword(AttributeType::Enum),
+            Some("enumeration")
+        );
     }
 
     fn entity(name: &str, qualified_name: &str, extra: mxrs_bson::Document) -> Entity {
@@ -497,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_attribute_type_is_commented_out_not_dropped() {
+    fn renders_the_float_attribute_type() {
         let mut order = entity("Order", "Sales.Order", mxrs_bson::doc! {});
         order
             .attributes
@@ -509,13 +516,12 @@ mod tests {
         let module = bare_module("Sales", vec![order]);
 
         let source = render_module(&module, &HashMap::new());
-        assert!(source.contains("TODO"));
-        assert!(source.contains("Score"));
-        assert!(!source.contains("float Score"));
+        assert!(!source.contains("TODO"));
+        assert!(source.contains("float Score"));
     }
 
     #[test]
-    fn safe_export_refuses_an_attribute_the_generated_source_would_delete() {
+    fn safe_export_refuses_attribute_metadata_the_grammar_would_reset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Project.mpr");
         let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
@@ -549,6 +555,7 @@ mod tests {
                 "$ID": uuid::Uuid::new_v4().to_string(),
                 "$Type": "DomainModels$Attribute",
                 "name": "Score",
+                "documentation": "hand-authored docs",
                 "type": { "$Type": "DomainModels$FloatAttributeType" },
             }));
         mpr.update_unit(&domain_unit.unit_id, domain_doc).unwrap();
@@ -560,7 +567,7 @@ mod tests {
         assert!(error.to_string().contains("refusing a lossy Rust export"));
 
         let source = export_project_lossy(&path).unwrap();
-        assert!(source.contains("TODO: attribute \"Score\""));
+        assert!(source.contains("float Score;"));
     }
 
     #[test]
@@ -627,7 +634,7 @@ mod tests {
                 e.association(
                     "Order_Customer",
                     mxrs_ir::Ref::<sales_markers::Customer>::new(),
-                    mxrs_model::association::AssociationType::Reference,
+                    mxrs_ir::AssociationType::Reference,
                 );
             });
         });

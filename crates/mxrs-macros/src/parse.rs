@@ -9,8 +9,9 @@
 //! entity-item:= <attribute> | <association>
 //!             | "documentation" <string-lit> ";"
 //!             | "persistable" <bool-lit> ";"
-//! attribute  := <attr-kind> <ident> ("=" <expr>)? ";"
-//! attr-kind  := "string" | "integer" | "long" | "decimal" | "boolean" | "datetime" | "autonumber"
+//! attribute  := <attr-kind> <ident> ("(" <expr> ")")? ("=" <expr>)? ";"
+//! attr-kind  := "string" | "integer" | "long" | "float" | "decimal" | "boolean"
+//!             | "datetime" | "autonumber" | "hash_string" | "binary" | "enumeration"
 //! association:= "association" <ident> "->" <rust-path> "as" <ident> ";"
 //! microflow  := "microflow" <ident> "{" <flow-item>* ("return" <expr> ";")? "}"
 //! flow-item  := <create> | <change> | <delete> | <commit> | <call> | <if>
@@ -155,10 +156,14 @@ pub enum AttrKind {
     String,
     Integer,
     Long,
+    Float,
     Decimal,
     Boolean,
     DateTime,
     AutoNumber,
+    HashString,
+    Binary,
+    Enumeration,
 }
 
 impl AttrKind {
@@ -167,10 +172,14 @@ impl AttrKind {
             AttrKind::String => "string",
             AttrKind::Integer => "integer",
             AttrKind::Long => "long",
+            AttrKind::Float => "float",
             AttrKind::Decimal => "decimal",
             AttrKind::Boolean => "boolean",
             AttrKind::DateTime => "datetime",
             AttrKind::AutoNumber => "autonumber",
+            AttrKind::HashString => "hash_string",
+            AttrKind::Binary => "binary",
+            AttrKind::Enumeration => "enumeration",
         }
     }
 
@@ -179,15 +188,19 @@ impl AttrKind {
             "string" => AttrKind::String,
             "integer" => AttrKind::Integer,
             "long" => AttrKind::Long,
+            "float" => AttrKind::Float,
             "decimal" => AttrKind::Decimal,
             "boolean" => AttrKind::Boolean,
             "datetime" => AttrKind::DateTime,
             "autonumber" => AttrKind::AutoNumber,
+            "hash_string" => AttrKind::HashString,
+            "binary" => AttrKind::Binary,
+            "enumeration" => AttrKind::Enumeration,
             other => {
                 return Err(syn::Error::new(
                     ident.span(),
                     format!(
-                        "unknown attribute kind `{other}` (expected one of: string, integer, long, decimal, boolean, datetime, autonumber)"
+                        "unknown attribute kind `{other}` (expected one of: string, integer, long, float, decimal, boolean, datetime, autonumber, hash_string, binary, enumeration)"
                     ),
                 ));
             }
@@ -198,6 +211,7 @@ impl AttrKind {
 pub struct AttributeInput {
     pub kind: AttrKind,
     pub name: Ident,
+    pub enumeration: Option<Expr>,
     pub default: Option<Expr>,
 }
 
@@ -477,6 +491,19 @@ impl Parse for AttributeInput {
         let kind_ident: Ident = input.parse()?;
         let kind = AttrKind::from_ident(&kind_ident)?;
         let name: Ident = input.parse()?;
+        let enumeration = if matches!(kind, AttrKind::Enumeration) {
+            if !input.peek(syn::token::Paren) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    "enumeration attributes require a qualified enumeration name in parentheses, for example `enumeration State(\"Sales.State\");`",
+                ));
+            }
+            let content;
+            parenthesized!(content in input);
+            Some(content.parse()?)
+        } else {
+            None
+        };
         let default = if input.peek(Token![=]) {
             input.parse::<Token![=]>()?;
             Some(input.parse()?)
@@ -487,6 +514,7 @@ impl Parse for AttributeInput {
         Ok(AttributeInput {
             kind,
             name,
+            enumeration,
             default,
         })
     }

@@ -1,8 +1,8 @@
-use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
+use mxrs_ir::declaration::{
+    AssociationDecl, AssociationOwner, AssociationStorage, AssociationType, AttributeDecl,
+    AttributeType, EntityDecl,
+};
 use mxrs_ir::{EntityMarker, Ref};
-use mxrs_model::Attribute;
-use mxrs_model::association::{AssociationType, Owner, StorageFormat};
-use mxrs_model::attribute::AttributeType;
 
 pub struct EntityBuilder {
     decl: EntityDecl,
@@ -29,32 +29,54 @@ impl EntityBuilder {
         self
     }
 
-    pub fn string(&mut self, name: impl Into<String>) -> &mut Attribute {
+    pub fn string(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
         self.push_attribute(name, AttributeType::String)
     }
 
-    pub fn integer(&mut self, name: impl Into<String>) -> &mut Attribute {
+    pub fn integer(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
         self.push_attribute(name, AttributeType::Integer)
     }
 
-    pub fn long(&mut self, name: impl Into<String>) -> &mut Attribute {
+    pub fn long(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
         self.push_attribute(name, AttributeType::Long)
     }
 
-    pub fn decimal(&mut self, name: impl Into<String>) -> &mut Attribute {
+    pub fn float(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
+        self.push_attribute(name, AttributeType::Float)
+    }
+
+    pub fn decimal(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
         self.push_attribute(name, AttributeType::Decimal)
     }
 
-    pub fn boolean(&mut self, name: impl Into<String>) -> &mut Attribute {
+    pub fn boolean(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
         self.push_attribute(name, AttributeType::Boolean)
     }
 
-    pub fn datetime(&mut self, name: impl Into<String>) -> &mut Attribute {
+    pub fn datetime(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
         self.push_attribute(name, AttributeType::DateTime)
     }
 
-    pub fn autonumber(&mut self, name: impl Into<String>) -> &mut Attribute {
+    pub fn autonumber(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
         self.push_attribute(name, AttributeType::AutoNumber)
+    }
+
+    pub fn hash_string(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
+        self.push_attribute(name, AttributeType::HashString)
+    }
+
+    pub fn binary(&mut self, name: impl Into<String>) -> &mut AttributeDecl {
+        self.push_attribute(name, AttributeType::Binary)
+    }
+
+    pub fn enumeration(
+        &mut self,
+        name: impl Into<String>,
+        enumeration: impl Into<String>,
+    ) -> &mut AttributeDecl {
+        let attribute = self.push_attribute(name, AttributeType::Enumeration);
+        attribute.enumeration = Some(enumeration.into());
+        attribute
     }
 
     /// Declares an association from this entity to `target` — a
@@ -69,7 +91,7 @@ impl EntityBuilder {
     /// `"Module.Entity"`, and `mxrs-writer` routes on the resolved module,
     /// not on whether the string happens to contain a dot.
     ///
-    /// Defaults to `Owner::Default`/`StorageFormat::Column`; set the
+    /// Defaults to `AssociationOwner::Default`/`AssociationStorage::Column`; set the
     /// returned `AssociationDecl`'s public fields directly to override.
     pub fn association<M: EntityMarker>(
         &mut self,
@@ -81,8 +103,8 @@ impl EntityBuilder {
             name: name.into(),
             target: target.qualified_name(),
             association_type,
-            owner: Owner::Default,
-            storage_format: StorageFormat::Column,
+            owner: AssociationOwner::Default,
+            storage: AssociationStorage::Column,
             documentation: String::new(),
         });
         self.decl.associations.last_mut().expect("just pushed")
@@ -92,23 +114,10 @@ impl EntityBuilder {
         &mut self,
         name: impl Into<String>,
         attribute_type: AttributeType,
-    ) -> &mut Attribute {
-        self.decl.attributes.push(Attribute {
-            id: None,
-            name: Some(name.into()),
-            documentation: String::new(),
-            attribute_type,
-            default_value: None,
-            data_storage_guid: None,
-            export_level: "Hidden".into(),
-            raw_type_doc: None,
-            raw_value_doc: None,
-            length: None,
-            localize_date: None,
-            enumeration: None,
-            required: false,
-            unique: false,
-        });
+    ) -> &mut AttributeDecl {
+        self.decl
+            .attributes
+            .push(AttributeDecl::new(name, attribute_type));
         self.decl.attributes.last_mut().expect("just pushed")
     }
 }

@@ -38,10 +38,14 @@
 use std::collections::{HashMap, HashSet};
 
 use mxrs_bson::{Bson, Document};
-use mxrs_ir::declaration::EntityDecl;
-use mxrs_model::association::Association;
+use mxrs_ir::declaration::{
+    AssociationOwner, AssociationStorage, AssociationType, AttributeDecl, AttributeType, EntityDecl,
+};
+use mxrs_model::association::{
+    Association, AssociationType as ModelAssociationType, Owner, StorageFormat,
+};
 use mxrs_model::entity::{Entity, Location, SystemMembers};
-use mxrs_model::{Attribute, DomainModel};
+use mxrs_model::{Attribute, AttributeType as ModelAttributeType, DomainModel};
 use mxrs_mpr::{MprFile, RawUnit};
 
 use crate::error::{Result, WriterError};
@@ -297,9 +301,9 @@ fn resolve_association(
         documentation: assoc.documentation.clone(),
         from_entity_id: Some(from_id.to_string()),
         to_entity_id: Some(to_entity_id),
-        association_type: assoc.association_type,
-        owner: assoc.owner,
-        storage_format: assoc.storage_format,
+        association_type: model_association_type(assoc.association_type),
+        owner: model_association_owner(assoc.owner),
+        storage_format: model_association_storage(assoc.storage),
         source: prior.and_then(|p| p.source.clone()),
         guid: prior.and_then(|p| p.guid.clone()),
         delete_behavior: prior.and_then(|p| p.delete_behavior.clone()),
@@ -307,6 +311,62 @@ fn resolve_association(
             .map(|p| p.export_level.clone())
             .unwrap_or_else(|| "Hidden".into()),
     })
+}
+
+fn model_association_type(value: AssociationType) -> ModelAssociationType {
+    match value {
+        AssociationType::Reference => ModelAssociationType::Reference,
+        AssociationType::ReferenceSet => ModelAssociationType::ReferenceSet,
+    }
+}
+
+fn model_association_owner(value: AssociationOwner) -> Owner {
+    match value {
+        AssociationOwner::Default => Owner::Default,
+        AssociationOwner::Both => Owner::Both,
+    }
+}
+
+fn model_association_storage(value: AssociationStorage) -> StorageFormat {
+    match value {
+        AssociationStorage::Column => StorageFormat::Column,
+        AssociationStorage::Table => StorageFormat::Table,
+    }
+}
+
+fn model_attribute_type(value: AttributeType) -> ModelAttributeType {
+    match value {
+        AttributeType::String => ModelAttributeType::String,
+        AttributeType::Integer => ModelAttributeType::Integer,
+        AttributeType::Long => ModelAttributeType::Long,
+        AttributeType::Float => ModelAttributeType::Float,
+        AttributeType::Decimal => ModelAttributeType::Decimal,
+        AttributeType::Boolean => ModelAttributeType::Boolean,
+        AttributeType::DateTime => ModelAttributeType::DateTime,
+        AttributeType::AutoNumber => ModelAttributeType::AutoNumber,
+        AttributeType::HashString => ModelAttributeType::HashString,
+        AttributeType::Binary => ModelAttributeType::Binary,
+        AttributeType::Enumeration => ModelAttributeType::Enum,
+    }
+}
+
+fn model_attribute(decl: &AttributeDecl) -> Attribute {
+    Attribute {
+        id: None,
+        name: Some(decl.name.clone()),
+        documentation: decl.documentation.clone(),
+        attribute_type: model_attribute_type(decl.attribute_type),
+        default_value: decl.default_value.clone(),
+        data_storage_guid: None,
+        export_level: "Hidden".into(),
+        raw_type_doc: None,
+        raw_value_doc: None,
+        length: decl.length,
+        localize_date: decl.localize_date,
+        enumeration: decl.enumeration.clone(),
+        required: decl.required,
+        unique: decl.unique,
+    }
 }
 
 /// Picks whichever key spelling is already present on `doc` (older/foreign
@@ -364,7 +424,7 @@ fn fresh_entity(module_name: &str, decl: &EntityDecl, id: String) -> Entity {
         source: None,
         oql_query: None,
         native_type: None,
-        attributes: decl.attributes.clone(),
+        attributes: decl.attributes.iter().map(model_attribute).collect(),
     }
 }
 
@@ -376,20 +436,20 @@ fn doc_name(doc: &Document) -> Option<String> {
     }
 }
 
-/// Rebuilds one attribute doc for a declared `Attribute`, preserving the
+/// Rebuilds one attribute doc for a declared `AttributeDecl`, preserving the
 /// prior attribute's `$ID`/`dataStorageGuid` when its name matches — every
 /// other field (type, default, length, ...) is fully re-derived from the
-/// declared value every time, since `mxrs_ir`'s `Attribute` (reused directly
-/// from `mxrs_model`, unlike mxrb's sparser Ruby declarations) always
-/// carries a complete value, not a partial override.
-fn reconcile_attribute_doc(decl: &Attribute, previous: Option<&Document>) -> Document {
+/// storage-independent declaration every time. A declaration always carries
+/// a complete value, not a partial override.
+fn reconcile_attribute_doc(decl: &AttributeDecl, previous: Option<&Document>) -> Document {
+    let decl = model_attribute(decl);
     match previous {
         Some(prev) => {
             let prior = Attribute::from_bson(prev);
             Attribute {
                 id: prior.id,
                 data_storage_guid: prior.data_storage_guid,
-                ..decl.clone()
+                ..decl
             }
             .to_bson()
         }
@@ -439,10 +499,7 @@ fn build_entity_doc(
         .attributes
         .iter()
         .map(|a| {
-            let prior = a
-                .name
-                .as_deref()
-                .and_then(|name| prev_attrs_by_name.get(name));
+            let prior = prev_attrs_by_name.get(&a.name);
             Bson::Document(reconcile_attribute_doc(a, prior))
         })
         .collect();

@@ -2,9 +2,7 @@ use std::fs;
 
 use mxrs_bson::{Bson, doc};
 use mxrs_dsl::ProjectBuilder;
-use mxrs_ir::Ref;
-use mxrs_model::association::AssociationType;
-use mxrs_model::attribute::AttributeType;
+use mxrs_ir::{AssociationType, AttributeType, Ref};
 use mxrs_mpr::MprFile;
 
 struct Detail;
@@ -23,7 +21,7 @@ fn generates_every_referenced_proxy_family_without_overwriting_files() {
         module.entity("Record", |entity| {
             entity.string("Name");
             let state = entity.string("State");
-            state.attribute_type = AttributeType::Enum;
+            state.attribute_type = AttributeType::Enumeration;
             state.enumeration = Some("Demo.State".into());
             entity.association(
                 "Record_Detail",

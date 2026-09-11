@@ -3,20 +3,18 @@
 //! (which compiles them into `.mpr` BSON). See `decisions/mxrs-rust-rewrite-plan.md`
 //! in this project's ai-memory for the surrounding Phase 3 plan.
 //!
-//! Deviation from the original crate table worth flagging: the plan places
-//! `mxrs-ir` upstream of `mxrs-model` (depending only on `mxrs-schema` +
-//! `mxrs-fragment-store`). In practice `mxrs-model`'s `Entity`/`Attribute`
-//! are already both-directions BSON structs (`from_bson`/`to_bson`), so this
-//! crate reuses them directly for entity/attribute declarations instead of
-//! duplicating near-identical types — only associations and microflow bodies
-//! get their own declaration shape here, since those need name-based
-//! resolution (entity/microflow references, not yet-assigned UUIDs) that
-//! `mxrs-model`'s storage-oriented structs don't carry.
+//! This crate deliberately has no dependency on `mxrs-model`, `mxrs-bson`,
+//! or the `.mpr` storage layer. Its declarations contain only concepts an
+//! author can name. `mxrs-writer` owns the one-way lowering into the
+//! storage-oriented model structs and assigns identities to new artifacts.
 
 pub mod declaration;
 pub mod flow;
 pub mod markers;
 
-pub use declaration::{AssociationDecl, EntityDecl, ModuleDecl, ProjectDecl};
+pub use declaration::{
+    AssociationDecl, AssociationOwner, AssociationStorage, AssociationType, AttributeDecl,
+    AttributeType, EntityDecl, ModuleDecl, ProjectDecl,
+};
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{AssociationMarker, AttributeMarker, EntityMarker, Ref};

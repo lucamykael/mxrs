@@ -545,7 +545,6 @@ name = "mxrs-dsl"
 version = "0.1.0"
 dependencies = [
  "mxrs-ir",
- "mxrs-model",
 ]
 
 [[package]]
@@ -590,9 +589,6 @@ dependencies = [
 [[package]]
 name = "mxrs-ir"
 version = "0.1.0"
-dependencies = [
- "mxrs-model",
-]
 
 [[package]]
 name = "mxrs-javagen"

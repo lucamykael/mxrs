@@ -6,9 +6,8 @@
 use mxrs_bson::Bson;
 use mxrs_compiler_domain::{DomainCompiler, SecurityCompiler};
 use mxrs_dsl::ProjectBuilder;
-use mxrs_ir::Ref;
+use mxrs_ir::{AssociationType, Ref};
 use mxrs_model::Project;
-use mxrs_model::association::AssociationType;
 use mxrs_model::entity::{AccessMember, AccessMemberKind, AccessRule};
 
 #[allow(dead_code, non_snake_case)]

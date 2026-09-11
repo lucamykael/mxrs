@@ -1,16 +1,89 @@
-//! Project/Module/Entity declarations. Reuses `mxrs-model`'s `Attribute`
-//! (and its `AttributeType`) as-is for entity attributes — those need no
-//! name resolution — but associations need a name-based `target` (the
-//! referenced entity doesn't have a UUID yet at declaration time), unlike
-//! `mxrs_model::Association`, which is storage-shaped (`from_entity_id`/
-//! `to_entity_id` as resolved UUID strings). `mxrs-writer` resolves
-//! `AssociationDecl`s into `mxrs_model::Association`s once every entity in
-//! the project has been assigned an id.
-
-use mxrs_model::Attribute;
-use mxrs_model::association::{AssociationType, Owner, StorageFormat};
+//! Storage-independent project/module/entity declarations. Nothing in this
+//! module knows about BSON field names, UUIDs, raw documents, export levels,
+//! or other `.mpr` representation details. `mxrs-writer` lowers these values
+//! into `mxrs-model` only at the persistence boundary.
 
 use crate::flow::MicroflowDecl;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// An author-level attribute kind.
+///
+/// The storage model uses a separate enum and is lowered by `mxrs-writer`:
+///
+/// ```compile_fail
+/// let _ = mxrs_ir::AttributeDecl::new("Name", "String");
+/// ```
+pub enum AttributeType {
+    String,
+    Integer,
+    Long,
+    Float,
+    Decimal,
+    Boolean,
+    DateTime,
+    AutoNumber,
+    HashString,
+    Binary,
+    Enumeration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeDecl {
+    pub name: String,
+    pub documentation: String,
+    pub attribute_type: AttributeType,
+    pub default_value: Option<String>,
+    pub length: Option<i32>,
+    pub localize_date: Option<bool>,
+    /// Qualified name of the backing enumeration for
+    /// [`AttributeType::Enumeration`].
+    pub enumeration: Option<String>,
+    pub required: bool,
+    pub unique: bool,
+}
+
+impl AttributeDecl {
+    pub fn new(name: impl Into<String>, attribute_type: AttributeType) -> Self {
+        Self {
+            name: name.into(),
+            documentation: String::new(),
+            attribute_type,
+            default_value: None,
+            length: None,
+            localize_date: None,
+            enumeration: None,
+            required: false,
+            unique: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Association cardinality at the declaration boundary.
+///
+/// Raw strings cannot cross this boundary:
+///
+/// ```compile_fail
+/// let _: mxrs_ir::AssociationType = "Reference";
+/// ```
+pub enum AssociationType {
+    Reference,
+    ReferenceSet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssociationOwner {
+    #[default]
+    Default,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssociationStorage {
+    #[default]
+    Column,
+    Table,
+}
 
 #[derive(Debug, Clone)]
 pub struct AssociationDecl {
@@ -19,8 +92,8 @@ pub struct AssociationDecl {
     /// `"Module.Entity"` (cross-module).
     pub target: String,
     pub association_type: AssociationType,
-    pub owner: Owner,
-    pub storage_format: StorageFormat,
+    pub owner: AssociationOwner,
+    pub storage: AssociationStorage,
     pub documentation: String,
 }
 
@@ -29,7 +102,7 @@ pub struct EntityDecl {
     pub name: String,
     pub documentation: String,
     pub persistable: bool,
-    pub attributes: Vec<Attribute>,
+    pub attributes: Vec<AttributeDecl>,
     pub associations: Vec<AssociationDecl>,
 }
 

@@ -86,7 +86,7 @@ fn generated_association_markers_resolve_their_from_and_to() {
     );
     assert_eq!(
         Sales::Order_Order_Customer::ASSOCIATION_TYPE,
-        mxrs_model::association::AssociationType::Reference
+        mxrs_ir::AssociationType::Reference
     );
 
     assert_eq!(

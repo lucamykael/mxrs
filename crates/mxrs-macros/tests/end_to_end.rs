@@ -84,6 +84,43 @@ fn expands_to_a_project_decl_writable_and_readable_like_hand_written_dsl() {
 }
 
 #[test]
+fn supports_every_attribute_kind_including_enumerations() {
+    let definition = project! {
+        "11.12.1",
+        module Demo {
+            entity Record {
+                string StringValue;
+                integer IntegerValue;
+                long LongValue;
+                float FloatValue;
+                decimal DecimalValue;
+                boolean BooleanValue;
+                datetime DateTimeValue;
+                autonumber AutoNumberValue;
+                hash_string HashStringValue;
+                binary BinaryValue;
+                enumeration EnumValue("Demo.State") = "Open";
+            }
+        }
+    };
+
+    let attributes = &definition.modules[0].entities[0].attributes;
+    assert_eq!(attributes.len(), 11);
+    assert_eq!(attributes[3].attribute_type, mxrs_ir::AttributeType::Float);
+    assert_eq!(
+        attributes[8].attribute_type,
+        mxrs_ir::AttributeType::HashString
+    );
+    assert_eq!(attributes[9].attribute_type, mxrs_ir::AttributeType::Binary);
+    assert_eq!(
+        attributes[10].attribute_type,
+        mxrs_ir::AttributeType::Enumeration
+    );
+    assert_eq!(attributes[10].enumeration.as_deref(), Some("Demo.State"));
+    assert_eq!(attributes[10].default_value.as_deref(), Some("Open"));
+}
+
+#[test]
 fn supports_a_cross_module_association_target() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("CrossModule.mpr");
@@ -131,7 +168,7 @@ fn supports_a_reference_set_association() {
     let order = sales.entities.iter().find(|e| e.name == "Order").unwrap();
     assert_eq!(
         order.associations[0].association_type,
-        mxrs_model::association::AssociationType::ReferenceSet
+        mxrs_ir::AssociationType::ReferenceSet
     );
     assert_eq!(order.associations[0].target, "Sales.Customer");
 }

@@ -32,10 +32,9 @@ fn try_compile(body: &str) -> Output {
         .collect();
     let name = format!("macros-diagnostics-fixture-{unique}");
     let cargo_toml = format!(
-        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\nmxrs-model = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\n",
+        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nmxrs-macros = {{ path = {:?} }}\nmxrs-dsl = {{ path = {:?} }}\nmxrs-ir = {{ path = {:?} }}\n",
         workspace_root().join("crates/mxrs-macros"),
         workspace_root().join("crates/mxrs-dsl"),
-        workspace_root().join("crates/mxrs-model"),
         workspace_root().join("crates/mxrs-ir"),
     );
     std::fs::write(dir.path().join("Cargo.toml"), cargo_toml).unwrap();
@@ -43,6 +42,7 @@ fn try_compile(body: &str) -> Output {
 
     Command::new(env!("CARGO"))
         .arg("build")
+        .arg("--offline")
         .current_dir(dir.path())
         .env("CARGO_TARGET_DIR", workspace_root().join("target"))
         .output()

@@ -10,13 +10,12 @@
 //! returns), so it's usable directly wherever one is needed —
 //! `mxrs_writer::write_project(path, &project! { ... })`.
 //!
-//! References `::mxrs_model::association::AssociationType`, `::mxrs_ir::Ref`,
+//! References `::mxrs_ir::AssociationType`, `::mxrs_ir::Ref`,
 //! `::mxrs_ir::Member`, and `::mxrs_ir::MicroflowCallMapping` directly
 //! rather than going through an `mxrs-dsl` re-export (there isn't one —
 //! existing hand-written `mxrs-dsl` usage already imports
-//! `mxrs_model::association`/`mxrs_ir` types directly, e.g. in
-//! `mxrs-writer`'s own test suite), so a crate using `project! {}` needs
-//! `mxrs-model` and `mxrs-ir` as direct dependencies too, same as
+//! `mxrs_ir` types directly, e.g. in `mxrs-writer`'s own test suite), so a
+//! crate using `project! {}` needs `mxrs-ir` as a direct dependency too, same as
 //! hand-written `mxrs-dsl` usage already does. An association's target
 //! path (`e.association(name, Ref::<#target>::new(), ...)`) is resolved in
 //! the *macro call site's* scope, not this crate's — it has to name a
@@ -201,12 +200,16 @@ fn expand_mapping(mapping: &MappingInput) -> TokenStream {
 fn expand_attribute(attribute: &AttributeInput) -> TokenStream {
     let name = attribute.name.to_string();
     let method = syn::Ident::new(attribute.kind.builder_method(), attribute.name.span());
+    let builder = match &attribute.enumeration {
+        Some(enumeration) => quote! { e.#method(#name, #enumeration) },
+        None => quote! { e.#method(#name) },
+    };
     match &attribute.default {
         Some(default) => quote! {
-            e.#method(#name).default_value = Some((#default).to_string());
+            #builder.default_value = Some((#default).to_string());
         },
         None => quote! {
-            e.#method(#name);
+            #builder;
         },
     }
 }
@@ -219,7 +222,7 @@ fn expand_association(association: &AssociationInput) -> TokenStream {
         e.association(
             #name,
             ::mxrs_ir::Ref::<#target>::new(),
-            ::mxrs_model::association::AssociationType::#association_type,
+            ::mxrs_ir::AssociationType::#association_type,
         );
     }
 }

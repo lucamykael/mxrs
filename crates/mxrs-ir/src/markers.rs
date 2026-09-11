@@ -111,7 +111,7 @@ pub trait AssociationMarker: 'static {
     /// The entity this association points to.
     type To: EntityMarker;
     const NAME: &'static str;
-    const ASSOCIATION_TYPE: mxrs_model::association::AssociationType;
+    const ASSOCIATION_TYPE: crate::AssociationType;
 }
 
 /// A typed reference to an entity, carrying no runtime state beyond what's
@@ -174,8 +174,7 @@ mod tests {
         type From = Order;
         type To = Customer;
         const NAME: &'static str = "Order_Customer";
-        const ASSOCIATION_TYPE: mxrs_model::association::AssociationType =
-            mxrs_model::association::AssociationType::Reference;
+        const ASSOCIATION_TYPE: crate::AssociationType = crate::AssociationType::Reference;
     }
 
     #[test]
@@ -211,7 +210,7 @@ mod tests {
         );
         assert_eq!(
             OrderCustomer::ASSOCIATION_TYPE,
-            mxrs_model::association::AssociationType::Reference
+            crate::AssociationType::Reference
         );
     }
 }

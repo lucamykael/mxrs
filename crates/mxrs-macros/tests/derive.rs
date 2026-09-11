@@ -14,6 +14,14 @@ struct Order {
     number: String,
     #[mx_attribute(kind = "decimal")]
     total: String,
+    #[mx_attribute(kind = "float")]
+    score: f64,
+    #[mx_attribute(kind = "hash_string")]
+    password: String,
+    #[mx_attribute(kind = "binary")]
+    payload: Vec<u8>,
+    #[mx_attribute(kind = "enumeration", enumeration = "Sales.State", default = "Open")]
+    state: String,
 }
 
 #[derive(MxEntity)]
@@ -62,6 +70,17 @@ fn derived_entities_write_and_read_back_correctly() {
             .iter()
             .any(|a| a.name.as_deref() == Some("Total"))
     );
+    let state = order
+        .attributes
+        .iter()
+        .find(|a| a.name.as_deref() == Some("State"))
+        .unwrap();
+    assert_eq!(
+        state.attribute_type,
+        mxrs_model::attribute::AttributeType::Enum
+    );
+    assert_eq!(state.enumeration.as_deref(), Some("Sales.State"));
+    assert_eq!(state.default_value.as_deref(), Some("Open"));
 
     // #[mx_entity(name = "Client")] overrides the struct's own name.
     assert!(entities.iter().any(|e| e.name.as_deref() == Some("Client")));
