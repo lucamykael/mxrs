@@ -24,7 +24,7 @@
 //! let definition = project.build();
 //! let order = &definition.modules[0].entities[0];
 //! assert_eq!(order.name, "Order");
-//! assert_eq!(order.attributes[0].name.as_deref(), Some("Number"));
+//! assert_eq!(order.attributes[0].name, "Number");
 //! # }
 //! ```
 //!
