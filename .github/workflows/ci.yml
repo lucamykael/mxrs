@@ -1,0 +1,102 @@
+name: CI
+
+# NOTE: this workspace has no GitHub remote configured yet (checked
+# 2026-09-11 — `git remote -v` is empty here); this workflow is prepared
+# ahead of that, per the mxrs plan's Wave 0 (decisions/mxrs-rust-rewrite-plan.md
+# in this project's ai-memory). It activates once the repo is pushed under
+# `lucamykael/mxrs` and mirrors the local development gate documented in
+# README.md and .claude/agents/mxrs-rust.md's rule #6 ("full green before
+# you call anything done"): fmt, clippy, tests, then the two mxrb-backed
+# oracles, run against a sibling checkout of mxrb (never a runtime
+# dependency of anything mxrs ships — dev/CI-only, same as `xtask` itself).
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt-clippy-test:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  mxrb-oracle:
+    name: oracle-diff + noise-audit (against mxrb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mxrs
+      # mxrb is mxrs's read-only behavioral oracle (never a runtime
+      # dependency — see the crate docs and .claude/agents/mxrs-rust.md).
+      # Checked out as a sibling directory so MXRB_HOME's default
+      # (`../mxrb` relative to mxrs) resolves without extra configuration.
+      - uses: actions/checkout@v4
+        with:
+          repository: lucamykael/mxrb
+          path: mxrb
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mxrs
+      - uses: ruby/setup-ruby@v1
+        with:
+          # mxrb.gemspec pins `required_ruby_version = ">= 4.0"` — verified
+          # against the current gemspec, not assumed.
+          ruby-version: "4.0"
+          bundler-cache: true
+          working-directory: mxrb
+      - name: oracle-diff (minimal fixture)
+        working-directory: mxrs
+        env:
+          MXRB_HOME: ${{ github.workspace }}/mxrb
+        run: cargo run -p xtask -- oracle-diff xtask/fixtures/minimal
+      - name: oracle-diff (with_page fixture)
+        working-directory: mxrs
+        env:
+          MXRB_HOME: ${{ github.workspace }}/mxrb
+        run: cargo run -p xtask -- oracle-diff xtask/fixtures/with_page
+      - name: noise-audit
+        working-directory: mxrs
+        run: cargo run -p xtask -- noise-audit
+
+  coverage:
+    name: coverage (report only, no threshold yet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      # No --fail-under yet: this is the first coverage instrumentation
+      # this workspace has ever had (see the Wave 0 plan notes). Establish
+      # a real baseline from a few runs before turning this into a gate —
+      # an arbitrary threshold picked without data would either be trivially
+      # passable or spuriously fail the first honest PR.
+      - run: cargo llvm-cov --workspace --summary-only
+
+  benches-build:
+    name: benches (build + smoke run, not a perf gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Shared GitHub-hosted runners are too noisy for reliable
+      # regression tracking — this only proves the bench harness stays
+      # buildable and runnable, not that performance hasn't regressed.
+      # Real perf tracking needs a dedicated/self-hosted runner, not yet
+      # set up.
+      - run: cargo bench -p mxrs-bson -- --sample-count 10

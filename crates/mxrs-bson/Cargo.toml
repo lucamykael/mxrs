@@ -18,4 +18,11 @@ sha2 = "0.10"
 thiserror.workspace = true
 
 [dev-dependencies]
+divan = "0.1"
 proptest = "1.11.0"
+
+# `harness = false` hands main() over to divan's own runner instead of
+# libtest's — required for #[divan::bench] to work at all.
+[[bench]]
+name = "codec"
+harness = false
