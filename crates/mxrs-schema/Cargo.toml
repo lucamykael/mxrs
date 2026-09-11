@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Mendix version/schema registry (11.x for v1). Skeleton — see Phase 1 (M1.6) in ai-memory decisions/mxrs-rust-rewrite-plan.md."
+description = "Mendix version/schema registry, scoped to 11.x per the locked MVP decision: compatibility projections, embedded Runtime/system-model schemas, and model.mdp reading."
 
 [lints]
 workspace = true

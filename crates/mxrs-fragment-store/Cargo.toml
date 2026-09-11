@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Content-addressed (SHA-256) store for unmodeled BSON fragments. Skeleton — see Phase 1 (M1.5) in ai-memory decisions/mxrs-rust-rewrite-plan.md."
+description = "Content-addressed (SHA-256), fail-closed store for unmodeled BSON fragments. Ports lib/mxrb/native_fragment_store.rb from mxrb, minus its Thread-local ambient-context accessors (mxrs has no script interpreter to need them)."
 
 [lints]
 workspace = true

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The `mxrs` binary: a Phase 6 CLI skeleton (validate/compare) over mxrs-mpr and mxrs-model. Ports the storage-format-invariant slice of Integrity::Validator and the structural-summary slice of Mxrb::Compare — see the crate's module docs for exactly what's narrowed."
+description = "The `mxrs` binary: validate/compare/inspect/units/dump-unit/sql/modules/export/javagen over mxrs-mpr and mxrs-model — a narrow slice of bin/mxrb's ~80-command surface, growing as engine crates land. See the crate's module docs for exactly what's narrowed per command."
 
 [lints]
 workspace = true

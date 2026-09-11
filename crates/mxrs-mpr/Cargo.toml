@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Low-level Mendix .mpr SQLite/BSON unit I/O (v2 .mxunit storage). Skeleton — see Phase 1 (M1.2-M1.4) in ai-memory decisions/mxrs-rust-rewrite-plan.md."
+description = "Low-level Mendix .mpr SQLite/BSON unit I/O (v2 .mxunit storage). Ports lib/mxrb/io/mpr_file.rb + mxunit_codec.rb from mxrb — v2-only per the locked 11.x MVP scope."
 
 [lints]
 workspace = true
