@@ -1205,6 +1205,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-exporter",
  "mxrs-mpr",
  "sha2",
 ]

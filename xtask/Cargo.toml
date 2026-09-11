@@ -13,5 +13,6 @@ workspace = true
 
 [dependencies]
 mxrs-bson = { path = "../crates/mxrs-bson" }
+mxrs-exporter = { path = "../crates/mxrs-exporter" }
 mxrs-mpr = { path = "../crates/mxrs-mpr" }
 sha2 = "0.10"

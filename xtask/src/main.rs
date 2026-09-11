@@ -7,6 +7,9 @@
 //! Usage:
 //!   cargo run -p xtask -- fixture-gen <name> <dsl_source.rb>
 //!   cargo run -p xtask -- oracle-diff <fixture_dir>
+//!   cargo run -p xtask -- noise-audit
+
+mod noise_audit;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,9 +42,16 @@ fn main() {
             let fixture_dir = args.next().expect("usage: oracle-diff <fixture_dir>");
             oracle_diff(Path::new(&fixture_dir))
         }
+        Some("noise-audit") => {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("xtask always lives one directory below the workspace root")
+                .to_path_buf();
+            noise_audit::noise_audit(&root)
+        }
         _ => {
             eprintln!(
-                "usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir>>"
+                "usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir> | noise-audit>"
             );
             std::process::exit(2);
         }
