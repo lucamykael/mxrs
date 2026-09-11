@@ -221,11 +221,11 @@ fn identity_key(node: &Node) -> Option<(&'static str, String)> {
 
 fn identity_key_path(index: usize, item: &Value) -> Vec<String> {
     let mut parts = vec![index.to_string()];
-    if let Value::Node(node) = item {
-        if let Some((field, value)) = identity_key(node) {
-            parts.push(field.to_string());
-            parts.push(value);
-        }
+    if let Value::Node(node) = item
+        && let Some((field, value)) = identity_key(node)
+    {
+        parts.push(field.to_string());
+        parts.push(value);
     }
     parts
 }

@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Typed, lossless BSON codec for Mendix project settings (Settings$ProjectSettings and its parts). Ports lib/mxrb/settings/{model,mpr_codec,value_contracts}.rb from mxrb."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
 mxrs-schema = { path = "../mxrs-schema" }

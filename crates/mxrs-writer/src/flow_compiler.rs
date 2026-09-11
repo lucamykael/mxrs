@@ -10,7 +10,7 @@
 //! `ArgumentModel`/`Queue` fields only present on majors 6-10/8-9) are
 //! dropped rather than ported.
 
-use mxrs_bson::{doc, Bson, Document};
+use mxrs_bson::{Bson, Document, doc};
 use mxrs_ir::flow::{Activity, Member};
 
 pub fn build_microflow_graph(

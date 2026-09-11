@@ -164,10 +164,10 @@ fn collect_types(document: &Document) -> std::collections::HashSet<String> {
 }
 
 fn collect_types_from_doc(doc: &Document, found: &mut std::collections::HashSet<String>) {
-    if let Ok(t) = doc.get_str("$Type") {
-        if !t.is_empty() {
-            found.insert(t.to_string());
-        }
+    if let Ok(t) = doc.get_str("$Type")
+        && !t.is_empty()
+    {
+        found.insert(t.to_string());
     }
     for (_, value) in doc {
         collect_types_from_value(value, found);
@@ -212,12 +212,12 @@ fn collect_hints(document: &Document) -> std::collections::HashSet<String> {
 
 fn collect_hints_from_doc(doc: &Document, found: &mut std::collections::HashSet<String>) {
     for (key, child) in doc {
-        if looks_like_hint_key(key) {
-            if let Bson::String(s) = child {
-                if !s.is_empty() && s.len() <= 512 {
-                    found.insert(s.clone());
-                }
-            }
+        if looks_like_hint_key(key)
+            && let Bson::String(s) = child
+            && !s.is_empty()
+            && s.len() <= 512
+        {
+            found.insert(s.clone());
         }
         collect_hints_from_value(child, found);
     }

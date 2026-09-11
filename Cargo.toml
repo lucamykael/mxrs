@@ -4,7 +4,8 @@ members = ["crates/*", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lucamykael/mxrs"
 authors = ["Lucas Moura"]
@@ -13,3 +14,27 @@ authors = ["Lucas Moura"]
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Zero `unsafe` is a project-wide invariant (nothing in this workspace needs
+# it — see .claude/agents/mxrs-rust.md's "Idiomatic Rust" section), so it's
+# enforced here rather than left to reviewer discipline.
+#
+# `clippy::pedantic` is intentionally left at its crate-level default
+# (allow) rather than workspace-`warn`/`deny`: a baseline run against the
+# current tree surfaces ~485 pedantic-only findings, almost all
+# stylistic (e.g. `must_use` candidates, `# Errors` doc sections) rather
+# than correctness issues — enabling it here would turn every future PR
+# red for pre-existing debt instead of the change under review. Burn it
+# down deliberately, crate by crate, rather than as a side effect of this
+# hygiene pass.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+# Performance is this project's whole pitch over mxrb (Ruby) — release
+# builds should actually be optimized for it, not left at cargo's defaults.
+[profile.release]
+lto = true
+codegen-units = 1

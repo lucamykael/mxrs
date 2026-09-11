@@ -6,8 +6,8 @@
 //! plain JSON, so this conversion is needed before a stored native document
 //! is written again during a version transition.
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use bson::{spec::BinarySubtype, Binary};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use bson::{Binary, spec::BinarySubtype};
 use serde_json::Value;
 
 /// A restored value: either a decoded binary blob, or a JSON value with any

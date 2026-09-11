@@ -216,18 +216,22 @@ mod tests {
 
     #[test]
     fn boolean_field_rejects_non_boolean() {
-        assert!(normalize(
-            "Forms$WebUIProjectSettingsPart",
-            "EnableRspackBundler",
-            Value::Integer(1)
-        )
-        .is_err());
-        assert!(normalize(
-            "Forms$WebUIProjectSettingsPart",
-            "EnableRspackBundler",
-            Value::Boolean(true)
-        )
-        .is_ok());
+        assert!(
+            normalize(
+                "Forms$WebUIProjectSettingsPart",
+                "EnableRspackBundler",
+                Value::Integer(1)
+            )
+            .is_err()
+        );
+        assert!(
+            normalize(
+                "Forms$WebUIProjectSettingsPart",
+                "EnableRspackBundler",
+                Value::Boolean(true)
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -241,22 +245,26 @@ mod tests {
         assert!(result.is_err());
 
         let right = Node::new("Settings$OpenTelemetryConfiguration").unwrap();
-        assert!(normalize(
-            "Settings$ServerConfiguration",
-            "OpenTelemetry",
-            Value::Node(right)
-        )
-        .is_ok());
+        assert!(
+            normalize(
+                "Settings$ServerConfiguration",
+                "OpenTelemetry",
+                Value::Node(right)
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn collection_field_requires_a_collection_value() {
-        assert!(normalize(
-            "Settings$JarDeploymentSettings",
-            "Exclusions",
-            Value::String("x".into())
-        )
-        .is_err());
+        assert!(
+            normalize(
+                "Settings$JarDeploymentSettings",
+                "Exclusions",
+                Value::String("x".into())
+            )
+            .is_err()
+        );
         let collection =
             Value::Collection(Collection::new(vec![Value::String("x".into())], 2).unwrap());
         assert!(normalize("Settings$JarDeploymentSettings", "Exclusions", collection).is_ok());

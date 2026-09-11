@@ -61,7 +61,7 @@ fn extract_text(doc: &Document, keys: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxrs_bson::{doc, Bson};
+    use mxrs_bson::{Bson, doc};
 
     #[test]
     fn decodes_nested_menu_items_with_page_reference() {

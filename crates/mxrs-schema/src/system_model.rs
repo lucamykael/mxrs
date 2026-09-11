@@ -89,12 +89,16 @@ mod tests {
             ) && mxrs_bson::extract_id(document.get("$ID").unwrap()).as_deref()
                 == Some(SYSTEM_MODULE_ID)
         }));
-        assert!(documents
-            .iter()
-            .any(|document| document.get_str("$Type").ok() == Some("DomainModels$DomainModel")));
-        assert!(documents
-            .iter()
-            .any(|document| document.get_str("$Type").ok() == Some("Enumerations$Enumeration")));
+        assert!(
+            documents
+                .iter()
+                .any(|document| document.get_str("$Type").ok() == Some("DomainModels$DomainModel"))
+        );
+        assert!(
+            documents
+                .iter()
+                .any(|document| document.get_str("$Type").ok() == Some("Enumerations$Enumeration"))
+        );
     }
 
     #[test]

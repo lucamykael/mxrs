@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use mxrs_forms::{node::Value, Catalog, MprCodec};
+use mxrs_forms::{Catalog, MprCodec, node::Value};
 
 #[test]
 fn decodes_and_round_trips_a_native_forms_mprcodec_document() {

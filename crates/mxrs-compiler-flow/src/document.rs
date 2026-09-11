@@ -4,13 +4,13 @@
 
 use std::collections::HashMap;
 
-use mxrs_bson::{doc, Bson, Document};
+use mxrs_bson::{Bson, Document, doc};
 use mxrs_schema::RuntimeModelSchema;
 
+use crate::CompilerError;
 use crate::node::{FlowDiagnostic, FlowNodeCompiler, VariableTypes};
 use crate::support::{derived_id, get_any, get_doc_any, get_str_any, stable_dedup};
 use crate::types::data_type;
-use crate::CompilerError;
 
 const ROOT_TYPES: &[&str] = &[
     "Microflows$Microflow",
@@ -110,10 +110,10 @@ impl<'a> FlowDocumentCompiler<'a> {
         if let Some(value) = source.get(field) {
             return self.nodes.compile(value, vars);
         }
-        if let Some(existing) = self.schema.counterpart(source) {
-            if let Some(value) = existing.get(field) {
-                return Ok(value.clone());
-            }
+        if let Some(existing) = self.schema.counterpart(source)
+            && let Some(value) = existing.get(field)
+        {
+            return Ok(value.clone());
         }
         self.root_default(source, field)
     }
@@ -137,7 +137,7 @@ impl<'a> FlowDocumentCompiler<'a> {
                 return Err(CompilerError::CannotDeriveRuntimeRootField {
                     type_name: get_str_any(source, &["$Type"]).unwrap_or_default(),
                     field: other.to_string(),
-                })
+                });
             }
         })
     }

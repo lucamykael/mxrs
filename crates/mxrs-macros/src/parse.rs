@@ -79,7 +79,7 @@
 
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{braced, parenthesized, Expr, Ident, LitStr, Result, Token};
+use syn::{Expr, Ident, LitStr, Result, Token, braced, parenthesized};
 
 pub struct ProjectInput {
     pub version: LitStr,
@@ -189,7 +189,7 @@ impl AttrKind {
                     format!(
                         "unknown attribute kind `{other}` (expected one of: string, integer, long, decimal, boolean, datetime, autonumber)"
                     ),
-                ))
+                ));
             }
         })
     }
@@ -503,7 +503,9 @@ impl Parse for AssociationInput {
         if association_type != "Reference" && association_type != "ReferenceSet" {
             return Err(syn::Error::new(
                 association_type.span(),
-                format!("unknown association type `{association_type}` (expected `Reference` or `ReferenceSet`)"),
+                format!(
+                    "unknown association type `{association_type}` (expected `Reference` or `ReferenceSet`)"
+                ),
             ));
         }
         input.parse::<Token![;]>()?;

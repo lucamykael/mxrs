@@ -1,6 +1,6 @@
 use std::fs;
 
-use mxrs_bson::{doc, Bson};
+use mxrs_bson::{Bson, doc};
 use mxrs_dsl::ProjectBuilder;
 use mxrs_ir::Ref;
 use mxrs_model::association::AssociationType;
@@ -135,37 +135,46 @@ fn generates_every_referenced_proxy_family_without_overwriting_files() {
     assert!(record.contains("class Record"));
     assert!(record.contains("demo.proxies.State getState"));
     assert!(record.contains("demo.proxies.Detail getRecord_Detail"));
-    assert!(temp
-        .path()
-        .join("javasource/demo/proxies/Detail.java")
-        .is_file());
-    assert!(!temp
-        .path()
-        .join("javasource/demo/proxies/Unused.java")
-        .exists());
+    assert!(
+        temp.path()
+            .join("javasource/demo/proxies/Detail.java")
+            .is_file()
+    );
+    assert!(
+        !temp
+            .path()
+            .join("javasource/demo/proxies/Unused.java")
+            .exists()
+    );
     assert!(
         fs::read_to_string(temp.path().join("javasource/demo/proxies/State.java"))
             .unwrap()
             .contains("Open, Closed")
     );
-    assert!(fs::read_to_string(
-        temp.path()
-            .join("javasource/demo/proxies/constants/Constants.java")
-    )
-    .unwrap()
-    .contains("getLimit"));
-    assert!(fs::read_to_string(
-        temp.path()
-            .join("javasource/demo/proxies/microflows/Microflows.java")
-    )
-    .unwrap()
-    .contains("Core.microflowCall(\"Demo.Run\")"));
-    assert!(fs::read_to_string(
-        temp.path()
-            .join("javasource/system/UserActionsRegistrar.java")
-    )
-    .unwrap()
-    .contains("registrator.registerUserAction(demo.actions.Publish.class)"));
+    assert!(
+        fs::read_to_string(
+            temp.path()
+                .join("javasource/demo/proxies/constants/Constants.java")
+        )
+        .unwrap()
+        .contains("getLimit")
+    );
+    assert!(
+        fs::read_to_string(
+            temp.path()
+                .join("javasource/demo/proxies/microflows/Microflows.java")
+        )
+        .unwrap()
+        .contains("Core.microflowCall(\"Demo.Run\")")
+    );
+    assert!(
+        fs::read_to_string(
+            temp.path()
+                .join("javasource/system/UserActionsRegistrar.java")
+        )
+        .unwrap()
+        .contains("registrator.registerUserAction(demo.actions.Publish.class)")
+    );
     assert_eq!(generated, 6);
 
     fs::write(
@@ -193,8 +202,9 @@ fn generates_a_referenced_system_entity_proxy_from_the_embedded_seed() {
 
     let generator = mxrs_javagen::JavaProxyGenerator::new(&mpr_path, temp.path()).unwrap();
     assert!(generator.generate().unwrap() >= 1);
-    assert!(temp
-        .path()
-        .join("javasource/system/proxies/User.java")
-        .is_file());
+    assert!(
+        temp.path()
+            .join("javasource/system/proxies/User.java")
+            .is_file()
+    );
 }

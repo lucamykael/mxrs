@@ -6,7 +6,7 @@
 //! Ports `Mxrb::IO::BsonCodec.parse` / `.serialize` / `.storage_value` /
 //! `.storage_hash` from `lib/mxrb/io/bson_codec.rb`.
 
-use bson::{spec::BinarySubtype, Binary, Bson, Document};
+use bson::{Binary, Bson, Document, spec::BinarySubtype};
 
 use crate::error::Result;
 use crate::guid::{looks_like_uuid, uuid_to_blob};
@@ -49,21 +49,22 @@ pub fn serialize(doc: &Document) -> Result<Vec<u8>> {
 /// `Int64` when `int64_properties` is enabled. Recurses into documents and
 /// arrays either way.
 pub fn storage_value(value: &Bson, key: Option<&str>, int64_properties: bool) -> Bson {
-    if let (Some(k), Bson::String(s)) = (key, value) {
-        if BINARY_UUID_KEYS.contains(&k) && looks_like_uuid(s) {
-            if let Ok(blob) = uuid_to_blob(s) {
-                return Bson::Binary(Binary {
-                    subtype: BinarySubtype::Generic,
-                    bytes: blob.to_vec(),
-                });
-            }
-        }
+    if let (Some(k), Bson::String(s)) = (key, value)
+        && BINARY_UUID_KEYS.contains(&k)
+        && looks_like_uuid(s)
+        && let Ok(blob) = uuid_to_blob(s)
+    {
+        return Bson::Binary(Binary {
+            subtype: BinarySubtype::Generic,
+            bytes: blob.to_vec(),
+        });
     }
 
-    if int64_properties && key.is_some() {
-        if let Bson::Int32(i) = value {
-            return Bson::Int64(i64::from(*i));
-        }
+    if int64_properties
+        && key.is_some()
+        && let Bson::Int32(i) = value
+    {
+        return Bson::Int64(i64::from(*i));
     }
 
     match value {

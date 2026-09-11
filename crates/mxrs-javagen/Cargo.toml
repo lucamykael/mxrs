@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Generates the Mendix Java proxies required by project Java sources from MPR model documents."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
 mxrs-mpr = { path = "../mxrs-mpr" }

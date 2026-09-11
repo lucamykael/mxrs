@@ -3,11 +3,11 @@
 //! code_action_document_compiler.rb` (64 lines). Depends only on
 //! [`crate::types::code_action_type`], no project-wide state.
 
-use mxrs_bson::{doc, Document};
+use mxrs_bson::{Document, doc};
 
+use crate::CompilerError;
 use crate::support::{array_docs, get_str_any};
 use crate::types::code_action_type;
-use crate::CompilerError;
 
 pub struct CodeActionCompiler;
 

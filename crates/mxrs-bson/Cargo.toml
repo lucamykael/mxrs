@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Mendix-specific BSON codec: MS-GUID<->UUID conversion, $ID 3-encoding extraction, array-marker convention. Ports lib/mxrb/io/bson_codec.rb from mxrb."
 
+[lints]
+workspace = true
+
 [dependencies]
 base64 = "0.22"
 bson = "3"

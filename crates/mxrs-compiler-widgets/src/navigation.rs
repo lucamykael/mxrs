@@ -8,11 +8,13 @@
 
 use std::collections::HashMap;
 
-use mxrs_bson::{doc, Bson, Document};
+use mxrs_bson::{Bson, Document, doc};
 use mxrs_schema::RuntimeModelSchema;
 
-use crate::support::{array_items, build_array, get, plain_array_field, plain_document_field, to_s};
 use crate::CompilerError;
+use crate::support::{
+    array_items, build_array, get, plain_array_field, plain_document_field, to_s,
+};
 
 pub struct NavigationCompiler<'a> {
     schema: &'a RuntimeModelSchema,
@@ -53,7 +55,8 @@ impl<'a> NavigationCompiler<'a> {
 
         let kind = get(source, "Kind");
         let is_offline = matches!(&kind, Bson::String(s) if s == "Offline");
-        let throw_partial_sync_error = matches!(get(source, "ThrowPartialSyncError"), Bson::Boolean(true));
+        let throw_partial_sync_error =
+            matches!(get(source, "ThrowPartialSyncError"), Bson::Boolean(true));
         let app_icon = source
             .get("AppIcon")
             .cloned()
@@ -218,7 +221,10 @@ mod tests {
         let Some(Bson::Array(grids)) = compiled.get("Grids") else {
             panic!("expected Grids to be preserved from the counterpart");
         };
-        assert_eq!(grids, &[Bson::Int32(3), Bson::String("StudioInjected".into())]);
+        assert_eq!(
+            grids,
+            &[Bson::Int32(3), Bson::String("StudioInjected".into())]
+        );
     }
 
     fn offline_profile(kind: &str) -> Document {
@@ -293,7 +299,10 @@ mod tests {
         };
         assert_eq!(
             runtime_configs,
-            &[Bson::Int32(3), Bson::String("computed-by-offline-sync".into())]
+            &[
+                Bson::Int32(3),
+                Bson::String("computed-by-offline-sync".into())
+            ]
         );
     }
 

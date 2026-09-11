@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Phase 8 (M8.1): project! {} proc-macro sugar over mxrs-dsl's builder API. Every expansion lowers to calls against mxrs-dsl pub fns already usable by hand — this crate adds no capability mxrs-dsl doesn't already expose, only syntax."
 
+[lints]
+workspace = true
+
 [lib]
 proc-macro = true
 

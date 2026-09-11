@@ -31,14 +31,14 @@
 
 use std::collections::HashMap;
 
-use mxrs_bson::{doc, Binary, BinarySubtype, Bson, Document};
+use mxrs_bson::{Binary, BinarySubtype, Bson, Document, doc};
 use mxrs_model::{Attribute, AttributeType, DomainModel, Entity, Module, Project};
 
+use crate::CompilerError;
 use crate::security::SecurityCompiler;
 use crate::support::{
     array_docs, get_any, get_bool_any, get_id_any, get_str_any, new_id, plain_value,
 };
-use crate::CompilerError;
 
 pub struct DomainCompiler<'a> {
     entities_by_qualified_name: HashMap<&'a str, &'a Entity>,

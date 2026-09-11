@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use mxrs_bson::{Bson, Document};
 
-use crate::source_model::{SourceModel, SourceUnit};
 use crate::Result;
+use crate::source_model::{SourceModel, SourceUnit};
 
 const TYPE_MAP: &[(&str, &str)] = &[
     ("DomainModels$StringAttributeType", "java.lang.String"),
@@ -364,9 +364,13 @@ impl JavaProxyGenerator {
         let java_type = attribute_java_type(unit, &attribute_type);
         let is_enum = native_type(&attribute_type) == Some("DomainModels$EnumerationAttributeType");
         let read = if is_enum {
-            format!("Object value = getMendixObject().getValue(context, MemberNames.{name}.toString());\n    return value == null ? null : {java_type}.valueOf((java.lang.String) value);")
+            format!(
+                "Object value = getMendixObject().getValue(context, MemberNames.{name}.toString());\n    return value == null ? null : {java_type}.valueOf((java.lang.String) value);"
+            )
         } else {
-            format!("return ({java_type}) getMendixObject().getValue(context, MemberNames.{name}.toString());")
+            format!(
+                "return ({java_type}) getMendixObject().getValue(context, MemberNames.{name}.toString());"
+            )
         };
         let value = if is_enum {
             "value == null ? null : value.toString()"
@@ -652,7 +656,9 @@ fn microflow_result(data_type: Option<&Document>) -> String {
                     .map(|value| string(value, "Entity"))
                     .unwrap_or_default(),
             );
-            format!("return result == null ? null : {proxy}.initialize(context, (com.mendix.systemwideinterfaces.core.IMendixObject) result);")
+            format!(
+                "return result == null ? null : {proxy}.initialize(context, (com.mendix.systemwideinterfaces.core.IMendixObject) result);"
+            )
         }
         Some("DataTypes$VoidType") | None => "return;".into(),
         _ => format!("return ({}) result;", java_data_type(data_type, true)),

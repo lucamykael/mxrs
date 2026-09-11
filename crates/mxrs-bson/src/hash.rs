@@ -2,7 +2,7 @@
 //!
 //! Ports `Mxrb::IO::BsonCodec.contents_hash` from `lib/mxrb/io/bson_codec.rb`.
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
 
 pub fn contents_hash(bson_bytes: &[u8]) -> String {

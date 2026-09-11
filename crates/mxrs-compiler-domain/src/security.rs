@@ -8,14 +8,14 @@
 
 use std::collections::HashMap;
 
-use mxrs_bson::{doc, Bson, Document};
+use mxrs_bson::{Bson, Document, doc};
 use mxrs_model::entity::{AccessMember, AccessMemberKind, AccessRule};
 use mxrs_model::{Association, Project};
 
+use crate::CompilerError;
 use crate::support::{
     array_docs, get_doc_any, get_id_any, get_str_any, new_id, stable_dedup, string_list,
 };
-use crate::CompilerError;
 
 pub struct SecurityCompiler {
     /// Module role name -> the user role names that grant it (built from

@@ -7,8 +7,8 @@
 
 use mxrs_bson::Document;
 
-use crate::support::get_str_any;
 use crate::CompilerError;
+use crate::support::get_str_any;
 
 /// `document` is `None` for a void return (`runtime_data_types.rb:16-17`).
 pub fn data_type(document: Option<&Document>) -> Result<String, CompilerError> {
@@ -40,7 +40,7 @@ pub fn data_type(document: Option<&Document>) -> Result<String, CompilerError> {
         other => {
             return Err(CompilerError::UnsupportedDataType {
                 type_name: other.to_string(),
-            })
+            });
         }
     })
 }
@@ -98,7 +98,7 @@ pub fn code_action_type(source: Option<&Document>) -> Result<String, CompilerErr
         other => {
             return Err(CompilerError::UnsupportedCodeActionType {
                 type_name: other.to_string(),
-            })
+            });
         }
     })
 }

@@ -53,8 +53,10 @@ use std::path::Path;
 use mxrs_bson::{Bson, Document};
 use sha2::{Digest, Sha256};
 
-use crate::support::{array_docs, get_any, get_doc_any, get_str_any, AssociationInfo, ProjectFlowIndex};
-use expression::{leading_variable_name, parse_expression, Expression};
+use crate::support::{
+    AssociationInfo, ProjectFlowIndex, array_docs, get_any, get_doc_any, get_str_any,
+};
+use expression::{Expression, leading_variable_name, parse_expression};
 use js_value::JsValue;
 
 pub struct UnsupportedNode {
@@ -469,10 +471,10 @@ impl<'a> NanoflowCompiler<'a> {
             &format!("{id}$change"),
             flow_name,
         ));
-        if get_str_any(action, &["Commit"]).as_deref() == Some("Yes") {
-            if let Some(commit) = self.compile_commit(action, node, false, flow_name) {
-                instructions.push(commit);
-            }
+        if get_str_any(action, &["Commit"]).as_deref() == Some("Yes")
+            && let Some(commit) = self.compile_commit(action, node, false, flow_name)
+        {
+            instructions.push(commit);
         }
         instructions
     }
@@ -486,10 +488,10 @@ impl<'a> NanoflowCompiler<'a> {
         let variable = get_str_any(action, &["ChangeVariableName"]).unwrap_or_default();
         let id = model_id_of(node);
         let mut instructions = self.change_instructions(action, &variable, &id, flow_name);
-        if get_str_any(action, &["Commit"]).as_deref() == Some("Yes") {
-            if let Some(commit) = self.compile_commit(action, node, false, flow_name) {
-                instructions.push(commit);
-            }
+        if get_str_any(action, &["Commit"]).as_deref() == Some("Yes")
+            && let Some(commit) = self.compile_commit(action, node, false, flow_name)
+        {
+            instructions.push(commit);
         }
         instructions
     }
@@ -1148,10 +1150,14 @@ impl<'a> NanoflowCompiler<'a> {
             // are in mxrb's own nanoflow allow-list (like `Sort`/`Head`/
             // `Find`/`Filter` above, this is an intentional addition beyond
             // the verbatim port — see the module doc comment).
-            "Microflows$Union" | "Microflows$Intersect" | "Microflows$Subtract"
-            | "Microflows$Contains" | "Microflows$Equals" => {
+            "Microflows$Union"
+            | "Microflows$Intersect"
+            | "Microflows$Subtract"
+            | "Microflows$Contains"
+            | "Microflows$Equals" => {
                 let list_name = get_str_any(&operation, &["ListName"]).unwrap_or_default();
-                let second = get_str_any(&operation, &["SecondListOrObjectName"]).unwrap_or_default();
+                let second =
+                    get_str_any(&operation, &["SecondListOrObjectName"]).unwrap_or_default();
                 if list_name.is_empty() || second.is_empty() {
                     self.mark_unsupported(flow_name, &operation_type, action);
                     return None;
@@ -1683,10 +1689,10 @@ mod tests {
             "$Type": "Microflows$ActionActivity",
             "Action": { "$Type": "Microflows$RetrieveAction" },
         };
-        if let Some(Bson::Document(oc)) = flow.get_mut("ObjectCollection") {
-            if let Some(Bson::Array(objects)) = oc.get_mut("Objects") {
-                objects.push(Bson::Document(unsupported_node));
-            }
+        if let Some(Bson::Document(oc)) = flow.get_mut("ObjectCollection")
+            && let Some(Bson::Array(objects)) = oc.get_mut("Objects")
+        {
+            objects.push(Bson::Document(unsupported_node));
         }
         if let Some(Bson::Array(flows)) = flow.get_mut("Flows") {
             // Rewire start -> unsupported -> end.

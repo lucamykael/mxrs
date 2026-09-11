@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Phase 4: build.rs codegen of per-module/entity/attribute marker types from a JSON schema manifest, subsuming the unresolved-reference slice of mxrb's architecture/validator.rb + semantic/analyzer.rb — a nonexistent or renamed reference against generated markers fails cargo build instead of a runtime mxrb evaluate lint pass."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-ir = { path = "../mxrs-ir" }
 serde.workspace = true

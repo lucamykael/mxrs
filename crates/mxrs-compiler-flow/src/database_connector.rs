@@ -22,8 +22,8 @@ use std::collections::HashMap;
 
 use mxrs_bson::Document;
 
-use crate::support::{array_docs, database_derived_id, get_id_any, get_str_any};
 use crate::CompilerError;
+use crate::support::{array_docs, database_derived_id, get_id_any, get_str_any};
 
 /// A JSON value tree that preserves insertion order and can splice an
 /// unescaped fragment verbatim — see this module's doc comment.
@@ -474,7 +474,7 @@ fn parameter_value(scalar_type: &str, expression: &str) -> Result<String, Compil
         other => {
             return Err(CompilerError::UnsupportedDatabaseParameterType {
                 type_name: other.to_string(),
-            })
+            });
         }
     })
 }
@@ -610,7 +610,7 @@ fn rpartition(qualified: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxrs_bson::{doc, Bson};
+    use mxrs_bson::{Bson, doc};
 
     fn connection_with_query(query: Document) -> Document {
         doc! {

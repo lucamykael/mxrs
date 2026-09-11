@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Reads an existing .mpr and emits Rust project! {} source text an mxrs-dsl user can read, edit, and write back via mxrs-writer::synchronize_project - the forward half of the Mendix<->Rust round trip. Domain model only in this first slice (entities/attributes/associations); microflow source reconstruction is a documented gap."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-model = { path = "../mxrs-model" }
 thiserror.workspace = true

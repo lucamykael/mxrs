@@ -81,13 +81,17 @@ pub enum TypegenError {
     #[error("duplicate association name {0}.{1}.{2:?} in manifest")]
     DuplicateAssociation(String, String, String),
 
-    #[error("association {0}.{1}.{2:?} has unknown type {3:?} (expected \"Reference\" or \"ReferenceSet\")")]
+    #[error(
+        "association {0}.{1}.{2:?} has unknown type {3:?} (expected \"Reference\" or \"ReferenceSet\")"
+    )]
     UnknownAssociationType(String, String, String, String),
 
     #[error("association {0}.{1}.{2:?} targets {3:?}, which no manifest entity declares")]
     UnknownAssociationTarget(String, String, String, String),
 
-    #[error("entity {0}.{1:?} has both an attribute and an association named {2:?} — the generated marker names would collide")]
+    #[error(
+        "entity {0}.{1:?} has both an attribute and an association named {2:?} — the generated marker names would collide"
+    )]
     MarkerNameCollision(String, String, String),
 }
 

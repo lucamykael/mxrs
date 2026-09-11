@@ -56,10 +56,12 @@ fn derived_entities_write_and_read_back_correctly() {
         .find(|a| a.name.as_deref() == Some("Number"))
         .unwrap();
     assert_eq!(number.default_value.as_deref(), Some("A-0000"));
-    assert!(order
-        .attributes
-        .iter()
-        .any(|a| a.name.as_deref() == Some("Total")));
+    assert!(
+        order
+            .attributes
+            .iter()
+            .any(|a| a.name.as_deref() == Some("Total"))
+    );
 
     // #[mx_entity(name = "Client")] overrides the struct's own name.
     assert!(entities.iter().any(|e| e.name.as_deref() == Some("Client")));
@@ -67,8 +69,10 @@ fn derived_entities_write_and_read_back_correctly() {
         .iter()
         .find(|e| e.name.as_deref() == Some("Client"))
         .unwrap();
-    assert!(client
-        .attributes
-        .iter()
-        .any(|a| a.name.as_deref() == Some("FullName")));
+    assert!(
+        client
+            .attributes
+            .iter()
+            .any(|a| a.name.as_deref() == Some("FullName"))
+    );
 }

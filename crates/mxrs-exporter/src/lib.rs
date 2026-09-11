@@ -57,10 +57,10 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use mxrs_model::attribute::AttributeType;
-use mxrs_model::entity::Entity;
 #[cfg(test)]
 use mxrs_model::Attribute;
+use mxrs_model::attribute::AttributeType;
+use mxrs_model::entity::Entity;
 use mxrs_model::{Association, Module, Project};
 
 /// One model feature the generated `project! {}` source cannot faithfully
@@ -77,7 +77,9 @@ pub enum ExportError {
     #[error(transparent)]
     Model(#[from] mxrs_model::ModelError),
 
-    #[error("refusing a lossy Rust export; {0} unsupported model feature(s) would not round-trip (pass --allow-lossy only if this is intentional)")]
+    #[error(
+        "refusing a lossy Rust export; {0} unsupported model feature(s) would not round-trip (pass --allow-lossy only if this is intentional)"
+    )]
     Lossy(usize, Vec<RoundTripGap>),
 }
 

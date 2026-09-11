@@ -231,7 +231,7 @@ impl MprCodec {
                     return Err(FormsError::ExpectedArray {
                         type_name: property.declared_by.clone(),
                         property: property.name.clone(),
-                    })
+                    });
                 }
             };
             let decoded = items
@@ -790,10 +790,10 @@ impl MprCodec {
     }
 
     fn node_identifier(&self, node: &Node, local_references: &HashMap<String, String>) -> String {
-        if let Ok(Some(Value::String(name))) = node.fetch("name") {
-            if let Some(id) = local_references.get(name) {
-                return id.clone();
-            }
+        if let Ok(Some(Value::String(name))) = node.fetch("name")
+            && let Some(id) = local_references.get(name)
+        {
+            return id.clone();
         }
         uuid::Uuid::new_v4().to_string()
     }
@@ -807,15 +807,14 @@ impl MprCodec {
     fn collect_local_reference_names(&self, root: &Node) -> HashMap<String, String> {
         let mut named: HashMap<String, Vec<String>> = HashMap::new();
         walk_nodes(root, &mut |node| {
-            if node.schema_type().property("name", true).is_some() {
-                if let Ok(Some(Value::String(name))) = node.fetch("name") {
-                    if !name.is_empty() {
-                        named
-                            .entry(name.clone())
-                            .or_default()
-                            .push(uuid::Uuid::new_v4().to_string());
-                    }
-                }
+            if node.schema_type().property("name", true).is_some()
+                && let Ok(Some(Value::String(name))) = node.fetch("name")
+                && !name.is_empty()
+            {
+                named
+                    .entry(name.clone())
+                    .or_default()
+                    .push(uuid::Uuid::new_v4().to_string());
             }
         });
         named

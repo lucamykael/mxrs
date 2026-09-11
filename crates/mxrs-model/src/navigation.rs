@@ -119,11 +119,7 @@ fn legacy_profile_documents(raw: &Document) -> Vec<Document> {
 
 fn reference(doc: &Document, keys: &[&str]) -> Option<String> {
     let id = get_id_any(doc, keys)?;
-    if id.is_empty() {
-        None
-    } else {
-        Some(id)
-    }
+    if id.is_empty() { None } else { Some(id) }
 }
 
 fn text_translations(text: Option<&Document>) -> std::collections::BTreeMap<String, String> {

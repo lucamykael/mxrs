@@ -9,7 +9,7 @@
 
 use mxrs_bson::BinarySubtype;
 
-use crate::catalog::{ruby_name, ReferenceKind};
+use crate::catalog::{ReferenceKind, ruby_name};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Translation {

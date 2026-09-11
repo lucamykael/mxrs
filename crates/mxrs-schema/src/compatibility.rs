@@ -72,23 +72,23 @@ fn project_node(node: &mut Document) {
         delete_empty_event_handlers(node);
     }
     if let Some((from, to)) = rename_for(&type_name) {
-        if node.contains_key(from) && !node.contains_key(to) {
-            if let Some(value) = node.get(from).cloned() {
-                node.insert(to, value);
-            }
+        if node.contains_key(from)
+            && !node.contains_key(to)
+            && let Some(value) = node.get(from).cloned()
+        {
+            node.insert(to, value);
         }
         node.remove(from);
     }
     for field in deletions_for(&type_name) {
         node.remove(*field);
     }
-    if let Some((field, mapping)) = replacement_for(&type_name) {
-        if let Some(Bson::String(current)) = node.get(field) {
-            if let Some((_, to)) = mapping.iter().find(|(from, _)| *from == current) {
-                let to = (*to).to_string();
-                node.insert(field, Bson::String(to));
-            }
-        }
+    if let Some((field, mapping)) = replacement_for(&type_name)
+        && let Some(Bson::String(current)) = node.get(field)
+        && let Some((_, to)) = mapping.iter().find(|(from, _)| *from == current)
+    {
+        let to = (*to).to_string();
+        node.insert(field, Bson::String(to));
     }
     for (key, value) in defaults_for(&type_name) {
         if !node.contains_key(key) {

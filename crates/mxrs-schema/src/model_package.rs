@@ -103,7 +103,10 @@ mod tests {
     fn rejects_an_out_of_range_size() {
         assert!(matches!(
             parse_package(&(-1i32).to_le_bytes()),
-            Err(ModelPackageError::InvalidSize { offset: 0, size: -1 })
+            Err(ModelPackageError::InvalidSize {
+                offset: 0,
+                size: -1
+            })
         ));
     }
 }

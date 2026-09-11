@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Compiles mxrb microflow/nanoflow/rule/code-action/database-connector-action editor documents into Mendix Runtime shape (and, for nanoflows, into client-side JS instruction programs). Second crate of Phase 5's compiler pipeline, sibling to mxrs-compiler-domain."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
 mxrs-model = { path = "../mxrs-model" }

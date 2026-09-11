@@ -101,9 +101,10 @@ mod tests {
     #[test]
     fn set_rejects_wrong_value_type() {
         let mut node = Node::new("Settings$ServerConfiguration").unwrap();
-        assert!(node
-            .set("HttpPortNumber", Value::String("not-an-int".into()))
-            .is_err());
+        assert!(
+            node.set("HttpPortNumber", Value::String("not-an-int".into()))
+                .is_err()
+        );
     }
 
     #[test]

@@ -43,10 +43,10 @@ impl RuntimeModelSchema {
 
     pub fn fields_for(&self, source: &Document) -> Result<Vec<String>, RuntimeModelError> {
         let type_name = source.get_str("$Type").unwrap_or_default();
-        if let Some(existing) = self.counterpart(source) {
-            if existing.get_str("$Type").ok() == Some(type_name) {
-                return Ok(existing.keys().cloned().collect());
-            }
+        if let Some(existing) = self.counterpart(source)
+            && existing.get_str("$Type").ok() == Some(type_name)
+        {
+            return Ok(existing.keys().cloned().collect());
         }
         if let Some(fields) = self.builtin_fields.get(type_name) {
             return Ok(fields.clone());
@@ -157,10 +157,12 @@ mod tests {
             schema.fields_for(&child).unwrap(),
             ["$ID", "$Type", "QualifiedName", "Value"]
         );
-        assert!(schema
-            .named("Demo.Child")
-            .unwrap()
-            .get_bool("Value")
-            .unwrap());
+        assert!(
+            schema
+                .named("Demo.Child")
+                .unwrap()
+                .get_bool("Value")
+                .unwrap()
+        );
     }
 }

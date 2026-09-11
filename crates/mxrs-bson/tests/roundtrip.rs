@@ -2,7 +2,7 @@
 //! (`decisions/mxrs-rust-rewrite-plan.md`): `encode ∘ decode == id` for the
 //! codec's core conversions.
 
-use bson::{doc, Bson};
+use bson::{Bson, doc};
 use mxrs_bson::{blob_to_uuid, build_array, parse_array, uuid_to_blob};
 use proptest::prelude::*;
 

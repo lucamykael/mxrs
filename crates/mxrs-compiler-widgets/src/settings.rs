@@ -6,11 +6,11 @@
 //! between the two, they're genuinely different (confirmed against both
 //! Ruby source files independently).
 
-use mxrs_bson::{doc, Bson, Document};
+use mxrs_bson::{Bson, Document, doc};
 use mxrs_schema::RuntimeModelSchema;
 
-use crate::support::{array_items, build_array, get};
 use crate::CompilerError;
+use crate::support::{array_items, build_array, get};
 
 pub struct SettingsCompiler<'a> {
     schema: &'a RuntimeModelSchema,
@@ -104,7 +104,10 @@ mod tests {
     fn compile_value_strips_the_array_marker_recursively() {
         let schema = schema(&[]);
         let compiler = SettingsCompiler::new(&schema);
-        let nested = Bson::Array(mxrs_bson::build_array(vec![Bson::String("value".into())], 3));
+        let nested = Bson::Array(mxrs_bson::build_array(
+            vec![Bson::String("value".into())],
+            3,
+        ));
         let compiled = compiler.compile_value(nested).unwrap();
         let Bson::Array(items) = compiled else {
             panic!("expected an array");
@@ -128,7 +131,10 @@ mod tests {
         let compiled = SettingsCompiler::new(&schema)
             .compile_node(&source_part)
             .unwrap();
-        assert!(matches!(compiled.get("DefaultLanguageCode"), Some(Bson::Null)));
+        assert!(matches!(
+            compiled.get("DefaultLanguageCode"),
+            Some(Bson::Null)
+        ));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 
 use mxrs_bson::{Bson, Document};
 
-use crate::support::{get, to_s};
 use crate::CompilerError;
+use crate::support::{get, to_s};
 
 fn image_bytes(value: &Bson) -> Vec<u8> {
     match value {
@@ -77,7 +77,7 @@ fn contains_svg_tag(head: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxrs_bson::{doc, Binary, BinarySubtype};
+    use mxrs_bson::{Binary, BinarySubtype, doc};
 
     fn img(bytes: &[u8]) -> Document {
         doc! {

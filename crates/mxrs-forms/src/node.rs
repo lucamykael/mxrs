@@ -233,7 +233,7 @@ impl Node {
                     type_name: self.type_name.clone(),
                     property: enum_type.name.clone(),
                     expected: "an enum value".to_string(),
-                })
+                });
             }
         };
         let exact = enum_type.values.iter().find(|allowed| {
@@ -329,9 +329,10 @@ mod tests {
     #[test]
     fn set_rejects_wrong_scalar_type() {
         let mut node = Node::new("Page", catalog()).unwrap();
-        assert!(node
-            .set("popupWidth", Value::String("not-an-int".into()))
-            .is_err());
+        assert!(
+            node.set("popupWidth", Value::String("not-an-int".into()))
+                .is_err()
+        );
         assert!(node.set("popupWidth", Value::Integer(400)).is_ok());
     }
 
@@ -354,15 +355,16 @@ mod tests {
     fn append_requires_a_collection_property() {
         let mut node = Node::new("Page", catalog()).unwrap();
         assert!(node.append("url", Value::String("x".into())).is_err());
-        assert!(node
-            .append(
+        assert!(
+            node.append(
                 "allowedRoles",
                 Value::Reference(Reference {
                     target: "Administrator".into(),
                     kind: crate::catalog::ReferenceKind::ByName
                 })
             )
-            .is_ok());
+            .is_ok()
+        );
     }
 
     #[test]
@@ -380,9 +382,10 @@ mod tests {
             node.fetch("autofocus").unwrap(),
             Some(Value::Enum(_))
         ));
-        assert!(node
-            .set("autofocus", Value::String("NotAValue".into()))
-            .is_err());
+        assert!(
+            node.set("autofocus", Value::String("NotAValue".into()))
+                .is_err()
+        );
     }
 
     #[test]

@@ -11,7 +11,9 @@ pub enum WriterError {
     #[error("association target {0:?} does not match any entity declared in this module")]
     UnknownAssociationTarget(String),
 
-    #[error("cross-module association target {0:?} does not match any entity declared anywhere in the project (expected \"Module.Entity\")")]
+    #[error(
+        "cross-module association target {0:?} does not match any entity declared anywhere in the project (expected \"Module.Entity\")"
+    )]
     UnknownCrossModuleAssociationTarget(String),
 
     #[error("module {0:?} has no DomainModel unit to synchronize")]

@@ -29,13 +29,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mxrs_bson::{doc, Bson, Document};
+use mxrs_bson::{Bson, Document, doc};
 use mxrs_schema::RuntimeModelSchema;
 
+use crate::CompilerError;
 use crate::database_connector::DatabaseConnectorCompiler;
 use crate::support::{derived_id, get_any, get_doc_any, get_str_any};
 use crate::types::{data_type, is_data_type_document};
-use crate::CompilerError;
 
 pub use crate::support::AssociationInfo;
 
@@ -123,10 +123,10 @@ impl<'a> FlowNodeCompiler<'a> {
             let entity = get_doc_any(node, &["VariableType"])
                 .and_then(|t| get_str_any(&t, &["Entity"]))
                 .unwrap_or_default();
-            if !entity.is_empty() {
-                if let Some(name) = get_str_any(node, &["Name"]) {
-                    types.insert(name, entity);
-                }
+            if !entity.is_empty()
+                && let Some(name) = get_str_any(node, &["Name"])
+            {
+                types.insert(name, entity);
             }
         });
         types
@@ -234,12 +234,11 @@ impl<'a> FlowNodeCompiler<'a> {
         }
 
         let existing = self.schema.counterpart(source);
-        if runtime_derived_fields(&type_name).contains(&field) {
-            if let Some(existing) = existing {
-                if let Some(value) = existing.get(field) {
-                    return Ok(value.clone());
-                }
-            }
+        if runtime_derived_fields(&type_name).contains(&field)
+            && let Some(existing) = existing
+            && let Some(value) = existing.get(field)
+        {
+            return Ok(value.clone());
         }
 
         let source_field = if source.contains_key(field) {
@@ -264,12 +263,11 @@ impl<'a> FlowNodeCompiler<'a> {
         if runtime_field == "AttributePath" {
             return Ok(Bson::String(runtime_attribute_path(&value)));
         }
-        if matches!(runtime_field, "Type" | "VariableDataType") {
-            if let Bson::Document(d) = &value {
-                if is_data_type_document(d) {
-                    return Ok(Bson::String(data_type(Some(d))?));
-                }
-            }
+        if matches!(runtime_field, "Type" | "VariableDataType")
+            && let Bson::Document(d) = &value
+            && is_data_type_document(d)
+        {
+            return Ok(Bson::String(data_type(Some(d))?));
         }
         self.compile(&value, vars)
     }
@@ -284,10 +282,10 @@ impl<'a> FlowNodeCompiler<'a> {
         if let Some(value) = type_default(&type_name, field) {
             return Ok(value);
         }
-        if let Some(existing) = self.schema.counterpart(source) {
-            if let Some(value) = existing.get(field) {
-                return Ok(value.clone());
-            }
+        if let Some(existing) = self.schema.counterpart(source)
+            && let Some(value) = existing.get(field)
+        {
+            return Ok(value.clone());
         }
         self.derived_default(source, field, vars)
     }
@@ -327,7 +325,7 @@ impl<'a> FlowNodeCompiler<'a> {
                 return Err(CompilerError::CannotDeriveRuntimeField {
                     type_name,
                     field: other.to_string(),
-                })
+                });
             }
         })
     }

@@ -514,15 +514,15 @@ fn data_grid_widget(widget: &Document) -> Widget {
     if let Some(entity) = grid_entity(widget) {
         options.insert("entity", entity);
     }
-    if let Some(sb) = get_doc_any(widget, &["SearchBar"]) {
-        if let Some(parsed) = parse_search_bar(&sb) {
-            options.insert("search_bar", parsed);
-        }
+    if let Some(sb) = get_doc_any(widget, &["SearchBar"])
+        && let Some(parsed) = parse_search_bar(&sb)
+    {
+        options.insert("search_bar", parsed);
     }
-    if let Some(tb) = get_doc_any(widget, &["ToolBar"]) {
-        if let Some(parsed) = parse_toolbar(&tb) {
-            options.insert("toolbar", parsed);
-        }
+    if let Some(tb) = get_doc_any(widget, &["ToolBar"])
+        && let Some(parsed) = parse_toolbar(&tb)
+    {
+        options.insert("toolbar", parsed);
     }
 
     Widget {
@@ -1009,10 +1009,10 @@ fn widget_options(widget: &Document, widget_type: &str) -> Document {
                     parameters.into_iter().map(Bson::String).collect::<Vec<_>>(),
                 );
             }
-            if widget_type == "text_area" {
-                if let Some(n) = get_i32_any(widget, &["NumberOfLines"]) {
-                    options.insert("lines", n);
-                }
+            if widget_type == "text_area"
+                && let Some(n) = get_i32_any(widget, &["NumberOfLines"])
+            {
+                options.insert("lines", n);
             }
             if widget_type == "radio_button_group" {
                 options.insert(

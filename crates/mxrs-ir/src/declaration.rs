@@ -7,8 +7,8 @@
 //! `AssociationDecl`s into `mxrs_model::Association`s once every entity in
 //! the project has been assigned an id.
 
-use mxrs_model::association::{AssociationType, Owner, StorageFormat};
 use mxrs_model::Attribute;
+use mxrs_model::association::{AssociationType, Owner, StorageFormat};
 
 use crate::flow::MicroflowDecl;
 

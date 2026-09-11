@@ -178,13 +178,13 @@ impl Catalog {
             .and_then(Json::as_str)
             .ok_or(FormsError::MalformedSchema("mendix_version"))?
             .to_string();
-        if let Some(expected) = expected_version {
-            if version != expected {
-                return Err(FormsError::SchemaVersionMismatch {
-                    expected: expected.to_string(),
-                    actual: version,
-                });
-            }
+        if let Some(expected) = expected_version
+            && version != expected
+        {
+            return Err(FormsError::SchemaVersionMismatch {
+                expected: expected.to_string(),
+                actual: version,
+            });
         }
 
         let widget_names: std::collections::HashSet<&str> = payload

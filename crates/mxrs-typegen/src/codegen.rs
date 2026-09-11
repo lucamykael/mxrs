@@ -26,8 +26,8 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use crate::manifest::{AssociationManifest, EntityManifest, Manifest, ModuleManifest};
 use crate::TypegenError;
+use crate::manifest::{AssociationManifest, EntityManifest, Manifest, ModuleManifest};
 
 pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
     let mut known_entities: HashSet<String> = HashSet::new();
@@ -175,7 +175,7 @@ fn emit_association<'a>(
                 entity.name.clone(),
                 association.name.clone(),
                 other.to_string(),
-            ))
+            ));
         }
     };
 

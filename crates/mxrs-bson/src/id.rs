@@ -3,8 +3,8 @@
 //! Ports `Mxrb::IO::BsonCodec.extract_id` / `.extended_binary` from
 //! `lib/mxrb/io/bson_codec.rb`.
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use bson::{spec::BinarySubtype, Binary, Bson, Document};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use bson::{Binary, Bson, Document, spec::BinarySubtype};
 
 use crate::guid::blob_to_uuid;
 

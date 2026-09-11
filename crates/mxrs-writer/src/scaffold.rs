@@ -13,7 +13,7 @@
 //! content — the DSL only asks for these units to *exist* with sane
 //! defaults, matching what `mxrb generate` produces for a brand-new project.
 
-use mxrs_bson::{doc, Bson, Document};
+use mxrs_bson::{Bson, Document, doc};
 use mxrs_mpr::MprFile;
 use mxrs_schema::TemplateUnit;
 

@@ -493,10 +493,10 @@ pub fn synchronize_domain_entities(
     let existing_raw = mxrs_bson::parse_array(array_field(&doc, entities_key));
     let mut existing_by_name: HashMap<String, Document> = HashMap::new();
     for item in &existing_raw.items {
-        if let Bson::Document(d) = item {
-            if let Some(name) = doc_name(d) {
-                existing_by_name.insert(name, d.clone());
-            }
+        if let Bson::Document(d) = item
+            && let Some(name) = doc_name(d)
+        {
+            existing_by_name.insert(name, d.clone());
         }
     }
 

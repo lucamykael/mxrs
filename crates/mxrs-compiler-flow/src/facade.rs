@@ -12,12 +12,12 @@ use std::cell::RefCell;
 use mxrs_model::Project;
 use mxrs_schema::RuntimeModelSchema;
 
+use crate::CompilerError;
 use crate::code_action::CodeActionCompiler;
 use crate::database_connector::DatabaseConnectorCompiler;
 use crate::document::FlowDocumentCompiler;
 use crate::node::{FlowDiagnostic, FlowNodeCompiler};
 use crate::support::ProjectFlowIndex;
-use crate::CompilerError;
 
 pub struct FlowCompiler {
     schema: RuntimeModelSchema,

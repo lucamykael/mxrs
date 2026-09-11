@@ -9,8 +9,8 @@ use mxrs_dsl::ProjectBuilder;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
 use mxrs_ir::flow::MicroflowCallMapping;
 use mxrs_ir::{Member, Ref};
-use mxrs_model::association::{AssociationType, Owner, StorageFormat};
 use mxrs_model::Project;
+use mxrs_model::association::{AssociationType, Owner, StorageFormat};
 
 /// Hand-written marker types (not `mxrs-typegen`-generated — these tests
 /// don't need a manifest/build.rs, just something implementing
@@ -679,21 +679,25 @@ fn synchronize_domain_entities_preserves_ids_reconciles_attributes_adds_and_remo
         order.location,
         mxrs_model::entity::Location { x: 999, y: 888 }
     );
-    assert!(order
-        .attributes
-        .iter()
-        .find(|a| a.name.as_deref() == Some("Total"))
-        .is_none());
+    assert!(
+        order
+            .attributes
+            .iter()
+            .find(|a| a.name.as_deref() == Some("Total"))
+            .is_none()
+    );
     let number = order
         .attributes
         .iter()
         .find(|a| a.name.as_deref() == Some("Number"))
         .unwrap();
     assert_eq!(number.id.as_deref(), Some(number_id.as_str()));
-    assert!(order
-        .attributes
-        .iter()
-        .any(|a| a.name.as_deref() == Some("Code")));
+    assert!(
+        order
+            .attributes
+            .iter()
+            .any(|a| a.name.as_deref() == Some("Code"))
+    );
 
     let shipment = entities
         .iter()
@@ -730,10 +734,12 @@ fn synchronize_domain_entities_preserves_ids_reconciles_attributes_adds_and_remo
         .unwrap();
     let entities = sales.entities();
     assert_eq!(entities.len(), 2);
-    assert!(entities
-        .iter()
-        .find(|e| e.name.as_deref() == Some("Shipment"))
-        .is_none());
+    assert!(
+        entities
+            .iter()
+            .find(|e| e.name.as_deref() == Some("Shipment"))
+            .is_none()
+    );
     let order = entities
         .iter()
         .find(|e| e.name.as_deref() == Some("Order"))

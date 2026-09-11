@@ -337,10 +337,10 @@ impl MprFile {
             return Ok(unit.contents.clone());
         }
 
-        if let Some(state) = &self.v2_transaction {
-            if let Some(staged) = state.staged_content(&unit.unit_id) {
-                return Ok(staged.map(<[u8]>::to_vec));
-            }
+        if let Some(state) = &self.v2_transaction
+            && let Some(staged) = state.staged_content(&unit.unit_id)
+        {
+            return Ok(staged.map(<[u8]>::to_vec));
         }
 
         let path = mxunit::path_for(&self.contents_dir(), &unit.unit_id);
@@ -466,11 +466,11 @@ impl MprFile {
         let bson_bytes = self.serialize_contents(&contents_doc)?;
         let hash = mxrs_bson::contents_hash(&bson_bytes);
 
-        if let Some(current) = self.unit(uuid)? {
-            if current.contents_hash.as_deref() == Some(hash.as_str()) {
-                self.write_stats.skipped += 1;
-                return Ok(false);
-            }
+        if let Some(current) = self.unit(uuid)?
+            && current.contents_hash.as_deref() == Some(hash.as_str())
+        {
+            self.write_stats.skipped += 1;
+            return Ok(false);
         }
 
         if format::contents_column(&self.conn)? {
@@ -1527,11 +1527,12 @@ mod tests {
 
         assert_eq!(mpr.all_units().unwrap().len(), 2);
         assert!(!mpr.transaction_journal_dir().exists());
-        assert!(!mpr
-            .tables()
-            .unwrap()
-            .iter()
-            .any(|t| t == "_MxrbFileTransaction"));
+        assert!(
+            !mpr.tables()
+                .unwrap()
+                .iter()
+                .any(|t| t == "_MxrbFileTransaction")
+        );
     }
 
     #[test]
@@ -1688,11 +1689,12 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read(live_path).unwrap(), b"new-and-committed");
         assert!(!mpr.transaction_journal_dir().exists());
-        assert!(!mpr
-            .tables()
-            .unwrap()
-            .iter()
-            .any(|t| t == "_MxrbFileTransaction"));
+        assert!(
+            !mpr.tables()
+                .unwrap()
+                .iter()
+                .any(|t| t == "_MxrbFileTransaction")
+        );
     }
 
     /// Hand-builds the on-disk state a crash would leave behind, bypassing

@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Compiles an mxrs-model DomainModel from editor shape into Mendix Runtime shape, including security and OQL view-source resolution."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
 mxrs-model = { path = "../mxrs-model" }

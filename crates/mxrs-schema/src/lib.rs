@@ -17,9 +17,9 @@ pub mod system_model;
 pub mod tables;
 
 pub use assets::{RUNTIME_SCHEMA_11, SYSTEM_MODEL_SEED_11_12_1};
-pub use compatibility::{apply_document, schema_hash, SCHEMA_HASH_11_12_1};
-pub use model_package::{read_model_package, ModelPackageError};
-pub use project_template::{project_template_units, ProjectTemplateError, TemplateUnit};
+pub use compatibility::{SCHEMA_HASH_11_12_1, apply_document, schema_hash};
+pub use model_package::{ModelPackageError, read_model_package};
+pub use project_template::{ProjectTemplateError, TemplateUnit, project_template_units};
 pub use runtime_model::{RuntimeModelError, RuntimeModelSchema};
-pub use system_model::{system_model_documents, SystemModelError, SYSTEM_MODULE_ID};
-pub use tables::{table_info, TableInfo, ATTRIBUTE_TYPES, TABLES, UNIT_TYPES};
+pub use system_model::{SYSTEM_MODULE_ID, SystemModelError, system_model_documents};
+pub use tables::{ATTRIBUTE_TYPES, TABLES, TableInfo, UNIT_TYPES, table_info};

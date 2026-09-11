@@ -7,5 +7,8 @@ repository.workspace = true
 authors.workspace = true
 description = "Storage-independent declaration types (project/module/entity/microflow) shared by mxrs-dsl (constructs them) and mxrs-writer (compiles them to .mpr BSON). Name-based cross-references (associations, microflow calls) that mxrs-model's storage-oriented structs resolve via UUID live here instead."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-model = { path = "../mxrs-model" }

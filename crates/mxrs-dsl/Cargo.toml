@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Typed Rust builder API (v1: domain model + minimal microflow subset) for declaring a Mendix project, producing an mxrs-ir::ProjectDecl for mxrs-writer to persist. Not a port of dsl/builder.rb's Ruby instance_eval syntax — a from-scratch Rust design per decisions/mxrs-rust-rewrite-plan.md."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-ir = { path = "../mxrs-ir" }
 mxrs-model = { path = "../mxrs-model" }

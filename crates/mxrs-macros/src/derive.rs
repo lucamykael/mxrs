@@ -167,7 +167,7 @@ fn attribute_kind_method(kind: &str, field: &syn::Field) -> syn::Result<syn::Ide
                 format!(
                     "unknown attribute kind `{other}` (expected one of: string, integer, long, decimal, boolean, datetime, autonumber)"
                 ),
-            ))
+            ));
         }
     };
     Ok(syn::Ident::new(method, field.span()))

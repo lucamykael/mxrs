@@ -7,7 +7,7 @@
 //! Member access should be added only to the FROM entity's pointer, never to
 //! `ChildID`.
 
-use mxrs_bson::{doc, Document};
+use mxrs_bson::{Document, doc};
 
 use crate::support::{get_any, get_doc_any, get_id_any, get_str_any};
 

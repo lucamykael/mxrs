@@ -1,7 +1,7 @@
 //! Entity attributes. Embedded inside `Entity` BSON — not separate Unit rows.
 //! Ports `lib/mxrb/model/attribute.rb` from mxrb.
 
-use mxrs_bson::{doc, Document};
+use mxrs_bson::{Document, doc};
 
 use crate::support::{get_bool_any, get_doc_any, get_i32_any, get_id_any, get_str_any};
 

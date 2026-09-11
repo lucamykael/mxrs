@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Persists an mxrs-ir::ProjectDecl into a fresh .mpr, and incrementally re-syncs an existing one's domain model (Phase 3 scope)."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
 mxrs-ir = { path = "../mxrs-ir" }

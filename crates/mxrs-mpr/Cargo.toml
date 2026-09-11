@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Low-level Mendix .mpr SQLite/BSON unit I/O (v2 .mxunit storage). Skeleton — see Phase 1 (M1.2-M1.4) in ai-memory decisions/mxrs-rust-rewrite-plan.md."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

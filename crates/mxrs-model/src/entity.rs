@@ -1,9 +1,9 @@
 //! Domain model entities. Embedded inside `DomainModel` BSON — not separate
 //! Unit rows. Ports `lib/mxrb/model/entity.rb` from mxrb.
 
-use mxrs_bson::{doc, Document};
+use mxrs_bson::{Document, doc};
 
-use crate::attribute::{apply_validation_rules, Attribute};
+use crate::attribute::{Attribute, apply_validation_rules};
 use crate::support::{
     docs_any, get_any, get_bool_any, get_doc_any, get_i32_any, get_id_any, get_str_any, items_any,
 };
@@ -271,16 +271,15 @@ fn normalize_indexes(
                 updated.push(member);
                 continue;
             };
-            if get_any(&member, &["Attribute", "attribute"]).is_none() {
-                if let Some(id) = get_id_any(&member, &["AttributePointer"]) {
-                    if let Some(name) = names_by_id.get(id.as_str()) {
-                        let full = match qualified_name {
-                            Some(q) => format!("{q}.{name}"),
-                            None => (*name).to_string(),
-                        };
-                        member.insert("Attribute", full);
-                    }
-                }
+            if get_any(&member, &["Attribute", "attribute"]).is_none()
+                && let Some(id) = get_id_any(&member, &["AttributePointer"])
+                && let Some(name) = names_by_id.get(id.as_str())
+            {
+                let full = match qualified_name {
+                    Some(q) => format!("{q}.{name}"),
+                    None => (*name).to_string(),
+                };
+                member.insert("Attribute", full);
             }
             updated.push(mxrs_bson::Bson::Document(member));
         }
@@ -467,10 +466,12 @@ mod tests {
         assert_eq!(entity.data_storage_guid.as_deref(), Some(guid.as_str()));
         assert_eq!(entity.image.as_deref(), Some("Sales.OrderIcon"));
         assert_eq!(entity.lifecycle.len(), 1);
-        assert!(entity.lifecycle[0]
-            .raw
-            .get_bool("OpaqueRuntimeField")
-            .unwrap());
+        assert!(
+            entity.lifecycle[0]
+                .raw
+                .get_bool("OpaqueRuntimeField")
+                .unwrap()
+        );
     }
 
     #[test]

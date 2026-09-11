@@ -43,7 +43,7 @@ use std::path::Path;
 
 use mxrs_bson::{Bson, Document};
 use mxrs_model::{Association, Entity, Menu, MenuItem, Microflow, Module, Page, Project, Widget};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 pub fn snapshot(path: impl AsRef<Path>) -> mxrs_model::Result<Value> {
@@ -440,20 +440,20 @@ fn assign_flow_ids(objects: &[Document], flows: &[Document], ids: &mut HashMap<S
     let mut root_ids: HashSet<String> = HashSet::new();
     let mut roots: Vec<&Document> = Vec::new();
     for o in objects {
-        if o.get_str("$Type").ok() == Some("Microflows$StartEvent") {
-            if let Some(id) = flow_id(o) {
-                if root_ids.insert(id) {
-                    roots.push(o);
-                }
-            }
+        if o.get_str("$Type").ok() == Some("Microflows$StartEvent")
+            && let Some(id) = flow_id(o)
+            && root_ids.insert(id)
+        {
+            roots.push(o);
         }
     }
     for o in objects {
-        if let Some(id) = flow_id(o) {
-            if !has_incoming.contains(&id) && !root_ids.contains(&id) {
-                root_ids.insert(id);
-                roots.push(o);
-            }
+        if let Some(id) = flow_id(o)
+            && !has_incoming.contains(&id)
+            && !root_ids.contains(&id)
+        {
+            root_ids.insert(id);
+            roots.push(o);
         }
     }
 
@@ -480,13 +480,11 @@ fn assign_flow_ids(objects: &[Document], flows: &[Document], ids: &mut HashMap<S
             if let Some(dest_id) = edge
                 .get("DestinationPointer")
                 .and_then(mxrs_bson::extract_id)
-            {
-                if let Some(target) = objects
+                && let Some(target) = objects
                     .iter()
                     .find(|o| flow_id(o).as_deref() == Some(dest_id.as_str()))
-                {
-                    queue.push_back(target);
-                }
+            {
+                queue.push_back(target);
             }
         }
     }
@@ -533,10 +531,10 @@ const DROPPED_FLOW_KEYS: &[&str] = &[
 ];
 
 fn normalize_flow_value(value: &Bson, ids: &HashMap<String, usize>) -> Value {
-    if let Some(id) = mxrs_bson::extract_id(value) {
-        if let Some(idx) = ids.get(&id) {
-            return json!({ "object": idx });
-        }
+    if let Some(id) = mxrs_bson::extract_id(value)
+        && let Some(idx) = ids.get(&id)
+    {
+        return json!({ "object": idx });
     }
 
     match value {
@@ -546,12 +544,11 @@ fn normalize_flow_value(value: &Bson, ids: &HashMap<String, usize>) -> Value {
                 if DROPPED_FLOW_KEYS.contains(&k.as_str()) {
                     continue;
                 }
-                if k.ends_with("Model") {
-                    if let Bson::Document(inner) = v {
-                        if inner.get_str("$Type").ok() == Some("Expressions$NoExpression") {
-                            continue;
-                        }
-                    }
+                if k.ends_with("Model")
+                    && let Bson::Document(inner) = v
+                    && inner.get_str("$Type").ok() == Some("Expressions$NoExpression")
+                {
+                    continue;
                 }
                 map.insert(k.clone(), normalize_flow_value(v, ids));
             }
@@ -863,10 +860,11 @@ mod tests {
         });
 
         let result = compare(&left, &right).unwrap();
-        assert!(result
-            .changes
-            .iter()
-            .any(|c| c.operation == Operation::Added && c.path.contains(&"Customer".to_string())));
+        assert!(
+            result.changes.iter().any(
+                |c| c.operation == Operation::Added && c.path.contains(&"Customer".to_string())
+            )
+        );
     }
 
     #[test]
@@ -938,10 +936,12 @@ mod tests {
         std::fs::write(right_dir.join("theme/main.css"), "body { color: blue; }").unwrap();
 
         let result = compare(&left, &right).unwrap();
-        assert!(result
-            .changes
-            .iter()
-            .any(|c| c.path.contains(&"design_assets".to_string())));
+        assert!(
+            result
+                .changes
+                .iter()
+                .any(|c| c.path.contains(&"design_assets".to_string()))
+        );
     }
 
     #[test]

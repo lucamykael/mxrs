@@ -45,7 +45,7 @@ pub fn project_template_units(version: &str) -> Result<Vec<TemplateUnit>, Projec
         _ => {
             return Err(ProjectTemplateError::UnsupportedVersion(
                 version.to_string(),
-            ))
+            ));
         }
     };
 
@@ -96,9 +96,11 @@ mod tests {
         assert!(types.contains(&"Settings$ProjectSettings"));
         assert!(types.contains(&"Texts$SystemTextCollection"));
         assert!(types.contains(&"Projects$ProjectConversion"));
-        assert!(units
-            .iter()
-            .all(|u| u.containment == "ProjectDocuments" || u.containment == "ProjectConversion"));
+        assert!(
+            units.iter().all(
+                |u| u.containment == "ProjectDocuments" || u.containment == "ProjectConversion"
+            )
+        );
     }
 
     #[test]

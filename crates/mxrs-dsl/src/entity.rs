@@ -1,8 +1,8 @@
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
 use mxrs_ir::{EntityMarker, Ref};
+use mxrs_model::Attribute;
 use mxrs_model::association::{AssociationType, Owner, StorageFormat};
 use mxrs_model::attribute::AttributeType;
-use mxrs_model::Attribute;
 
 pub struct EntityBuilder {
     decl: EntityDecl,

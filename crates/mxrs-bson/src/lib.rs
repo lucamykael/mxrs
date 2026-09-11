@@ -22,11 +22,11 @@ pub mod guid;
 pub mod hash;
 pub mod id;
 
-pub use array::{build_array, parse_array, ParsedArray};
+pub use array::{ParsedArray, build_array, parse_array};
 pub use containment::containment_to_type;
-pub use document::{parse, serialize, storage_hash, storage_value, BINARY_UUID_KEYS};
+pub use document::{BINARY_UUID_KEYS, parse, serialize, storage_hash, storage_value};
 pub use error::{BsonCodecError, Result};
-pub use extjson::{restore_extended_json, Restored};
+pub use extjson::{Restored, restore_extended_json};
 pub use guid::{blob_to_uuid, looks_like_uuid, uuid_to_blob};
 pub use hash::contents_hash;
 pub use id::extract_id;
@@ -34,4 +34,4 @@ pub use id::extract_id;
 // Re-export the underlying BSON types so downstream crates (mxrs-mpr,
 // mxrs-model, ...) depend on a single, pinned `bson` version through this
 // crate rather than declaring their own.
-pub use bson::{doc, spec::BinarySubtype, Binary, Bson, DateTime, Document};
+pub use bson::{Binary, Bson, DateTime, Document, doc, spec::BinarySubtype};

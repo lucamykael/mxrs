@@ -8,6 +8,9 @@ authors.workspace = true
 publish = false
 description = "Dev-only differential-testing/fixture-generation harness against mxrb (Ruby), per the mxrs plan's Testing section. Never linked into shipped mxrs binaries."
 
+[lints]
+workspace = true
+
 [dependencies]
 mxrs-bson = { path = "../crates/mxrs-bson" }
 mxrs-mpr = { path = "../crates/mxrs-mpr" }

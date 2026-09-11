@@ -9,11 +9,11 @@
 //! `mxrs-compiler-flow::CodeActionCompiler`'s own precedent for a
 //! compiler with no cross-call state to hold.
 
-use mxrs_bson::{doc, Bson, Document};
+use mxrs_bson::{Bson, Document, doc};
 
+use crate::CompilerError;
 use crate::image_format::image_format;
 use crate::support::{array_items, build_array, get, plain_document_field, to_s};
-use crate::CompilerError;
 
 /// `$Type`s compiled via the shallow `{$ID, $Type, Name, QualifiedName}`
 /// shape ([`named`]) — mirrors mxrb's `NAME_ONLY_TYPES`.
@@ -43,7 +43,10 @@ pub const TYPES: &[&str] = &[
 pub struct ArtifactCompiler;
 
 impl ArtifactCompiler {
-    pub fn compile(source: &Document, module_name: Option<&str>) -> Result<Document, CompilerError> {
+    pub fn compile(
+        source: &Document,
+        module_name: Option<&str>,
+    ) -> Result<Document, CompilerError> {
         let type_name = source.get_str("$Type").unwrap_or_default();
         if NAME_ONLY_TYPES.contains(&type_name) {
             return named(source, module_name);
@@ -62,9 +65,8 @@ impl ArtifactCompiler {
 }
 
 fn qualified_name(module_name: Option<&str>, name: &Bson) -> Result<String, CompilerError> {
-    let module_name = module_name.ok_or_else(|| CompilerError::ArtifactOutsideModule {
-        name: to_s(name),
-    })?;
+    let module_name =
+        module_name.ok_or_else(|| CompilerError::ArtifactOutsideModule { name: to_s(name) })?;
     Ok(format!("{module_name}.{}", to_s(name)))
 }
 
@@ -107,7 +109,10 @@ fn enumeration_value(source: &Document) -> Document {
     }
 }
 
-fn image_collection(source: &Document, module_name: Option<&str>) -> Result<Document, CompilerError> {
+fn image_collection(
+    source: &Document,
+    module_name: Option<&str>,
+) -> Result<Document, CompilerError> {
     let name = get(source, "Name");
     let collection_name = qualified_name(module_name, &name)?;
     let images = array_items(source, "Images")
@@ -136,13 +141,19 @@ fn image(source: &Document, collection_name: &str) -> Result<Document, CompilerE
     })
 }
 
-fn regular_expression(source: &Document, module_name: Option<&str>) -> Result<Document, CompilerError> {
+fn regular_expression(
+    source: &Document,
+    module_name: Option<&str>,
+) -> Result<Document, CompilerError> {
     let mut result = named(source, module_name)?;
     result.insert("Expression", to_s(&get(source, "Expression")));
     Ok(result)
 }
 
-fn scheduled_event(source: &Document, module_name: Option<&str>) -> Result<Document, CompilerError> {
+fn scheduled_event(
+    source: &Document,
+    module_name: Option<&str>,
+) -> Result<Document, CompilerError> {
     let name = get(source, "Name");
     let qualified = qualified_name(module_name, &name)?;
     Ok(doc! {
@@ -221,7 +232,9 @@ mod tests {
             "$Type": "Something$Unknown",
         };
         let err = ArtifactCompiler::compile(&source, Some("App")).unwrap_err();
-        assert!(matches!(err, CompilerError::UnsupportedArtifactType { type_name } if type_name == "Something$Unknown"));
+        assert!(
+            matches!(err, CompilerError::UnsupportedArtifactType { type_name } if type_name == "Something$Unknown")
+        );
     }
 
     #[test]
@@ -252,10 +265,7 @@ mod tests {
             ),
         };
         let compiled = ArtifactCompiler::compile(&source, Some("Sales")).unwrap();
-        assert_eq!(
-            compiled.get_str("QualifiedName").unwrap(),
-            "Sales.Status"
-        );
+        assert_eq!(compiled.get_str("QualifiedName").unwrap(), "Sales.Status");
         let Some(Bson::Array(values)) = compiled.get("Values") else {
             panic!("expected an array");
         };

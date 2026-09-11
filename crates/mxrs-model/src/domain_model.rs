@@ -30,10 +30,10 @@ impl DomainModel {
             .collect();
         if let Some(module_name) = module_name {
             for entity in &mut entities {
-                if entity.qualified_name.is_none() {
-                    if let Some(name) = &entity.name {
-                        entity.qualified_name = Some(format!("{module_name}.{name}"));
-                    }
+                if entity.qualified_name.is_none()
+                    && let Some(name) = &entity.name
+                {
+                    entity.qualified_name = Some(format!("{module_name}.{name}"));
                 }
             }
         }
@@ -80,7 +80,7 @@ impl DomainModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxrs_bson::{doc, Bson};
+    use mxrs_bson::{Bson, doc};
 
     #[test]
     fn qualifies_entities_missing_a_qualified_name() {

@@ -1,5 +1,5 @@
-use mxrs_ir::flow::{Activity, MicroflowCallMapping, MicroflowDecl};
 use mxrs_ir::Member;
+use mxrs_ir::flow::{Activity, MicroflowCallMapping, MicroflowDecl};
 
 pub struct FlowBuilder {
     decl: MicroflowDecl,

@@ -279,9 +279,11 @@ mod tests {
             ),
             "reproduces mxrb's actual (mis-)parse verbatim"
         );
-        assert!(diagnostics
-            .iter()
-            .any(|d| d.kind == ExpressionDiagnosticKind::AmbiguousBinaryLeftOperand));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.kind == ExpressionDiagnosticKind::AmbiguousBinaryLeftOperand)
+        );
     }
 
     #[test]
@@ -290,9 +292,11 @@ mod tests {
         // split; each side then recurses into its own real comparison.
         // No ambiguity to flag here.
         let (_, diagnostics) = parse_expression("$a and $b = $c");
-        assert!(diagnostics
-            .iter()
-            .all(|d| d.kind != ExpressionDiagnosticKind::AmbiguousBinaryLeftOperand));
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.kind != ExpressionDiagnosticKind::AmbiguousBinaryLeftOperand)
+        );
     }
 
     #[test]
