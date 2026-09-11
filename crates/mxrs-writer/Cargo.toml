@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
 mxrs-ir = { path = "../mxrs-ir" }
+mxrs-identity = { path = "../mxrs-identity" }
 mxrs-model = { path = "../mxrs-model" }
 mxrs-mpr = { path = "../mxrs-mpr" }
 mxrs-schema = { path = "../mxrs-schema" }

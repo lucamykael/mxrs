@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 
+use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::flow::MicroflowDecl;
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
@@ -37,6 +38,28 @@ pub fn synchronize_microflows(
     mpr: &mut MprFile,
     module_id: &str,
     microflows: &[MicroflowDecl],
+) -> Result<()> {
+    let root_id = mpr
+        .root_unit()?
+        .ok_or(crate::WriterError::MissingRootUnit)?
+        .unit_id;
+    let identity = ProjectIdentity::from_project_root(&root_id)?;
+    let module_unit = mpr
+        .unit(module_id)?
+        .ok_or_else(|| crate::WriterError::MissingModuleUnit(module_id.to_string()))?;
+    let module_doc = mpr.parse_contents(&module_unit)?;
+    let module_name = module_doc
+        .get_str("Name")
+        .map_err(|_| crate::WriterError::MissingModuleName(module_id.to_string()))?;
+    synchronize_microflows_with_identity(mpr, module_id, module_name, microflows, identity)
+}
+
+pub(crate) fn synchronize_microflows_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    microflows: &[MicroflowDecl],
+    identity: ProjectIdentity,
 ) -> Result<()> {
     let existing_by_name: HashMap<String, String> = mpr
         .children_of(module_id)?
@@ -57,9 +80,15 @@ pub fn synchronize_microflows(
             &decl.activities,
             decl.return_expression.as_deref(),
         );
-        let id = existing_by_name.get(&decl.name).cloned();
+        let existing_id = existing_by_name.get(&decl.name).cloned();
+        let id = existing_id.clone().unwrap_or_else(|| {
+            identity.artifact_id(
+                ArtifactKind::Microflow,
+                &format!("{module_name}.{}", decl.name),
+            )
+        });
         let microflow = Microflow {
-            id: id.clone(),
+            id: Some(id.clone()),
             name: Some(decl.name.clone()),
             documentation: decl.documentation.clone(),
             return_variable_name: "ReturnValue".into(),
@@ -76,12 +105,12 @@ pub fn synchronize_microflows(
             flows,
         };
         let doc = microflow.to_bson();
-        match id {
+        match existing_id {
             Some(id) => {
                 mpr.update_unit(&id, doc)?;
             }
             None => {
-                mpr.insert_unit(module_id, "Documents", doc, None)?;
+                mpr.insert_unit(module_id, "Documents", doc, Some(&id))?;
             }
         }
     }

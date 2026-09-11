@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::declaration::ModuleDecl;
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
@@ -17,12 +18,13 @@ pub fn write_module(
     project_root_id: &str,
     decl: &ModuleDecl,
     known_entities: &HashSet<String>,
+    identity: ProjectIdentity,
 ) -> Result<()> {
-    let module_id = insert_bare_module(mpr, project_root_id, &decl.name)?;
+    let module_id = insert_bare_module(mpr, project_root_id, &decl.name, identity)?;
 
     let (domain_model, _entity_ids) =
-        domain::build_domain_model(&decl.name, &decl.entities, known_entities)?;
-    let domain_model_id = uuid::Uuid::new_v4().to_string();
+        domain::build_domain_model(&decl.name, &decl.entities, known_entities, identity)?;
+    let domain_model_id = identity.artifact_id(ArtifactKind::DomainModel, &decl.name);
     mpr.insert_unit(
         &module_id,
         "DomainModel",
@@ -34,7 +36,10 @@ pub fn write_module(
         let (objects, flows) =
             flow_compiler::build_microflow_graph(&mf.activities, mf.return_expression.as_deref());
         let microflow = Microflow {
-            id: None,
+            id: Some(identity.artifact_id(
+                ArtifactKind::Microflow,
+                &format!("{}.{}", decl.name, mf.name),
+            )),
             name: Some(mf.name.clone()),
             documentation: mf.documentation.clone(),
             return_variable_name: "ReturnValue".into(),
@@ -50,7 +55,13 @@ pub fn write_module(
             objects,
             flows,
         };
-        mpr.insert_unit(&module_id, "Documents", microflow.to_bson(), None)?;
+        let microflow_id = microflow.id.clone().expect("assigned above");
+        mpr.insert_unit(
+            &module_id,
+            "Documents",
+            microflow.to_bson(),
+            Some(&microflow_id),
+        )?;
     }
 
     Ok(())
@@ -65,8 +76,9 @@ pub(crate) fn insert_bare_module(
     mpr: &mut MprFile,
     project_root_id: &str,
     name: &str,
+    identity: ProjectIdentity,
 ) -> Result<String> {
-    let module_id = uuid::Uuid::new_v4().to_string();
+    let module_id = identity.artifact_id(ArtifactKind::Module, name);
     let module = mxrs_model::Module {
         id: module_id.clone(),
         name: Some(name.to_string()),

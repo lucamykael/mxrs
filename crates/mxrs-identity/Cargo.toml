@@ -1,0 +1,15 @@
+[package]
+name = "mxrs-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Stable, project-scoped UUIDv5 identities for author-level Mendix artifacts."
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+uuid = { version = "1", features = ["v5"] }

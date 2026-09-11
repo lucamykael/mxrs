@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::declaration::ProjectDecl;
 use mxrs_mpr::MprFile;
 
@@ -17,20 +18,29 @@ use crate::error::{Result, WriterError};
 use crate::{documents, domain, module, scaffold};
 
 pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()> {
+    let path = path.as_ref();
     let schema_hash = mxrs_schema::schema_hash(&project.mendix_version)
         .ok_or_else(|| WriterError::UnsupportedVersion(project.mendix_version.clone()))?;
-    let mut mpr = MprFile::create(path, &project.mendix_version, schema_hash)?;
+    let logical_name = path
+        .file_stem()
+        .map(|name| name.to_string_lossy())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Project".into());
+    let identity = ProjectIdentity::for_project(&logical_name);
+    let root_id = identity.project_root_id();
+    let mut mpr =
+        MprFile::create_with_root_id(path, &project.mendix_version, schema_hash, &root_id)?;
     let root_id = mpr
         .root_unit()?
         .ok_or(WriterError::MissingRootUnit)?
         .unit_id;
 
-    scaffold::write_default_project_units(&mut mpr, &root_id, &project.mendix_version)?;
+    scaffold::write_default_project_units(&mut mpr, &root_id, &project.mendix_version, identity)?;
 
     let known_entities = known_entities(project);
 
     for decl in &project.modules {
-        module::write_module(&mut mpr, &root_id, decl, &known_entities)?;
+        module::write_module(&mut mpr, &root_id, decl, &known_entities, identity)?;
     }
     Ok(())
 }
@@ -55,6 +65,7 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
         .root_unit()?
         .ok_or(WriterError::MissingRootUnit)?
         .unit_id;
+    let identity = ProjectIdentity::from_project_root(&root_id)?;
 
     let existing_modules_by_name = existing_module_ids_by_name(&mpr, &root_id)?;
     let known_entities = known_entities(project);
@@ -63,7 +74,8 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
         let module_id = match existing_modules_by_name.get(&decl.name) {
             Some(id) => id.clone(),
             None => {
-                let module_id = module::insert_bare_module(&mut mpr, &root_id, &decl.name)?;
+                let module_id =
+                    module::insert_bare_module(&mut mpr, &root_id, &decl.name, identity)?;
                 // `synchronize_domain_model` resyncs an *existing*
                 // `DomainModel` unit (it errors with `MissingDomainModel`
                 // otherwise) — a module that's new to this project needs
@@ -77,7 +89,7 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
                     associations: vec![],
                     cross_associations: vec![],
                 };
-                let domain_model_id = uuid::Uuid::new_v4().to_string();
+                let domain_model_id = identity.artifact_id(ArtifactKind::DomainModel, &decl.name);
                 mpr.insert_unit(
                     &module_id,
                     "DomainModel",
@@ -94,7 +106,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.entities,
             &known_entities,
         )?;
-        documents::synchronize_microflows(&mut mpr, &module_id, &decl.microflows)?;
+        documents::synchronize_microflows_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.microflows,
+            identity,
+        )?;
     }
     Ok(())
 }

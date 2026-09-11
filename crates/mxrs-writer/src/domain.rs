@@ -38,6 +38,7 @@
 use std::collections::{HashMap, HashSet};
 
 use mxrs_bson::{Bson, Document};
+use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::declaration::{
     AssociationOwner, AssociationStorage, AssociationType, AttributeDecl, AttributeType, EntityDecl,
 };
@@ -62,13 +63,15 @@ pub fn build_domain_model(
     module_name: &str,
     decls: &[EntityDecl],
     known_entities: &HashSet<String>,
+    identity: ProjectIdentity,
 ) -> Result<(DomainModel, HashMap<String, String>)> {
     let mut entity_ids = HashMap::new();
     let mut entities = Vec::with_capacity(decls.len());
     for decl in decls {
-        let id = uuid::Uuid::new_v4().to_string();
+        let qualified_name = format!("{module_name}.{}", decl.name);
+        let id = identity.artifact_id(ArtifactKind::Entity, &qualified_name);
         entity_ids.insert(decl.name.clone(), id.clone());
-        entities.push(fresh_entity(module_name, decl, id));
+        entities.push(fresh_entity(module_name, decl, id, identity));
     }
 
     let mut associations = Vec::new();
@@ -86,6 +89,7 @@ pub fn build_domain_model(
                 &entity_ids,
                 known_entities,
                 None,
+                identity,
             )?;
             if built.is_cross_module() {
                 cross_associations.push(built);
@@ -132,6 +136,7 @@ pub fn synchronize_domain_associations(
     entities: &[EntityDecl],
     known_entities: &HashSet<String>,
 ) -> Result<()> {
+    let identity = project_identity(mpr)?;
     let dm_unit = find_domain_model_unit(mpr, module_id, module_name)?;
     let dm_id = dm_unit.unit_id.clone();
     let mut doc = mpr.parse_contents(&dm_unit)?;
@@ -224,6 +229,7 @@ pub fn synchronize_domain_associations(
                 &entity_ids,
                 known_entities,
                 prior,
+                identity,
             )?;
 
             if built.is_cross_module() {
@@ -280,6 +286,7 @@ fn resolve_association(
     entity_ids: &HashMap<String, String>,
     known_entities: &HashSet<String>,
     prior: Option<&Association>,
+    identity: ProjectIdentity,
 ) -> Result<Association> {
     let (target_module, target_name) = association_target(&assoc.target, module_name);
     let to_entity_id = if target_module == module_name {
@@ -296,7 +303,12 @@ fn resolve_association(
     };
 
     Ok(Association {
-        id: prior.and_then(|p| p.id.clone()),
+        id: prior.and_then(|p| p.id.clone()).or_else(|| {
+            Some(identity.artifact_id(
+                ArtifactKind::Association,
+                &format!("{module_name}.{}", assoc.name),
+            ))
+        }),
         name: Some(assoc.name.clone()),
         documentation: assoc.documentation.clone(),
         from_entity_id: Some(from_id.to_string()),
@@ -350,14 +362,18 @@ fn model_attribute_type(value: AttributeType) -> ModelAttributeType {
     }
 }
 
-fn model_attribute(decl: &AttributeDecl) -> Attribute {
+fn model_attribute(
+    decl: &AttributeDecl,
+    id: Option<String>,
+    data_storage_guid: Option<String>,
+) -> Attribute {
     Attribute {
-        id: None,
+        id,
         name: Some(decl.name.clone()),
         documentation: decl.documentation.clone(),
         attribute_type: model_attribute_type(decl.attribute_type),
         default_value: decl.default_value.clone(),
-        data_storage_guid: None,
+        data_storage_guid,
         export_level: "Hidden".into(),
         raw_type_doc: None,
         raw_value_doc: None,
@@ -404,7 +420,13 @@ fn find_domain_model_unit(mpr: &MprFile, module_id: &str, module_name: &str) -> 
 /// domain model take this path). Mirrors `Writer#entity_doc`'s `previous:
 /// nil` branch, narrowed to what `EntityDecl` exposes today (no
 /// indexes/access-rules/lifecycle/generalization-target DSL surface yet).
-fn fresh_entity(module_name: &str, decl: &EntityDecl, id: String) -> Entity {
+fn fresh_entity(
+    module_name: &str,
+    decl: &EntityDecl,
+    id: String,
+    identity: ProjectIdentity,
+) -> Entity {
+    let entity_name = format!("{module_name}.{}", decl.name);
     Entity {
         id: Some(id),
         name: Some(decl.name.clone()),
@@ -424,7 +446,18 @@ fn fresh_entity(module_name: &str, decl: &EntityDecl, id: String) -> Entity {
         source: None,
         oql_query: None,
         native_type: None,
-        attributes: decl.attributes.iter().map(model_attribute).collect(),
+        attributes: decl
+            .attributes
+            .iter()
+            .map(|attribute| {
+                let qualified_name = format!("{entity_name}.{}", attribute.name);
+                model_attribute(
+                    attribute,
+                    Some(identity.artifact_id(ArtifactKind::Attribute, &qualified_name)),
+                    Some(identity.artifact_id(ArtifactKind::DataStorage, &qualified_name)),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -441,8 +474,17 @@ fn doc_name(doc: &Document) -> Option<String> {
 /// other field (type, default, length, ...) is fully re-derived from the
 /// storage-independent declaration every time. A declaration always carries
 /// a complete value, not a partial override.
-fn reconcile_attribute_doc(decl: &AttributeDecl, previous: Option<&Document>) -> Document {
-    let decl = model_attribute(decl);
+fn reconcile_attribute_doc(
+    decl: &AttributeDecl,
+    previous: Option<&Document>,
+    qualified_name: &str,
+    identity: ProjectIdentity,
+) -> Document {
+    let decl = model_attribute(
+        decl,
+        Some(identity.artifact_id(ArtifactKind::Attribute, qualified_name)),
+        Some(identity.artifact_id(ArtifactKind::DataStorage, qualified_name)),
+    );
     match previous {
         Some(prev) => {
             let prior = Attribute::from_bson(prev);
@@ -473,9 +515,10 @@ fn build_entity_doc(
     previous: Option<&Document>,
     id: String,
     index: usize,
+    identity: ProjectIdentity,
 ) -> Document {
     let Some(prev) = previous else {
-        return fresh_entity(module_name, decl, id).to_bson();
+        return fresh_entity(module_name, decl, id, identity).to_bson();
     };
 
     let mut out = prev.clone();
@@ -500,7 +543,8 @@ fn build_entity_doc(
         .iter()
         .map(|a| {
             let prior = prev_attrs_by_name.get(&a.name);
-            Bson::Document(reconcile_attribute_doc(a, prior))
+            let qualified_name = format!("{module_name}.{}.{}", decl.name, a.name);
+            Bson::Document(reconcile_attribute_doc(a, prior, &qualified_name, identity))
         })
         .collect();
     out.insert(
@@ -542,6 +586,7 @@ pub fn synchronize_domain_entities(
     module_name: &str,
     entities: &[EntityDecl],
 ) -> Result<HashMap<String, String>> {
+    let identity = project_identity(mpr)?;
     let dm_unit = find_domain_model_unit(mpr, module_id, module_name)?;
     let dm_id = dm_unit.unit_id.clone();
     let mut doc = mpr.parse_contents(&dm_unit)?;
@@ -569,10 +614,11 @@ pub fn synchronize_domain_entities(
         }
 
         let previous = existing_by_name.get(&decl.name);
-        let id = match previous.and_then(|p| p.get("$ID")) {
-            Some(v) => mxrs_bson::extract_id(v).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            None => uuid::Uuid::new_v4().to_string(),
-        };
+        let qualified_name = format!("{module_name}.{}", decl.name);
+        let id = previous
+            .and_then(|p| p.get("$ID"))
+            .and_then(mxrs_bson::extract_id)
+            .unwrap_or_else(|| identity.artifact_id(ArtifactKind::Entity, &qualified_name));
         entity_ids.insert(decl.name.clone(), id.clone());
         new_items.push(Bson::Document(build_entity_doc(
             module_name,
@@ -580,6 +626,7 @@ pub fn synchronize_domain_entities(
             previous,
             id,
             index,
+            identity,
         )));
     }
 
@@ -589,6 +636,14 @@ pub fn synchronize_domain_entities(
     );
     mpr.update_unit(&dm_id, doc)?;
     Ok(entity_ids)
+}
+
+fn project_identity(mpr: &MprFile) -> Result<ProjectIdentity> {
+    let root_id = mpr
+        .root_unit()?
+        .ok_or(WriterError::MissingRootUnit)?
+        .unit_id;
+    Ok(ProjectIdentity::from_project_root(&root_id)?)
 }
 
 /// Combined incremental re-sync entry point for one module's domain model:

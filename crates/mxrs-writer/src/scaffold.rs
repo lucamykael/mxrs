@@ -14,6 +14,7 @@
 //! defaults, matching what `mxrb generate` produces for a brand-new project.
 
 use mxrs_bson::{Bson, Document, doc};
+use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_mpr::MprFile;
 use mxrs_schema::TemplateUnit;
 
@@ -23,7 +24,12 @@ use crate::error::Result;
 /// ProjectConversion) plus a default Security and Navigation document as
 /// direct children of the project root. Call once per fresh `.mpr`, after
 /// the root unit exists and before/independent of module writes.
-pub fn write_default_project_units(mpr: &mut MprFile, root_id: &str, version: &str) -> Result<()> {
+pub fn write_default_project_units(
+    mpr: &mut MprFile,
+    root_id: &str,
+    version: &str,
+    identity: ProjectIdentity,
+) -> Result<()> {
     let units = mxrs_schema::project_template_units(version)?;
     for TemplateUnit {
         containment,
@@ -33,12 +39,18 @@ pub fn write_default_project_units(mpr: &mut MprFile, root_id: &str, version: &s
         if doc.get_str("$Type").ok() == Some("Settings$ProjectSettings") {
             sanitize_project_settings(&mut doc, version);
         }
-        let id = uuid::Uuid::new_v4().to_string();
+        let kind = match doc.get_str("$Type").unwrap_or_default() {
+            "Settings$ProjectSettings" => ArtifactKind::ProjectSettings,
+            "Projects$ProjectConversion" => ArtifactKind::ProjectConversion,
+            "Texts$SystemTextCollection" => ArtifactKind::SystemTexts,
+            other => unreachable!("unexpected project template unit {other}"),
+        };
+        let id = identity.artifact_id(kind, "project");
         doc.insert("$ID", id.clone());
         mpr.insert_unit(root_id, &containment, doc, Some(&id))?;
     }
 
-    let security_id = uuid::Uuid::new_v4().to_string();
+    let security_id = identity.artifact_id(ArtifactKind::ProjectSecurity, "project");
     mpr.insert_unit(
         root_id,
         "ProjectDocuments",
@@ -46,7 +58,7 @@ pub fn write_default_project_units(mpr: &mut MprFile, root_id: &str, version: &s
         Some(&security_id),
     )?;
 
-    let navigation_id = uuid::Uuid::new_v4().to_string();
+    let navigation_id = identity.artifact_id(ArtifactKind::Navigation, "project");
     mpr.insert_unit(
         root_id,
         "ProjectDocuments",

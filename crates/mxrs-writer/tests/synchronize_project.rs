@@ -8,7 +8,41 @@
 //! level up — a full project rather than one domain model in isolation).
 
 use mxrs_dsl::ProjectBuilder;
+use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_model::Project;
+
+#[test]
+fn fresh_projects_with_the_same_logical_name_reuse_all_unit_identities() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("one/Project.mpr");
+    let second = dir.path().join("two/Project.mpr");
+
+    let mut declaration = ProjectBuilder::new("11.12.1");
+    declaration.module("Sales", |module| {
+        module.entity("Order", |entity| {
+            entity.string("Number");
+        });
+        module.microflow("ACT_Order", |flow| {
+            flow.return_value("empty");
+        });
+    });
+    let declaration = declaration.build();
+    mxrs_writer::write_project(&first, &declaration).unwrap();
+    mxrs_writer::write_project(&second, &declaration).unwrap();
+
+    let unit_ids = |path: &std::path::Path| {
+        let mpr = mxrs_mpr::MprFile::open(path, true).unwrap();
+        let mut ids: Vec<String> = mpr
+            .all_units()
+            .unwrap()
+            .into_iter()
+            .map(|unit| unit.unit_id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(unit_ids(&first), unit_ids(&second));
+}
 
 #[test]
 fn synchronize_project_adds_a_new_module_to_an_existing_project() {
@@ -99,6 +133,21 @@ fn synchronize_project_adds_an_attribute_and_preserves_the_entitys_id() {
         .collect();
     assert!(attr_names.contains(&"Number"));
     assert!(attr_names.contains(&"Total"));
+
+    let root_id = mxrs_mpr::MprFile::open(&path, true)
+        .unwrap()
+        .root_unit()
+        .unwrap()
+        .unwrap()
+        .unit_id;
+    let identity = ProjectIdentity::from_project_root(&root_id).unwrap();
+    let total = order
+        .attributes
+        .iter()
+        .find(|attribute| attribute.name.as_deref() == Some("Total"))
+        .unwrap();
+    let expected_total_id = identity.artifact_id(ArtifactKind::Attribute, "Sales.Order.Total");
+    assert_eq!(total.id.as_deref(), Some(expected_total_id.as_str()));
 }
 
 #[test]

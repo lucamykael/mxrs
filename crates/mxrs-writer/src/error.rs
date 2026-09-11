@@ -19,6 +19,12 @@ pub enum WriterError {
     #[error("module {0:?} has no DomainModel unit to synchronize")]
     MissingDomainModel(String),
 
+    #[error("module unit {0:?} was not found")]
+    MissingModuleUnit(String),
+
+    #[error("module unit {0:?} has no string Name")]
+    MissingModuleName(String),
+
     #[error("entities missing from domain model of module {module_name:?}: {missing:?}")]
     EntitiesMissingFromDomainModel {
         module_name: String,
@@ -39,6 +45,9 @@ pub enum WriterError {
 
     #[error("project scaffolding error: {0}")]
     ProjectTemplate(#[from] mxrs_schema::ProjectTemplateError),
+
+    #[error("identity error: {0}")]
+    Identity(#[from] mxrs_identity::IdentityError),
 }
 
 pub type Result<T> = std::result::Result<T, WriterError>;
