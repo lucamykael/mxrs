@@ -173,6 +173,9 @@ impl<'a> FlowNodeCompiler<'a> {
         if type_name == "Microflows$CustomRange" {
             return Ok(Some(compile_custom_range(source)));
         }
+        if type_name == "Microflows$LoopedActivity" {
+            return Ok(Some(self.compile_looped_activity(source, vars)?));
+        }
         if type_name == "DatabaseConnector$ExecuteDatabaseQueryAction" {
             let connector = self
                 .database_connector
@@ -192,6 +195,49 @@ impl<'a> FlowNodeCompiler<'a> {
             return self.compile_hash(&replaced, vars);
         }
         Ok(Some(self.compile_node(source, vars)?))
+    }
+
+    /// A loop is a nested object collection whose sequence flows stay on
+    /// the containing flow document. Keeping this lowering explicit avoids
+    /// accidentally looking for (or synthesizing) an
+    /// `ObjectCollection.Flows` field that does not exist in Runtime shape.
+    fn compile_looped_activity(
+        &self,
+        source: &Document,
+        vars: &VariableTypes,
+    ) -> Result<Document, CompilerError> {
+        let mut result = Document::new();
+        result.insert(
+            "$ID",
+            get_any(source, &["$ID"]).cloned().unwrap_or(Bson::Null),
+        );
+        result.insert(
+            "$Type",
+            get_any(source, &["$Type"])
+                .cloned()
+                .unwrap_or_else(|| Bson::String("Microflows$LoopedActivity".to_string())),
+        );
+        result.insert(
+            "ObjectCollection",
+            self.compile(
+                get_any(source, &["ObjectCollection"]).unwrap_or(&Bson::Null),
+                vars,
+            )?,
+        );
+        result.insert(
+            "LoopSource",
+            self.compile(
+                get_any(source, &["LoopSource"]).unwrap_or(&Bson::Null),
+                vars,
+            )?,
+        );
+        result.insert(
+            "ErrorHandlingType",
+            get_any(source, &["ErrorHandlingType"])
+                .cloned()
+                .unwrap_or_else(|| Bson::String("Rollback".to_string())),
+        );
+        Ok(result)
     }
 
     fn compile_node(
@@ -760,5 +806,80 @@ mod tests {
             err,
             CompilerError::CannotDeriveRuntimeField { .. }
         ));
+    }
+
+    #[test]
+    fn a_while_loop_lowers_to_the_five_field_runtime_shape() {
+        let schema = schema();
+        let associations = HashMap::new();
+        let c = compiler(&schema, &associations);
+        let source = Bson::Document(doc! {
+            "$ID": "11111111-1111-1111-1111-111111111111",
+            "$Type": "Microflows$LoopedActivity",
+            "Documentation": "editor-only",
+            "RelativeMiddlePoint": { "X": 10, "Y": 20 },
+            "ObjectCollection": {
+                "$ID": "22222222-2222-2222-2222-222222222222",
+                "$Type": "Microflows$MicroflowObjectCollection",
+                "Objects": mxrs_bson::build_array(Vec::<Bson>::new(), 3),
+            },
+            "LoopSource": {
+                "$ID": "33333333-3333-3333-3333-333333333333",
+                "$Type": "Microflows$WhileLoopCondition",
+                "Caption": "editor-only",
+                "WhileExpression": "$Continue",
+            },
+            "ErrorHandlingType": "CustomWithoutRollBack",
+        });
+
+        let Bson::Document(compiled) = c.compile(&source, &VariableTypes::new()).unwrap() else {
+            panic!("expected a document")
+        };
+        assert_eq!(
+            compiled.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "$ID",
+                "$Type",
+                "ObjectCollection",
+                "LoopSource",
+                "ErrorHandlingType"
+            ]
+        );
+        let loop_source = compiled.get_document("LoopSource").unwrap();
+        assert_eq!(
+            loop_source.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["$ID", "$Type", "WhileExpression"]
+        );
+        assert_eq!(loop_source.get_str("WhileExpression").unwrap(), "$Continue");
+    }
+
+    #[test]
+    fn an_iterable_loop_preserves_both_variable_names() {
+        let schema = schema();
+        let associations = HashMap::new();
+        let c = compiler(&schema, &associations);
+        let source = Bson::Document(doc! {
+            "$ID": "11111111-1111-1111-1111-111111111111",
+            "$Type": "Microflows$LoopedActivity",
+            "ObjectCollection": {
+                "$ID": "22222222-2222-2222-2222-222222222222",
+                "$Type": "Microflows$MicroflowObjectCollection",
+                "Objects": mxrs_bson::build_array(Vec::<Bson>::new(), 3),
+            },
+            "LoopSource": {
+                "$ID": "33333333-3333-3333-3333-333333333333",
+                "$Type": "Microflows$IterableList",
+                "ListVariableName": "Orders",
+                "VariableName": "Order",
+            },
+        });
+
+        let Bson::Document(compiled) = c.compile(&source, &VariableTypes::new()).unwrap() else {
+            panic!("expected a document")
+        };
+        let loop_source = compiled.get_document("LoopSource").unwrap();
+        assert_eq!(loop_source.get_str("ListVariableName").unwrap(), "Orders");
+        assert_eq!(loop_source.get_str("VariableName").unwrap(), "Order");
+        assert_eq!(compiled.get_str("ErrorHandlingType").unwrap(), "Rollback");
     }
 }

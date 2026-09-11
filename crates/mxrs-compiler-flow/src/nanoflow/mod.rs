@@ -1,8 +1,10 @@
 //! Lowers a `Microflows$Nanoflow` into a client-side JS instruction
 //! program — ports `lib/mxrb/compiler/nanoflow_program_compiler.rb` (483
-//! lines) verbatim, including its allow-listed activity set, its
-//! all-or-nothing-per-flow failure semantics, and the expression
-//! mini-language in [`expression`].
+//! lines), including its all-or-nothing-per-flow failure semantics and the
+//! expression mini-language in [`expression`]. It also closes mxrb's loop
+//! gap: Mendix 11's client natively consumes `listLoop` and `whileLoop`
+//! instructions, so looped activities are compiled here instead of being
+//! rejected by the original allow-list.
 //!
 //! **This is not the BSON pipeline** — no [`crate::CompilerError`] variant
 //! exists for anything in this module, on purpose: an unsupported
@@ -43,6 +45,11 @@
 //!   model with two flows sharing the same case value the way Ruby's
 //!   `to_h` would (last one wins) — an edge case not worth the extra
 //!   bookkeeping for a model shape Studio Pro shouldn't produce anyway.
+//! - Loops are an intentional extension rather than a Ruby port. Their
+//!   instruction fields and `break`/`continue` boolean return convention
+//!   were verified against the Mendix 11.12.1 client; their nested graph is
+//!   reconstructed from root-level sequence flows and acceptance-tested
+//!   against real compiled projects.
 
 pub mod expression;
 pub mod js_value;
@@ -208,7 +215,7 @@ impl<'a> NanoflowCompiler<'a> {
         for node in &ordered {
             let id = model_id_of(node);
             let node_flows = flows.get(&id).cloned().unwrap_or_default();
-            instructions.extend(self.compile_graph_node(node, &node_flows, flow_name));
+            instructions.extend(self.compile_graph_node(node, &node_flows, &flows, flow_name));
         }
         instructions
     }
@@ -217,6 +224,7 @@ impl<'a> NanoflowCompiler<'a> {
         &mut self,
         node: &Document,
         flows: &[Document],
+        all_flows: &FlowsByOrigin,
         flow_name: &str,
     ) -> Vec<JsValue> {
         let error_flows: Vec<Document> = flows
@@ -230,9 +238,9 @@ impl<'a> NanoflowCompiler<'a> {
             .cloned()
             .collect();
         let mut instructions = if error_flows.is_empty() {
-            self.compile_node(node, &normal_flows, flow_name)
+            self.compile_node(node, &normal_flows, all_flows, flow_name)
         } else {
-            self.compile_try_catch(node, &normal_flows, &error_flows, flow_name)
+            self.compile_try_catch(node, &normal_flows, &error_flows, all_flows, flow_name)
                 .into_iter()
                 .collect()
         };
@@ -256,13 +264,14 @@ impl<'a> NanoflowCompiler<'a> {
         node: &Document,
         normal_flows: &[Document],
         error_flows: &[Document],
+        all_flows: &FlowsByOrigin,
         flow_name: &str,
     ) -> Option<JsValue> {
         if normal_flows.len() != 1 || error_flows.len() != 1 {
             self.mark_unsupported(flow_name, "Microflows$ErrorHandler", node);
             return None;
         }
-        let compiled = self.compile_node(node, normal_flows, flow_name);
+        let compiled = self.compile_node(node, normal_flows, all_flows, flow_name);
         if compiled.is_empty() {
             return None;
         }
@@ -293,6 +302,7 @@ impl<'a> NanoflowCompiler<'a> {
         &mut self,
         node: &Document,
         flows: &[Document],
+        all_flows: &FlowsByOrigin,
         flow_name: &str,
     ) -> Vec<JsValue> {
         let type_name = get_str_any(node, &["$Type"]).unwrap_or_default();
@@ -306,6 +316,12 @@ impl<'a> NanoflowCompiler<'a> {
                 .compile_merge(node, flows, flow_name)
                 .into_iter()
                 .collect(),
+            "Microflows$LoopedActivity" => self
+                .compile_loop(node, all_flows, flow_name)
+                .into_iter()
+                .collect(),
+            "Microflows$BreakEvent" => vec![loop_return(Some(model_id_of(node)), true)],
+            "Microflows$ContinueEvent" => vec![loop_return(Some(model_id_of(node)), false)],
             "Microflows$ActionActivity" => {
                 // A disabled activity is a real, valid model (Studio Pro
                 // lets an activity sit disabled with no action configured
@@ -402,6 +418,105 @@ impl<'a> NanoflowCompiler<'a> {
             other => {
                 self.mark_unsupported(flow_name, other, node);
                 vec![]
+            }
+        }
+    }
+
+    /// Lowers a nested editor graph to the instruction shape consumed by
+    /// Mendix 11's client (`whileLoop` / `listLoop`). Sequence flows for a
+    /// loop body remain on the nanoflow root, so `all_flows` is threaded
+    /// down instead of looking for a non-existent `ObjectCollection.Flows`.
+    fn compile_loop(
+        &mut self,
+        node: &Document,
+        all_flows: &FlowsByOrigin,
+        flow_name: &str,
+    ) -> Option<JsValue> {
+        let collection = get_doc_any(node, &["ObjectCollection"]).unwrap_or_default();
+        let objects = array_docs(&collection, &["Objects"]);
+        let by_id: HashMap<String, Document> = objects
+            .iter()
+            .map(|object| (model_id_of(object), object.clone()))
+            .collect();
+        let entry = collection_entry(&objects, &by_id, all_flows);
+        let ordered = reachable_collection_nodes(entry.as_ref(), &by_id, all_flows);
+
+        let reachable_ids: std::collections::HashSet<String> =
+            ordered.iter().map(model_id_of).collect();
+        for object in &objects {
+            let id = model_id_of(object);
+            let type_name = get_str_any(object, &["$Type"]).unwrap_or_default();
+            if !reachable_ids.contains(&id) && !type_name.contains("Annotation") {
+                self.diagnostics.push(NanoflowDiagnostic::UnreachableNode {
+                    flow: flow_name.to_string(),
+                    node_id: id,
+                    node_type: type_name,
+                });
+            }
+        }
+
+        let source = get_doc_any(node, &["LoopSource"]).unwrap_or_default();
+        let source_type = get_str_any(&source, &["$Type"]).unwrap_or_default();
+        let iterator = (source_type == "Microflows$IterableList")
+            .then(|| get_str_any(&source, &["VariableName"]).unwrap_or_default());
+        let previous_iterator_kind = iterator.as_ref().and_then(|name| {
+            self.variable_kind_stack
+                .last_mut()
+                .and_then(|kinds| kinds.insert(name.clone(), "object".to_string()))
+        });
+
+        let mut body = Vec::new();
+        for object in &ordered {
+            let id = model_id_of(object);
+            let outgoing = all_flows.get(&id).cloned().unwrap_or_default();
+            let has_normal_outgoing = outgoing.iter().any(|flow| !is_error_handler(flow));
+            body.extend(self.compile_graph_node(object, &outgoing, all_flows, flow_name));
+            if !has_normal_outgoing && !is_loop_terminal(object) {
+                body.push(loop_return(None, false));
+            }
+        }
+        if body.is_empty() {
+            body.push(loop_return(None, false));
+        }
+
+        if let Some(iterator) = &iterator
+            && let Some(kinds) = self.variable_kind_stack.last_mut()
+        {
+            match previous_iterator_kind {
+                Some(kind) => {
+                    kinds.insert(iterator.clone(), kind);
+                }
+                None => {
+                    kinds.remove(iterator);
+                }
+            }
+        }
+
+        let id = model_id_of(node);
+        match source_type.as_str() {
+            "Microflows$WhileLoopCondition" => {
+                let raw = get_str_any(&source, &["WhileExpression"]).unwrap_or_default();
+                let condition = self.expression_for(&raw);
+                Some(JsValue::object(vec![
+                    ("type", JsValue::Str("whileLoop".to_string())),
+                    ("label", JsValue::Str(id)),
+                    ("condition", condition.into()),
+                    ("body", JsValue::Array(body)),
+                ]))
+            }
+            "Microflows$IterableList" => Some(JsValue::object(vec![
+                ("type", JsValue::Str("listLoop".to_string())),
+                ("label", JsValue::Str(id)),
+                (
+                    "listVar",
+                    JsValue::Str(get_str_any(&source, &["ListVariableName"]).unwrap_or_default()),
+                ),
+                ("iteratorVar", JsValue::Str(iterator.unwrap_or_default())),
+                ("body", JsValue::Array(body)),
+            ])),
+            other => {
+                self.mark_unsupported(flow_name, other, node);
+                None
             }
         }
     }
@@ -1451,18 +1566,18 @@ fn variable_kind(type_doc: Option<&Document>) -> String {
 
 fn variable_kinds(document: &Document) -> HashMap<String, String> {
     let mut result = HashMap::new();
-    let object_collection = get_doc_any(document, &["ObjectCollection"]).unwrap_or_default();
-    for object in array_docs(&object_collection, &["Objects"]) {
-        match get_str_any(&object, &["$Type"]).as_deref() {
+    visit_documents(
+        &Bson::Document(document.clone()),
+        &mut |object| match get_str_any(object, &["$Type"]).as_deref() {
             Some("Microflows$MicroflowParameter") => {
-                let name = get_str_any(&object, &["Name"]).unwrap_or_default();
+                let name = get_str_any(object, &["Name"]).unwrap_or_default();
                 result.insert(
                     name,
-                    variable_kind(get_doc_any(&object, &["VariableType"]).as_ref()),
+                    variable_kind(get_doc_any(object, &["VariableType"]).as_ref()),
                 );
             }
             Some("Microflows$ActionActivity") => {
-                let action = get_doc_any(&object, &["Action"]).unwrap_or_default();
+                let action = get_doc_any(object, &["Action"]).unwrap_or_default();
                 if let Some(name) = get_str_any(&action, &["VariableName"]) {
                     result.insert(
                         name.clone(),
@@ -1484,9 +1599,26 @@ fn variable_kinds(document: &Document) -> HashMap<String, String> {
                 }
             }
             _ => {}
-        }
-    }
+        },
+    );
     result
+}
+
+fn visit_documents(value: &Bson, callback: &mut impl FnMut(&Document)) {
+    match value {
+        Bson::Document(document) => {
+            callback(document);
+            for (_, child) in document {
+                visit_documents(child, callback);
+            }
+        }
+        Bson::Array(items) => {
+            for child in mxrs_bson::parse_array(Some(items)).items {
+                visit_documents(&child, callback);
+            }
+        }
+        _ => {}
+    }
 }
 
 type FlowsByOrigin = HashMap<String, Vec<Document>>;
@@ -1545,6 +1677,64 @@ fn reachable_nodes(
     result
 }
 
+fn collection_entry(
+    objects: &[Document],
+    by_id: &HashMap<String, Document>,
+    flows: &FlowsByOrigin,
+) -> Option<Document> {
+    let mut has_incoming: HashMap<String, bool> =
+        by_id.keys().map(|id| (id.clone(), false)).collect();
+    for origin in by_id.keys() {
+        for flow in flows.get(origin).cloned().unwrap_or_default() {
+            let destination = get_any(&flow, &["DestinationPointer"])
+                .map(model_id)
+                .unwrap_or_default();
+            if let Some(incoming) = has_incoming.get_mut(&destination) {
+                *incoming = true;
+            }
+        }
+    }
+    objects.iter().find_map(|object| {
+        let id = model_id_of(object);
+        let type_name = get_str_any(object, &["$Type"]).unwrap_or_default();
+        (!has_incoming.get(&id).copied().unwrap_or(false)
+            && !matches!(
+                type_name.as_str(),
+                "Microflows$Annotation" | "Microflows$MicroflowParameter"
+            ))
+        .then(|| object.clone())
+    })
+}
+
+fn reachable_collection_nodes(
+    entry: Option<&Document>,
+    by_id: &HashMap<String, Document>,
+    flows: &FlowsByOrigin,
+) -> Vec<Document> {
+    let mut queue = std::collections::VecDeque::new();
+    if let Some(entry) = entry {
+        queue.push_back(entry.clone());
+    }
+    let mut visited = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    while let Some(current) = queue.pop_front() {
+        let id = model_id_of(&current);
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        result.push(current);
+        for flow in flows.get(&id).cloned().unwrap_or_default() {
+            if let Some(node) = get_any(&flow, &["DestinationPointer"])
+                .map(model_id)
+                .and_then(|destination| by_id.get(&destination))
+            {
+                queue.push_back(node.clone());
+            }
+        }
+    }
+    result
+}
+
 fn is_error_handler(flow: &Document) -> bool {
     get_any(flow, &["IsErrorHandler"]) == Some(&Bson::Boolean(true))
 }
@@ -1552,8 +1742,39 @@ fn is_error_handler(flow: &Document) -> bool {
 fn is_terminal(node: &Document) -> bool {
     matches!(
         get_str_any(node, &["$Type"]).as_deref(),
-        Some("Microflows$EndEvent" | "Microflows$ExclusiveSplit" | "Microflows$ExclusiveMerge")
+        Some(
+            "Microflows$EndEvent"
+                | "Microflows$ExclusiveSplit"
+                | "Microflows$ExclusiveMerge"
+                | "Microflows$BreakEvent"
+                | "Microflows$ContinueEvent"
+        )
     )
+}
+
+fn is_loop_terminal(node: &Document) -> bool {
+    matches!(
+        get_str_any(node, &["$Type"]).as_deref(),
+        Some("Microflows$BreakEvent" | "Microflows$ContinueEvent")
+    )
+}
+
+fn loop_return(label: Option<String>, breaks: bool) -> JsValue {
+    let mut entries = vec![("type", JsValue::Str("return".to_string()))];
+    if let Some(label) = label {
+        entries.push(("label", JsValue::Str(label)));
+    }
+    entries.extend([
+        (
+            "result",
+            JsValue::object(vec![
+                ("type", JsValue::Str("literal".to_string())),
+                ("value", JsValue::Bool(breaks)),
+            ]),
+        ),
+        ("resultKind", JsValue::Str("primitive".to_string())),
+    ]);
+    JsValue::object(entries)
 }
 
 fn strip_label(value: JsValue) -> JsValue {
@@ -1660,6 +1881,68 @@ mod tests {
         }
     }
 
+    fn loop_flow(
+        loop_source: Document,
+        body: Vec<Document>,
+        body_flows: Vec<Document>,
+    ) -> Document {
+        let loop_node = doc! {
+            "$ID": "44444444-4444-4444-4444-444444444444",
+            "$Type": "Microflows$LoopedActivity",
+            "LoopSource": loop_source,
+            "ObjectCollection": {
+                "$ID": "55555555-5555-5555-5555-555555555555",
+                "$Type": "Microflows$MicroflowObjectCollection",
+                "Objects": mxrs_bson::build_array(
+                    body.into_iter().map(Bson::Document).collect(),
+                    3,
+                ),
+            },
+        };
+        let mut flows = vec![
+            Bson::Document(doc! {
+                "OriginPointer": "11111111-1111-1111-1111-111111111111",
+                "DestinationPointer": "44444444-4444-4444-4444-444444444444",
+            }),
+            Bson::Document(doc! {
+                "OriginPointer": "44444444-4444-4444-4444-444444444444",
+                "DestinationPointer": "22222222-2222-2222-2222-222222222222",
+            }),
+        ];
+        flows.extend(body_flows.into_iter().map(Bson::Document));
+        doc! {
+            "$Type": "Microflows$Nanoflow",
+            "Name": "ACT_Loop",
+            "ObjectCollection": {
+                "Objects": mxrs_bson::build_array(vec![
+                    Bson::Document(doc! {
+                        "$ID": "11111111-1111-1111-1111-111111111111",
+                        "$Type": "Microflows$StartEvent",
+                    }),
+                    Bson::Document(loop_node),
+                    Bson::Document(doc! {
+                        "$ID": "22222222-2222-2222-2222-222222222222",
+                        "$Type": "Microflows$EndEvent",
+                        "ReturnValue": "",
+                    }),
+                ], 3),
+            },
+            "Flows": mxrs_bson::build_array(flows, 3),
+        }
+    }
+
+    fn variable_activity(id: &str, variable: &str, value: &str) -> Document {
+        doc! {
+            "$ID": id,
+            "$Type": "Microflows$ActionActivity",
+            "Action": {
+                "$Type": "Microflows$CreateVariableAction",
+                "VariableName": variable,
+                "InitialValue": value,
+            },
+        }
+    }
+
     #[test]
     fn compiles_a_trivial_flow_to_a_declaration() {
         let mut index = empty_index();
@@ -1670,6 +1953,76 @@ mod tests {
         let reference = compiler.reference("Sales.ACT_Do").unwrap();
         assert!(reference.starts_with("() => mxrbNanoflow_"));
         assert!(compiler.declarations().contains("const mxrbNanoflow_"));
+        assert!(compiler.unsupported().is_empty());
+    }
+
+    #[test]
+    fn a_list_loop_compiles_every_body_node_using_root_level_sequence_flows() {
+        let first_id = "66666666-6666-6666-6666-666666666666";
+        let second_id = "77777777-7777-7777-7777-777777777777";
+        let flow = loop_flow(
+            doc! {
+                "$Type": "Microflows$IterableList",
+                "ListVariableName": "Orders",
+                "VariableName": "Order",
+            },
+            vec![
+                variable_activity(first_id, "First", "true"),
+                variable_activity(second_id, "Second", "false"),
+            ],
+            vec![doc! {
+                "OriginPointer": first_id,
+                "DestinationPointer": second_id,
+            }],
+        );
+        let mut index = empty_index();
+        index.nanoflows.insert("Sales.ACT_Loop".to_string(), flow);
+        let mut compiler = NanoflowCompiler::new(&index, None);
+
+        assert!(compiler.reference("Sales.ACT_Loop").is_some());
+        let declaration = compiler.declarations();
+        assert!(declaration.contains(r#""type": "listLoop""#));
+        assert!(declaration.contains(r#""listVar": "Orders""#));
+        assert!(declaration.contains(r#""iteratorVar": "Order""#));
+        let first = declaration.find(first_id).unwrap();
+        let second = declaration.find(second_id).unwrap();
+        assert!(
+            first < second,
+            "both loop-body nodes must be emitted in graph order"
+        );
+        assert!(declaration.contains(
+            r#""type": "return", "result": { "type": "literal", "value": false }, "resultKind": "primitive""#
+        ));
+        assert!(compiler.unsupported().is_empty());
+    }
+
+    #[test]
+    fn a_while_loop_and_break_event_match_the_client_instruction_contract() {
+        let break_id = "88888888-8888-8888-8888-888888888888";
+        let flow = loop_flow(
+            doc! {
+                "$Type": "Microflows$WhileLoopCondition",
+                "WhileExpression": "$KeepGoing",
+            },
+            vec![doc! {
+                "$ID": break_id,
+                "$Type": "Microflows$BreakEvent",
+            }],
+            vec![],
+        );
+        let mut index = empty_index();
+        index.nanoflows.insert("Sales.ACT_Loop".to_string(), flow);
+        let mut compiler = NanoflowCompiler::new(&index, None);
+
+        assert!(compiler.reference("Sales.ACT_Loop").is_some());
+        let declaration = compiler.declarations();
+        assert!(declaration.contains(r#""type": "whileLoop""#));
+        assert!(
+            declaration.contains(r#""condition": { "type": "variable", "variable": "KeepGoing" }"#)
+        );
+        assert!(declaration.contains(&format!(
+            r#""body": [{{ "type": "return", "label": "{break_id}", "result": {{ "type": "literal", "value": true }}, "resultKind": "primitive" }}]"#
+        )));
         assert!(compiler.unsupported().is_empty());
     }
 
