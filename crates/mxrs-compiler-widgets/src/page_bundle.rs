@@ -15,6 +15,7 @@ use crate::{
 type NativeRenderer<'a> = dyn Fn(&Document, Option<&str>, &str) -> Option<String> + 'a;
 type ActionRenderer<'a> = dyn Fn(&Document) -> Option<String> + 'a;
 type NanoflowRenderer<'a> = dyn Fn(&str) -> Option<String> + 'a;
+type NanoflowDeclarations<'a> = dyn Fn() -> String + 'a;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageBundle {
@@ -29,14 +30,19 @@ enum UsedBundle {
     ActionButton,
     BoundText,
     ComboBox,
+    Container,
     DataView,
     DataGrid,
     FormInput,
+    FileManager,
     Gallery,
     Image,
     ListView,
     NativeImage,
+    NavigationList,
     ReferenceSelector,
+    ReferenceSetSelector,
+    ScrollContainer,
     Generic,
 }
 
@@ -60,6 +66,7 @@ pub struct PageBundleCompiler<'a> {
     action_renderer: Option<&'a ActionRenderer<'a>>,
     nanoflow_renderer: Option<&'a NanoflowRenderer<'a>>,
     nanoflow_declarations: &'a str,
+    nanoflow_declarations_renderer: Option<&'a NanoflowDeclarations<'a>>,
     package_modules: RefCell<BTreeMap<String, bool>>,
 }
 
@@ -68,6 +75,65 @@ pub struct PageBundleCompiler<'a> {
 pub struct ProjectPageBundleCompiler {
     project_path: PathBuf,
     documents: Vec<(String, Document)>,
+    flow_index: mxrs_compiler_flow::ProjectFlowIndex,
+}
+
+struct ProjectNanoflowCache<'a> {
+    index: &'a mxrs_compiler_flow::ProjectFlowIndex,
+    project_root: Option<&'a Path>,
+    programs: RefCell<BTreeMap<String, Option<(String, String)>>>,
+    requested: RefCell<BTreeSet<String>>,
+}
+
+impl<'a> ProjectNanoflowCache<'a> {
+    fn new(
+        index: &'a mxrs_compiler_flow::ProjectFlowIndex,
+        project_root: Option<&'a Path>,
+    ) -> Self {
+        Self {
+            index,
+            project_root,
+            programs: RefCell::new(BTreeMap::new()),
+            requested: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    fn reset(&self) {
+        self.requested.borrow_mut().clear();
+    }
+
+    fn reference(&self, name: &str) -> Option<String> {
+        self.requested.borrow_mut().insert(name.to_string());
+        if let Some(cached) = self.programs.borrow().get(name) {
+            return cached.as_ref().map(|(reference, _)| reference.clone());
+        }
+        let mut compiler =
+            mxrs_compiler_flow::nanoflow::NanoflowCompiler::new(self.index, self.project_root);
+        let reference = compiler.reference(name);
+        let compiled = reference.map(|reference| (reference, compiler.declarations()));
+        self.programs
+            .borrow_mut()
+            .insert(name.to_string(), compiled.clone());
+        compiled.map(|(reference, _)| reference)
+    }
+
+    fn declarations(&self) -> String {
+        let requested = self.requested.borrow();
+        let programs = self.programs.borrow();
+        let mut seen = BTreeSet::new();
+        let mut lines = Vec::new();
+        for name in requested.iter() {
+            let Some(Some((_, declarations))) = programs.get(name) else {
+                continue;
+            };
+            for line in declarations.lines() {
+                if seen.insert(line.to_string()) {
+                    lines.push(line);
+                }
+            }
+        }
+        lines.join("\n")
+    }
 }
 
 impl ProjectPageBundleCompiler {
@@ -92,7 +158,7 @@ impl ProjectPageBundleCompiler {
                     .map_err(mxrs_model::ModelError::from)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let documents = parsed
+        let documents: Vec<(String, Document)> = parsed
             .into_iter()
             .map(|(unit, document)| {
                 let owner = owning_module(&unit.container_id, &parent_by_id, &module_by_id)
@@ -100,9 +166,11 @@ impl ProjectPageBundleCompiler {
                 (owner, document)
             })
             .collect();
+        let flow_index = mxrs_compiler_flow::ProjectFlowIndex::from_documents(&documents);
         Ok(Self {
             project_path: project.mpr().path().to_path_buf(),
             documents,
+            flow_index,
         })
     }
 
@@ -111,20 +179,34 @@ impl ProjectPageBundleCompiler {
     }
 
     pub fn compile_pages(&self) -> Vec<Result<PageBundle, CompilerError>> {
-        let compiler = PageBundleCompiler::new(&self.documents, &self.project_path);
+        let programs = ProjectNanoflowCache::new(&self.flow_index, self.project_path.parent());
         self.documents
             .iter()
             .filter(|(_, document)| document.get_str("$Type").ok() == Some("Forms$Page"))
-            .map(|(module, page)| compiler.compile_page(module, page))
+            .map(|(module, page)| {
+                programs.reset();
+                let render = |name: &str| programs.reference(name);
+                let declarations = || programs.declarations();
+                PageBundleCompiler::new(&self.documents, &self.project_path)
+                    .with_nanoflow_programs(&render, &declarations)
+                    .compile_page(module, page)
+            })
             .collect()
     }
 
     pub fn compile_layouts(&self) -> Vec<Result<PageBundle, CompilerError>> {
-        let compiler = PageBundleCompiler::new(&self.documents, &self.project_path);
+        let programs = ProjectNanoflowCache::new(&self.flow_index, self.project_path.parent());
         self.documents
             .iter()
             .filter(|(_, document)| document.get_str("$Type").ok() == Some("Forms$Layout"))
-            .map(|(module, layout)| compiler.compile_layout(module, layout))
+            .map(|(module, layout)| {
+                programs.reset();
+                let render = |name: &str| programs.reference(name);
+                let declarations = || programs.declarations();
+                PageBundleCompiler::new(&self.documents, &self.project_path)
+                    .with_nanoflow_programs(&render, &declarations)
+                    .compile_layout(module, layout)
+            })
             .collect()
     }
 }
@@ -138,6 +220,7 @@ impl<'a> PageBundleCompiler<'a> {
             action_renderer: None,
             nanoflow_renderer: None,
             nanoflow_declarations: "",
+            nanoflow_declarations_renderer: None,
             package_modules: RefCell::new(BTreeMap::new()),
         }
     }
@@ -160,6 +243,22 @@ impl<'a> PageBundleCompiler<'a> {
         self.nanoflow_renderer = Some(renderer);
         self.nanoflow_declarations = declarations;
         self
+    }
+
+    pub fn with_nanoflow_programs(
+        mut self,
+        renderer: &'a NanoflowRenderer<'a>,
+        declarations: &'a NanoflowDeclarations<'a>,
+    ) -> Self {
+        self.nanoflow_renderer = Some(renderer);
+        self.nanoflow_declarations_renderer = Some(declarations);
+        self
+    }
+
+    fn rendered_nanoflow_declarations(&self) -> String {
+        self.nanoflow_declarations_renderer
+            .map(|renderer| renderer())
+            .unwrap_or_else(|| self.nanoflow_declarations.to_string())
     }
 
     pub fn compile_page(
@@ -207,7 +306,7 @@ impl<'a> PageBundleCompiler<'a> {
         let parameters = page_parameters(page);
         let source = format!(
             "import React from \"react\";\nimport {{ PageFragment }} from \"mendix/PageFragment\";\n{imports}\n{}\n\nexport const title = {};\nexport const classes = {};\nexport const autofocus = \"off\";\nexport const style = {{}};\nexport const parameters = {parameters};\nexport const content = {content};\n",
-            self.nanoflow_declarations,
+            self.rendered_nanoflow_declarations(),
             js_string(&title),
             js_string(classes),
         );
@@ -233,7 +332,7 @@ impl<'a> PageBundleCompiler<'a> {
         let imports = context.imports();
         let source = format!(
             "import React from \"react\";\n{imports}\n{}\n\nexport const content = Object.assign({{}}, {{ \"Main\": {rendered} }});\n",
-            self.nanoflow_declarations,
+            self.rendered_nanoflow_declarations(),
         );
         Ok(context.finish(source))
     }
@@ -346,7 +445,34 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                         !type_name.is_empty() && type_name != "Forms$NoAction"
                     })
                 }) {
-                    return None;
+                    let action = action?;
+                    let property = self
+                        .compiler
+                        .action_renderer
+                        .and_then(|renderer| renderer(action))
+                        .or_else(|| self.builtin_action_property(widget, action, scope, entity));
+                    if let Some(property) = property {
+                        self.state.borrow_mut().used.insert(UsedBundle::Container);
+                        let key = self.widget_key(widget);
+                        return Some(format!(
+                            "React.createElement($Container, {})",
+                            js_object(&[
+                                ("key", js_string(&key)),
+                                ("$widgetId", js_string(&key)),
+                                ("class", js_string(&css_class(widget))),
+                                ("renderMode", js_string("div")),
+                                (
+                                    "content",
+                                    self.render_widgets(
+                                        &array_docs(widget, "Widgets"),
+                                        scope,
+                                        entity,
+                                    ),
+                                ),
+                                ("onClick", property),
+                            ])
+                        ));
+                    }
                 }
                 Some(self.render_element(
                     "div",
@@ -366,7 +492,18 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             "Forms$DropDown" => self.render_drop_down(widget, scope, entity),
             "Forms$ListView" => self.render_list_view(widget, scope, entity),
             "Forms$StaticImageViewer" => self.render_static_image(widget),
-            "Forms$ReferenceSelector" => self.render_reference_selector(widget, scope, entity),
+            "Forms$NavigationList" => self.render_navigation_list(widget, scope, entity),
+            "Forms$ScrollContainer" => self.render_scroll_container(widget, scope, entity),
+            "Forms$FileManager" => self.render_file_manager(widget, scope),
+            "Forms$ReferenceSelector" => {
+                self.render_association_selector(widget, scope, entity, false, true)
+            }
+            "Forms$InputReferenceSetSelector" => {
+                self.render_association_selector(widget, scope, entity, true, true)
+            }
+            "Forms$ReferenceSetSelector" => {
+                self.render_association_selector(widget, scope, entity, true, false)
+            }
             "Forms$RadioButtonGroup" => {
                 self.render_simple_input(widget, scope, entity, "RadioButtonGroup")
             }
@@ -1054,11 +1191,217 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         ))
     }
 
-    fn render_reference_selector(
+    fn render_navigation_list(
+        &self,
+        widget: &Document,
+        scope: Option<&str>,
+        entity: &str,
+    ) -> Option<String> {
+        let items = array_docs(widget, "Items")
+            .iter()
+            .map(|item| {
+                let mut values = vec![
+                    ("class".to_string(), js_string(&css_class(item))),
+                    (
+                        "content".to_string(),
+                        self.render_widgets(&array_docs(item, "Widgets"), scope, entity),
+                    ),
+                ];
+                if let Some(action) = item.get_document("Action").ok()
+                    && let Some(property) = self
+                        .compiler
+                        .action_renderer
+                        .and_then(|renderer| renderer(action))
+                        .or_else(|| self.builtin_action_property(widget, action, scope, entity))
+                {
+                    values.push(("action".to_string(), property));
+                }
+                js_object_owned(&values)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.state
+            .borrow_mut()
+            .used
+            .insert(UsedBundle::NavigationList);
+        let key = self.widget_key(widget);
+        Some(format!(
+            "React.createElement($NavigationList, {})",
+            js_object(&[
+                ("key", js_string(&key)),
+                ("$widgetId", js_string(&key)),
+                ("class", js_string(&css_class(widget))),
+                ("items", format!("[{items}]")),
+            ])
+        ))
+    }
+
+    fn render_scroll_container(
+        &self,
+        widget: &Document,
+        scope: Option<&str>,
+        entity: &str,
+    ) -> Option<String> {
+        let key = self.widget_key(widget);
+        self.state
+            .borrow_mut()
+            .used
+            .insert(UsedBundle::ScrollContainer);
+        Some(format!(
+            "React.createElement($ScrollContainer, {})",
+            js_object(&[
+                ("key", js_string(&key)),
+                ("$widgetId", js_string(&key)),
+                ("class", js_string(&css_class(widget))),
+                (
+                    "scrollPerRegion",
+                    (widget.get_str("ScrollBehavior").ok() == Some("PerRegion")).to_string(),
+                ),
+                (
+                    "layoutMode",
+                    js_string(
+                        &widget
+                            .get_str("LayoutMode")
+                            .unwrap_or_default()
+                            .to_ascii_lowercase(),
+                    ),
+                ),
+                (
+                    "top",
+                    self.render_scroll_region(widget, "Top", scope, entity)
+                ),
+                (
+                    "bottom",
+                    self.render_scroll_region(widget, "Bottom", scope, entity),
+                ),
+                (
+                    "left",
+                    self.render_scroll_region(widget, "Left", scope, entity)
+                ),
+                (
+                    "right",
+                    self.render_scroll_region(widget, "Right", scope, entity),
+                ),
+                (
+                    "center",
+                    self.render_scroll_region(widget, "CenterRegion", scope, entity),
+                ),
+            ])
+        ))
+    }
+
+    fn render_scroll_region(
+        &self,
+        widget: &Document,
+        field: &str,
+        scope: Option<&str>,
+        entity: &str,
+    ) -> String {
+        let Ok(region) = widget.get_document(field) else {
+            return "{ enabled: false }".to_string();
+        };
+        let toggle = region.get_str("ToggleMode").unwrap_or_default();
+        let toggle_mode = if toggle.starts_with("ShrinkContent") {
+            "shrink"
+        } else if toggle.starts_with("PushContent") {
+            "push"
+        } else if toggle.starts_with("SlideOverContent") {
+            "slide"
+        } else {
+            "none"
+        };
+        js_object(&[
+            ("enabled", "true".to_string()),
+            (
+                "content",
+                self.render_widgets(&array_docs(region, "Widgets"), scope, entity),
+            ),
+            (
+                "sizeMode",
+                js_string(
+                    &region
+                        .get_str("SizeMode")
+                        .unwrap_or_default()
+                        .to_ascii_lowercase(),
+                ),
+            ),
+            (
+                "sizeValue",
+                region.get_i32("Size").unwrap_or_default().to_string(),
+            ),
+            (
+                "class",
+                js_string(
+                    region
+                        .get_document("Appearance")
+                        .ok()
+                        .and_then(|appearance| appearance.get_str("Class").ok())
+                        .unwrap_or_default(),
+                ),
+            ),
+            ("toggleMode", js_string(toggle_mode)),
+            (
+                "initiallyOpen",
+                (!toggle.contains("InitiallyClosed")).to_string(),
+            ),
+        ])
+    }
+
+    fn render_file_manager(&self, widget: &Document, scope: Option<&str>) -> Option<String> {
+        let scope = scope?;
+        let key = self.widget_key(widget);
+        self.state.borrow_mut().used.insert(UsedBundle::FileManager);
+        Some(format!(
+            "React.createElement($FileManager, {})",
+            js_object(&[
+                ("key", js_string(&key)),
+                ("$widgetId", js_string(&key)),
+                ("class", js_string(&css_class(widget))),
+                ("id", js_string(&key)),
+                (
+                    "widgetType",
+                    js_string(
+                        &widget
+                            .get_str("Type")
+                            .unwrap_or("both")
+                            .to_ascii_lowercase(),
+                    ),
+                ),
+                (
+                    "extensions",
+                    js_string(widget.get_str("AllowedExtensions").unwrap_or_default()),
+                ),
+                (
+                    "maxFileSize",
+                    positive_i32(widget.get_i32("MaxFileSize").unwrap_or_default(), 200)
+                        .to_string(),
+                ),
+                (
+                    "content",
+                    format!(
+                        "DynamicFileProperty({})",
+                        js_object(&[
+                            ("scope", js_string(scope)),
+                            ("path", js_string("")),
+                            ("isEditable", "true".to_string()),
+                            (
+                                "allowUpload",
+                                (widget.get_str("Type").ok() != Some("Download")).to_string(),
+                            ),
+                        ])
+                    ),
+                ),
+            ])
+        ))
+    }
+
+    fn render_association_selector(
         &self,
         widget: &Document,
         scope: Option<&str>,
         source_entity: &str,
+        reference_set: bool,
+        form_group: bool,
     ) -> Option<String> {
         let scope = scope?;
         if !qualified_name_valid(source_entity) {
@@ -1098,7 +1441,12 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         let key = self.widget_key(widget);
         let data_source_id = format!("{key}$options");
         let input = format!(
-            "React.createElement($ReferenceSelector, {})",
+            "React.createElement({}, {})",
+            if reference_set {
+                "$MxrbReferenceSetSelector"
+            } else {
+                "$ReferenceSelector"
+            },
             js_object(&[
                 ("key", js_string(&key)),
                 ("$widgetId", js_string(&key)),
@@ -1114,7 +1462,14 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                     format!(
                         "AssociationProperty({})",
                         js_object(&[
-                            ("type", js_string("Reference")),
+                            (
+                                "type",
+                                js_string(if reference_set {
+                                    "ReferenceSet"
+                                } else {
+                                    "Reference"
+                                }),
+                            ),
                             ("entity", js_string(source_entity)),
                             ("path", js_string(&parent_path)),
                             ("attribute", js_string(association_name)),
@@ -1166,15 +1521,23 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                 ),
             ])
         );
-        self.state
-            .borrow_mut()
-            .used
-            .insert(UsedBundle::ReferenceSelector);
+        self.state.borrow_mut().used.insert(if reference_set {
+            UsedBundle::ReferenceSetSelector
+        } else {
+            UsedBundle::ReferenceSelector
+        });
+        if !form_group {
+            return Some(input);
+        }
         Some(js_form_group(
             widget,
             &key,
             &input,
-            "mx-referenceselector",
+            if reference_set {
+                "mx-referencesetselector"
+            } else {
+                "mx-referenceselector"
+            },
             &client_template_text(widget.get_document("LabelTemplate").ok()),
         ))
     }
@@ -1419,6 +1782,31 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             .get_bool("DisabledDuringExecution")
             .unwrap_or(true)
             .to_string();
+        if action.get_str("$Type").ok() == Some("Forms$CallNanoflowClientAction") {
+            let name = action
+                .get_str("Nanoflow")
+                .ok()
+                .filter(|name| qualified_name_valid(name))?;
+            let reference = self
+                .compiler
+                .nanoflow_renderer
+                .and_then(|renderer| renderer(name))?;
+            let arg_map = self.nanoflow_argument_map(action, current_scope, current_entity)?;
+            let payload = js_object(&[
+                ("type", js_string("callNanoflow")),
+                ("argMap", arg_map),
+                ("config", format!("{{ nanoflow: {reference} }}")),
+                ("disabledDuringExecution", disabled),
+            ]);
+            return Some(format!(
+                "ActionProperty({})",
+                js_object(&[
+                    ("action", payload),
+                    ("abortOnServerValidation", "false".to_string()),
+                    ("skipClientValidation", "false".to_string()),
+                ])
+            ));
+        }
         let action_payload = match action.get_str("$Type").ok()? {
             "Forms$SaveChangesClientAction"
             | "Forms$CancelChangesClientAction"
@@ -1557,6 +1945,63 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                 ("abortOnServerValidation", "true".to_string()),
             ])
         ))
+    }
+
+    fn nanoflow_argument_map(
+        &self,
+        action: &Document,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        let entries = array_docs(action, "ParameterMappings")
+            .into_iter()
+            .map(|mapping| {
+                let name = mapping.get_str("Parameter").ok()?.rsplit('.').next()?;
+                let variable = mapping
+                    .get_str("Expression")
+                    .ok()?
+                    .strip_prefix('$')?
+                    .to_string();
+                if !identifier(name) || !identifier(&variable) {
+                    return None;
+                }
+                let entity_variable = current_entity.rsplit('.').next() == Some(&variable);
+                let widget = if entity_variable {
+                    current_scope.map(str::to_string)?
+                } else {
+                    format!("${variable}")
+                };
+                Some((
+                    name.to_string(),
+                    js_object(&[
+                        (
+                            "expression",
+                            js_object(&[
+                                (
+                                    "expr",
+                                    js_object(&[
+                                        ("type", js_string("variable")),
+                                        ("variable", js_string(&variable)),
+                                    ]),
+                                ),
+                                (
+                                    "args",
+                                    js_object(&[(
+                                        &variable,
+                                        js_object(&[
+                                            ("widget", js_string(&widget)),
+                                            ("source", js_string("object")),
+                                        ]),
+                                    )]),
+                                ),
+                            ]),
+                        ),
+                        ("kind", js_string("object")),
+                    ]),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(js_object_owned(&entries))
     }
 
     fn render_data_view(
@@ -2207,6 +2652,12 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             );
             widgets.insert("Datagrid".to_string());
         }
+        if state.used.contains(&UsedBundle::Container) {
+            add_property_imports(&mut imports, &["ActionProperty"]);
+            imports
+                .insert("import { Container } from \"mendix/widgets/web/Container\";".to_string());
+            widgets.insert("Container".to_string());
+        }
         if state.used.contains(&UsedBundle::ActionButton) {
             add_property_imports(&mut imports, &["ActionProperty", "TextProperty"]);
             imports.insert(
@@ -2264,7 +2715,9 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             );
             widgets.insert("NativeImage".to_string());
         }
-        if state.used.contains(&UsedBundle::ReferenceSelector) {
+        if state.used.contains(&UsedBundle::ReferenceSelector)
+            || state.used.contains(&UsedBundle::ReferenceSetSelector)
+        {
             add_property_imports(
                 &mut imports,
                 &[
@@ -2276,12 +2729,45 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             );
             imports
                 .insert("import { FormGroup } from \"mendix/widgets/web/FormGroup\";".to_string());
+            widgets.insert("FormGroup".to_string());
+            if state.used.contains(&UsedBundle::ReferenceSelector) {
+                imports.insert(
+                    "import { ReferenceSelector } from \"mendix/widgets/web/ReferenceSelector\";"
+                        .to_string(),
+                );
+                widgets.insert("ReferenceSelector".to_string());
+            }
+            if state.used.contains(&UsedBundle::ReferenceSetSelector) {
+                imports.insert(
+                    "const MxrbReferenceSetSelector = ({ value, valueOptions, attribute, id, class: className }) => { const options = valueOptions?.items || []; const selected = value?.value || []; return React.createElement(\"select\", { id, multiple: true, className, disabled: value?.readOnly, value: selected.map(item => item.id), onChange: event => value?.setValue(Array.from(event.target.selectedOptions).map(option => options.find(item => item.id === option.value)).filter(Boolean)) }, options.map(item => React.createElement(\"option\", { key: item.id, value: item.id }, attribute.get(item).displayValue))); };".to_string(),
+                );
+                imports.insert(
+                    "MxrbReferenceSetSelector.displayName = \"MxrbReferenceSetSelector\";"
+                        .to_string(),
+                );
+                widgets.insert("MxrbReferenceSetSelector".to_string());
+            }
+        }
+        if state.used.contains(&UsedBundle::NavigationList) {
+            add_property_imports(&mut imports, &["ActionProperty"]);
             imports.insert(
-                "import { ReferenceSelector } from \"mendix/widgets/web/ReferenceSelector\";"
+                "import { NavigationList } from \"mendix/widgets/web/NavigationList\";".to_string(),
+            );
+            widgets.insert("NavigationList".to_string());
+        }
+        if state.used.contains(&UsedBundle::ScrollContainer) {
+            imports.insert(
+                "import { ScrollContainer } from \"mendix/widgets/web/ScrollContainer\";"
                     .to_string(),
             );
-            widgets.insert("FormGroup".to_string());
-            widgets.insert("ReferenceSelector".to_string());
+            widgets.insert("ScrollContainer".to_string());
+        }
+        if state.used.contains(&UsedBundle::FileManager) {
+            add_property_imports(&mut imports, &["DynamicFileProperty"]);
+            imports.insert(
+                "import { FileManager } from \"mendix/widgets/web/FileManager\";".to_string(),
+            );
+            widgets.insert("FileManager".to_string());
         }
         if state.used.contains(&UsedBundle::DataView) {
             add_property_imports(

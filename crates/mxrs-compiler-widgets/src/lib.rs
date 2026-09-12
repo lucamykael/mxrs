@@ -53,6 +53,8 @@ pub use web_operation::{DATA_GRID_WIDGET_ID, WebOperationCompiler};
 #[derive(Debug, thiserror::Error)]
 pub enum CompilerError {
     #[error(transparent)]
+    Flow(#[from] mxrs_compiler_flow::CompilerError),
+    #[error(transparent)]
     Model(#[from] mxrs_model::ModelError),
     #[error(transparent)]
     Schema(#[from] mxrs_schema::RuntimeModelError),

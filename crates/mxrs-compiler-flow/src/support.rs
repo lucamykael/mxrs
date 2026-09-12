@@ -51,6 +51,115 @@ pub struct AssociationInfo {
 }
 
 impl ProjectFlowIndex {
+    /// Builds the flow index from documents already decoded and associated
+    /// with their owning module. This avoids a second full MPR decode when a
+    /// higher-level compiler shares a project-wide document catalog.
+    pub fn from_documents(documents: &[(String, Document)]) -> Self {
+        let entity_qualified_name_by_id: HashMap<String, String> = documents
+            .iter()
+            .filter(|(_, document)| {
+                get_str_any(document, &["$Type"]).as_deref() == Some("DomainModels$DomainModel")
+            })
+            .flat_map(|(module_name, document)| {
+                array_docs(document, &["Entities", "entities"])
+                    .into_iter()
+                    .filter_map(move |entity| {
+                        Some((
+                            get_id_any(&entity, &["$ID"])?,
+                            format!("{module_name}.{}", get_str_any(&entity, &["Name", "name"])?),
+                        ))
+                    })
+            })
+            .collect();
+        let mut index = ProjectFlowIndex {
+            database_connections: HashMap::new(),
+            constants: HashMap::new(),
+            javascript_actions: HashMap::new(),
+            nanoflows: HashMap::new(),
+            associations: HashMap::new(),
+            role_map: HashMap::new(),
+        };
+        for (module_name, document) in documents {
+            let Some(type_name) = get_str_any(document, &["$Type"]) else {
+                continue;
+            };
+            let name = get_str_any(document, &["Name"]).unwrap_or_default();
+            match type_name.as_str() {
+                "DatabaseConnector$DatabaseConnection" => {
+                    index
+                        .database_connections
+                        .insert(format!("{module_name}.{name}"), document.clone());
+                }
+                "Constants$Constant" => {
+                    index
+                        .constants
+                        .insert(format!("{module_name}.{name}"), document.clone());
+                }
+                "JavaScriptActions$JavaScriptAction" => {
+                    index
+                        .javascript_actions
+                        .insert(format!("{module_name}.{name}"), document.clone());
+                }
+                "Microflows$Nanoflow" => {
+                    index
+                        .nanoflows
+                        .insert(format!("{module_name}.{name}"), document.clone());
+                }
+                "DomainModels$DomainModel" => {
+                    index.index_domain_associations(
+                        module_name,
+                        document,
+                        &entity_qualified_name_by_id,
+                    );
+                }
+                _ => {}
+            }
+        }
+        index
+    }
+
+    fn index_domain_associations(
+        &mut self,
+        module_name: &str,
+        document: &Document,
+        entity_qualified_name_by_id: &HashMap<String, String>,
+    ) {
+        for association in array_docs(document, &["Associations", "associations"]) {
+            let Some(name) = get_str_any(&association, &["Name", "name"]) else {
+                continue;
+            };
+            let parent_id = get_id_any(&association, &["ParentPointer", "ParentID"]);
+            let child_id = get_id_any(&association, &["ChildPointer", "ChildID"]);
+            let reference_set =
+                get_str_any(&association, &["Type", "type"]).as_deref() == Some("ReferenceSet");
+            self.associations.insert(
+                format!("{module_name}.{name}"),
+                AssociationInfo {
+                    parent: parent_id.and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
+                    child: child_id.and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
+                    reference_set,
+                },
+            );
+        }
+        for association in array_docs(document, &["CrossAssociations", "crossAssociations"]) {
+            let Some(name) = get_str_any(&association, &["Name", "name"]) else {
+                continue;
+            };
+            let parent_id = get_id_any(&association, &["ParentPointer", "ParentID"]);
+            let child_name = get_str_any(&association, &["Child", "child"]);
+            let reference_set =
+                get_str_any(&association, &["Type", "type"]).as_deref() == Some("ReferenceSet");
+            self.associations.insert(
+                format!("{module_name}.{name}"),
+                AssociationInfo {
+                    parent: parent_id.and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
+                    child: child_name,
+                    reference_set,
+                },
+            );
+        }
+    }
+
     pub fn build(project: &Project) -> Result<Self, CompilerError> {
         let units = project.all_units()?;
         let parent_by_id: HashMap<String, String> = units

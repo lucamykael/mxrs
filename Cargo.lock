@@ -543,6 +543,7 @@ name = "mxrs-compiler-widgets"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-compiler-flow",
  "mxrs-compiler-support",
  "mxrs-dsl",
  "mxrs-ir",

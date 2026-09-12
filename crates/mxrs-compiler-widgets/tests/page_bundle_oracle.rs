@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use mxrs_compiler_widgets::ProjectPageBundleCompiler;
 use mxrs_model::Project;
@@ -22,8 +23,11 @@ fn audits_page_bundle_coverage_against_a_real_project() {
         return;
     }
 
+    let started = Instant::now();
     let project = Project::open(&path, true).expect("open real project");
     let compiler = ProjectPageBundleCompiler::new(&project).expect("index real project");
+    println!("page bundle oracle indexed in {:?}", started.elapsed());
+    let compilation_started = Instant::now();
     let mut native = BTreeMap::<String, usize>::new();
     let mut custom = BTreeMap::<String, usize>::new();
     let mut pages = 0usize;
@@ -38,6 +42,10 @@ fn audits_page_bundle_coverage_against_a_real_project() {
         }
     }
     println!("page bundle oracle: {pages} pages");
+    println!(
+        "page bundles compiled in {:?}",
+        compilation_started.elapsed()
+    );
     println!("unsupported native kinds: {native:#?}");
     println!("unsupported custom widget ids: {custom:#?}");
     assert!(pages > 0);
