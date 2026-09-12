@@ -7,10 +7,12 @@
 //! top-level doc comment for the alternatives this was weighed against).
 //!
 //! Narrow on purpose: only what's needed to generate a distinct marker type
-//! per module/entity/attribute/association (names, plus an association's
-//! target and type) — no attribute types or microflow bodies yet. Widen
-//! incrementally as `mxrs-dsl` grows a typed surface that actually consumes
-//! more of it.
+//! per module/entity/attribute/association/microflow (names, plus an
+//! association's target and type) — no attribute types or microflow bodies
+//! yet (a microflow's manifest entry is just its name: `MicroflowMarker`
+//! only needs to prove a name exists, not describe what the microflow does).
+//! Widen incrementally as `mxrs-dsl` grows a typed surface that actually
+//! consumes more of it.
 
 use std::path::Path;
 
@@ -23,11 +25,17 @@ pub struct Manifest {
     pub modules: Vec<ModuleManifest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModuleManifest {
     pub name: String,
     #[serde(default)]
     pub entities: Vec<EntityManifest>,
+    /// Microflow names owned by this module. Each generates a marker struct
+    /// implementing `mxrs_ir::MicroflowMarker`, sharing the module's flat
+    /// item namespace with its entities (a microflow named the same as an
+    /// entity in the same module is a [`crate::TypegenError::ModuleItemNameCollision`]).
+    #[serde(default)]
+    pub microflows: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

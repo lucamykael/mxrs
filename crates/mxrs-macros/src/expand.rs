@@ -273,7 +273,7 @@ fn expand_flow_item(
         FlowItem::Delete { variable } => quote! { f.delete_object(&#variable); },
         FlowItem::Commit { variable } => quote! { f.commit(&#variable); },
         FlowItem::Call {
-            name,
+            microflow,
             mappings,
             result_variable,
         } => {
@@ -286,7 +286,12 @@ fn expand_flow_item(
                 None => (quote! { None }, quote! { false }),
             };
             quote! {
-                f.call_microflow(#name, #result_expr, #use_return, vec![#(#mapping_exprs),*]);
+                f.call_microflow(
+                    ::mxrs_ir::MicroflowRef::<#microflow>::new(),
+                    #result_expr,
+                    #use_return,
+                    vec![#(#mapping_exprs),*],
+                );
             }
         }
         FlowItem::If {

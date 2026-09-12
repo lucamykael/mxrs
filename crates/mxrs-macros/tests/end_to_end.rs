@@ -11,13 +11,23 @@ use mxrs_model::Project;
 /// against — same rationale as `mxrs-writer`'s test suite: these tests
 /// don't need a manifest/build.rs, just something implementing
 /// `EntityMarker`. `mxrs-typegen`'s own crate proves the codegen path.
-#[allow(dead_code, non_snake_case)]
+#[allow(dead_code, non_snake_case, non_camel_case_types)]
 mod markers {
     pub mod Sales {
         pub struct Customer;
         impl mxrs_ir::EntityMarker for Customer {
             const MODULE: &'static str = "Sales";
             const NAME: &'static str = "Customer";
+        }
+        pub struct ACT_Notify;
+        impl mxrs_ir::MicroflowMarker for ACT_Notify {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "ACT_Notify";
+        }
+        pub struct ACT_LogFailure;
+        impl mxrs_ir::MicroflowMarker for ACT_LogFailure {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "ACT_LogFailure";
         }
     }
     pub mod CRM {
@@ -257,7 +267,7 @@ fn supports_the_full_widened_microflow_grammar() {
                 };
                 if order.total().gt(0.0) {
                     commit order;
-                    call "Sales.ACT_Notify" (OrderNumber: order.number()) -> notified;
+                    call markers::Sales::ACT_Notify (OrderNumber: order.number()) -> notified;
                 } else {
                     delete order;
                 }
@@ -348,7 +358,7 @@ fn supports_typed_loops_and_a_rescue_branch() {
                 }
                 commit order;
                 rescue {
-                    call "Sales.ACT_LogFailure";
+                    call markers::Sales::ACT_LogFailure;
                 }
                 return order;
             }

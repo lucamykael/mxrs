@@ -17,4 +17,6 @@ pub use declaration::{
     AttributeType, EntityDecl, ModuleDecl, ProjectDecl,
 };
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
-pub use markers::{AssociationMarker, AttributeMarker, EntityMarker, Ref};
+pub use markers::{
+    AssociationMarker, AttributeMarker, EntityMarker, MicroflowMarker, MicroflowRef, Ref,
+};

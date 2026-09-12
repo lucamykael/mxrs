@@ -8,7 +8,9 @@
 use mxrs_dsl::{CallArgument, ProjectBuilder, decimal, integer, string};
 use mxrs_expr::attribute;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
-use mxrs_ir::{AssociationOwner, AssociationStorage, AssociationType, AttributeType, Ref};
+use mxrs_ir::{
+    AssociationOwner, AssociationStorage, AssociationType, AttributeType, MicroflowRef, Ref,
+};
 use mxrs_model::Project;
 use mxrs_model::association::{AssociationType as ModelAssociationType, Owner as ModelOwner};
 use mxrs_model::attribute::AttributeType as ModelAttributeType;
@@ -46,6 +48,11 @@ mod markers {
         }
         impl mxrs_expr::TypedAttributeMarker for Order_Total {
             type Value = mxrs_expr::MxDecimal;
+        }
+        pub struct ACT_Notify;
+        impl mxrs_ir::MicroflowMarker for ACT_Notify {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "ACT_Notify";
         }
     }
     pub mod CRM {
@@ -154,7 +161,7 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
                 |_f| {},
             );
             f.call_microflow(
-                "Sales.ACT_Notify",
+                MicroflowRef::<markers::Sales::ACT_Notify>::new(),
                 None,
                 false,
                 vec![CallArgument::new("Order", order.clone())],

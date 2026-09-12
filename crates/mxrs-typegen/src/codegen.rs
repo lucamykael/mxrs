@@ -1,15 +1,22 @@
 //! Renders a [`Manifest`](crate::manifest::Manifest) into Rust source: one
 //! `pub mod` per Mendix module, one zero-sized `pub struct` per entity
 //! implementing `mxrs_ir::EntityMarker`, one zero-sized `pub struct` per
-//! attribute implementing `mxrs_ir::AttributeMarker<Entity = Entity>`, and
-//! one zero-sized `pub struct` per association implementing
-//! `mxrs_ir::AssociationMarker<From = Entity, To = Target>`. Attribute and
-//! association markers are flat-named `Entity_Name` rather than nested in a
-//! same-named submodule (a type and a module can't share a name) —
-//! `Entity`'s own attribute names and association names share that flat
-//! namespace, so a manifest with e.g. both an attribute and an association
-//! named `Total` on the same entity is a [`TypegenError::MarkerNameCollision`]
-//! at generation time, not a confusing rustc "duplicate definition" error.
+//! attribute implementing `mxrs_ir::AttributeMarker<Entity = Entity>`, one
+//! zero-sized `pub struct` per association implementing
+//! `mxrs_ir::AssociationMarker<From = Entity, To = Target>`, and one
+//! zero-sized `pub struct` per microflow implementing
+//! `mxrs_ir::MicroflowMarker`. Attribute and association markers are
+//! flat-named `Entity_Name` rather than nested in a same-named submodule (a
+//! type and a module can't share a name) — `Entity`'s own attribute names
+//! and association names share that flat namespace, so a manifest with e.g.
+//! both an attribute and an association named `Total` on the same entity is
+//! a [`TypegenError::MarkerNameCollision`] at generation time, not a
+//! confusing rustc "duplicate definition" error. Microflow markers are
+//! module-scoped (not entity-scoped, since a microflow doesn't belong to an
+//! entity) and named verbatim, sharing the module's own flat item namespace
+//! with its entities — a microflow named the same as an entity in the same
+//! module is a [`TypegenError::ModuleItemNameCollision`], for the same
+//! reason.
 //!
 //! An association's target is validated against every entity declared
 //! *anywhere* in the manifest (not just the current module) before any code
@@ -56,10 +63,14 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
         // at a non-crate-root position.
         out.push_str("#[allow(non_camel_case_types, non_snake_case, dead_code)]\n");
         writeln!(out, "pub mod {module_ident} {{").unwrap();
-        let mut seen_entities: HashSet<&str> = HashSet::new();
+        // Entities and microflows are both top-level items in this same
+        // `pub mod`, so their names share one flat namespace — tracked
+        // together the same way attribute/association names share an
+        // entity's flat namespace below.
+        let mut seen_module_items: HashSet<&str> = HashSet::new();
         for entity in &module.entities {
             let entity_ident = valid_ident(&entity.name, "entity name")?;
-            if !seen_entities.insert(entity.name.as_str()) {
+            if !seen_module_items.insert(entity.name.as_str()) {
                 return Err(TypegenError::DuplicateEntity(
                     module.name.clone(),
                     entity.name.clone(),
@@ -113,6 +124,38 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
                     &mut seen_markers,
                 )?;
             }
+        }
+
+        let mut seen_microflows: HashSet<&str> = HashSet::new();
+        for microflow in &module.microflows {
+            let microflow_ident = valid_ident(microflow, "microflow name")?;
+            if !seen_microflows.insert(microflow.as_str()) {
+                return Err(TypegenError::DuplicateMicroflow(
+                    module.name.clone(),
+                    microflow.clone(),
+                ));
+            }
+            if !seen_module_items.insert(microflow.as_str()) {
+                return Err(TypegenError::ModuleItemNameCollision(
+                    module.name.clone(),
+                    microflow.clone(),
+                ));
+            }
+
+            writeln!(out, "    pub struct {microflow_ident};").unwrap();
+            writeln!(
+                out,
+                "    impl mxrs_ir::MicroflowMarker for {microflow_ident} {{"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        const MODULE: &'static str = {:?};",
+                module.name
+            )
+            .unwrap();
+            writeln!(out, "        const NAME: &'static str = {microflow:?};").unwrap();
+            out.push_str("    }\n");
         }
         out.push_str("}\n\n");
     }
@@ -273,6 +316,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                ..Default::default()
             }],
         }
     }
@@ -301,6 +345,7 @@ mod tests {
             modules: vec![ModuleManifest {
                 name: "Sales-Team".into(),
                 entities: vec![],
+                ..Default::default()
             }],
         };
         let err = generate(&manifest).unwrap_err();
@@ -316,10 +361,42 @@ mod tests {
                     name: "type".into(),
                     ..Default::default()
                 }],
+                ..Default::default()
             }],
         };
         let err = generate(&manifest).unwrap_err();
         assert!(matches!(err, TypegenError::InvalidIdentifier(name, _) if name == "type"));
+    }
+
+    #[test]
+    fn generates_a_struct_and_microflow_marker_impl_per_microflow() {
+        let mut manifest = sample();
+        manifest.modules[0].microflows = vec!["ACT_Notify".into()];
+        let out = generate(&manifest).unwrap();
+        assert!(out.contains("pub struct ACT_Notify;"));
+        assert!(out.contains("impl mxrs_ir::MicroflowMarker for ACT_Notify"));
+        assert!(out.contains(r#"const MODULE: &'static str = "Sales";"#));
+        assert!(out.contains(r#"const NAME: &'static str = "ACT_Notify";"#));
+    }
+
+    #[test]
+    fn rejects_a_duplicate_microflow_name_within_a_module() {
+        let mut manifest = sample();
+        manifest.modules[0].microflows = vec!["ACT_Notify".into(), "ACT_Notify".into()];
+        let err = generate(&manifest).unwrap_err();
+        assert!(
+            matches!(err, TypegenError::DuplicateMicroflow(module, name) if module == "Sales" && name == "ACT_Notify")
+        );
+    }
+
+    #[test]
+    fn rejects_a_microflow_name_colliding_with_an_entity_name_in_the_same_module() {
+        let mut manifest = sample();
+        manifest.modules[0].microflows = vec!["Order".into()];
+        let err = generate(&manifest).unwrap_err();
+        assert!(
+            matches!(err, TypegenError::ModuleItemNameCollision(module, name) if module == "Sales" && name == "Order")
+        );
     }
 
     #[test]
@@ -337,6 +414,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                ..Default::default()
             }],
         };
         let err = generate(&manifest).unwrap_err();
@@ -355,6 +433,7 @@ mod tests {
                     attributes: vec!["Number".into(), "Number".into()],
                     ..Default::default()
                 }],
+                ..Default::default()
             }],
         };
         let err = generate(&manifest).unwrap_err();
@@ -385,6 +464,7 @@ mod tests {
                             ..Default::default()
                         },
                     ],
+                    ..Default::default()
                 },
                 ModuleManifest {
                     name: "CRM".into(),
@@ -392,6 +472,7 @@ mod tests {
                         name: "Account".into(),
                         ..Default::default()
                     }],
+                    ..Default::default()
                 },
             ],
         }

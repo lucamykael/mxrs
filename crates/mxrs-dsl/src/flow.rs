@@ -1,6 +1,6 @@
 use mxrs_expr::{Expr, ListVar, MemberAssignment, MxBool, RenderExpr, Var};
 use mxrs_ir::flow::{Activity, MicroflowCallMapping, MicroflowDecl};
-use mxrs_ir::{EntityMarker, Ref};
+use mxrs_ir::{EntityMarker, MicroflowMarker, MicroflowRef, Ref};
 
 pub struct CallArgument {
     parameter: String,
@@ -108,15 +108,15 @@ impl FlowBuilder {
         ListVar::new(variable)
     }
 
-    pub fn call_microflow(
+    pub fn call_microflow<M: MicroflowMarker>(
         &mut self,
-        name: impl Into<String>,
+        target: MicroflowRef<M>,
         result_variable: Option<String>,
         use_return: bool,
         mappings: Vec<CallArgument>,
     ) -> &mut Self {
         self.decl.activities.push(Activity::CallMicroflow {
-            name: name.into(),
+            name: target.qualified_name(),
             result_variable,
             use_return,
             mappings: mappings.into_iter().map(CallArgument::into_ir).collect(),

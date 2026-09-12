@@ -21,7 +21,7 @@
 //! create-list:= "create_list" <ident> "=" <rust-path> ";"
 //! delete     := "delete" <ident> ";"
 //! commit     := "commit" <ident> ";"
-//! call       := "call" <string-lit> ("(" <mapping> ("," <mapping>)* ","? ")")? ("->" <ident>)? ";"
+//! call       := "call" <rust-path> ("(" <mapping> ("," <mapping>)* ","? ")")? ("->" <ident>)? ";"
 //! if         := "if" <expr> "{" <flow-item>* "}" "else" "{" <flow-item>* "}"
 //! for        := "for" <ident> "in" <ident> "{" <flow-item>* "}"
 //! while      := "while" <expr> "{" <flow-item>* "}"
@@ -37,16 +37,22 @@
 //! expressions checked against `mxrs-expr`; raw Mendix expression strings
 //! do not cross this authoring boundary.
 //!
-//! A `call`'s microflow name is a `syn::LitStr`, not a general `Expr` like
-//! the others — deliberately narrower, because the obvious grammar
-//! (`"Sales.ACT_Notify" (...)`) is genuinely ambiguous against Rust's own
-//! call-expression syntax: `Expr::parse` happily parses `<expr> (<args>)`
-//! as a single call expression (a string literal is a valid callee in
-//! Rust's grammar, even though it'd never type-check), and then chokes on
-//! `OrderNumber: <value>` since that's not valid call-argument syntax. A
-//! plain `LitStr` sidesteps the ambiguity entirely, at the cost of one
-//! narrower rule for this one field. A `mapping`'s value is still an
-//! `Expr`, since it's never immediately followed by `(`.
+//! A `call`'s target is a `syn::Path` (e.g. `Sales::ACT_Notify`), marker-
+//! checked the same way `create`/`create_list`'s entity path is — not a
+//! general `Expr` like the others. This is deliberately narrower, because
+//! the obvious grammar (`<expr> (...)`) is genuinely ambiguous against
+//! Rust's own call-expression syntax: `Expr::parse` happily parses
+//! `<expr> (<args>)` as a single call expression, and then chokes on
+//! `OrderNumber: <value>` since that's not valid call-argument syntax.
+//! Parsing a plain `syn::Path` (which never itself consumes a trailing
+//! `(...)`) sidesteps the ambiguity entirely, at the cost of one narrower
+//! rule for this one field — the same reason `create`'s entity path already
+//! had to be `syn::Path`, not `Expr`. A `mapping`'s value is still an
+//! `Expr`, since it's never immediately followed by `(`. Expanded via
+//! `::mxrs_ir::MicroflowRef::<#microflow>::new()`, mirroring `create`'s
+//! `::mxrs_ir::Ref::<#entity>::new()` — a nonexistent/renamed microflow
+//! marker now fails `cargo build`, same guarantee Phase 4 already gives
+//! entity/association references.
 //!
 //! `call`'s `-> <ident>` is deliberately narrower than
 //! `FlowBuilder::call_microflow`'s full signature: presence of `-> var`
@@ -117,7 +123,7 @@ pub enum FlowItem {
         variable: Ident,
     },
     Call {
-        name: LitStr,
+        microflow: syn::Path,
         mappings: Vec<MappingInput>,
         result_variable: Option<Ident>,
     },
@@ -513,7 +519,7 @@ fn validate_loop_control(items: &[FlowItem], inside_loop: bool) -> Result<()> {
 
 fn parse_call(input: ParseStream) -> Result<FlowItem> {
     input.parse::<Ident>()?; // consumes "call"
-    let name: LitStr = input.parse()?;
+    let microflow: syn::Path = input.parse()?;
     let mut mappings = Vec::new();
     if input.peek(syn::token::Paren) {
         let content;
@@ -533,7 +539,7 @@ fn parse_call(input: ParseStream) -> Result<FlowItem> {
     };
     input.parse::<Token![;]>()?;
     Ok(FlowItem::Call {
-        name,
+        microflow,
         mappings,
         result_variable,
     })

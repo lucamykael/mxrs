@@ -40,6 +40,7 @@ fn sample_manifest() -> mxrs_typegen::Manifest {
                     ..Default::default()
                 },
             ],
+            ..Default::default()
         }],
     }
 }

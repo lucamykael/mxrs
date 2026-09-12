@@ -81,6 +81,14 @@ pub enum TypegenError {
     #[error("duplicate association name {0}.{1}.{2:?} in manifest")]
     DuplicateAssociation(String, String, String),
 
+    #[error("duplicate microflow name {0}.{1:?} in manifest")]
+    DuplicateMicroflow(String, String),
+
+    #[error(
+        "module {0} has both an entity and a microflow named {1:?} — the generated marker names would collide"
+    )]
+    ModuleItemNameCollision(String, String),
+
     #[error(
         "association {0}.{1}.{2:?} has unknown type {3:?} (expected \"Reference\" or \"ReferenceSet\")"
     )]
