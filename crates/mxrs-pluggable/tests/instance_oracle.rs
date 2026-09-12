@@ -74,6 +74,7 @@ fn run_against(path: &str, label: &str) {
     let mut full_success = 0usize;
     let mut blocked_by_kind: BTreeMap<String, usize> = BTreeMap::new();
     let mut embedded_decode_failures = 0usize;
+    let mut embedded_failure_details: BTreeMap<String, usize> = BTreeMap::new();
     let mut unexpected_errors = Vec::new();
 
     for (index, instance) in instances.iter().enumerate() {
@@ -102,8 +103,11 @@ fn run_against(path: &str, label: &str) {
             // `mxrs-forms` gap of its own (e.g. an unsupported native
             // widget nested inside it) — a legitimate, separately-named
             // failure mode, not this crate's own gap and not a panic.
-            Err(PluggableError::EmbeddedDecodeFailed { .. }) => {
+            Err(PluggableError::EmbeddedDecodeFailed { path, source }) => {
                 embedded_decode_failures += 1;
+                *embedded_failure_details
+                    .entry(format!("{path}: {source}"))
+                    .or_default() += 1;
             }
             Err(other) => unexpected_errors.push(format!("{item_path}: {other}")),
         }
@@ -121,6 +125,9 @@ fn run_against(path: &str, label: &str) {
     );
     for (kind, count) in &blocked_by_kind {
         println!("[{label}]   blocked by {kind}: {count}");
+    }
+    for (detail, count) in &embedded_failure_details {
+        println!("[{label}]   embedded failure ({count}x): {detail}");
     }
     assert!(
         unexpected_errors.is_empty(),

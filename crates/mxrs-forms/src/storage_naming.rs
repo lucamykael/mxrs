@@ -145,9 +145,9 @@ pub fn storage_type_name(schema_name: &str) -> String {
 }
 
 pub fn schema_type_name(storage_name: &str) -> String {
-    if let Some((schema, _)) = LEGACY_TYPE_ALIASES
+    if let Some((_, schema)) = LEGACY_TYPE_ALIASES
         .iter()
-        .find(|(_, storage)| *storage == storage_name)
+        .find(|(storage, _)| *storage == storage_name)
     {
         return (*schema).to_string();
     }
@@ -202,6 +202,19 @@ mod tests {
 
     #[test]
     fn legacy_type_aliases_only_resolve_in_the_schema_direction() {
-        assert_eq!(schema_type_name("GridXPathSource"), "NewGridDatabaseSource");
+        assert_eq!(
+            schema_type_name("FormForSpecialization"),
+            "PageForSpecialization"
+        );
+        assert_eq!(schema_type_name("NewGridDatabaseSource"), "GridXPathSource");
+        assert_eq!(
+            schema_type_name("NewListViewDatabaseSource"),
+            "ListViewXPathSource"
+        );
+        assert_eq!(
+            schema_type_name("NewSelectorDatabaseSource"),
+            "SelectorXPathSource"
+        );
+        assert_eq!(storage_type_name("GridXPathSource"), "GridXPathSource");
     }
 }
