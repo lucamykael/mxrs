@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use mxrs_bson::{Document, parse_array};
+use mxrs_compiler_support::operation_id;
 
 use crate::{
     ComboBoxBundleCompiler, CompilerError, DataGridBundleCompiler, GalleryBundleCompiler,
@@ -25,24 +26,33 @@ pub struct PageBundle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum UsedBundle {
+    ActionButton,
+    BoundText,
     ComboBox,
+    DataView,
     DataGrid,
+    FormInput,
     Gallery,
     Image,
+    ListView,
+    NativeImage,
+    ReferenceSelector,
     Generic,
 }
 
 #[derive(Default)]
 struct RenderState {
     used: BTreeSet<UsedBundle>,
+    form_widgets: BTreeSet<String>,
     generic_widgets: BTreeMap<String, String>,
     unsupported: BTreeSet<String>,
     unsupported_custom: BTreeSet<String>,
 }
 
-/// Emits Runtime-loadable page and layout modules. Native Forms widgets are
-/// deliberately delegated to a caller-supplied renderer; custom widgets are
-/// dispatched through Data Grid 2, Gallery, Image, Combo Box, then generic.
+/// Emits Runtime-loadable page and layout modules. Native Forms widgets not
+/// handled by the built-in renderer can be delegated to a caller-supplied
+/// renderer; custom widgets are dispatched through specialized bundles, then
+/// the generic compiler.
 pub struct PageBundleCompiler<'a> {
     documents: &'a [(String, Document)],
     project_path: &'a Path,
@@ -67,6 +77,11 @@ impl ProjectPageBundleCompiler {
             .iter()
             .map(|unit| (unit.unit_id.clone(), unit.container_id.clone()))
             .collect::<BTreeMap<_, _>>();
+        let module_by_id = project
+            .modules()?
+            .into_iter()
+            .filter_map(|module| module.name.map(|name| (module.id, name)))
+            .collect::<BTreeMap<_, _>>();
         let parsed = units
             .iter()
             .map(|unit| {
@@ -77,32 +92,11 @@ impl ProjectPageBundleCompiler {
                     .map_err(mxrs_model::ModelError::from)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let module_by_id = parsed
-            .iter()
-            .filter_map(|(unit, document)| {
-                matches!(
-                    document.get_str("$Type").ok(),
-                    Some("Projects$Module" | "Projects$ModuleDocument")
-                )
-                .then(|| {
-                    document
-                        .get_str("Name")
-                        .ok()
-                        .map(|name| (unit.unit_id.clone(), name.to_string()))
-                })
-                .flatten()
-            })
-            .collect::<BTreeMap<_, _>>();
         let documents = parsed
             .into_iter()
             .map(|(unit, document)| {
-                let owner = owning_module(
-                    &unit.unit_id,
-                    &unit.container_id,
-                    &parent_by_id,
-                    &module_by_id,
-                )
-                .unwrap_or_default();
+                let owner = owning_module(&unit.container_id, &parent_by_id, &module_by_id)
+                    .unwrap_or_default();
                 (owner, document)
             })
             .collect();
@@ -308,6 +302,7 @@ impl<'a, 'b> RenderContext<'a, 'b> {
     ) -> Option<String> {
         let type_name = widget.get_str("$Type").ok()?;
         match type_name {
+            "Forms$ActionButton" => Some(self.render_action_button(widget, scope, entity)),
             "Forms$LayoutGrid" => Some(self.render_element(
                 "div",
                 widget,
@@ -362,13 +357,28 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                     "",
                 ))
             }
+            "Forms$DataView" => self.render_data_view(widget, scope, entity),
+            "Forms$DataGrid" => self.render_native_data_grid(widget, scope, entity),
+            "Forms$TextBox" => self.render_text_box(widget, scope, entity),
+            "Forms$TextArea" => self.render_text_area(widget, scope, entity),
+            "Forms$CheckBox" => self.render_simple_input(widget, scope, entity, "CheckBox"),
+            "Forms$DatePicker" => self.render_date_picker(widget, scope, entity),
+            "Forms$DropDown" => self.render_drop_down(widget, scope, entity),
+            "Forms$ListView" => self.render_list_view(widget, scope, entity),
+            "Forms$StaticImageViewer" => self.render_static_image(widget),
+            "Forms$ReferenceSelector" => self.render_reference_selector(widget, scope, entity),
+            "Forms$RadioButtonGroup" => {
+                self.render_simple_input(widget, scope, entity, "RadioButtonGroup")
+            }
             "Forms$DynamicText" | "Forms$Title" => {
                 let template = widget
                     .get_document("Content")
                     .ok()
                     .or_else(|| widget.get_document("CaptionTemplate").ok());
                 if template.is_some_and(|template| !array_docs(template, "Parameters").is_empty()) {
-                    return None;
+                    return (type_name == "Forms$DynamicText")
+                        .then(|| self.render_bound_text(widget, template.expect("checked"), scope))
+                        .flatten();
                 }
                 let tag = text_mode(widget.get_str("RenderMode").unwrap_or(
                     if type_name == "Forms$Title" {
@@ -430,6 +440,1490 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             self.html_props(widget, base_class),
             self.render_widgets(children, scope, entity),
         )
+    }
+
+    fn render_action_button(
+        &self,
+        widget: &Document,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> String {
+        let action = widget.get_document("Action").ok();
+        let action_property = action.and_then(|action| {
+            self.compiler
+                .action_renderer
+                .and_then(|renderer| renderer(action))
+                .or_else(|| {
+                    self.builtin_action_property(widget, action, current_scope, current_entity)
+                })
+        });
+        let caption = client_template_text(widget.get_document("CaptionTemplate").ok());
+        let Some(action_property) = action_property else {
+            let classes = [
+                "btn",
+                "mx-button",
+                button_style(widget).as_str(),
+                css_class(widget).as_str(),
+            ]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+            return format!(
+                "React.createElement(\"button\", {}, {})",
+                js_object(&[
+                    ("key", js_string(&self.widget_key(widget))),
+                    ("type", js_string("button")),
+                    ("className", js_string(&classes)),
+                    ("disabled", "true".to_string()),
+                ]),
+                js_string(&caption),
+            );
+        };
+
+        self.state
+            .borrow_mut()
+            .used
+            .insert(UsedBundle::ActionButton);
+        let key = self.widget_key(widget);
+        let props = js_object(&[
+            ("key", js_string(&key)),
+            ("$widgetId", js_string(&key)),
+            ("buttonId", js_string(&key)),
+            ("class", js_string(&css_class(widget))),
+            (
+                "renderType",
+                js_string(
+                    if widget
+                        .get_str("RenderType")
+                        .unwrap_or_default()
+                        .eq_ignore_ascii_case("link")
+                    {
+                        "link"
+                    } else {
+                        "button"
+                    },
+                ),
+            ),
+            ("buttonClass", js_string(&button_style(widget))),
+            (
+                "tabIndex",
+                widget.get_i32("TabIndex").unwrap_or_default().to_string(),
+            ),
+            (
+                "caption",
+                format!("TextProperty({{ value: {} }})", js_string(&caption)),
+            ),
+            (
+                "tooltip",
+                format!(
+                    "TextProperty({{ value: {} }})",
+                    js_string(&translated_text(widget.get_document("Tooltip").ok()))
+                ),
+            ),
+            ("action", action_property),
+        ]);
+        format!("React.createElement($ActionButton, {props})")
+    }
+
+    fn render_bound_text(
+        &self,
+        widget: &Document,
+        template: &Document,
+        scope: Option<&str>,
+    ) -> Option<String> {
+        let scope = scope?;
+        let values = array_docs(template, "Parameters")
+            .into_iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                let reference = parameter.get_document("AttributeRef").ok()?;
+                let qualified = reference.get_str("Attribute").ok()?;
+                let (entity, attribute) = qualified.rsplit_once('.')?;
+                if !qualified_name_valid(entity) || !identifier(attribute) {
+                    return None;
+                }
+                let path = reference
+                    .get_document("EntityRef")
+                    .ok()
+                    .map(entity_ref_path)
+                    .unwrap_or_default();
+                Some((
+                    format!("value{}", index + 1),
+                    bound_text_attribute_property(scope, entity, attribute, &path),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        self.state.borrow_mut().used.insert(UsedBundle::BoundText);
+        let mut props = vec![
+            ("key".to_string(), js_string(&self.widget_key(widget))),
+            ("$widgetId".to_string(), js_string(&self.widget_key(widget))),
+            ("class".to_string(), js_string(&css_class(widget))),
+            (
+                "renderMode".to_string(),
+                js_string(text_mode(widget.get_str("RenderMode").unwrap_or("Text"))),
+            ),
+            (
+                "template".to_string(),
+                js_string(&client_template_text(Some(template))),
+            ),
+        ];
+        props.extend(values);
+        Some(format!(
+            "React.createElement($MxrbFormattedText, {})",
+            js_object_owned(&props)
+        ))
+    }
+
+    fn render_text_box(
+        &self,
+        widget: &Document,
+        scope: Option<&str>,
+        entity: &str,
+    ) -> Option<String> {
+        let (attribute_entity, attribute) = bound_attribute(widget, scope)?;
+        let key = self.widget_key(widget);
+        let max_length = widget.get_i32("MaxLengthCode").unwrap_or_default();
+        let input = self.render_form_input(
+            "TextBox",
+            widget,
+            scope?,
+            &attribute_entity,
+            &attribute,
+            vec![
+                (
+                    "isPassword",
+                    widget
+                        .get_bool("IsPasswordBox")
+                        .unwrap_or(false)
+                        .to_string(),
+                ),
+                (
+                    "mask",
+                    js_string(widget.get_str("InputMask").unwrap_or_default()),
+                ),
+                ("readOnlyStyle", js_string(&read_only_style(widget))),
+                (
+                    "maxLength",
+                    if max_length > 0 {
+                        max_length.to_string()
+                    } else {
+                        "null".to_string()
+                    },
+                ),
+                ("autocomplete", js_string(&autocomplete_value(widget))),
+                (
+                    "submitWhileEditing",
+                    (widget.get_str("SubmitBehaviour").ok() == Some("OnTyping")).to_string(),
+                ),
+                (
+                    "submitDelay",
+                    widget
+                        .get_i32("SubmitOnInputDelay")
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                ("id", js_string(&key)),
+                (
+                    "ariaRequired",
+                    widget.get_bool("AriaRequired").unwrap_or(false).to_string(),
+                ),
+                (
+                    "tabIndex",
+                    widget.get_i32("TabIndex").unwrap_or_default().to_string(),
+                ),
+                (
+                    "placeholder",
+                    text_property(widget.get_document("PlaceholderTemplate").ok()),
+                ),
+                (
+                    "ariaLabel",
+                    text_property(
+                        widget
+                            .get_document("ScreenReaderLabel")
+                            .ok()
+                            .and_then(|label| label.get_document("Template").ok())
+                            .or_else(|| widget.get_document("ScreenReaderLabel").ok()),
+                    ),
+                ),
+            ],
+        );
+        Some(self.render_form_group(widget, &key, &input, "mx-textbox", entity))
+    }
+
+    fn render_drop_down(
+        &self,
+        widget: &Document,
+        scope: Option<&str>,
+        entity: &str,
+    ) -> Option<String> {
+        let (attribute_entity, attribute) = bound_attribute(widget, scope)?;
+        let key = self.widget_key(widget);
+        let input = self.render_form_input(
+            "EnumSelect",
+            widget,
+            scope?,
+            &attribute_entity,
+            &attribute,
+            vec![
+                ("id", js_string(&key)),
+                ("readOnlyStyle", js_string(&read_only_style(widget))),
+                (
+                    "ariaRequired",
+                    widget.get_bool("AriaRequired").unwrap_or(false).to_string(),
+                ),
+                (
+                    "tabIndex",
+                    widget.get_i32("TabIndex").unwrap_or_default().to_string(),
+                ),
+                (
+                    "emptyOptionCaption",
+                    text_property(widget.get_document("EmptyOptionCaption").ok()),
+                ),
+                (
+                    "ariaLabel",
+                    text_property(
+                        widget
+                            .get_document("ScreenReaderLabel")
+                            .ok()
+                            .and_then(|label| label.get_document("Template").ok())
+                            .or_else(|| widget.get_document("ScreenReaderLabel").ok()),
+                    ),
+                ),
+            ],
+        );
+        Some(self.render_form_group(widget, &key, &input, "mx-dropdown", entity))
+    }
+
+    fn render_list_view(
+        &self,
+        widget: &Document,
+        current_scope: Option<&str>,
+        _current_entity: &str,
+    ) -> Option<String> {
+        let source = crate::WebListDataSource::from_documents(self.compiler.documents, widget);
+        if !source.supported() || !qualified_name_valid(&source.entity) {
+            return None;
+        }
+        let key = self.widget_key(widget);
+        let list_value = if source.xpath() {
+            format!(
+                "DatabaseObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(&key)),
+                    (
+                        "operationId",
+                        js_string(&operation_id(
+                            self.qualified_name,
+                            widget.get_str("Name").unwrap_or_default(),
+                        )),
+                    ),
+                    ("entity", js_string(&source.entity)),
+                    ("sort", "[]".to_string()),
+                ])
+            )
+        } else if source.association() {
+            let scope = current_scope?;
+            format!(
+                "AssociationObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(&key)),
+                    (
+                        "operationId",
+                        js_string(&operation_id(
+                            self.qualified_name,
+                            widget.get_str("Name").unwrap_or_default(),
+                        )),
+                    ),
+                    ("scope", js_string(scope)),
+                    ("directPath", js_string(&source.association_path)),
+                    ("sort", "[]".to_string()),
+                ])
+            )
+        } else if source.microflow() {
+            let settings = widget
+                .get_document("DataSource")
+                .ok()?
+                .get_document("MicroflowSettings")
+                .unwrap_or(widget.get_document("DataSource").ok()?);
+            let arg_map = self.flow_argument_map(
+                settings,
+                &source.microflow_name,
+                current_scope,
+                _current_entity,
+            )?;
+            format!(
+                "MicroflowObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(&key)),
+                    (
+                        "operationId",
+                        js_string(&operation_id(
+                            self.qualified_name,
+                            widget.get_str("Name").unwrap_or_default(),
+                        )),
+                    ),
+                    ("argMap", arg_map),
+                    ("fetchOnlyWithAllParams", "false".to_string()),
+                ])
+            )
+        } else {
+            let reference = self
+                .compiler
+                .nanoflow_renderer
+                .and_then(|renderer| renderer(&source.nanoflow_name))?;
+            format!(
+                "NanoflowObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(&key)),
+                    ("source", format!("{{ nanoflow: {reference} }}")),
+                    ("argMap", "{}".to_string()),
+                    ("fetchOnlyWithAllParams", "false".to_string()),
+                ])
+            )
+        };
+        let content =
+            self.render_widgets(&array_docs(widget, "Widgets"), Some(&key), &source.entity);
+        self.state.borrow_mut().used.insert(UsedBundle::ListView);
+        Some(format!(
+            "React.createElement($ListView, {})",
+            js_object(&[
+                ("key", js_string(&key)),
+                ("$widgetId", js_string(&key)),
+                ("class", js_string(&css_class(widget))),
+                (
+                    "pageSize",
+                    positive_i32(widget.get_i32("PageSize").unwrap_or_default(), 20).to_string(),
+                ),
+                ("listValue", list_value),
+                (
+                    "itemTemplate",
+                    format!(
+                        "TemplatedWidgetProperty({{ children: () => {content}, dataSourceId: {}, editable: {} }})",
+                        js_string(&key),
+                        widget.get_bool("Editable").unwrap_or(false),
+                    ),
+                ),
+            ])
+        ))
+    }
+
+    fn render_native_data_grid(
+        &self,
+        widget: &Document,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        let source = crate::WebListDataSource::from_documents(self.compiler.documents, widget);
+        if !source.supported() || !qualified_name_valid(&source.entity) {
+            return None;
+        }
+        let key = self.widget_key(widget);
+        let list_value =
+            self.native_list_property(widget, &source, &key, current_scope, current_entity)?;
+        let columns = array_docs(widget, "Columns");
+        let headers = columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "React.createElement(\"div\", {}, {})",
+                    js_object(&[
+                        ("key", js_string(&self.widget_key(column))),
+                        (
+                            "className",
+                            js_string(&format!("mx-datagrid-head-cell {}", css_class(column))),
+                        ),
+                    ]),
+                    js_string(&translated_text(column.get_document("Caption").ok())),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cells = columns
+            .iter()
+            .map(|column| {
+                let value = column
+                    .get_document("AttributeRef")
+                    .ok()
+                    .and_then(|reference| {
+                        let qualified = reference.get_str("Attribute").ok()?;
+                        let (entity, attribute) = qualified.rsplit_once('.')?;
+                        let path = reference
+                            .get_document("EntityRef")
+                            .ok()
+                            .map(entity_ref_path)
+                            .unwrap_or_default();
+                        (qualified_name_valid(entity) && identifier(attribute)).then(|| {
+                            format!(
+                                "React.createElement($MxrbAttributeValue, {{ value: {} }})",
+                                bound_text_attribute_property(&key, entity, attribute, &path)
+                            )
+                        })
+                    })
+                    .unwrap_or_else(|| "null".to_string());
+                format!(
+                    "React.createElement(\"div\", {}, {value})",
+                    js_object(&[
+                        ("key", js_string(&self.widget_key(column))),
+                        (
+                            "className",
+                            js_string(&format!("mx-datagrid-cell {}", css_class(column))),
+                        ),
+                    ])
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let row = format!(
+            "React.createElement(\"div\", {{ className: \"mx-datagrid-row\" }}, [{cells}])"
+        );
+        let list = format!(
+            "React.createElement($ListView, {})",
+            js_object(&[
+                ("key", js_string(&key)),
+                ("$widgetId", js_string(&key)),
+                (
+                    "pageSize",
+                    positive_i32(widget.get_i32("NumberOfRows").unwrap_or_default(), 20)
+                        .to_string(),
+                ),
+                ("listValue", list_value),
+                (
+                    "itemTemplate",
+                    format!(
+                        "TemplatedWidgetProperty({{ children: () => {row}, dataSourceId: {}, editable: false }})",
+                        js_string(&key)
+                    ),
+                ),
+            ])
+        );
+        let controls = array_docs(
+            widget.get_document("ControlBar").unwrap_or(widget),
+            "NewButtons",
+        )
+        .iter()
+        .map(|button| self.render_action_button(button, current_scope, current_entity))
+        .collect::<Vec<_>>()
+        .join(", ");
+        self.state.borrow_mut().used.insert(UsedBundle::BoundText);
+        self.state.borrow_mut().used.insert(UsedBundle::ListView);
+        Some(format!(
+            "React.createElement(\"div\", {}, [React.createElement(\"div\", {{ className: \"mx-grid-controlbar\" }}, [{controls}]), React.createElement(\"div\", {{ className: \"mx-datagrid-head\" }}, [{headers}]), {list}])",
+            self.html_props(widget, "mx-datagrid mx-datagrid-legacy")
+        ))
+    }
+
+    fn native_list_property(
+        &self,
+        widget: &Document,
+        source: &crate::WebListDataSource,
+        key: &str,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        if source.xpath() {
+            return Some(format!(
+                "DatabaseObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(key)),
+                    (
+                        "operationId",
+                        js_string(&operation_id(
+                            self.qualified_name,
+                            widget.get_str("Name").unwrap_or_default(),
+                        )),
+                    ),
+                    ("entity", js_string(&source.entity)),
+                    ("sort", "[]".to_string()),
+                ])
+            ));
+        }
+        if source.association() {
+            return Some(format!(
+                "AssociationObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(key)),
+                    (
+                        "operationId",
+                        js_string(&operation_id(
+                            self.qualified_name,
+                            widget.get_str("Name").unwrap_or_default(),
+                        )),
+                    ),
+                    ("scope", js_string(current_scope?)),
+                    ("directPath", js_string(&source.association_path)),
+                    ("sort", "[]".to_string()),
+                ])
+            ));
+        }
+        if source.microflow() {
+            let direct = widget.get_document("DataSource").ok()?;
+            let settings = direct.get_document("MicroflowSettings").unwrap_or(direct);
+            let arg_map = self.flow_argument_map(
+                settings,
+                &source.microflow_name,
+                current_scope,
+                current_entity,
+            )?;
+            return Some(format!(
+                "MicroflowObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(key)),
+                    (
+                        "operationId",
+                        js_string(&operation_id(
+                            self.qualified_name,
+                            widget.get_str("Name").unwrap_or_default(),
+                        )),
+                    ),
+                    ("argMap", arg_map),
+                    ("fetchOnlyWithAllParams", "false".to_string()),
+                ])
+            ));
+        }
+        let reference = self
+            .compiler
+            .nanoflow_renderer
+            .and_then(|renderer| renderer(&source.nanoflow_name))?;
+        Some(format!(
+            "NanoflowObjectListProperty({})",
+            js_object(&[
+                ("dataSourceId", js_string(key)),
+                ("source", format!("{{ nanoflow: {reference} }}")),
+                ("argMap", "{}".to_string()),
+                ("fetchOnlyWithAllParams", "false".to_string()),
+            ])
+        ))
+    }
+
+    fn render_static_image(&self, widget: &Document) -> Option<String> {
+        let reference = widget.get_str("Image").ok()?;
+        let mut parts = reference.splitn(3, '.');
+        let module = parts.next()?;
+        let collection_name = parts.next()?;
+        let image_name = parts.next()?;
+        let collection = self
+            .compiler
+            .documents
+            .iter()
+            .find_map(|(owner, document)| {
+                (owner == module
+                    && document.get_str("$Type").ok() == Some("Images$ImageCollection")
+                    && document.get_str("Name").ok() == Some(collection_name))
+                .then_some(document)
+            })?;
+        let image = array_docs(collection, "Images")
+            .into_iter()
+            .find(|image| image.get_str("Name").ok() == Some(image_name))?;
+        let format = crate::image_format::image_format(&image).ok()?;
+        let uri = format!("img/{module}${collection_name}${image_name}.{format}");
+        let key = self.widget_key(widget);
+        self.state.borrow_mut().used.insert(UsedBundle::NativeImage);
+        Some(format!(
+            "React.createElement($NativeImage, {})",
+            js_object(&[
+                ("key", js_string(&key)),
+                ("$widgetId", js_string(&key)),
+                ("class", js_string(&css_class(widget))),
+                (
+                    "responsive",
+                    widget.get_bool("Responsive").unwrap_or(false).to_string(),
+                ),
+                (
+                    "tabIndex",
+                    widget.get_i32("TabIndex").unwrap_or_default().to_string(),
+                ),
+                (
+                    "source",
+                    format!(
+                        "WebStaticImageProperty({{ image: {{ uri: {} }} }})",
+                        js_string(&uri)
+                    ),
+                ),
+                (
+                    "alternativeText",
+                    text_property(
+                        widget
+                            .get_document("AlternativeText")
+                            .ok()
+                            .and_then(|text| text.get_document("Template").ok())
+                            .or_else(|| widget.get_document("AlternativeText").ok()),
+                    ),
+                ),
+            ])
+        ))
+    }
+
+    fn render_reference_selector(
+        &self,
+        widget: &Document,
+        scope: Option<&str>,
+        source_entity: &str,
+    ) -> Option<String> {
+        let scope = scope?;
+        if !qualified_name_valid(source_entity) {
+            return None;
+        }
+        let reference = widget.get_document("AttributeRef").ok()?;
+        let steps = reference
+            .get_document("EntityRef")
+            .ok()
+            .map(|reference| array_docs(reference, "Steps"))?;
+        let association = steps.last()?;
+        let association_name = association
+            .get_str("Association")
+            .ok()
+            .filter(|name| qualified_name_valid(name))?;
+        let endpoint = association
+            .get_str("DestinationEntity")
+            .ok()
+            .filter(|name| qualified_name_valid(name))?;
+        let caption = reference.get_str("Attribute").ok()?;
+        let (caption_entity, caption_attribute) = caption.rsplit_once('.')?;
+        if !qualified_name_valid(caption_entity) || !identifier(caption_attribute) {
+            return None;
+        }
+        let parent_path = steps[..steps.len() - 1]
+            .iter()
+            .flat_map(|step| {
+                [
+                    step.get_str("Association").ok(),
+                    step.get_str("DestinationEntity").ok(),
+                ]
+            })
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("/");
+        let key = self.widget_key(widget);
+        let data_source_id = format!("{key}$options");
+        let input = format!(
+            "React.createElement($ReferenceSelector, {})",
+            js_object(&[
+                ("key", js_string(&key)),
+                ("$widgetId", js_string(&key)),
+                ("id", js_string(&key)),
+                ("class", js_string(&css_class(widget))),
+                ("readOnlyStyle", js_string(&read_only_style(widget))),
+                (
+                    "tabIndex",
+                    widget.get_i32("TabIndex").unwrap_or_default().to_string(),
+                ),
+                (
+                    "value",
+                    format!(
+                        "AssociationProperty({})",
+                        js_object(&[
+                            ("type", js_string("Reference")),
+                            ("entity", js_string(source_entity)),
+                            ("path", js_string(&parent_path)),
+                            ("attribute", js_string(association_name)),
+                            ("endpointEntity", js_string(endpoint)),
+                            ("selectableObjectsId", js_string(&data_source_id)),
+                            ("scope", js_string(scope)),
+                            ("restrictToDataSource", "false".to_string()),
+                            ("onChange", simple_client_action("doNothing", "false"),),
+                        ])
+                    ),
+                ),
+                (
+                    "valueOptions",
+                    format!(
+                        "DatabaseObjectListProperty({})",
+                        js_object(&[
+                            ("dataSourceId", js_string(&data_source_id)),
+                            ("entity", js_string(endpoint)),
+                            (
+                                "operationId",
+                                js_string(&operation_id(
+                                    self.qualified_name,
+                                    widget.get_str("Name").unwrap_or_default(),
+                                )),
+                            ),
+                            ("sort", "[]".to_string()),
+                        ])
+                    ),
+                ),
+                (
+                    "attribute",
+                    format!(
+                        "ListAttributeProperty({})",
+                        js_object(&[
+                            ("path", js_string("")),
+                            ("entity", js_string(caption_entity)),
+                            ("attribute", js_string(caption_attribute)),
+                            ("attributeType", js_string("String")),
+                            ("sortable", "true".to_string()),
+                            ("filterable", "true".to_string()),
+                            ("dataSourceId", js_string(&data_source_id)),
+                            ("isList", "false".to_string()),
+                        ])
+                    ),
+                ),
+                (
+                    "emptyCaption",
+                    text_property(widget.get_document("EmptyOptionCaption").ok()),
+                ),
+            ])
+        );
+        self.state
+            .borrow_mut()
+            .used
+            .insert(UsedBundle::ReferenceSelector);
+        Some(js_form_group(
+            widget,
+            &key,
+            &input,
+            "mx-referenceselector",
+            &client_template_text(widget.get_document("LabelTemplate").ok()),
+        ))
+    }
+
+    fn render_text_area(
+        &self,
+        widget: &Document,
+        scope: Option<&str>,
+        entity: &str,
+    ) -> Option<String> {
+        let (attribute_entity, attribute) = bound_attribute(widget, scope)?;
+        let key = self.widget_key(widget);
+        let max_length = widget.get_i32("MaxLengthCode").unwrap_or_default();
+        let input = self.render_form_input(
+            "TextArea",
+            widget,
+            scope?,
+            &attribute_entity,
+            &attribute,
+            vec![
+                ("readOnlyStyle", js_string(&read_only_style(widget))),
+                (
+                    "numberOfLines",
+                    positive_i32(widget.get_i32("NumberOfLines").unwrap_or_default(), 5)
+                        .to_string(),
+                ),
+                (
+                    "autoGrow",
+                    widget.get_bool("AutoGrow").unwrap_or(false).to_string(),
+                ),
+                (
+                    "maxLength",
+                    if max_length > 0 {
+                        max_length.to_string()
+                    } else {
+                        "null".to_string()
+                    },
+                ),
+                ("autocomplete", js_string(&autocomplete_value(widget))),
+                (
+                    "submitWhileEditing",
+                    matches!(
+                        widget.get_str("SubmitBehaviour").ok(),
+                        Some("WhileEditing" | "OnTyping")
+                    )
+                    .to_string(),
+                ),
+                (
+                    "submitDelay",
+                    widget
+                        .get_i32("SubmitOnInputDelay")
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                ("id", js_string(&key)),
+                (
+                    "ariaRequired",
+                    widget.get_bool("AriaRequired").unwrap_or(false).to_string(),
+                ),
+                (
+                    "tabIndex",
+                    widget.get_i32("TabIndex").unwrap_or_default().to_string(),
+                ),
+                (
+                    "placeholder",
+                    text_property(widget.get_document("PlaceholderTemplate").ok()),
+                ),
+                (
+                    "textTooLongMessage",
+                    text_property_with_fallback(
+                        widget.get_document("TextTooLongMessage").ok(),
+                        "Text is too long",
+                    ),
+                ),
+                (
+                    "counterMessage",
+                    text_property(widget.get_document("CounterMessage").ok()),
+                ),
+            ],
+        );
+        Some(self.render_form_group(widget, &key, &input, "mx-textarea", entity))
+    }
+
+    fn render_date_picker(
+        &self,
+        widget: &Document,
+        scope: Option<&str>,
+        entity: &str,
+    ) -> Option<String> {
+        let (attribute_entity, attribute) = bound_attribute(widget, scope)?;
+        let key = self.widget_key(widget);
+        let time = widget
+            .get_document("FormattingInfo")
+            .ok()
+            .and_then(|formatting| formatting.get_str("DateFormat").ok())
+            .is_some_and(|format| format.eq_ignore_ascii_case("time"));
+        let formatting = if time {
+            "{ \"timeFormat\": { \"type\": \"time\" } }"
+        } else {
+            "{ \"dateFormat\": { \"type\": \"date\" } }"
+        };
+        let input = self.render_form_input_with_formatting(
+            "DatePicker",
+            widget,
+            scope?,
+            &attribute_entity,
+            &attribute,
+            formatting,
+            vec![
+                ("mode", js_string(if time { "time" } else { "date" })),
+                (
+                    "showCalendarButton",
+                    widget
+                        .get_bool("ShowCalendarButton")
+                        .unwrap_or(true)
+                        .to_string(),
+                ),
+                ("readOnlyStyle", js_string(&read_only_style(widget))),
+                ("id", js_string(&key)),
+                (
+                    "placeholder",
+                    text_property(widget.get_document("PlaceholderTemplate").ok()),
+                ),
+                (
+                    "buttonLabel",
+                    "TextProperty({ value: \"Show date picker\" })".to_string(),
+                ),
+            ],
+        );
+        Some(self.render_form_group(widget, &key, &input, "mx-datepicker", entity))
+    }
+
+    fn render_simple_input(
+        &self,
+        widget: &Document,
+        scope: Option<&str>,
+        entity: &str,
+        component: &str,
+    ) -> Option<String> {
+        let (attribute_entity, attribute) = bound_attribute(widget, scope)?;
+        let key = self.widget_key(widget);
+        let input = self.render_form_input(
+            component,
+            widget,
+            scope?,
+            &attribute_entity,
+            &attribute,
+            vec![
+                ("readOnlyStyle", js_string(&read_only_style(widget))),
+                ("id", js_string(&key)),
+                (
+                    "ariaRequired",
+                    widget.get_bool("AriaRequired").unwrap_or(false).to_string(),
+                ),
+                (
+                    "tabIndex",
+                    widget.get_i32("TabIndex").unwrap_or_default().to_string(),
+                ),
+            ],
+        );
+        Some(self.render_form_group(
+            widget,
+            &key,
+            &input,
+            if component == "CheckBox" {
+                "mx-checkbox"
+            } else {
+                "mx-radiogroup"
+            },
+            entity,
+        ))
+    }
+
+    fn render_form_input(
+        &self,
+        component: &str,
+        widget: &Document,
+        scope: &str,
+        entity: &str,
+        attribute: &str,
+        properties: Vec<(&str, String)>,
+    ) -> String {
+        self.render_form_input_with_formatting(
+            component, widget, scope, entity, attribute, "{}", properties,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_form_input_with_formatting(
+        &self,
+        component: &str,
+        widget: &Document,
+        scope: &str,
+        entity: &str,
+        attribute: &str,
+        formatting: &str,
+        mut properties: Vec<(&str, String)>,
+    ) -> String {
+        let key = self.widget_key(widget);
+        properties.extend([
+            ("key", js_string(&key)),
+            ("$widgetId", js_string(&key)),
+            (
+                if matches!(component, "CheckBox" | "RadioButtonGroup" | "EnumSelect") {
+                    "value"
+                } else {
+                    "inputValue"
+                },
+                attribute_property(widget, scope, entity, attribute, formatting),
+            ),
+        ]);
+        let mut state = self.state.borrow_mut();
+        state.used.insert(UsedBundle::FormInput);
+        state.form_widgets.insert(component.to_string());
+        drop(state);
+        format!(
+            "React.createElement(${component}, {})",
+            js_object(&properties)
+        )
+    }
+
+    fn render_form_group(
+        &self,
+        widget: &Document,
+        key: &str,
+        input: &str,
+        widget_class: &str,
+        _entity: &str,
+    ) -> String {
+        let caption = client_template_text(widget.get_document("LabelTemplate").ok());
+        js_form_group(widget, key, input, widget_class, &caption)
+    }
+
+    fn builtin_action_property(
+        &self,
+        widget: &Document,
+        action: &Document,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        let disabled = action
+            .get_bool("DisabledDuringExecution")
+            .unwrap_or(true)
+            .to_string();
+        let action_payload = match action.get_str("$Type").ok()? {
+            "Forms$SaveChangesClientAction"
+            | "Forms$CancelChangesClientAction"
+            | "Forms$DeleteClientAction" => {
+                let scope = current_scope?;
+                let kind = match action.get_str("$Type").ok()? {
+                    "Forms$SaveChangesClientAction" => "saveChanges",
+                    "Forms$CancelChangesClientAction" => "cancelChanges",
+                    _ => "deleteObject",
+                };
+                let arg_map = if kind == "cancelChanges" {
+                    "{}".to_string()
+                } else {
+                    js_object(&[(
+                        "$object",
+                        js_object(&[
+                            ("widget", js_string(scope)),
+                            ("source", js_string("object")),
+                        ]),
+                    )])
+                };
+                js_object(&[
+                    ("type", js_string(kind)),
+                    ("argMap", arg_map),
+                    (
+                        "config",
+                        js_object(&[
+                            (
+                                "operationId",
+                                js_string(&operation_id(
+                                    self.qualified_name,
+                                    widget.get_str("Name").unwrap_or_default(),
+                                )),
+                            ),
+                            (
+                                "closePage",
+                                action.get_bool("ClosePage").unwrap_or(true).to_string(),
+                            ),
+                        ]),
+                    ),
+                    ("disabledDuringExecution", disabled),
+                ])
+            }
+            "Forms$ClosePageClientAction" => simple_client_action("closePage", &disabled),
+            "Forms$SignOutClientAction" => js_object(&[
+                ("type", js_string("signOut")),
+                ("argMap", "{}".to_string()),
+                ("config", js_object(&[("namedUser", "true".to_string())])),
+                ("disabledDuringExecution", disabled),
+            ]),
+            "Forms$OpenLinkClientAction" => {
+                let address = action.get_document("Address").ok()?;
+                if address.get_bool("IsDynamic").unwrap_or(false) {
+                    return None;
+                }
+                js_object(&[
+                    ("type", js_string("openLink")),
+                    ("argMap", "{}".to_string()),
+                    (
+                        "config",
+                        js_object(&[
+                            (
+                                "schema",
+                                js_string(
+                                    &action
+                                        .get_str("LinkType")
+                                        .unwrap_or_default()
+                                        .to_ascii_lowercase(),
+                                ),
+                            ),
+                            (
+                                "address",
+                                js_string(address.get_str("Value").unwrap_or_default()),
+                            ),
+                        ]),
+                    ),
+                    ("disabledDuringExecution", disabled),
+                ])
+            }
+            "Forms$FormAction" => {
+                let settings = action.get_document("FormSettings").ok()?;
+                let form = settings
+                    .get_str("Form")
+                    .ok()
+                    .filter(|name| qualified_name_valid(name))?;
+                if !array_docs(settings, "ParameterMappings").is_empty() {
+                    return None;
+                }
+                js_object(&[
+                    ("type", js_string("openPage")),
+                    ("argMap", "{}".to_string()),
+                    (
+                        "config",
+                        js_object(&[
+                            (
+                                "name",
+                                js_string(&format!("{}.page.xml", form.replace('.', "/"))),
+                            ),
+                            ("location", js_string("content")),
+                            ("allowedRoles", "[]".to_string()),
+                        ]),
+                    ),
+                    ("disabledDuringExecution", disabled),
+                ])
+            }
+            "Forms$MicroflowAction" => {
+                let settings = action.get_document("MicroflowSettings").ok()?;
+                let name = settings
+                    .get_str("Microflow")
+                    .ok()
+                    .filter(|name| qualified_name_valid(name))?;
+                let arg_map =
+                    self.flow_argument_map(settings, name, current_scope, current_entity)?;
+                js_object(&[
+                    ("type", js_string("callMicroflow")),
+                    ("argMap", arg_map),
+                    (
+                        "config",
+                        js_object(&[(
+                            "operationId",
+                            js_string(&operation_id(
+                                self.qualified_name,
+                                widget.get_str("Name").unwrap_or_default(),
+                            )),
+                        )]),
+                    ),
+                    ("disabledDuringExecution", disabled),
+                ])
+            }
+            _ => return None,
+        };
+        Some(format!(
+            "ActionProperty({})",
+            js_object(&[
+                ("action", action_payload),
+                ("abortOnServerValidation", "true".to_string()),
+            ])
+        ))
+    }
+
+    fn render_data_view(
+        &self,
+        widget: &Document,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        let scope = self.widget_key(widget);
+        let source = widget.get_document("DataSource").ok()?;
+        let object =
+            self.data_view_object_property(widget, source, &scope, current_scope, current_entity)?;
+        let entity = self.data_view_entity(source);
+        let body = self.render_widgets(&array_docs(widget, "Widgets"), Some(&scope), &entity);
+        let footer =
+            self.render_widgets(&array_docs(widget, "FooterWidgets"), Some(&scope), &entity);
+        self.state.borrow_mut().used.insert(UsedBundle::DataView);
+        let props = js_object(&[
+            ("key", js_string(&scope)),
+            ("$widgetId", js_string(&scope)),
+            ("class", js_string(&css_class(widget))),
+            ("body", body),
+            ("footer", footer),
+            (
+                "hideFooter",
+                (!widget.get_bool("ShowFooter").unwrap_or(true)).to_string(),
+            ),
+            ("object", object),
+            (
+                "emptyMessage",
+                format!(
+                    "TextProperty({{ value: {} }})",
+                    js_string(&translated_text(
+                        widget.get_document("NoEntityMessage").ok()
+                    ))
+                ),
+            ),
+        ]);
+        Some(format!("React.createElement($DataView, {props})"))
+    }
+
+    fn data_view_object_property(
+        &self,
+        widget: &Document,
+        source: &Document,
+        data_view_scope: &str,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        match source.get_str("$Type").ok()? {
+            "Forms$ListenTargetSource" => self.listen_object_property(widget, source),
+            "Forms$MicroflowSource" => self.microflow_object_property(
+                widget,
+                source,
+                data_view_scope,
+                current_scope,
+                current_entity,
+            ),
+            "Forms$NanoflowSource" => {
+                self.nanoflow_object_property(source, data_view_scope, current_scope)
+            }
+            _ => {
+                let path = source
+                    .get_document("EntityRef")
+                    .ok()
+                    .map(entity_ref_path)
+                    .unwrap_or_default();
+                if let Some(source_scope) = source_variable_scope(
+                    source.get_document("SourceVariable").ok(),
+                    self.current_document(),
+                ) {
+                    if path.is_empty() {
+                        return Some(association_object_property(&source_scope, "", None));
+                    }
+                    return Some(association_object_property(
+                        &source_scope,
+                        &path,
+                        Some(operation_id(
+                            self.qualified_name,
+                            widget.get_str("Name").unwrap_or_default(),
+                        )),
+                    ));
+                }
+                if source
+                    .get_document("SourceVariable")
+                    .ok()
+                    .and_then(|variable| variable.get_str("SnippetParameter").ok())
+                    .is_some_and(identifier)
+                    && let Some(scope) = current_scope
+                {
+                    return Some(association_object_property(
+                        scope,
+                        &path,
+                        (!path.is_empty()).then(|| {
+                            operation_id(
+                                self.qualified_name,
+                                widget.get_str("Name").unwrap_or_default(),
+                            )
+                        }),
+                    ));
+                }
+                current_scope.filter(|_| !path.is_empty()).map(|scope| {
+                    association_object_property(
+                        scope,
+                        &path,
+                        Some(operation_id(
+                            self.qualified_name,
+                            widget.get_str("Name").unwrap_or_default(),
+                        )),
+                    )
+                })
+            }
+        }
+    }
+
+    fn listen_object_property(&self, widget: &Document, source: &Document) -> Option<String> {
+        let target_name = source
+            .get_str("ListenTarget")
+            .ok()
+            .filter(|name| identifier(name))?;
+        let target = self
+            .current_document()
+            .and_then(|document| find_widget(document, target_name))?;
+        Some(format!(
+            "ListenObjectProperty({})",
+            js_object(&[
+                ("listenTo", js_string(&self.widget_key(target))),
+                ("editable", "true".to_string()),
+                (
+                    "operationId",
+                    js_string(&operation_id(
+                        self.qualified_name,
+                        widget.get_str("Name").unwrap_or_default(),
+                    )),
+                ),
+            ])
+        ))
+    }
+
+    fn microflow_object_property(
+        &self,
+        widget: &Document,
+        source: &Document,
+        data_view_scope: &str,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        let settings = source.get_document("MicroflowSettings").unwrap_or(source);
+        let name = settings
+            .get_str("Microflow")
+            .ok()
+            .filter(|name| qualified_name_valid(name))?;
+        let arg_map = self.flow_argument_map(settings, name, current_scope, current_entity)?;
+        Some(format!(
+            "MicroflowObjectProperty({})",
+            js_object(&[
+                ("dataSourceId", js_string(data_view_scope)),
+                (
+                    "operationId",
+                    js_string(&operation_id(
+                        self.qualified_name,
+                        widget.get_str("Name").unwrap_or_default(),
+                    )),
+                ),
+                ("editable", "true".to_string()),
+                ("argMap", arg_map),
+            ])
+        ))
+    }
+
+    fn nanoflow_object_property(
+        &self,
+        source: &Document,
+        data_view_scope: &str,
+        current_scope: Option<&str>,
+    ) -> Option<String> {
+        let name = source
+            .get_str("Nanoflow")
+            .ok()
+            .filter(|name| qualified_name_valid(name))?;
+        let reference = self
+            .compiler
+            .nanoflow_renderer
+            .and_then(|renderer| renderer(name))?;
+        let arg_map = self.explicit_argument_map(source, current_scope)?;
+        Some(format!(
+            "NanoflowObjectProperty({})",
+            js_object(&[
+                ("dataSourceId", js_string(data_view_scope)),
+                ("editable", "true".to_string()),
+                ("source", format!("{{ nanoflow: {reference} }}"),),
+                ("argMap", arg_map),
+            ])
+        ))
+    }
+
+    fn flow_argument_map(
+        &self,
+        settings: &Document,
+        flow_name: &str,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        let mappings = array_docs(settings, "ParameterMappings");
+        if !mappings.is_empty() {
+            return self.explicit_argument_map(settings, current_scope);
+        }
+        let Some(scope) = current_scope.filter(|_| identifier(current_entity)) else {
+            return Some("{}".to_string());
+        };
+        let flow = self.qualified_document("Microflows$Microflow", flow_name)?;
+        let entries = flow
+            .get_document("ObjectCollection")
+            .ok()
+            .map(|collection| array_docs(collection, "Objects"))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|object| {
+                object.get_str("$Type").ok() == Some("Microflows$MicroflowParameter")
+                    && object
+                        .get_document("VariableType")
+                        .ok()
+                        .and_then(|type_| type_.get_str("Entity").ok())
+                        == Some(current_entity)
+            })
+            .filter_map(|parameter| {
+                parameter
+                    .get_str("Name")
+                    .ok()
+                    .filter(|name| identifier(name))
+                    .map(|name| {
+                        (
+                            name.to_string(),
+                            js_object(&[
+                                ("widget", js_string(scope)),
+                                ("source", js_string("object")),
+                            ]),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        Some(js_object_owned(&entries))
+    }
+
+    fn explicit_argument_map(
+        &self,
+        settings: &Document,
+        current_scope: Option<&str>,
+    ) -> Option<String> {
+        let entries = array_docs(settings, "ParameterMappings")
+            .into_iter()
+            .map(|mapping| {
+                let name = mapping.get_str("Parameter").ok()?.rsplit('.').next()?;
+                if !identifier(name) {
+                    return None;
+                }
+                let expression = mapping.get_str("Expression").unwrap_or_default();
+                let scope = if expression == "$currentObject" {
+                    current_scope.map(str::to_string)
+                } else if expression.is_empty() {
+                    source_variable_scope(
+                        mapping.get_document("Variable").ok(),
+                        self.current_document(),
+                    )
+                } else if expression.starts_with('$') {
+                    Some(expression.to_string())
+                } else {
+                    None
+                }?;
+                Some((
+                    name.to_string(),
+                    js_object(&[
+                        ("widget", js_string(&scope)),
+                        ("source", js_string("object")),
+                    ]),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(js_object_owned(&entries))
+    }
+
+    fn data_view_entity(&self, source: &Document) -> String {
+        if source.get_str("$Type").ok() == Some("Forms$ListenTargetSource") {
+            return source
+                .get_str("ListenTarget")
+                .ok()
+                .and_then(|name| {
+                    self.current_document()
+                        .and_then(|page| find_widget(page, name))
+                })
+                .map(|target| {
+                    crate::WebListDataSource::from_documents(self.compiler.documents, target).entity
+                })
+                .unwrap_or_default();
+        }
+        let direct = source
+            .get_document("EntityRef")
+            .ok()
+            .and_then(entity_ref_destination);
+        if let Some(entity) = direct.filter(|entity| !entity.is_empty()) {
+            return entity;
+        }
+        if let Some(parameter) = source
+            .get_document("SourceVariable")
+            .ok()
+            .and_then(|variable| variable.get_str("PageParameter").ok())
+            .filter(|name| identifier(name))
+            && let Some(entity) = self.current_document().and_then(|document| {
+                array_docs(document, "Parameters")
+                    .into_iter()
+                    .find(|candidate| candidate.get_str("Name").ok() == Some(parameter))
+                    .and_then(|candidate| {
+                        candidate
+                            .get_document("ParameterType")
+                            .ok()
+                            .and_then(|type_| type_.get_str("Entity").ok().map(str::to_string))
+                    })
+            })
+        {
+            return entity;
+        }
+        let flow_name = match source.get_str("$Type").ok() {
+            Some("Forms$MicroflowSource") => source
+                .get_document("MicroflowSettings")
+                .unwrap_or(source)
+                .get_str("Microflow")
+                .ok(),
+            Some("Forms$NanoflowSource") => source.get_str("Nanoflow").ok(),
+            _ => None,
+        };
+        flow_name
+            .and_then(|name| {
+                self.qualified_document(
+                    if source.get_str("$Type").ok() == Some("Forms$NanoflowSource") {
+                        "Microflows$Nanoflow"
+                    } else {
+                        "Microflows$Microflow"
+                    },
+                    name,
+                )
+            })
+            .and_then(|flow| flow.get_document("MicroflowReturnType").ok())
+            .and_then(|return_type| return_type.get_str("Entity").ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn current_document(&self) -> Option<&Document> {
+        let (module, name) = self.qualified_name.rsplit_once('.')?;
+        self.compiler
+            .documents
+            .iter()
+            .find_map(|(owner, document)| {
+                (owner == module && document.get_str("Name").ok() == Some(name)).then_some(document)
+            })
+    }
+
+    fn qualified_document(&self, type_name: &str, qualified_name: &str) -> Option<&Document> {
+        self.compiler
+            .documents
+            .iter()
+            .find_map(|(module, document)| {
+                (document.get_str("$Type").ok() == Some(type_name)
+                    && format!("{module}.{}", document.get_str("Name").unwrap_or_default())
+                        == qualified_name)
+                    .then_some(document)
+            })
     }
 
     fn html_props(&self, widget: &Document, base_class: &str) -> String {
@@ -713,6 +2207,96 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             );
             widgets.insert("Datagrid".to_string());
         }
+        if state.used.contains(&UsedBundle::ActionButton) {
+            add_property_imports(&mut imports, &["ActionProperty", "TextProperty"]);
+            imports.insert(
+                "import { ActionButton } from \"mendix/widgets/web/ActionButton\";".to_string(),
+            );
+            widgets.insert("ActionButton".to_string());
+        }
+        if state.used.contains(&UsedBundle::BoundText) {
+            add_property_imports(&mut imports, &["AttributeProperty"]);
+            imports.insert(
+                "const MxrbFormattedText = ({ template, renderMode, class: className, ...props }) => React.createElement(renderMode, { className }, Object.keys(props).filter(key => /^value\\d+$/.test(key)).sort((left, right) => Number(left.slice(5)) - Number(right.slice(5))).reduce((text, key, index) => text.split(`{${index + 1}}`).join(props[key]?.displayValue ?? \" \"), template));".to_string(),
+            );
+            imports.insert("MxrbFormattedText.displayName = \"MxrbFormattedText\";".to_string());
+            imports.insert(
+                "const MxrbAttributeValue = ({ value }) => value?.displayValue ?? \"\";"
+                    .to_string(),
+            );
+            imports.insert("MxrbAttributeValue.displayName = \"MxrbAttributeValue\";".to_string());
+            widgets.insert("MxrbAttributeValue".to_string());
+            widgets.insert("MxrbFormattedText".to_string());
+        }
+        if state.used.contains(&UsedBundle::FormInput) {
+            add_property_imports(
+                &mut imports,
+                &["ActionProperty", "AttributeProperty", "TextProperty"],
+            );
+            imports
+                .insert("import { FormGroup } from \"mendix/widgets/web/FormGroup\";".to_string());
+            widgets.insert("FormGroup".to_string());
+            for component in &state.form_widgets {
+                imports.insert(format!(
+                    "import {{ {component} }} from \"mendix/widgets/web/{component}\";"
+                ));
+                widgets.insert(component.clone());
+            }
+        }
+        if state.used.contains(&UsedBundle::ListView) {
+            add_property_imports(
+                &mut imports,
+                &[
+                    "AssociationObjectListProperty",
+                    "DatabaseObjectListProperty",
+                    "MicroflowObjectListProperty",
+                    "NanoflowObjectListProperty",
+                    "TemplatedWidgetProperty",
+                ],
+            );
+            imports.insert("import { ListView } from \"mendix/widgets/web/ListView\";".to_string());
+            widgets.insert("ListView".to_string());
+        }
+        if state.used.contains(&UsedBundle::NativeImage) {
+            add_property_imports(&mut imports, &["TextProperty", "WebStaticImageProperty"]);
+            imports.insert(
+                "import { Image as NativeImage } from \"mendix/widgets/web/Image\";".to_string(),
+            );
+            widgets.insert("NativeImage".to_string());
+        }
+        if state.used.contains(&UsedBundle::ReferenceSelector) {
+            add_property_imports(
+                &mut imports,
+                &[
+                    "AssociationProperty",
+                    "DatabaseObjectListProperty",
+                    "ListAttributeProperty",
+                    "TextProperty",
+                ],
+            );
+            imports
+                .insert("import { FormGroup } from \"mendix/widgets/web/FormGroup\";".to_string());
+            imports.insert(
+                "import { ReferenceSelector } from \"mendix/widgets/web/ReferenceSelector\";"
+                    .to_string(),
+            );
+            widgets.insert("FormGroup".to_string());
+            widgets.insert("ReferenceSelector".to_string());
+        }
+        if state.used.contains(&UsedBundle::DataView) {
+            add_property_imports(
+                &mut imports,
+                &[
+                    "AssociationObjectProperty",
+                    "ListenObjectProperty",
+                    "MicroflowObjectProperty",
+                    "NanoflowObjectProperty",
+                    "TextProperty",
+                ],
+            );
+            imports.insert("import { DataView } from \"mendix/widgets/web/DataView\";".to_string());
+            widgets.insert("DataView".to_string());
+        }
         if state.used.contains(&UsedBundle::Gallery) {
             add_property_imports(
                 &mut imports,
@@ -827,14 +2411,10 @@ fn add_property_imports(imports: &mut BTreeSet<String>, names: &[&str]) {
 }
 
 fn owning_module(
-    unit_id: &str,
     container_id: &str,
     parent_by_id: &BTreeMap<String, String>,
     module_by_id: &BTreeMap<String, String>,
 ) -> Option<String> {
-    if let Some(module) = module_by_id.get(unit_id) {
-        return Some(module.clone());
-    }
     let mut current = container_id;
     let mut seen = BTreeSet::new();
     while seen.insert(current.to_string()) {
@@ -923,6 +2503,259 @@ fn grid_weight_class(size: &str, weight: i32) -> String {
     } else {
         String::new()
     }
+}
+
+fn button_style(widget: &Document) -> String {
+    let style = widget
+        .get_str("ButtonStyle")
+        .unwrap_or("default")
+        .to_ascii_lowercase();
+    format!("btn-{}", if style.is_empty() { "default" } else { &style })
+}
+
+fn bound_attribute(widget: &Document, scope: Option<&str>) -> Option<(String, String)> {
+    let attribute = widget
+        .get_document("AttributeRef")
+        .ok()?
+        .get_str("Attribute")
+        .ok()?;
+    let (entity, name) = attribute.rsplit_once('.')?;
+    (scope.is_some() && qualified_name_valid(entity) && identifier(name))
+        .then(|| (entity.to_string(), name.to_string()))
+}
+
+fn read_only_style(widget: &Document) -> String {
+    match widget
+        .get_str("ReadOnlyStyle")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "control" => "control".to_string(),
+        _ => "text".to_string(),
+    }
+}
+
+fn autocomplete_value(widget: &Document) -> String {
+    if !widget.get_bool("Autocomplete").unwrap_or(true) {
+        return "off".to_string();
+    }
+    let purpose = widget.get_str("AutocompletePurpose").unwrap_or("On");
+    if purpose.eq_ignore_ascii_case("on") || purpose.eq_ignore_ascii_case("off") {
+        return purpose.to_ascii_lowercase();
+    }
+    let mut result = String::new();
+    for character in purpose.chars() {
+        if character.is_ascii_uppercase() && !result.is_empty() {
+            result.push('-');
+        }
+        result.push(character.to_ascii_lowercase());
+    }
+    result
+}
+
+fn attribute_property(
+    widget: &Document,
+    scope: &str,
+    entity: &str,
+    attribute: &str,
+    formatting: &str,
+) -> String {
+    let editable = match widget.get_str("Editable").ok() {
+        Some("Never") => js_object(&[
+            (
+                "expr",
+                js_object(&[
+                    ("type", js_string("literal")),
+                    ("value", "false".to_string()),
+                ]),
+            ),
+            ("args", "{}".to_string()),
+        ]),
+        _ => "null".to_string(),
+    };
+    format!(
+        "AttributeProperty({})",
+        js_object(&[
+            ("scope", js_string(scope)),
+            ("path", js_string("")),
+            ("entity", js_string(entity)),
+            ("attribute", js_string(attribute)),
+            (
+                "onChange",
+                js_object(&[
+                    ("type", js_string("doNothing")),
+                    ("argMap", "{}".to_string()),
+                    ("config", "{}".to_string()),
+                    ("disabledDuringExecution", "false".to_string()),
+                ]),
+            ),
+            ("isList", "false".to_string()),
+            ("validation", "null".to_string()),
+            ("formatting", formatting.to_string()),
+            ("isEditable", editable),
+        ])
+    )
+}
+
+fn bound_text_attribute_property(scope: &str, entity: &str, attribute: &str, path: &str) -> String {
+    format!(
+        "AttributeProperty({})",
+        js_object(&[
+            ("scope", js_string(scope)),
+            ("path", js_string(path)),
+            ("entity", js_string(entity)),
+            ("attribute", js_string(attribute)),
+            (
+                "onChange",
+                js_object(&[
+                    ("type", js_string("doNothing")),
+                    ("argMap", "{}".to_string()),
+                    ("config", "{}".to_string()),
+                    ("disabledDuringExecution", "false".to_string()),
+                ]),
+            ),
+            ("isList", "false".to_string()),
+            ("validation", "null".to_string()),
+            ("formatting", "{}".to_string()),
+        ])
+    )
+}
+
+fn text_property(text: Option<&Document>) -> String {
+    text_property_with_fallback(text, "")
+}
+
+fn text_property_with_fallback(text: Option<&Document>, fallback: &str) -> String {
+    let mut value = text
+        .map(|text| client_template_text(Some(text)))
+        .unwrap_or_default();
+    if value.is_empty() {
+        value = fallback.to_string();
+    }
+    format!("TextProperty({{ value: {} }})", js_string(&value))
+}
+
+fn js_form_group(
+    widget: &Document,
+    key: &str,
+    input: &str,
+    widget_class: &str,
+    caption: &str,
+) -> String {
+    format!(
+        "React.createElement($FormGroup, {})",
+        js_object(&[
+            ("key", js_string(&format!("{key}$formGroup"))),
+            ("$widgetId", js_string(&format!("{key}$formGroup"))),
+            (
+                "class",
+                js_string(&format!(
+                    "mx-name-{} {widget_class}",
+                    widget.get_str("Name").unwrap_or_default()
+                )),
+            ),
+            ("control", format!("[{input}]")),
+            ("width", "3".to_string()),
+            ("orientation", js_string("horizontal")),
+            ("labelFor", js_string(key)),
+            (
+                "caption",
+                format!("TextProperty({{ value: {} }})", js_string(caption)),
+            ),
+            ("hasError", "TextProperty({ value: false })".to_string()),
+        ])
+    )
+}
+
+fn positive_i32(value: i32, fallback: i32) -> i32 {
+    if value > 0 { value } else { fallback }
+}
+
+fn simple_client_action(kind: &str, disabled: &str) -> String {
+    js_object(&[
+        ("type", js_string(kind)),
+        ("argMap", "{}".to_string()),
+        ("config", "{}".to_string()),
+        ("disabledDuringExecution", disabled.to_string()),
+    ])
+}
+
+fn association_object_property(scope: &str, path: &str, operation: Option<String>) -> String {
+    let mut values = vec![
+        ("scope".to_string(), js_string(scope)),
+        ("path".to_string(), js_string(path)),
+        ("editable".to_string(), "true".to_string()),
+    ];
+    if let Some(operation) = operation {
+        values.push(("operationId".to_string(), js_string(&operation)));
+    }
+    format!("AssociationObjectProperty({})", js_object_owned(&values))
+}
+
+fn source_variable_scope(
+    variable: Option<&Document>,
+    _current_document: Option<&Document>,
+) -> Option<String> {
+    let variable = variable?;
+    if let Some(parameter) = variable
+        .get_str("PageParameter")
+        .ok()
+        .filter(|name| identifier(name))
+    {
+        return Some(format!("${parameter}"));
+    }
+    variable
+        .get_str("LocalVariable")
+        .ok()
+        .filter(|name| identifier(name))
+        .map(|name| format!("${name}"))
+}
+
+fn entity_ref_destination(reference: &Document) -> Option<String> {
+    array_docs(reference, "Steps")
+        .last()
+        .and_then(|step| step.get_str("DestinationEntity").ok())
+        .filter(|entity| !entity.is_empty())
+        .or_else(|| {
+            reference
+                .get_str("Entity")
+                .ok()
+                .filter(|entity| !entity.is_empty())
+        })
+        .map(str::to_string)
+}
+
+fn entity_ref_path(reference: &Document) -> String {
+    array_docs(reference, "Steps")
+        .iter()
+        .flat_map(|step| {
+            [
+                step.get_str("Association").ok(),
+                step.get_str("DestinationEntity").ok(),
+            ]
+        })
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn find_widget<'a>(document: &'a Document, name: &str) -> Option<&'a Document> {
+    if document.get_str("$Type").ok().is_some_and(|type_name| {
+        type_name.starts_with("Forms$") || type_name.starts_with("CustomWidgets$")
+    }) && document.get_str("Name").ok() == Some(name)
+    {
+        return Some(document);
+    }
+    document.values().find_map(|value| match value {
+        mxrs_bson::Bson::Document(child) => find_widget(child, name),
+        mxrs_bson::Bson::Array(children) => children.iter().find_map(|child| match child {
+            mxrs_bson::Bson::Document(child) => find_widget(child, name),
+            _ => None,
+        }),
+        _ => None,
+    })
 }
 
 fn array_docs(document: &Document, field: &str) -> Vec<Document> {
@@ -1176,6 +3009,60 @@ mod tests {
             "mx-name-body card",
             "React.createElement(\"p\"",
             "Hello",
+        ] {
+            assert!(bundle.source.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn renders_data_view_bound_input_and_data_action() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("App.mpr");
+        let text_box = doc! {
+            "$Type": "Forms$TextBox",
+            "Name": "customerName",
+            "AttributeRef": { "Attribute": "Demo.Order.CustomerName" },
+            "LabelTemplate": { "Template": { "Items": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                "LanguageCode": "en_US", "Text": "Customer",
+            })], 3) } },
+            "PlaceholderTemplate": { "Template": { "Items": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                "LanguageCode": "en_US", "Text": "Enter a name",
+            })], 3) } },
+        };
+        let save = doc! {
+            "$Type": "Forms$ActionButton",
+            "Name": "save",
+            "Action": { "$Type": "Forms$SaveChangesClientAction", "ClosePage": true },
+            "CaptionTemplate": { "Template": { "Items": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                "LanguageCode": "en_US", "Text": "Save",
+            })], 3) } },
+        };
+        let data_view = doc! {
+            "$Type": "Forms$DataView",
+            "Name": "orderView",
+            "DataSource": {
+                "$Type": "Forms$DataViewSource",
+                "EntityRef": { "Entity": "Demo.Order" },
+                "SourceVariable": { "PageParameter": "Order" },
+            },
+            "Widgets": mxrs_bson::build_array(vec![Bson::Document(text_box), Bson::Document(save)], 2),
+            "FooterWidgets": mxrs_bson::build_array(Vec::new(), 2),
+        };
+        let documents = Vec::new();
+        let bundle = PageBundleCompiler::new(&documents, &project)
+            .compile_page("Demo", &page(vec![data_view]))
+            .unwrap();
+        assert!(bundle.unsupported_widgets.is_empty());
+        for expected in [
+            "React.createElement($DataView",
+            "AssociationObjectProperty",
+            "React.createElement($TextBox",
+            "AttributeProperty",
+            "React.createElement($FormGroup",
+            "React.createElement($ActionButton",
+            "saveChanges",
+            "Customer",
+            "Enter a name",
         ] {
             assert!(bundle.source.contains(expected), "missing {expected}");
         }
