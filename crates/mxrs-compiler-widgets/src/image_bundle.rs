@@ -272,16 +272,26 @@ impl<'a> ImageBundleCompiler<'a> {
 
     fn icon_property(&self) -> Option<String> {
         let icon = self.value("imageIcon")?.get_document("Icon").ok()?;
-        if icon.get_str("$Type").ok() != Some("Forms$ImageIcon") {
-            return None;
-        }
-        let uri = self.image_uri_for(icon.get_str("Image").ok()?)?;
+        let value = match icon.get_str("$Type").ok()? {
+            "Forms$ImageIcon" => js_object(&[
+                ("type", js_string("image")),
+                (
+                    "iconUrl",
+                    js_string(&self.image_uri_for(icon.get_str("Image").ok()?)?),
+                ),
+            ]),
+            "Forms$GlyphIcon" => js_object(&[
+                ("type", js_string("glyph")),
+                (
+                    "iconClass",
+                    js_string(glyph_icon_class(icon.get_i32("Code").ok()?)?),
+                ),
+            ]),
+            _ => return None,
+        };
         Some(format!(
             "WebIconProperty({})",
-            js_object(&[(
-                "icon",
-                js_object(&[("type", js_string("image")), ("iconUrl", js_string(&uri)),]),
-            )])
+            js_object(&[("icon", value)])
         ))
     }
 
@@ -447,6 +457,13 @@ fn translated_text(template: Option<&Document>) -> String {
         .to_string()
 }
 
+fn glyph_icon_class(code: i32) -> Option<&'static str> {
+    match code {
+        57478 => Some("glyphicon-info-sign"),
+        _ => None,
+    }
+}
+
 fn expression(value: &str) -> String {
     format!(
         "ExpressionProperty({})",
@@ -584,14 +601,14 @@ mod tests {
                 })], 2),
             },
         )];
-        let widget = widget(vec![
+        let image_widget = widget(vec![
             property("source", doc! { "PrimitiveValue": "image" }),
             property("object", doc! { "Image": "Demo.Brand.Logo" }),
             property("url", template("", Vec::new())),
             property("alt", template("Company", Vec::new())),
             property("responsive", doc! { "PrimitiveValue": "true" }),
         ]);
-        let compiler = ImageBundleCompiler::new(&documents, "Demo.Home", &widget);
+        let compiler = ImageBundleCompiler::new(&documents, "Demo.Home", &image_widget);
         assert!(compiler.supported());
         let rendered = compiler.render();
         for expected in [
@@ -667,7 +684,7 @@ mod tests {
                 })], 2),
             },
         )];
-        let widget = widget(vec![
+        let image_widget = widget(vec![
             property("source", doc! { "PrimitiveValue": "icon" }),
             property(
                 "icon",
@@ -676,12 +693,27 @@ mod tests {
             property("url", template("", Vec::new())),
             property("alt", template("User", Vec::new())),
         ]);
-        let compiler = ImageBundleCompiler::new(&documents, "Demo.Home", &widget);
+        let compiler = ImageBundleCompiler::new(&documents, "Demo.Home", &image_widget);
 
         assert!(compiler.supported());
         let rendered = compiler.render();
         assert!(rendered.contains("WebIconProperty"));
         assert!(rendered.contains("img/Demo$Icons$User.svg"));
         assert!(rendered.contains("\"type\": \"image\""));
+
+        let glyph = widget(vec![
+            property("source", doc! { "PrimitiveValue": "icon" }),
+            property(
+                "icon",
+                doc! { "Icon": { "$Type": "Forms$GlyphIcon", "Code": 57478 } },
+            ),
+            property("url", template("", Vec::new())),
+            property("alt", template("Information", Vec::new())),
+        ]);
+        let compiler = ImageBundleCompiler::new(&documents, "Demo.Home", &glyph);
+        assert!(compiler.supported());
+        let rendered = compiler.render();
+        assert!(rendered.contains("glyphicon-info-sign"));
+        assert!(rendered.contains("\"type\": \"glyph\""));
     }
 }

@@ -404,6 +404,9 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         scope: Option<&str>,
         entity: &str,
     ) -> Option<String> {
+        let (resolved_scope, resolved_entity) = self.widget_context(widget, scope, entity);
+        let scope = resolved_scope.as_deref();
+        let entity = resolved_entity.as_str();
         let type_name = widget.get_str("$Type").ok()?;
         match type_name {
             "Forms$ActionButton" => Some(self.render_action_button(widget, scope, entity)),
@@ -2442,6 +2445,53 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             })
     }
 
+    fn widget_context(
+        &self,
+        widget: &Document,
+        inherited_scope: Option<&str>,
+        inherited_entity: &str,
+    ) -> (Option<String>, String) {
+        let variable = widget
+            .get_document("SourceVariable")
+            .ok()
+            .or_else(|| {
+                widget
+                    .get_document("DataSource")
+                    .ok()
+                    .and_then(|source| source.get_document("SourceVariable").ok())
+            })
+            .or_else(|| custom_widget_source_variable(widget));
+        let explicit_scope =
+            source_variable_scope(variable, self.current_document()).or_else(|| {
+                variable
+                    .and_then(|variable| variable.get_str("Widget").ok())
+                    .filter(|name| identifier(name))
+                    .map(|name| format!("{}.{}.{}", self.key_prefix, self.qualified_name, name))
+            });
+        let parameter = variable
+            .and_then(|variable| variable.get_str("PageParameter").ok())
+            .filter(|name| identifier(name));
+        let explicit_entity = parameter.and_then(|name| self.page_parameter_entity(name));
+        (
+            explicit_scope.or_else(|| inherited_scope.map(str::to_string)),
+            explicit_entity.unwrap_or_else(|| inherited_entity.to_string()),
+        )
+    }
+
+    fn page_parameter_entity(&self, name: &str) -> Option<String> {
+        array_docs(self.current_document()?, "Parameters")
+            .into_iter()
+            .find(|parameter| parameter.get_str("Name").ok() == Some(name))
+            .and_then(|parameter| {
+                parameter
+                    .get_document("ParameterType")
+                    .ok()
+                    .and_then(|type_| type_.get_str("Entity").ok())
+                    .filter(|entity| qualified_name_valid(entity))
+                    .map(str::to_string)
+            })
+    }
+
     fn qualified_document(&self, type_name: &str, qualified_name: &str) -> Option<&Document> {
         self.compiler
             .documents
@@ -2585,6 +2635,9 @@ impl<'a, 'b> RenderContext<'a, 'b> {
     }
 
     fn render_custom_widget(&self, widget: &Document, scope: Option<&str>, entity: &str) -> String {
+        let (resolved_scope, resolved_entity) = self.widget_context(widget, scope, entity);
+        let scope = resolved_scope.as_deref();
+        let entity = resolved_entity.as_str();
         let nested = |widgets: &[Document], nested_scope: &str, nested_entity: &str| {
             self.render_widgets(widgets, Some(nested_scope), nested_entity)
         };
@@ -3332,6 +3385,24 @@ fn source_variable_scope(
         .map(|name| format!("${name}"))
 }
 
+fn custom_widget_source_variable(widget: &Document) -> Option<&Document> {
+    let object = widget.get_document("Object").ok()?;
+    object
+        .get_array("Properties")
+        .ok()?
+        .iter()
+        .filter_map(|property| property.as_document())
+        .filter_map(|property| property.get_document("Value").ok())
+        .find_map(|value| {
+            value.get_document("SourceVariable").ok().or_else(|| {
+                value
+                    .get_document("DataSource")
+                    .ok()
+                    .and_then(|source| source.get_document("SourceVariable").ok())
+            })
+        })
+}
+
 fn entity_ref_destination(reference: &Document) -> Option<String> {
     array_docs(reference, "Steps")
         .last()
@@ -3799,5 +3870,39 @@ mod tests {
         ] {
             assert!(bundle.source.contains(expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn resolves_explicit_page_parameter_context_for_top_level_widgets() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("App.mpr");
+        let source_variable = doc! { "$Type": "Forms$PageVariable", "PageParameter": "Order" };
+        let text_box = doc! {
+            "$Type": "Forms$TextBox",
+            "Name": "customerName",
+            "SourceVariable": source_variable.clone(),
+            "AttributeRef": { "Attribute": "Demo.Order.CustomerName" },
+        };
+        let list = doc! {
+            "$Type": "Forms$ListView",
+            "Name": "lines",
+            "DataSource": {
+                "$Type": "Forms$AssociationSource",
+                "SourceVariable": source_variable,
+                "EntityRef": { "Steps": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "Association": "Demo.Order_Lines",
+                    "DestinationEntity": "Demo.Line",
+                })], 2) },
+            },
+            "Widgets": mxrs_bson::build_array(Vec::new(), 2),
+        };
+        let documents = Vec::new();
+        let bundle = PageBundleCompiler::new(&documents, &project)
+            .compile_page("Demo", &page(vec![text_box, list]))
+            .unwrap();
+
+        assert!(bundle.unsupported_widgets.is_empty());
+        assert!(bundle.source.contains("\"scope\": \"$Order\""));
+        assert!(bundle.source.contains("Demo.Order_Lines/Demo.Line"));
     }
 }

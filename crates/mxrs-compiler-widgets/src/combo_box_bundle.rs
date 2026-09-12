@@ -397,8 +397,9 @@ impl<'a> ComboBoxBundleCompiler<'a> {
     }
 
     fn page_parameter(&self) -> Option<&str> {
-        self.value("databaseAttributeString")
-            .and_then(|value| value.get_document("SourceVariable").ok())
+        self.values
+            .iter()
+            .find_map(|property| property.value.get_document("SourceVariable").ok())
             .and_then(|source| source.get_str("PageParameter").ok())
             .filter(|name| !name.is_empty())
     }
