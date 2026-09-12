@@ -39,9 +39,9 @@ pub enum Value {
     /// A decoded `CustomWidgets$CustomWidget` (Data Grid 2/Gallery/
     /// ComboBox and any third-party pluggable widget) — not a [`Node`]
     /// because pluggable widgets aren't part of this crate's fixed
-    /// `Catalog` schema; see `mxrs-pluggable` for why. Decode-only for now
-    /// (`mxrs-pluggable::encode_object`/`encode_value` aren't ported yet).
-    Pluggable(mxrs_pluggable::ObjectNode<Node>),
+    /// `Catalog` schema; see `mxrs-pluggable` for why. Its inline schema is
+    /// retained, so this variant supports both decode and encode.
+    Pluggable(Box<mxrs_pluggable::WidgetNode<Node>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,6 +191,12 @@ impl Node {
         if property.is_reference() {
             return self.normalize_reference(property, value);
         }
+        // Custom widgets are storage-level implementations of the
+        // abstract Forms `Widget` type, but they intentionally have no
+        // entry in the fixed native Forms catalog.
+        if property.type_name == "Widget" && matches!(value, Value::Pluggable(_)) {
+            return Ok(value);
+        }
         if let Some(target) = self.catalog.type_(&property.type_name) {
             if target.is_enum() {
                 return self.normalize_enum(target, value);
@@ -314,6 +320,33 @@ mod tests {
     fn new_rejects_enum_types() {
         let result = Node::new("Autofocus", catalog());
         assert!(matches!(result, Err(FormsError::TypeIsEnum { .. })));
+    }
+
+    #[test]
+    fn widget_property_accepts_a_pluggable_widget() {
+        let widget_type = mxrs_pluggable::WidgetType {
+            id: "test.empty".to_string(),
+            name: "Empty".to_string(),
+            description: String::new(),
+            prompt: String::new(),
+            studio_pro_category: String::new(),
+            studio_category: String::new(),
+            platform: "Web".to_string(),
+            offline: false,
+            needs_context: false,
+            plugin: false,
+            help_url: String::new(),
+            object_type: mxrs_pluggable::ObjectType::default(),
+        };
+        let custom = Value::Pluggable(Box::new(mxrs_pluggable::WidgetNode::new(
+            widget_type,
+            mxrs_pluggable::ObjectNode::new(),
+        )));
+        let mut column = Node::new("LayoutGridColumn", catalog()).unwrap();
+
+        column
+            .set("widgets", Value::List(vec![custom]))
+            .expect("abstract Widget property accepts CustomWidgets storage node");
     }
 
     #[test]

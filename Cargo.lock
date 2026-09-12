@@ -697,6 +697,7 @@ dependencies = [
  "mxrs-forms-refs",
  "mxrs-mpr",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

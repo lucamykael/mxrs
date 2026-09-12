@@ -1,27 +1,45 @@
-//! Decoded *instance* of a pluggable widget's `Object` (its assigned
-//! property values), keyed against the [`crate::catalog::ObjectType`]
-//! schema already decoded for it. Ports the read side of
-//! `Mxrb::Pluggable::ObjectNode` from `lib/mxrb/pluggable/node.rb` —
+//! Typed instance of a pluggable widget: its inline schema, outer storage
+//! baseline, assigned object, and every property-value shape. Ports
+//! `Mxrb::Pluggable::{Node,ObjectNode}` from `lib/mxrb/pluggable/node.rb` —
 //! deliberately not the `method_missing`-based Ruby ergonomics on top of
 //! it (`mxrs-dsl`'s job, same boundary `mxrs-forms`'s own `Node` already
 //! draws).
-//!
-//! See [`crate::mpr_codec`]'s module doc for exactly which
-//! [`Value`] kinds this can decode today and which still need
-//! `mxrs-forms` to expose more of its private codec surface first.
 
 use crate::catalog::PropertyType;
+use crate::catalog::WidgetType;
 
-/// A decoded pluggable-widget property value. Every variant here is
-/// self-contained (needs only this crate + `mxrs-bson`) — kinds whose
-/// mxrb behavior delegates to `Forms::MprCodec`'s *private* helpers
-/// (`Attribute`, `Entity`, an `Association` routed through `EntityRef`,
-/// `TextTemplate`, `Action`, `Icon`, a `DataSource` beyond a bare source
-/// variable, or a `Widgets` child that isn't itself a nested
-/// `CustomWidgets$CustomWidget`) are not represented here — decoding one
-/// returns [`crate::error::PluggableError::NeedsFormsIntegration`]
-/// instead of a value, per this workspace's rule that an unported gap
-/// must fail loudly, never guess or silently drop data.
+/// A complete custom-widget instance: its inline schema and assigned
+/// object. Keeping both is essential for encoding because every stored
+/// property/value points back into that inline schema by generated UUID.
+#[derive(Debug, Clone)]
+pub struct WidgetNode<N> {
+    pub widget_type: WidgetType,
+    pub object: ObjectNode<N>,
+    /// Original outer storage document, when this node was decoded from
+    /// BSON. The encoder uses it to preserve outer properties and the
+    /// exact inline-schema identity expected by Studio Pro.
+    pub storage_baseline: Option<mxrs_bson::Document>,
+}
+
+impl<N> WidgetNode<N> {
+    pub fn new(widget_type: WidgetType, object: ObjectNode<N>) -> Self {
+        Self {
+            widget_type,
+            object,
+            storage_baseline: None,
+        }
+    }
+}
+
+impl<N: PartialEq> PartialEq for WidgetNode<N> {
+    fn eq(&self, other: &Self) -> bool {
+        self.widget_type == other.widget_type && self.object == other.object
+    }
+}
+
+/// A decoded pluggable-widget property value. Self-contained kinds live
+/// directly in this enum; kinds containing native Forms nodes use the
+/// generic `N` supplied through the embedded codec traits.
 /// The polymorphic `target` a semantic [`Value::Reference`] wraps —
 /// mirrors `Pluggable.reference(kind, target)`'s duck-typed `target` in
 /// mxrb: a bare storage path for `File`/`Form`/`Image`/`Microflow`/
@@ -102,9 +120,8 @@ pub enum Value<N> {
     DataSource(Option<DataSourceValue<N>>),
     /// A `Widgets`-kind value — one [`WidgetItem`] per entry, mirroring
     /// mxrb's `decode_widgets`: a `CustomWidgets$CustomWidget` item
-    /// recurses into this crate's own `decode_widget_type`/`decode_object`
-    /// (discarding the nested widget's own schema/outer-properties, same
-    /// as `mxrs-forms::decode_pluggable` does for the top-level case); any
+    /// recurses into this crate's own complete widget codec, retaining the
+    /// nested schema and outer storage baseline; any
     /// other item routes through the injected `EmbeddedFormsDecoder`
     /// (mxrb's `forms_codec.decode_embedded`).
     Widgets(Vec<WidgetItem<N>>),
@@ -138,8 +155,9 @@ pub struct DataSource<N> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WidgetItem<N> {
     /// A nested `CustomWidgets$CustomWidget` item, decoded via this
-    /// crate's own schema/object decode (mxrb's `decode(item)` branch).
-    Pluggable(ObjectNode<N>),
+    /// crate's own schema/object decode (mxrb's `decode(item)` branch),
+    /// retaining the nested schema for encoding.
+    Pluggable(Box<WidgetNode<N>>),
     /// Any other (native Forms) item, decoded via the injected
     /// `EmbeddedFormsDecoder` (mxrb's `forms_codec.decode_embedded`
     /// branch).

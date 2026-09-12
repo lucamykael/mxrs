@@ -72,11 +72,12 @@ pub enum FormsError {
         source: mxrs_pluggable::PluggableError,
     },
 
-    #[error(
-        "encoding a custom (pluggable) widget is not supported yet (mxrs-pluggable's encode \
-         side isn't ported): {path}"
-    )]
-    PluggableEncodeNotSupported { path: String },
+    #[error("custom (pluggable) widget at {path} could not be encoded: {source}")]
+    PluggableEncodeFailed {
+        path: String,
+        #[source]
+        source: mxrs_pluggable::PluggableError,
+    },
 
     #[error("{0}")]
     Other(String),

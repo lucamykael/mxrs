@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Schema model and BSON schema decode for Mendix pluggable (CustomWidgets) widgets. Ports the schema half of lib/mxrb/pluggable/{catalog,mpr_codec}.rb from mxrb."
+description = "Typed model and bidirectional BSON codec for Mendix pluggable (CustomWidgets) widgets."
 
 [lints]
 workspace = true
@@ -14,6 +14,7 @@ workspace = true
 mxrs-bson = { path = "../mxrs-bson" }
 mxrs-forms-refs = { path = "../mxrs-forms-refs" }
 thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # Dev-only, test-scoped: safe despite mxrs-forms depending on this crate

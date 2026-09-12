@@ -23,11 +23,7 @@ pub enum PluggableError {
     #[error("unresolved widget property pointer at {path}")]
     UnresolvedPropertyPointer { path: String },
 
-    #[error(
-        "value kind {kind:?} at {path} needs mxrs-forms to expose more of its private codec \
-         surface first (see mxrs-pluggable::mpr_codec's module doc) — not a silent gap, a known \
-         follow-up"
-    )]
+    #[error("value kind {kind:?} at {path} is not supported by this codec version")]
     NeedsFormsIntegration { kind: String, path: String },
 
     #[error("invalid {kind} value {value:?} at {path}: {source}")]
@@ -51,6 +47,19 @@ pub enum PluggableError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+
+    #[error("embedded Forms element encode failed at {path}: {source}")]
+    EmbeddedEncodeFailed {
+        path: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    #[error("value at {path} does not match pluggable value kind {kind:?}")]
+    ValueKindMismatch { kind: String, path: String },
+
+    #[error("missing generated schema pointer for {item} at {path}")]
+    MissingSchemaPointer { item: &'static str, path: String },
 
     #[error("expected an embedded Forms element document at {path}, got a non-document value")]
     ExpectedEmbeddedDocument { path: String },

@@ -9,22 +9,17 @@
 //!     --test instance_oracle -- --ignored --nocapture
 //! ```
 //!
-//! Unlike `schema_oracle.rs`, this one does **not** assert zero errors —
-//! `mpr_codec`'s module doc already documents, with real numbers, that a
-//! whole-instance decode of a real Data Grid 2/Gallery/ComboBox still
-//! usually needs kinds `mxrs-forms` doesn't expose yet
-//! (`PluggableError::NeedsFormsIntegration`). What this test asserts
-//! instead: every failure is *that specific, named* error — never a
-//! panic, never a silently-wrong value — and it reports the exact
-//! kind/success breakdown so the numbers in that doc comment stay honest
-//! as the codebase changes.
+//! Unlike `schema_oracle.rs`, this one does **not** assert zero decode
+//! errors: a pluggable value can contain a native Forms element whose own
+//! type is not implemented yet. Every successfully decoded widget is also
+//! encoded and decoded again, and the test asserts semantic equality.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use mxrs_bson::{Bson, Document};
 use mxrs_mpr::MprFile;
-use mxrs_pluggable::{PluggableError, decode_object, decode_widget_type};
+use mxrs_pluggable::{PluggableError, decode_widget, encode_widget};
 
 fn collect_widget_instances(mpr: &MprFile) -> Vec<Document> {
     fn visit(value: &Bson, found: &mut Vec<Document>) {
@@ -83,30 +78,23 @@ fn run_against(path: &str, label: &str) {
 
     for (index, instance) in instances.iter().enumerate() {
         let item_path = format!("$[{index}]");
-        let Ok(type_document) = instance.get_document("Type") else {
-            unexpected_errors.push(format!("{item_path}: missing Type document"));
-            continue;
-        };
-        let Ok((widget_type, context)) =
-            decode_widget_type(type_document, &format!("{item_path}.Type"))
-        else {
-            // Already covered exhaustively by schema_oracle.rs (asserts
-            // zero schema errors) — a schema failure here would mean the
-            // two oracles disagree, worth its own unexpected-error bucket.
-            unexpected_errors.push(format!("{item_path}: schema decode failed unexpectedly"));
-            continue;
-        };
-        let Ok(object_document) = instance.get_document("Object") else {
-            unexpected_errors.push(format!("{item_path}: missing Object document"));
-            continue;
-        };
-        match decode_object(
-            object_document,
-            &context,
-            &format!("{item_path}.Object"),
-            &forms_codec,
-        ) {
-            Ok(_) => full_success += 1,
+        match decode_widget(instance, &item_path, &forms_codec) {
+            Ok(widget) => {
+                full_success += 1;
+                match encode_widget(&widget, &item_path, &forms_codec)
+                    .and_then(|encoded| decode_widget(&encoded, &item_path, &forms_codec))
+                {
+                    Ok(round_tripped) if round_tripped == widget => {}
+                    Ok(_) => unexpected_errors.push(format!(
+                        "{item_path} ({}): semantic value changed after encode/decode",
+                        widget.widget_type.id
+                    )),
+                    Err(error) => unexpected_errors.push(format!(
+                        "{item_path} ({}): round-trip failed: {error}",
+                        widget.widget_type.id
+                    )),
+                }
+            }
             Err(PluggableError::NeedsFormsIntegration { kind, .. }) => {
                 *blocked_by_kind.entry(kind).or_default() += 1;
             }
@@ -117,9 +105,7 @@ fn run_against(path: &str, label: &str) {
             Err(PluggableError::EmbeddedDecodeFailed { .. }) => {
                 embedded_decode_failures += 1;
             }
-            Err(other) => {
-                unexpected_errors.push(format!("{item_path} ({}): {other}", widget_type.id))
-            }
+            Err(other) => unexpected_errors.push(format!("{item_path}: {other}")),
         }
     }
 

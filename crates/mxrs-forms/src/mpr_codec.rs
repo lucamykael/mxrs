@@ -46,13 +46,10 @@
 //! inversion seam that lets `mxrs-pluggable` decode a `TextTemplate`/
 //! `Action`/`Icon` value's embedded Forms element without this crate
 //! depending back on it (mirroring mxrb's `Pluggable::MprCodec`
-//! constructor taking a `forms_codec:` callback). Still explicitly
-//! erroring rather than silently dropping data: (a) the remaining
-//! non-self-contained slices of `DataSource`/`Widgets` in
-//! `mxrs-pluggable` (see that crate's module doc — mechanical follow-up,
-//! same seam, not a new blocker), and (b) encoding a `Value::Pluggable`
-//! back to BSON at all (`mxrs-pluggable::encode_object`/`encode_value`
-//! aren't ported yet).
+//! constructor taking a `forms_codec:` callback). The symmetric
+//! `EmbeddedFormsEncoder` implementation closes the same cycle on write;
+//! `Value::Pluggable` now round-trips schema, object, every value kind,
+//! nested custom widgets, and native Forms children.
 //!
 //! Deliberately **not** ported:
 //! - The `OBSOLETE_DEFAULT_FIELDS` shim and the legacy attribute-path/
@@ -248,29 +245,11 @@ impl MprCodec {
         document: &Document,
         path: &str,
         local_references: &HashMap<String, String>,
-    ) -> Result<mxrs_pluggable::ObjectNode<Node>> {
+    ) -> Result<mxrs_pluggable::WidgetNode<Node>> {
         let wrap = |source| FormsError::PluggableDecodeFailed {
             path: path.to_string(),
             source,
         };
-        let type_path = format!("{path}.Type");
-        let type_document =
-            document
-                .get_document("Type")
-                .map_err(|_| FormsError::InvalidShape {
-                    shape: "CustomWidgets$CustomWidget.Type",
-                    path: path.to_string(),
-                })?;
-        let (_widget_type, context) =
-            mxrs_pluggable::decode_widget_type(type_document, &type_path).map_err(wrap)?;
-        let object_path = format!("{path}.Object");
-        let object_document =
-            document
-                .get_document("Object")
-                .map_err(|_| FormsError::InvalidShape {
-                    shape: "CustomWidgets$CustomWidget.Object",
-                    path: path.to_string(),
-                })?;
         // Nested pluggable values share the root document's semantic
         // reference maps (same comment mxrb's own `decode_embedded` makes)
         // — this hook closes over the *caller's* `local_references` rather
@@ -281,8 +260,7 @@ impl MprCodec {
             codec: self,
             local_references,
         };
-        mxrs_pluggable::decode_object(object_document, &context, &object_path, &embedded)
-            .map_err(wrap)
+        mxrs_pluggable::decode_widget(document, path, &embedded).map_err(wrap)
     }
 
     fn decode_property(
@@ -349,6 +327,7 @@ impl MprCodec {
                 if doc.get_str("$Type").ok() == Some("CustomWidgets$CustomWidget") {
                     return self
                         .decode_pluggable(doc, path, local_references)
+                        .map(Box::new)
                         .map(Value::Pluggable);
                 }
                 return Ok(Value::Node(self.decode_node(
@@ -785,9 +764,18 @@ impl MprCodec {
             Value::List(_) => Err(FormsError::Other(format!(
                 "unexpected nested list at {path}"
             ))),
-            Value::Pluggable(_) => Err(FormsError::PluggableEncodeNotSupported {
-                path: path.to_string(),
-            }),
+            Value::Pluggable(widget) => {
+                let embedded = EmbeddedEncoder {
+                    codec: self,
+                    local_references,
+                };
+                mxrs_pluggable::encode_widget(widget, path, &embedded)
+                    .map(Bson::Document)
+                    .map_err(|source| FormsError::PluggableEncodeFailed {
+                        path: path.to_string(),
+                        source,
+                    })
+            }
         }
     }
 
@@ -892,6 +880,33 @@ impl mxrs_pluggable::EmbeddedFormsDecoder for MprCodec {
     }
 }
 
+/// Encoder-side equivalent of [`EmbeddedDecoder`], sharing the root's
+/// precomputed local-reference map across native nodes nested in a custom
+/// widget.
+struct EmbeddedEncoder<'a> {
+    codec: &'a MprCodec,
+    local_references: &'a HashMap<String, String>,
+}
+
+impl mxrs_pluggable::EmbeddedFormsEncoder for EmbeddedEncoder<'_> {
+    type Node = Node;
+    type Error = FormsError;
+
+    fn encode_embedded(&self, node: &Node, path: &str) -> Result<Document> {
+        self.codec.encode_node(node, path, self.local_references)
+    }
+}
+
+impl mxrs_pluggable::EmbeddedFormsEncoder for MprCodec {
+    type Node = Node;
+    type Error = FormsError;
+
+    fn encode_embedded(&self, node: &Node, path: &str) -> Result<Document> {
+        let local_references = self.collect_local_reference_names(node);
+        self.encode_node(node, path, &local_references)
+    }
+}
+
 fn walk_nodes(node: &Node, visit: &mut impl FnMut(&Node)) {
     visit(node);
     for assignment in node.assignments() {
@@ -905,6 +920,51 @@ fn walk_value(value: &Value, visit: &mut impl FnMut(&Node)) {
         Value::List(items) => {
             for item in items {
                 walk_value(item, visit);
+            }
+        }
+        Value::Pluggable(widget) => walk_pluggable_object(&widget.object, visit),
+        _ => {}
+    }
+}
+
+fn walk_pluggable_object(object: &mxrs_pluggable::ObjectNode<Node>, visit: &mut impl FnMut(&Node)) {
+    for assignment in object.assignments() {
+        walk_pluggable_value(&assignment.value, visit);
+    }
+}
+
+fn walk_pluggable_value(value: &mxrs_pluggable::Value<Node>, visit: &mut impl FnMut(&Node)) {
+    use mxrs_pluggable::{DataSourceValue, Value as PluggableValue, WidgetItem};
+
+    match value {
+        PluggableValue::TextTemplate(node)
+        | PluggableValue::Action(node)
+        | PluggableValue::Icon(node) => walk_nodes(node, visit),
+        PluggableValue::DataSource(Some(DataSourceValue::Embedded(node))) => {
+            walk_nodes(node, visit);
+        }
+        PluggableValue::DataSource(Some(DataSourceValue::XPath(source))) => {
+            if let Some(node) = &source.sort_bar {
+                walk_nodes(node, visit);
+            }
+            if let Some(node) = &source.source_variable {
+                walk_nodes(node, visit);
+            }
+        }
+        PluggableValue::Object(Some(object)) => walk_pluggable_object(object, visit),
+        PluggableValue::ObjectList(objects) => {
+            for object in objects {
+                walk_pluggable_object(object, visit);
+            }
+        }
+        PluggableValue::Widgets(widgets) => {
+            for widget in widgets {
+                match widget {
+                    WidgetItem::Pluggable(widget) => {
+                        walk_pluggable_object(&widget.object, visit);
+                    }
+                    WidgetItem::Native(node) => walk_nodes(node, visit),
+                }
             }
         }
         _ => {}

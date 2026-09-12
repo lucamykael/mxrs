@@ -68,16 +68,15 @@
 //! panic, or any error variant other than `EmbeddedDecodeFailed`) in
 //! either file — every failure is named and expected.
 //!
-//! `encode_object`/`encode_value` (the writer-side counterpart) are **not
-//! ported yet** — decode was the priority (it's what
-//! `mxrs-compiler-widgets` needs to read real pages first), encode is
-//! symmetric follow-up work, not attempted this pass.
-//!
-//! `mxrs-forms::mpr_codec`'s `CustomWidgets$CustomWidget` branch now
-//! delegates here for real (`Value::Pluggable` in `mxrs-forms::node`) —
-//! see that crate's `decode_pluggable`. Encoding a `Value::Pluggable`
-//! back to BSON is not supported yet (`FormsError::PluggableEncodeNotSupported`),
-//! symmetric with `encode_object`/`encode_value` not being ported here.
+//! The writer side is ported as well: [`encode_widget_type`],
+//! [`encode_object`], and [`encode_widget`] cover every value kind above
+//! and route embedded Forms nodes through
+//! [`crate::embedded::EmbeddedFormsEncoder`]. A decoded [`WidgetNode`]
+//! retains its original storage baseline so encoding preserves exact
+//! inline-schema identity and outer widget fields; a newly-built node gets
+//! a complete canonical schema with fresh, internally-consistent UUID
+//! pointers. `mxrs-forms::MprCodec` implements both embedded traits and
+//! delegates its `Value::Pluggable` encode/decode arms here.
 
 use mxrs_bson::{Bson, Document, extract_id, parse_array};
 
@@ -85,21 +84,69 @@ use crate::catalog::{
     ActionVariable, EnumerationValue, ObjectType, PropertyType, ReturnType, Translation, ValueType,
     WidgetType,
 };
-use crate::embedded::EmbeddedFormsDecoder;
+use crate::embedded::{EmbeddedFormsDecoder, EmbeddedFormsEncoder};
 use crate::error::{PluggableError, Result};
-use crate::node::{Assignment, DataSource, DataSourceValue, ObjectNode, Value, WidgetItem};
+use crate::node::{
+    Assignment, DataSource, DataSourceValue, ObjectNode, ReferenceTarget, Value, WidgetItem,
+    WidgetNode,
+};
 
 /// Decoded alongside a widget type: storage-id -> property/object-type,
 /// resolved by identity while decoding a single `CustomWidgets$CustomWidget`
 /// instance's `Properties` against `TypePointer`s (mxrb's `context` hash).
-/// Left for the instance-decode follow-up to populate/consume — the schema
-/// decode below still threads it through (matching mxrb's own
-/// `decode_widget_type` return shape) so that follow-up doesn't need to
-/// touch this module's signatures.
 #[derive(Debug, Default)]
 pub struct SchemaContext {
     pub property_types: std::collections::HashMap<String, PropertyType>,
     pub object_types: std::collections::HashMap<String, ObjectType>,
+}
+
+/// UUID pointers generated while encoding one inline widget schema.
+///
+/// The keys are addresses inside the borrowed [`WidgetType`], matching
+/// mxrb's identity-keyed hashes. The lifetime prevents this context from
+/// outliving (or being used after moving) the schema it was built from.
+#[derive(Debug)]
+pub struct EncodeContext<'schema> {
+    property_ids: std::collections::HashMap<*const PropertyType, String>,
+    value_type_ids: std::collections::HashMap<*const ValueType, String>,
+    object_type_ids: std::collections::HashMap<*const ObjectType, String>,
+    _schema: std::marker::PhantomData<&'schema WidgetType>,
+}
+
+impl EncodeContext<'_> {
+    fn new() -> Self {
+        Self {
+            property_ids: std::collections::HashMap::new(),
+            value_type_ids: std::collections::HashMap::new(),
+            object_type_ids: std::collections::HashMap::new(),
+            _schema: std::marker::PhantomData,
+        }
+    }
+}
+
+/// Decodes a complete `CustomWidgets$CustomWidget`, retaining both its
+/// inline type and object so the result can be encoded again.
+pub fn decode_widget<D: EmbeddedFormsDecoder>(
+    document: &Document,
+    path: &str,
+    decoder: &D,
+) -> Result<WidgetNode<D::Node>> {
+    require_type(document, "CustomWidgets$CustomWidget", path)?;
+    let type_path = format!("{path}.Type");
+    let (widget_type, context) =
+        decode_widget_type(get_doc(document, "Type", &type_path)?, &type_path)?;
+    let object_path = format!("{path}.Object");
+    let object = decode_object(
+        get_doc(document, "Object", &object_path)?,
+        &context,
+        &object_path,
+        decoder,
+    )?;
+    Ok(WidgetNode {
+        widget_type,
+        object,
+        storage_baseline: Some(document.clone()),
+    })
 }
 
 /// Decodes a `CustomWidgets$CustomWidgetType` document (the `Type` field of
@@ -412,6 +459,758 @@ fn decode_translations(document: &Document, field: &str, path: &str) -> Result<V
         .collect()
 }
 
+/// Encodes an inline `CustomWidgets$CustomWidgetType` and returns the
+/// identity context required to encode its corresponding object.
+pub fn encode_widget_type<'schema>(
+    widget_type: &'schema WidgetType,
+) -> (Document, EncodeContext<'schema>) {
+    let mut context = EncodeContext::new();
+    let object_type = encode_object_type(&widget_type.object_type, &mut context);
+    let mut document = identified("CustomWidgets$CustomWidgetType");
+    document.insert("HelpUrl", widget_type.help_url.clone());
+    document.insert("OfflineCapable", widget_type.offline);
+    document.insert("StudioCategory", widget_type.studio_category.clone());
+    document.insert("StudioProCategory", widget_type.studio_pro_category.clone());
+    document.insert("SupportedPlatform", widget_type.platform.clone());
+    document.insert("WidgetDescription", widget_type.description.clone());
+    document.insert("WidgetId", widget_type.id.clone());
+    document.insert("WidgetName", widget_type.name.clone());
+    document.insert("Prompt", widget_type.prompt.clone());
+    document.insert("WidgetNeedsEntityContext", widget_type.needs_context);
+    document.insert("WidgetPluginWidget", widget_type.plugin);
+    document.insert("ObjectType", object_type);
+    (document, context)
+}
+
+fn encode_object_type<'schema>(
+    object_type: &'schema ObjectType,
+    context: &mut EncodeContext<'schema>,
+) -> Document {
+    let mut document = identified("CustomWidgets$WidgetObjectType");
+    let id = document
+        .get_str("$ID")
+        .expect("identified document")
+        .to_string();
+    context
+        .object_type_ids
+        .insert(std::ptr::from_ref(object_type), id);
+    let properties = object_type
+        .properties
+        .iter()
+        .map(|property| Bson::Document(encode_property_type(property, context)))
+        .collect();
+    document.insert("PropertyTypes", marked(properties, 2));
+    document
+}
+
+fn encode_property_type<'schema>(
+    property: &'schema PropertyType,
+    context: &mut EncodeContext<'schema>,
+) -> Document {
+    let mut document = identified("CustomWidgets$WidgetPropertyType");
+    let id = document
+        .get_str("$ID")
+        .expect("identified document")
+        .to_string();
+    context
+        .property_ids
+        .insert(std::ptr::from_ref(property), id);
+    document.insert("Caption", property.caption.clone());
+    document.insert("Category", property.category.clone());
+    document.insert("Description", property.description.clone());
+    document.insert("IsDefault", property.default);
+    document.insert("PropertyKey", property.key.clone());
+    document.insert("Prompt", property.prompt.clone());
+    document.insert(
+        "ValueType",
+        encode_value_type(&property.value_type, context),
+    );
+    document
+}
+
+fn encode_value_type<'schema>(
+    value_type: &'schema ValueType,
+    context: &mut EncodeContext<'schema>,
+) -> Document {
+    let mut document = identified("CustomWidgets$WidgetValueType");
+    let id = document
+        .get_str("$ID")
+        .expect("identified document")
+        .to_string();
+    context
+        .value_type_ids
+        .insert(std::ptr::from_ref(value_type), id);
+    document.insert(
+        "ActionVariables",
+        marked(
+            value_type
+                .action_variables
+                .iter()
+                .map(|value| {
+                    let mut item = identified("CustomWidgets$WidgetActionVariable");
+                    item.insert("Caption", value.caption.clone());
+                    item.insert("Key", value.key.clone());
+                    item.insert("Type", value.kind.clone());
+                    Bson::Document(item)
+                })
+                .collect(),
+            2,
+        ),
+    );
+    document.insert(
+        "AllowedTypes",
+        marked_strings(&value_type.attribute_types, 1),
+    );
+    document.insert(
+        "AllowNonPersistableEntities",
+        value_type.allow_non_persistable_entities,
+    );
+    document.insert("AllowUpload", value_type.allow_upload);
+    document.insert(
+        "AssociationTypes",
+        marked_strings(&value_type.association_types, 1),
+    );
+    document.insert(
+        "DataSourceProperty",
+        value_type.data_source_property.clone(),
+    );
+    document.insert("DefaultType", value_type.default_type.clone());
+    document.insert("DefaultValue", value_type.default_value.clone());
+    document.insert("EntityProperty", value_type.entity_property.clone());
+    document.insert(
+        "EnumerationValues",
+        marked(
+            value_type
+                .enumeration_values
+                .iter()
+                .map(|value| {
+                    let mut item = identified("CustomWidgets$WidgetEnumerationValue");
+                    item.insert("_Key", value.key.clone());
+                    item.insert("Caption", value.caption.clone());
+                    Bson::Document(item)
+                })
+                .collect(),
+            2,
+        ),
+    );
+    document.insert("IsLinked", value_type.linked);
+    document.insert("IsList", value_type.list);
+    document.insert("IsMetaData", value_type.metadata);
+    document.insert("IsPath", value_type.path_kind.clone());
+    document.insert("Multiline", value_type.multiline);
+    document.insert(
+        "ObjectType",
+        value_type
+            .object_type
+            .as_deref()
+            .map(|object| Bson::Document(encode_object_type(object, context)))
+            .unwrap_or(Bson::Null),
+    );
+    document.insert("OnChangeProperty", value_type.on_change_property.clone());
+    document.insert("ParameterIsList", value_type.parameter_list);
+    document.insert("PathType", value_type.path_type.clone());
+    document.insert("Required", value_type.required);
+    document.insert(
+        "ReturnType",
+        value_type
+            .return_type
+            .as_ref()
+            .map(|value| {
+                let mut item = identified("CustomWidgets$WidgetReturnType");
+                item.insert("Type", value.kind.clone());
+                item.insert("IsList", value.list);
+                item.insert("EntityProperty", value.entity_property.clone());
+                item.insert("AssignableTo", value.assignable_to.clone());
+                Bson::Document(item)
+            })
+            .unwrap_or(Bson::Null),
+    );
+    document.insert(
+        "SelectableObjectsProperty",
+        value_type.selectable_objects_property.clone(),
+    );
+    document.insert(
+        "SelectionTypes",
+        marked_strings(&value_type.selection_types, 1),
+    );
+    document.insert("SetLabel", value_type.set_label);
+    document.insert(
+        "Translations",
+        marked(
+            value_type
+                .translations
+                .iter()
+                .map(|value| {
+                    let mut item = identified("CustomWidgets$WidgetTranslation");
+                    item.insert("LanguageCode", value.language.clone());
+                    item.insert("Text", value.text.clone());
+                    Bson::Document(item)
+                })
+                .collect(),
+            2,
+        ),
+    );
+    document.insert("Type", value_type.kind.clone());
+    document
+}
+
+/// Encodes a complete custom widget, including its inline schema.
+pub fn encode_widget<E: EmbeddedFormsEncoder>(
+    widget: &WidgetNode<E::Node>,
+    path: &str,
+    encoder: &E,
+) -> Result<Document> {
+    let (widget_type, context, mut document) = match &widget.storage_baseline {
+        Some(baseline) => {
+            require_type(baseline, "CustomWidgets$CustomWidget", path)?;
+            let type_path = format!("{path}.Type");
+            let type_document = get_doc(baseline, "Type", &type_path)?;
+            (
+                type_document.clone(),
+                encode_context_from_document(&widget.widget_type, type_document, &type_path)?,
+                baseline.clone(),
+            )
+        }
+        None => {
+            let (type_document, context) = encode_widget_type(&widget.widget_type);
+            (
+                type_document,
+                context,
+                identified("CustomWidgets$CustomWidget"),
+            )
+        }
+    };
+    let object = encode_object(
+        &widget.object,
+        &widget.widget_type.object_type,
+        &context,
+        &format!("{path}.Object"),
+        encoder,
+    )?;
+    document.insert("Type", widget_type);
+    document.insert("Object", object);
+    Ok(document)
+}
+
+/// Rebuilds mxrb's identity-keyed encode context from an original inline
+/// schema. This is the Rust equivalent of `restore_schema_identity!`: it
+/// lets a decoded widget retain the baseline's UUIDs, field aliases/order,
+/// and outer properties instead of making Studio Pro see a new schema.
+fn encode_context_from_document<'schema>(
+    widget_type: &'schema WidgetType,
+    document: &Document,
+    path: &str,
+) -> Result<EncodeContext<'schema>> {
+    require_type(document, "CustomWidgets$CustomWidgetType", path)?;
+    let mut context = EncodeContext::new();
+    let object_path = format!("{path}.ObjectType");
+    collect_encode_context(
+        &widget_type.object_type,
+        get_doc(document, "ObjectType", &object_path)?,
+        &mut context,
+        &object_path,
+    )?;
+    Ok(context)
+}
+
+fn collect_encode_context<'schema>(
+    schema: &'schema ObjectType,
+    document: &Document,
+    context: &mut EncodeContext<'schema>,
+    path: &str,
+) -> Result<()> {
+    let object_id = document.get("$ID").and_then(extract_id).ok_or_else(|| {
+        PluggableError::MissingSchemaPointer {
+            item: "object type baseline ID",
+            path: path.to_string(),
+        }
+    })?;
+    context
+        .object_type_ids
+        .insert(std::ptr::from_ref(schema), object_id);
+
+    let stored_properties = array_docs(document, "PropertyTypes");
+    for property in &schema.properties {
+        let Some(stored) = stored_properties.iter().find(|stored| {
+            ["PropertyKey", "_Key", "Key"]
+                .iter()
+                .find_map(|field| stored.get_str(field).ok())
+                == Some(property.key.as_str())
+        }) else {
+            return Err(PluggableError::MissingSchemaPointer {
+                item: "property type baseline",
+                path: format!("{path}.{}", property.key),
+            });
+        };
+        let property_path = format!("{path}.{}", property.key);
+        let property_id = stored.get("$ID").and_then(extract_id).ok_or_else(|| {
+            PluggableError::MissingSchemaPointer {
+                item: "property type baseline ID",
+                path: property_path.clone(),
+            }
+        })?;
+        context
+            .property_ids
+            .insert(std::ptr::from_ref(property), property_id);
+        let value_path = format!("{property_path}.ValueType");
+        let value_document = get_doc(stored, "ValueType", &value_path)?;
+        let value_id = value_document
+            .get("$ID")
+            .and_then(extract_id)
+            .ok_or_else(|| PluggableError::MissingSchemaPointer {
+                item: "value type baseline ID",
+                path: value_path.clone(),
+            })?;
+        context
+            .value_type_ids
+            .insert(std::ptr::from_ref(&property.value_type), value_id);
+        if let Some(nested_schema) = property.value_type.object_type.as_deref() {
+            let nested_path = format!("{value_path}.ObjectType");
+            collect_encode_context(
+                nested_schema,
+                get_doc(value_document, "ObjectType", &nested_path)?,
+                context,
+                &nested_path,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Encodes one `CustomWidgets$WidgetObject`, resolving its schema pointers
+/// through the context returned by [`encode_widget_type`].
+pub fn encode_object<'schema, E: EmbeddedFormsEncoder>(
+    object: &ObjectNode<E::Node>,
+    schema: &'schema ObjectType,
+    context: &EncodeContext<'schema>,
+    path: &str,
+    encoder: &E,
+) -> Result<Document> {
+    let object_pointer = context
+        .object_type_ids
+        .get(&std::ptr::from_ref(schema))
+        .ok_or_else(|| PluggableError::MissingSchemaPointer {
+            item: "object type",
+            path: path.to_string(),
+        })?;
+    let mut properties = Vec::new();
+    for assignment in object.assignments() {
+        let property = schema.fetch_property(&assignment.property.key)?;
+        let property_pointer = context
+            .property_ids
+            .get(&std::ptr::from_ref(property))
+            .ok_or_else(|| PluggableError::MissingSchemaPointer {
+                item: "property type",
+                path: format!("{path}.{}", property.key),
+            })?;
+        let value_type_pointer = context
+            .value_type_ids
+            .get(&std::ptr::from_ref(&property.value_type))
+            .ok_or_else(|| PluggableError::MissingSchemaPointer {
+                item: "value type",
+                path: format!("{path}.{}", property.key),
+            })?;
+        let value_path = format!("{path}.{}", property.key);
+        let mut value = encode_value(
+            &assignment.value,
+            &property.value_type,
+            value_type_pointer,
+            context,
+            &value_path,
+            encoder,
+        )?;
+        if let Some(source_variable) = &assignment.source_variable {
+            value.insert("SourceVariable", source_variable.clone());
+        }
+        let mut stored = identified("CustomWidgets$WidgetProperty");
+        stored.insert("TypePointer", property_pointer.clone());
+        stored.insert("Value", value);
+        properties.push(Bson::Document(stored));
+    }
+    let mut document = identified("CustomWidgets$WidgetObject");
+    document.insert("TypePointer", object_pointer.clone());
+    document.insert("Properties", marked(properties, 2));
+    Ok(document)
+}
+
+fn encode_value<'schema, E: EmbeddedFormsEncoder>(
+    value: &Value<E::Node>,
+    value_type: &'schema ValueType,
+    type_id: &str,
+    context: &EncodeContext<'schema>,
+    path: &str,
+    encoder: &E,
+) -> Result<Document> {
+    let mut document = empty_widget_value(type_id);
+    if matches!(value, Value::Null) {
+        // `Action` is the sole field whose storage baseline is non-null
+        // (`Forms$NoAction`); an explicitly absent semantic action must
+        // overwrite it or decode would change `Null` into `Action`.
+        if value_type.kind == "Action" {
+            document.insert("Action", Bson::Null);
+        }
+        return Ok(document);
+    }
+    let mismatch = || PluggableError::ValueKindMismatch {
+        kind: value_type.kind.clone(),
+        path: path.to_string(),
+    };
+    match value_type.kind.as_str() {
+        "Boolean" => match value {
+            Value::Boolean(value) => document.insert("PrimitiveValue", value.to_string()),
+            _ => return Err(mismatch()),
+        },
+        "Integer" => match value {
+            Value::Integer(value) => document.insert("PrimitiveValue", value.to_string()),
+            _ => return Err(mismatch()),
+        },
+        "Decimal" | "String" | "Enumeration" => match value {
+            Value::Primitive(value) => document.insert("PrimitiveValue", value.clone()),
+            _ => return Err(mismatch()),
+        },
+        "Selection" => match value {
+            Value::Selection(value) => document.insert("Selection", value.clone()),
+            _ => return Err(mismatch()),
+        },
+        "Expression" => match value {
+            Value::Expression(value) => document.insert("Expression", value.clone()),
+            _ => return Err(mismatch()),
+        },
+        "EntityConstraint" => match value {
+            Value::XPathConstraint(value) => document.insert("XPathConstraint", value.clone()),
+            _ => return Err(mismatch()),
+        },
+        "Attribute" => match value {
+            Value::AttributeReference(value) => document.insert(
+                "AttributeRef",
+                mxrs_forms_refs::encode_attribute_reference(value),
+            ),
+            _ => return Err(mismatch()),
+        },
+        "Entity" => match value {
+            Value::EntityReference(value) => {
+                document.insert("EntityRef", mxrs_forms_refs::encode_entity_reference(value))
+            }
+            _ => return Err(mismatch()),
+        },
+        "TranslatableString" => match value {
+            Value::Text(value) => document.insert("TranslatableValue", encode_text(value)),
+            _ => return Err(mismatch()),
+        },
+        "TextTemplate" => match value {
+            Value::TextTemplate(value) => document.insert(
+                "TextTemplate",
+                encode_embedded(value, &format!("{path}.TextTemplate"), encoder)?,
+            ),
+            _ => return Err(mismatch()),
+        },
+        "Action" => match value {
+            Value::Action(value) => document.insert(
+                "Action",
+                encode_embedded(value, &format!("{path}.Action"), encoder)?,
+            ),
+            _ => return Err(mismatch()),
+        },
+        "Icon" => match value {
+            Value::Icon(value) => document.insert(
+                "Icon",
+                encode_embedded(value, &format!("{path}.Icon"), encoder)?,
+            ),
+            _ => return Err(mismatch()),
+        },
+        "DataSource" => {
+            encode_data_source(&mut document, value, path, encoder)?;
+            None
+        }
+        "Object" => {
+            encode_objects(&mut document, value, value_type, context, path, encoder)?;
+            None
+        }
+        "Widgets" => {
+            encode_widgets(&mut document, value, path, encoder)?;
+            None
+        }
+        "System" if matches!(value, Value::System) => None,
+        "System" => return Err(mismatch()),
+        kind => {
+            encode_semantic_reference(&mut document, value, kind, path)?;
+            None
+        }
+    };
+    Ok(document)
+}
+
+fn empty_widget_value(type_id: &str) -> Document {
+    let mut document = identified("CustomWidgets$WidgetValue");
+    let mut no_action = identified("Forms$NoAction");
+    no_action.insert("DisabledDuringExecution", true);
+    document.insert("Action", no_action);
+    document.insert("AttributeRef", Bson::Null);
+    document.insert("DataSource", Bson::Null);
+    document.insert("EntityRef", Bson::Null);
+    document.insert("Expression", "");
+    document.insert("Form", "");
+    document.insert("Icon", Bson::Null);
+    document.insert("Image", "");
+    document.insert("Microflow", "");
+    document.insert("Nanoflow", "");
+    document.insert("Objects", marked(Vec::new(), 2));
+    document.insert("PrimitiveValue", "");
+    document.insert("Selection", "None");
+    document.insert("SourceVariable", Bson::Null);
+    document.insert("TextTemplate", Bson::Null);
+    document.insert("TranslatableValue", Bson::Null);
+    document.insert("TypePointer", type_id);
+    document.insert("Widgets", marked(Vec::new(), 2));
+    document.insert("XPathConstraint", "");
+    document
+}
+
+fn encode_objects<'schema, E: EmbeddedFormsEncoder>(
+    document: &mut Document,
+    value: &Value<E::Node>,
+    value_type: &'schema ValueType,
+    context: &EncodeContext<'schema>,
+    path: &str,
+    encoder: &E,
+) -> Result<()> {
+    let schema =
+        value_type
+            .object_type
+            .as_deref()
+            .ok_or_else(|| PluggableError::MissingSchemaPointer {
+                item: "nested object type",
+                path: path.to_string(),
+            })?;
+    let objects: Vec<&ObjectNode<E::Node>> = match (value_type.list, value) {
+        (true, Value::ObjectList(values)) => values.iter().collect(),
+        (false, Value::Object(Some(value))) => vec![value],
+        (false, Value::Object(None)) => Vec::new(),
+        _ => {
+            return Err(PluggableError::ValueKindMismatch {
+                kind: value_type.kind.clone(),
+                path: path.to_string(),
+            });
+        }
+    };
+    let encoded = objects
+        .into_iter()
+        .enumerate()
+        .map(|(index, object)| {
+            encode_object(
+                object,
+                schema,
+                context,
+                &format!("{path}[{index}]"),
+                encoder,
+            )
+            .map(Bson::Document)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    document.insert("Objects", marked(encoded, 2));
+    Ok(())
+}
+
+fn encode_widgets<E: EmbeddedFormsEncoder>(
+    document: &mut Document,
+    value: &Value<E::Node>,
+    path: &str,
+    encoder: &E,
+) -> Result<()> {
+    let Value::Widgets(values) = value else {
+        return Err(PluggableError::ValueKindMismatch {
+            kind: "Widgets".to_string(),
+            path: path.to_string(),
+        });
+    };
+    let encoded = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let item_path = format!("{path}.Widgets[{index}]");
+            match value {
+                WidgetItem::Pluggable(widget) => encode_widget(widget, &item_path, encoder),
+                WidgetItem::Native(node) => encode_embedded(node, &item_path, encoder),
+            }
+            .map(Bson::Document)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    document.insert("Widgets", marked(encoded, 2));
+    Ok(())
+}
+
+fn encode_data_source<E: EmbeddedFormsEncoder>(
+    document: &mut Document,
+    value: &Value<E::Node>,
+    path: &str,
+    encoder: &E,
+) -> Result<()> {
+    let Value::DataSource(source) = value else {
+        return Err(PluggableError::ValueKindMismatch {
+            kind: "DataSource".to_string(),
+            path: path.to_string(),
+        });
+    };
+    let Some(source) = source else {
+        return Ok(());
+    };
+    match source {
+        DataSourceValue::Embedded(node) => {
+            document.insert(
+                "DataSource",
+                encode_embedded(node, &format!("{path}.DataSource"), encoder)?,
+            );
+        }
+        DataSourceValue::XPath(source)
+            if source.entity.is_none()
+                && source.constraint.is_empty()
+                && source.sort_bar.is_none()
+                && !source.force_full_objects =>
+        {
+            if let Some(variable) = &source.source_variable {
+                document.insert(
+                    "SourceVariable",
+                    encode_embedded(variable, &format!("{path}.SourceVariable"), encoder)?,
+                );
+            }
+        }
+        DataSourceValue::XPath(source) => {
+            let mut data_source = identified("CustomWidgets$CustomWidgetXPathSource");
+            data_source.insert(
+                "EntityRef",
+                source
+                    .entity
+                    .as_ref()
+                    .map(|value| Bson::Document(mxrs_forms_refs::encode_entity_reference(value)))
+                    .unwrap_or(Bson::Null),
+            );
+            data_source.insert("XPathConstraint", source.constraint.clone());
+            data_source.insert(
+                "SortBar",
+                source
+                    .sort_bar
+                    .as_ref()
+                    .map(|node| {
+                        encode_embedded(node, &format!("{path}.DataSource.SortBar"), encoder)
+                            .map(Bson::Document)
+                    })
+                    .transpose()?
+                    .unwrap_or(Bson::Null),
+            );
+            data_source.insert(
+                "SourceVariable",
+                source
+                    .source_variable
+                    .as_ref()
+                    .map(|node| {
+                        encode_embedded(node, &format!("{path}.DataSource.SourceVariable"), encoder)
+                            .map(Bson::Document)
+                    })
+                    .transpose()?
+                    .unwrap_or(Bson::Null),
+            );
+            data_source.insert("ForceFullObjects", source.force_full_objects);
+            document.insert("DataSource", data_source);
+        }
+    }
+    Ok(())
+}
+
+fn encode_semantic_reference<N>(
+    document: &mut Document,
+    value: &Value<N>,
+    kind: &str,
+    path: &str,
+) -> Result<()> {
+    let Value::Reference {
+        kind: value_kind,
+        target,
+    } = value
+    else {
+        return Err(PluggableError::ValueKindMismatch {
+            kind: kind.to_string(),
+            path: path.to_string(),
+        });
+    };
+    if value_kind != kind {
+        return Err(PluggableError::ValueKindMismatch {
+            kind: kind.to_string(),
+            path: path.to_string(),
+        });
+    }
+    match (kind, target) {
+        ("Association", ReferenceTarget::Entity(value)) => {
+            document.insert("EntityRef", mxrs_forms_refs::encode_entity_reference(value));
+        }
+        ("Association", ReferenceTarget::Attribute(value)) => {
+            document.insert(
+                "AttributeRef",
+                mxrs_forms_refs::encode_attribute_reference(value),
+            );
+        }
+        ("Association", _) => {
+            return Err(PluggableError::ValueKindMismatch {
+                kind: kind.to_string(),
+                path: path.to_string(),
+            });
+        }
+        (_, ReferenceTarget::Path(value)) => {
+            let field = if kind == "File" { "Image" } else { kind };
+            document.insert(field, value.clone());
+        }
+        _ => {
+            return Err(PluggableError::ValueKindMismatch {
+                kind: kind.to_string(),
+                path: path.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn encode_text(value: &[(String, String)]) -> Document {
+    let items = value
+        .iter()
+        .map(|(language, text)| {
+            let mut item = identified("Texts$Translation");
+            item.insert("LanguageCode", language.clone());
+            item.insert("Text", text.clone());
+            Bson::Document(item)
+        })
+        .collect();
+    let mut document = identified("Texts$Text");
+    document.insert("Items", marked(items, 3));
+    document
+}
+
+fn encode_embedded<E: EmbeddedFormsEncoder>(
+    node: &E::Node,
+    path: &str,
+    encoder: &E,
+) -> Result<Document> {
+    encoder
+        .encode_embedded(node, path)
+        .map_err(|source| PluggableError::EmbeddedEncodeFailed {
+            path: path.to_string(),
+            source: Box::new(source),
+        })
+}
+
+fn identified(type_name: &str) -> Document {
+    let mut document = Document::new();
+    document.insert("$ID", uuid::Uuid::new_v4().to_string());
+    document.insert("$Type", type_name);
+    document
+}
+
+fn marked(values: Vec<Bson>, marker: i32) -> Bson {
+    Bson::Array(mxrs_bson::build_array(values, marker))
+}
+
+fn marked_strings(values: &[String], marker: i32) -> Bson {
+    marked(values.iter().cloned().map(Bson::String).collect(), marker)
+}
+
 /// Ports mxrb's `WIDGET_VALUE_FIELDS` — every storage field a
 /// `CustomWidgets$WidgetValue` document may carry, across every value
 /// kind (most are unused for any given kind; that's normal, mxrb's own
@@ -445,11 +1244,8 @@ const WIDGET_VALUE_FIELDS: &[&str] = &[
 /// `context` (as populated by [`decode_widget_type`] for the same widget).
 /// Ports the read side of `decode_object`.
 ///
-/// Stops at the first property whose value kind isn't self-contained yet
-/// — see this module's doc for exactly which kinds those are and why —
-/// returning [`PluggableError::NeedsFormsIntegration`] rather than
-/// guessing or dropping data, same as every other unported gap in this
-/// workspace.
+/// Native Forms values are delegated through [`EmbeddedFormsDecoder`]; no
+/// currently-known pluggable value kind is left unhandled here.
 pub fn decode_object<D: EmbeddedFormsDecoder>(
     document: &Document,
     context: &SchemaContext,
@@ -502,9 +1298,7 @@ pub fn decode_object<D: EmbeddedFormsDecoder>(
     Ok(node)
 }
 
-/// Ports the self-contained slice of `decode_value` — see this module's
-/// doc for which kinds are covered and which return
-/// [`PluggableError::NeedsFormsIntegration`] instead.
+/// Ports mxrb's complete `decode_value` dispatch.
 fn decode_value<D: EmbeddedFormsDecoder>(
     document: &Document,
     value_type: &ValueType,
@@ -758,16 +1552,9 @@ fn decode_widgets_value<D: EmbeddedFormsDecoder>(
             items.push(WidgetItem::Native(node));
             continue;
         }
-        let type_path = format!("{item_path}.Type");
-        let (_widget_type, context) =
-            decode_widget_type(get_doc(&item, "Type", &type_path)?, &type_path)?;
-        let object_path = format!("{item_path}.Object");
-        items.push(WidgetItem::Pluggable(decode_object(
-            get_doc(&item, "Object", &object_path)?,
-            &context,
-            &object_path,
-            decoder,
-        )?));
+        items.push(WidgetItem::Pluggable(Box::new(decode_widget(
+            &item, &item_path, decoder,
+        )?)));
     }
     Ok(Value::Widgets(items))
 }

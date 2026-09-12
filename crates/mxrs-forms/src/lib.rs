@@ -9,9 +9,8 @@
 //! Phase 3, from-scratch Rust API).
 //!
 //! `CustomWidgets$CustomWidget` (pluggable-widget) support now delegates
-//! to `mxrs-pluggable` for real — see `mpr_codec.rs`'s doc comment for
-//! exactly which value kinds decode today and which are still an
-//! explicit, named gap — and
+//! bidirectionally to `mxrs-pluggable` — see `mpr_codec.rs`'s doc comment
+//! for the dependency-inversion seam used by embedded native nodes, and
 //! `decisions/mxrs-rust-rewrite-plan.md` in this project's ai-memory for
 //! the fuller history.
 
