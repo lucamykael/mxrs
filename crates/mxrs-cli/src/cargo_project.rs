@@ -13,6 +13,35 @@ pub enum CargoProjectError {
     Validate(#[from] mxrs_mpr::MprError),
     #[error("the generated Mendix artifact is invalid: {0:?}")]
     InvalidArtifact(Vec<String>),
+    #[error(transparent)]
+    Project(#[from] mxrs_project::ProjectError),
+    #[error(transparent)]
+    Model(#[from] mxrs_model::ModelError),
+}
+
+/// Builds the current Rust declaration and compares it with the exact
+/// imported snapshot, including editable filesystem assets.
+pub fn diff(
+    manifest: impl AsRef<Path>,
+    snapshot: impl AsRef<Path>,
+    release: bool,
+    offline: bool,
+) -> Result<crate::compare::CompareResult> {
+    let manifest = std::path::absolute(manifest.as_ref())?;
+    let snapshot = std::path::absolute(snapshot.as_ref())?;
+    let project_root = manifest.parent().unwrap_or_else(|| Path::new("."));
+    let temporary = tempfile::tempdir()?;
+    let baseline_directory = temporary.path().join("baseline");
+    let current_directory = temporary.path().join("current");
+    std::fs::create_dir_all(&baseline_directory)?;
+    std::fs::create_dir_all(&current_directory)?;
+    let baseline = baseline_directory.join("Project.mpr");
+    let current = current_directory.join("Project.mpr");
+
+    mxrs_project::restore_imported_project(&snapshot, &baseline)?;
+    mxrs_project::materialize_project_assets(project_root.join("assets"), &baseline)?;
+    build(&manifest, &current, release, offline)?;
+    Ok(crate::compare::compare(baseline, current)?)
 }
 
 pub type Result<T> = std::result::Result<T, CargoProjectError>;

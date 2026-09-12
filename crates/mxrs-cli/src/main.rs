@@ -327,8 +327,11 @@ fn run_import(mut args: Vec<String>) -> ExitCode {
         };
 
     println!(
-        "[mxrs] imported {} as Cargo package {} ({} model units)",
-        imported.project_name, imported.package_name, imported.imported_units
+        "[mxrs] imported {} as Cargo package {} ({} model units, {} assets)",
+        imported.project_name,
+        imported.package_name,
+        imported.imported_units,
+        imported.imported_assets
     );
     if !imported.typed_round_trip_gaps.is_empty() {
         println!(

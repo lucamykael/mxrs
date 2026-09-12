@@ -24,7 +24,9 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
 
 An import writes typed domain source under `src/domain/`, stable identity
 bindings under `src/generated/ids.rs`, and a complete generated unit snapshot
-under `model/imported/`. The snapshot makes concepts without a friendly Rust
+under `model/imported/`. Mendix filesystem resources are copied into the
+editable `assets/` tree and materialized next to each built `.mpr`. The
+snapshot makes concepts without a friendly Rust
 representation lossless; rebuilding does not read or patch the original
 `.mpr`. Typed coverage can therefore replace opaque snapshot content
 incrementally without blocking a correct build.
@@ -71,6 +73,7 @@ cargo install --path crates/mxrs-cli --bin cargo-mxrs
 cd existing-app
 cargo check
 cargo test
+cargo mxrs diff
 cargo mxrs build --output build/ExistingApp.mpr
 ```
 

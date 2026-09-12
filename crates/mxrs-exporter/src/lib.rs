@@ -108,6 +108,7 @@ pub struct CargoProjectImport {
     pub project_name: String,
     pub mendix_version: String,
     pub imported_units: usize,
+    pub imported_assets: usize,
     pub typed_round_trip_gaps: Vec<RoundTripGap>,
 }
 
@@ -181,6 +182,8 @@ fn import_cargo_project_inner(
 
     let imported = destination.join("model/imported");
     let manifest = mxrs_project::capture_imported_project(mpr_path, &imported)?;
+    let imported_assets =
+        mxrs_project::capture_project_assets(mpr_path, destination.join("assets"))?;
     let package_name = cargo_package_name(&manifest.project_name);
     let crate_name = package_name.replace('-', "_");
     let generated_directory = destination.join("src/generated");
@@ -241,6 +244,7 @@ fn import_cargo_project_inner(
         project_name: manifest.project_name,
         mendix_version: manifest.mendix_version,
         imported_units: manifest.units.len(),
+        imported_assets,
         typed_round_trip_gaps: gaps,
     })
 }
@@ -261,14 +265,14 @@ fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>) -> String {
 fn build_binary_source(crate_name: &str, project_name: &str) -> String {
     let default_output = format!("build/{project_name}.mpr");
     format!(
-        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let snapshot = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"model/imported\");\n    mxrs::replace_imported_project(snapshot, &output, &{crate_name}::Application::build())?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n",
+        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let root = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"));\n    mxrs::replace_imported_project(root.join(\"model/imported\"), &output, &{crate_name}::Application::build())?;\n    mxrs::materialize_project_assets(root.join(\"assets\"), &output)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n",
         serde_json::to_string(&default_output).expect("a string always serializes"),
     )
 }
 
 fn generated_readme(project_name: &str, gaps: usize) -> String {
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Rust under `src/` is the editable source; `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Rust under `src/` is the editable source; `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n"
     )
 }
 
@@ -962,6 +966,13 @@ mod tests {
             .and_then(Path::parent)
             .unwrap();
 
+        std::fs::create_dir_all(source_directory.path().join("theme/web")).unwrap();
+        std::fs::write(
+            source_directory.path().join("theme/web/main.css"),
+            b"body { color: rebeccapurple; }",
+        )
+        .unwrap();
+
         let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
         builder.module("Sales", |module| {
             module.entity("Order", |entity| {
@@ -978,6 +989,7 @@ mod tests {
 
         let imported = import_cargo_project(&source_path, &generated, Some(workspace)).unwrap();
         assert!(imported.imported_units > 1);
+        assert_eq!(imported.imported_assets, 1);
         assert!(generated.join("Cargo.toml").is_file());
         assert!(generated.join("mxrs.toml").is_file());
         assert!(generated.join("src/lib.rs").is_file());
@@ -1045,6 +1057,10 @@ mod tests {
             .find(|attribute| attribute.name.as_deref() == Some("SubmittedAt"))
             .unwrap();
         assert_eq!(submitted_at.localize_date, Some(false));
+        assert_eq!(
+            std::fs::read(build_directory.path().join("theme/web/main.css")).unwrap(),
+            b"body { color: rebeccapurple; }"
+        );
     }
 
     #[allow(dead_code, non_snake_case, non_camel_case_types)]

@@ -496,6 +496,7 @@ dependencies = [
  "mxrs-javagen",
  "mxrs-model",
  "mxrs-mpr",
+ "mxrs-project",
  "mxrs-writer",
  "serde_json",
  "sha2",

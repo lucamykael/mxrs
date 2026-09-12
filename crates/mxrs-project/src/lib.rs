@@ -18,6 +18,18 @@ const SNAPSHOT_VERSION: u32 = 2;
 const MANIFEST_NAME: &str = "manifest.json";
 static BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+pub const PROJECT_ASSET_DIRECTORIES: &[&str] = &[
+    "theme",
+    "theme-cache",
+    "themesource",
+    "resources",
+    "widgets",
+    "javasource",
+    "javascriptsource",
+    "userlib",
+    "vendorlib",
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
     #[error(transparent)]
@@ -186,12 +198,89 @@ pub fn read_imported_manifest(snapshot: impl AsRef<Path>) -> Result<ImportedProj
     Ok(manifest)
 }
 
+/// Copies Mendix project assets into the Cargo project's editable `assets/`
+/// tree. Symbolic links are skipped so an import cannot escape its source
+/// project directory.
+pub fn capture_project_assets(
+    mpr_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+) -> Result<usize> {
+    let source_root = mpr_path.as_ref().parent().unwrap_or_else(|| Path::new("."));
+    let destination = destination.as_ref();
+    let mut copied = 0;
+    for directory in PROJECT_ASSET_DIRECTORIES {
+        copied += copy_regular_tree(&source_root.join(directory), &destination.join(directory))?;
+    }
+    Ok(copied)
+}
+
+/// Materializes editable Cargo-project assets next to a built `.mpr`.
+pub fn materialize_project_assets(
+    assets: impl AsRef<Path>,
+    output_mpr: impl AsRef<Path>,
+) -> Result<usize> {
+    let output = std::path::absolute(output_mpr.as_ref())
+        .map_err(|error| io_error(output_mpr.as_ref(), error))?;
+    let output_root = output.parent().unwrap_or_else(|| Path::new("."));
+    let mut copied = 0;
+    for directory in PROJECT_ASSET_DIRECTORIES {
+        copied += copy_regular_tree(
+            &assets.as_ref().join(directory),
+            &output_root.join(directory),
+        )?;
+    }
+    Ok(copied)
+}
+
+fn copy_regular_tree(source: &Path, destination: &Path) -> Result<usize> {
+    if !source.is_dir() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(destination).map_err(|error| io_error(destination, error))?;
+    let mut copied = 0;
+    for entry in std::fs::read_dir(source).map_err(|error| io_error(source, error))? {
+        let entry = entry.map_err(|error| io_error(source, error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error(&entry.path(), error))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copied += copy_regular_tree(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &target).map_err(|error| io_error(&target, error))?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
 /// Reconstructs a new `.mpr` from generated import assets, then applies the
 /// typed Rust declaration as an overlay. The destination must not exist.
 pub fn rebuild_imported_project(
     snapshot: impl AsRef<Path>,
     output: impl AsRef<Path>,
     declaration: &mxrs_ir::ProjectDecl,
+) -> Result<PathBuf> {
+    let snapshot = snapshot.as_ref();
+    let output = output.as_ref();
+    let contents = format::contents_dir(output);
+    restore_imported_project(snapshot, output)?;
+    if let Err(error) = mxrs_writer::synchronize_project(output, declaration) {
+        let _ = std::fs::remove_file(output);
+        let _ = std::fs::remove_dir_all(&contents);
+        return Err(error.into());
+    }
+    Ok(output.to_path_buf())
+}
+
+/// Reconstructs exactly the imported `.mpr` snapshot without applying the
+/// typed Rust overlay. Used as the baseline for `cargo mxrs diff`.
+pub fn restore_imported_project(
+    snapshot: impl AsRef<Path>,
+    output: impl AsRef<Path>,
 ) -> Result<PathBuf> {
     let snapshot = snapshot.as_ref();
     let output = output.as_ref();
@@ -205,7 +294,7 @@ pub fn rebuild_imported_project(
         .iter()
         .find(|unit| unit.unit_id == manifest.root_id)
         .ok_or_else(|| ProjectError::MissingRootMetadata(manifest.root_id.clone()))?;
-    let result = rebuild(snapshot, output, declaration, &manifest, root);
+    let result = restore(snapshot, output, &manifest, root);
     if result.is_err() {
         let _ = std::fs::remove_file(output);
         let _ = std::fs::remove_dir_all(&contents);
@@ -274,10 +363,9 @@ pub fn replace_imported_project(
     Ok(output)
 }
 
-fn rebuild(
+fn restore(
     snapshot: &Path,
     output: &Path,
-    declaration: &mxrs_ir::ProjectDecl,
     manifest: &ImportedProjectManifest,
     root: &ImportedUnit,
 ) -> Result<()> {
@@ -327,7 +415,6 @@ fn rebuild(
         }
     }
     drop(target);
-    mxrs_writer::synchronize_project(output, declaration)?;
     Ok(())
 }
 

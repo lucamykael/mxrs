@@ -9,9 +9,10 @@ pub use mxrs_expr::*;
 pub use mxrs_ir::*;
 pub use mxrs_macros::{MxEntity, application, project};
 pub use mxrs_project::{
-    ImportedDocumentRef, ImportedProjectManifest, ImportedUnit, ProjectError,
-    capture_imported_project, read_imported_manifest, rebuild_imported_project,
-    replace_imported_project,
+    ImportedDocumentRef, ImportedProjectManifest, ImportedUnit, PROJECT_ASSET_DIRECTORIES,
+    ProjectError, capture_imported_project, capture_project_assets, materialize_project_assets,
+    read_imported_manifest, rebuild_imported_project, replace_imported_project,
+    restore_imported_project,
 };
 
 /// Implemented by `#[mxrs::application]` for the root application type.

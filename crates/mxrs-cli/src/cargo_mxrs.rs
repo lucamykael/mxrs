@@ -5,14 +5,29 @@ fn main() -> ExitCode {
     if args.first().is_some_and(|argument| argument == "mxrs") {
         args.remove(0);
     }
-    if args.first().is_none_or(|argument| argument != "build") {
-        eprintln!(
-            "Usage: cargo mxrs build --output <file.mpr> [--manifest-path <Cargo.toml>] [--release] [--offline]"
-        );
-        return ExitCode::FAILURE;
+    match args.first().map(String::as_str) {
+        Some("build") => {
+            args.remove(0);
+            run_build(args)
+        }
+        Some("diff") => {
+            args.remove(0);
+            run_diff(args)
+        }
+        _ => {
+            usage();
+            ExitCode::FAILURE
+        }
     }
-    args.remove(0);
-    run_build(args)
+}
+
+fn usage() {
+    eprintln!(
+        "Usage: cargo mxrs build --output <file.mpr> [--manifest-path <Cargo.toml>] [--release] [--offline]"
+    );
+    eprintln!(
+        "       cargo mxrs diff [--manifest-path <Cargo.toml>] [--snapshot <model/imported>] [--json] [--release] [--offline]"
+    );
 }
 
 fn run_build(mut args: Vec<String>) -> ExitCode {
@@ -31,6 +46,54 @@ fn run_build(mut args: Vec<String>) -> ExitCode {
     match mxrs_cli::cargo_project::build(manifest, output, release, offline) {
         Ok(path) => {
             println!("[mxrs] built and validated {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_diff(mut args: Vec<String>) -> ExitCode {
+    let manifest = take_value(&mut args, "--manifest-path").unwrap_or_else(|| "Cargo.toml".into());
+    let snapshot = take_value(&mut args, "--snapshot").unwrap_or_else(|| {
+        std::path::Path::new(&manifest)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("model/imported")
+            .display()
+            .to_string()
+    });
+    let release = take_flag(&mut args, "--release");
+    let offline = take_flag(&mut args, "--offline");
+    let json = take_flag(&mut args, "--json");
+    if !args.is_empty() {
+        eprintln!("[mxrs] error: unexpected arguments: {}", args.join(" "));
+        return ExitCode::FAILURE;
+    }
+    match mxrs_cli::cargo_project::diff(manifest, snapshot, release, offline) {
+        Ok(result) if json => {
+            let changes = result
+                .changes
+                .iter()
+                .map(|change| {
+                    serde_json::json!({
+                        "operation": format!("{:?}", change.operation),
+                        "path": change.path,
+                        "before": change.before,
+                        "after": change.after,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::json!({ "changes": changes }));
+            ExitCode::SUCCESS
+        }
+        Ok(result) => {
+            for change in &result.changes {
+                println!("{}", change.format());
+            }
+            println!("[mxrs] {} change(s)", result.changes.len());
             ExitCode::SUCCESS
         }
         Err(error) => {
