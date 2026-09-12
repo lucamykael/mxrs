@@ -19,5 +19,5 @@ pub use declaration::{
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{
     AssociationMarker, AttributeMarker, EntityMarker, EnumerationMarker, MicroflowMarker,
-    MicroflowRef, Ref,
+    MicroflowRef, Ref, Reference, ReferenceSet,
 };

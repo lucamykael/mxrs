@@ -26,6 +26,7 @@ struct Order {
 
 #[derive(MxEntity)]
 #[mx_entity(name = "Client")]
+#[mxrs(module = "Sales")]
 #[allow(dead_code)]
 struct Customer {
     #[mx_attribute(kind = "string")]
@@ -53,6 +54,11 @@ struct TypedOrder {
     #[mxrs(localize_date = false)]
     submitted_at: Option<mxrs_expr::MxDateTime>,
     status: OrderStatus,
+    #[mxrs(association = "TypedOrder_Customer", documentation = "Owning customer")]
+    customer: mxrs_ir::Reference<Customer>,
+    #[mxrs(association = "TypedOrder_Watchers", owner = "Both", storage = "Table")]
+    watchers: mxrs_ir::ReferenceSet<Customer>,
+    approver: mxrs_ir::Reference<Customer>,
 }
 
 #[derive(MxEnumeration)]
@@ -161,6 +167,35 @@ fn derived_entities_write_and_read_back_correctly() {
         .find(|attribute| attribute.name.as_deref() == Some("Status"))
         .unwrap();
     assert_eq!(status.enumeration.as_deref(), Some("Sales.OrderStatus"));
+    let associations = sales.associations();
+    let customer = associations
+        .iter()
+        .find(|association| association.name.as_deref() == Some("TypedOrder_Customer"))
+        .unwrap();
+    assert_eq!(customer.documentation, "Owning customer");
+    assert_eq!(
+        customer.association_type,
+        mxrs_model::association::AssociationType::Reference
+    );
+    let watchers = associations
+        .iter()
+        .find(|association| association.name.as_deref() == Some("TypedOrder_Watchers"))
+        .unwrap();
+    assert_eq!(
+        watchers.association_type,
+        mxrs_model::association::AssociationType::ReferenceSet
+    );
+    assert_eq!(watchers.owner, mxrs_model::association::Owner::Both);
+    assert_eq!(
+        watchers.storage_format,
+        mxrs_model::association::StorageFormat::Table
+    );
+    assert!(
+        associations
+            .iter()
+            .any(|association| association.name.as_deref() == Some("TypedOrder_Approver")),
+        "an unannotated Reference<T> should infer its association name"
+    );
 
     let enumeration = read
         .mpr()

@@ -234,6 +234,57 @@ fn an_unknown_mx_attribute_kind_fails_to_compile() {
 }
 
 #[test]
+fn a_reference_target_must_be_an_entity_marker() {
+    let output = try_compile(
+        r#"
+        struct NotAnEntity;
+
+        #[derive(mxrs_macros::MxEntity)]
+        #[mxrs(module = "Sales")]
+        struct Order {
+            customer: mxrs_ir::Reference<NotAnEntity>,
+        }
+        pub fn make() {}
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a compile failure for a Reference<T> whose target is not an entity"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not a Mendix entity marker")
+            || stderr.contains("EntityMarker is not implemented"),
+        "expected the diagnostic to identify the invalid entity target, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_reference_to_a_non_entity_type_fails_to_compile() {
+    let output = try_compile(
+        r#"
+        struct NotAnEntity;
+
+        #[derive(mxrs_macros::MxEntity)]
+        #[mxrs(module = "Sales")]
+        struct Order {
+            customer: mxrs_ir::Reference<NotAnEntity>,
+        }
+        pub fn make() {}
+        "#,
+    );
+    assert!(
+        !output.status.success(),
+        "expected a typed association target without EntityMarker to fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Mendix entity marker") || stderr.contains("EntityMarker"),
+        "expected the diagnostic to name the missing entity-marker contract, got:\n{stderr}"
+    );
+}
+
+#[test]
 fn deriving_mx_entity_on_an_enum_fails_to_compile() {
     let output = try_compile(
         r#"

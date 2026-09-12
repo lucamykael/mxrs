@@ -30,7 +30,8 @@ pub mod prelude {
         ApplicationDefinition, AssociationMarker, AttributeMarker, CallArgument, EntityMarker,
         EnumerationBuilder, EnumerationMarker, Expr, FlowBuilder, MendixType, MicroflowMarker,
         MicroflowRef, ModuleBuilder, MxBool, MxDecimal, MxEntity, MxEnumeration, MxFloat,
-        MxInteger, MxLong, MxString, ProjectBuilder, Ref, RenderExpr, TypedAttributeMarker, Var,
-        application, boolean, decimal, float, integer, long, project, string,
+        MxInteger, MxLong, MxString, ProjectBuilder, Ref, Reference, ReferenceSet, RenderExpr,
+        TypedAttributeMarker, Var, application, boolean, decimal, float, integer, long, project,
+        string,
     };
 }

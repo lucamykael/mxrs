@@ -80,6 +80,16 @@ pub trait EnumerationMarker: 'static {
     }
 }
 
+/// A Cargo-native single-reference field. It carries no runtime value; the
+/// entity derive lowers its target and cardinality into the domain model.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Reference<T: EntityMarker>(PhantomData<T>);
+
+/// A Cargo-native reference-set field. Like [`Reference`], this is schema
+/// information consumed by `#[derive(MxEntity)]`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReferenceSet<T: EntityMarker>(PhantomData<T>);
+
 /// Implemented by a generated marker type for one attribute of one entity
 /// (e.g. `markers::Sales::Order_Number`, generated from a manifest entity's
 /// `attributes` list).

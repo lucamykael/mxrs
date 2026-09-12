@@ -30,7 +30,7 @@
 //! source compatibility. Only plain structs with named fields are supported;
 //! tuple/unit structs and enums are a clear compile error.
 
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 
 struct ParsedAttribute {
@@ -53,6 +53,15 @@ struct ParsedEntity {
     persistable: Option<bool>,
 }
 
+struct ParsedAssociation {
+    name: String,
+    target: syn::Type,
+    reference_set: bool,
+    documentation: Option<String>,
+    owner_both: bool,
+    storage_table: bool,
+}
+
 pub fn expand_derive(input: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
     let entity = parse_mx_entity(&input.attrs, struct_name)?;
@@ -72,11 +81,67 @@ pub fn expand_derive(input: &syn::DeriveInput) -> syn::Result<proc_macro2::Token
     };
 
     let mut attribute_stmts = Vec::with_capacity(fields.named.len());
+    let mut association_stmts = Vec::new();
+    let mut association_markers = Vec::new();
     for field in &fields.named {
         let field_ident = field
             .ident
             .as_ref()
             .expect("named field always has an ident");
+        if let Some((reference_set, target)) = association_target(&field.ty) {
+            if entity.module.is_none() {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "Reference<T> and ReferenceSet<T> fields require #[mxrs(module = \"ModuleName\")] on the entity",
+                ));
+            }
+            let association =
+                parse_association(field, target, reference_set, entity_name, field_ident)?;
+            let ParsedAssociation {
+                name,
+                target,
+                reference_set,
+                documentation,
+                owner_both,
+                storage_table,
+            } = association;
+            let marker = format_ident!(
+                "__MxrsAssociation{}{}",
+                struct_name,
+                to_pascal_case(&field_ident.to_string())
+            );
+            let association_type = if reference_set {
+                quote!(::mxrs_ir::AssociationType::ReferenceSet)
+            } else {
+                quote!(::mxrs_ir::AssociationType::Reference)
+            };
+            association_markers.push(quote! {
+                #[doc(hidden)]
+                struct #marker;
+                impl ::mxrs_ir::AssociationMarker for #marker {
+                    type From = #struct_name;
+                    type To = #target;
+                    const NAME: &'static str = #name;
+                    const ASSOCIATION_TYPE: ::mxrs_ir::AssociationType = #association_type;
+                }
+            });
+            let documentation = documentation.map(|value| {
+                quote! { association.documentation = #value.to_string(); }
+            });
+            let owner = owner_both.then(|| {
+                quote! { association.owner = ::mxrs_ir::AssociationOwner::Both; }
+            });
+            let storage = storage_table.then(|| {
+                quote! { association.storage = ::mxrs_ir::AssociationStorage::Table; }
+            });
+            association_stmts.push(quote! {{
+                let association = e.association::<#marker>();
+                #documentation
+                #owner
+                #storage
+            }});
+            continue;
+        }
         let attribute = parse_mx_attribute(field, entity.module.as_deref())?;
         let ParsedAttribute {
             kind,
@@ -160,11 +225,88 @@ pub fn expand_derive(input: &syn::DeriveInput) -> syn::Result<proc_macro2::Token
                     #documentation
                     #persistable
                     #(#attribute_stmts)*
+                    #(#association_stmts)*
                 });
             }
         }
 
         #marker
+        #(#association_markers)*
+    })
+}
+
+fn association_target(ty: &syn::Type) -> Option<(bool, syn::Type)> {
+    let ty = unwrapped_type(ty);
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    let reference_set = match segment.ident.to_string().as_str() {
+        "Reference" => false,
+        "ReferenceSet" => true,
+        _ => return None,
+    };
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    let mut types = arguments.args.iter().filter_map(|argument| match argument {
+        syn::GenericArgument::Type(target) => Some(target.clone()),
+        _ => None,
+    });
+    let target = types.next()?;
+    types.next().is_none().then_some((reference_set, target))
+}
+
+fn parse_association(
+    field: &syn::Field,
+    target: syn::Type,
+    reference_set: bool,
+    entity_name: &str,
+    field_ident: &syn::Ident,
+) -> syn::Result<ParsedAssociation> {
+    let mut name = format!("{entity_name}_{}", to_pascal_case(&field_ident.to_string()));
+    let mut documentation = None;
+    let mut owner_both = false;
+    let mut storage_table = false;
+    for attribute in field
+        .attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("mxrs"))
+    {
+        attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("association") {
+                name = meta.value()?.parse::<syn::LitStr>()?.value();
+            } else if meta.path.is_ident("documentation") {
+                documentation = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            } else if meta.path.is_ident("owner") {
+                let value = meta.value()?.parse::<syn::LitStr>()?.value();
+                owner_both = match value.as_str() {
+                    "Default" => false,
+                    "Both" => true,
+                    _ => return Err(meta.error("association owner must be `Default` or `Both`")),
+                };
+            } else if meta.path.is_ident("storage") {
+                let value = meta.value()?.parse::<syn::LitStr>()?.value();
+                storage_table = match value.as_str() {
+                    "Column" => false,
+                    "Table" => true,
+                    _ => return Err(meta.error("association storage must be `Column` or `Table`")),
+                };
+            } else {
+                return Err(meta.error(
+                    "unknown association #[mxrs(...)] key; expected `association`, `documentation`, `owner`, or `storage`",
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(ParsedAssociation {
+        name,
+        target,
+        reference_set,
+        documentation,
+        owner_both,
+        storage_table,
     })
 }
 
