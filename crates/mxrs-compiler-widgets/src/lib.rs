@@ -12,14 +12,15 @@
 //! - `data_grid_bundle_compiler.rb` — Data Grid 2 properties and columns
 //! - `combo_box_bundle_compiler.rb` — association/database/enumeration Combo Box
 //! - `image_bundle_compiler.rb` — static and dynamically-bound Image properties
+//! - `generic_widget_bundle_compiler.rb` — schema-driven pluggable fallback
 //!
-//! Generic pluggable compilation and the surrounding page bundle/module emitter
-//! remain in the widget-bundle roadmap slice.
+//! The surrounding page bundle/module emitter remains in this roadmap slice.
 
 mod artifact;
 mod combo_box_bundle;
 mod data_grid_bundle;
 mod gallery_bundle;
+mod generic_widget_bundle;
 mod image_bundle;
 mod image_format;
 mod navigation;
@@ -35,6 +36,7 @@ pub use artifact::{ArtifactCompiler, NAME_ONLY_TYPES, TYPES};
 pub use combo_box_bundle::{COMBO_BOX_WIDGET_ID, ComboBoxBundleCompiler};
 pub use data_grid_bundle::DataGridBundleCompiler;
 pub use gallery_bundle::{GALLERY_WIDGET_ID, GalleryBundleCompiler};
+pub use generic_widget_bundle::GenericWidgetBundleCompiler;
 pub use image_bundle::{IMAGE_WIDGET_ID, ImageBundleCompiler, StaticImageOptions};
 pub use mxrs_compiler_support::{menu_operation_id, operation_id, widget_data_source_id};
 pub use navigation::NavigationCompiler;
