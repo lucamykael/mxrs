@@ -14,6 +14,10 @@
 //! - `image_bundle_compiler.rb` — static and dynamically-bound Image properties
 //! - `generic_widget_bundle_compiler.rb` — schema-driven pluggable fallback
 //! - `page_bundle_compiler.rb` — page/layout module emitter and bundle dispatch
+//!
+//! The emitter also renders structural/static Forms widgets directly
+//! (layout grids, containers, tables, tabs, snippets, labels and text) while
+//! keeping an override hook for richer native-widget implementations.
 
 mod artifact;
 mod combo_box_bundle;
@@ -40,7 +44,7 @@ pub use generic_widget_bundle::GenericWidgetBundleCompiler;
 pub use image_bundle::{IMAGE_WIDGET_ID, ImageBundleCompiler, StaticImageOptions};
 pub use mxrs_compiler_support::{menu_operation_id, operation_id, widget_data_source_id};
 pub use navigation::NavigationCompiler;
-pub use page_bundle::{PageBundle, PageBundleCompiler};
+pub use page_bundle::{PageBundle, PageBundleCompiler, ProjectPageBundleCompiler};
 pub use page_document::PageDocumentCompiler;
 pub use settings::SettingsCompiler;
 pub use web_list_data_source::WebListDataSource;

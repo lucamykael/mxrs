@@ -29,7 +29,8 @@ other half of the round trip).
 `mxrs-compiler-flow` (microflow/nanoflow/code-action) →
 `mxrs-compiler-widgets` (page metadata/web operations/navigation/settings/
 artifact plus Gallery/Data Grid 2/Combo Box/Image and generic pluggable bundles,
-shared modern list sources, and page/layout ES-module emission) →
+shared modern list sources, and page/layout ES-module emission with native
+structural/text rendering) →
 `mxrs-javagen` (generated Java proxies). Materializers/packaging
 (`mxrs-materializers`, `mxrs-packager`) and the runtime/OQL/semantic/scaffold
 subsystems are not started yet.

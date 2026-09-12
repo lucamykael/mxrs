@@ -29,6 +29,7 @@ pub struct GenericWidgetBundleCompiler<'a> {
     key_prefix: &'a str,
     renderer: Option<&'a WidgetRenderer<'a>>,
     action_renderer: Option<&'a ActionRenderer<'a>>,
+    package_available: Option<bool>,
     index: HashMap<String, Document>,
     values: Vec<PropertyValue>,
     component_name: String,
@@ -56,6 +57,7 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
             key_prefix: "p",
             renderer: None,
             action_renderer: None,
+            package_available: None,
             index,
             values,
             component_name: widget_id.rsplit('.').next().unwrap_or_default().to_string(),
@@ -78,6 +80,15 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
         self
     }
 
+    pub fn with_package_available(mut self, available: bool) -> Self {
+        self.package_available = Some(available);
+        self
+    }
+
+    pub fn module_available(project_path: &Path, module_path: &str) -> bool {
+        package_module(project_path, module_path)
+    }
+
     pub fn component_name(&self) -> &str {
         &self.component_name
     }
@@ -88,7 +99,9 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
 
     pub fn supported(&self) -> bool {
         identifier(&self.component_name)
-            && self.package_module()
+            && self
+                .package_available
+                .unwrap_or_else(|| self.package_module())
             && self
                 .values
                 .iter()
@@ -464,19 +477,7 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
     }
 
     fn package_module(&self) -> bool {
-        let root = self.project_path.parent().unwrap_or_else(|| Path::new("."));
-        let entry = format!("{}.mjs", self.module_path);
-        if root.join("widgets").join(&entry).is_file() {
-            return true;
-        }
-        let Ok(entries) = fs::read_dir(root.join("widgets")) else {
-            return false;
-        };
-        entries.filter_map(Result::ok).any(|entry_path| {
-            let path = entry_path.path();
-            path.extension().is_some_and(|extension| extension == "mpk")
-                && archive_contains(&path, &entry)
-        })
+        package_module(self.project_path, &self.module_path)
     }
 
     fn widget_key(&self) -> String {
@@ -666,6 +667,22 @@ fn archive_contains(path: &Path, entry: &str) -> bool {
         bytes
             .windows(entry.len())
             .any(|window| window == entry.as_bytes())
+    })
+}
+
+fn package_module(project_path: &Path, module_path: &str) -> bool {
+    let root = project_path.parent().unwrap_or_else(|| Path::new("."));
+    let entry = format!("{module_path}.mjs");
+    if root.join("widgets").join(&entry).is_file() {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(root.join("widgets")) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry_path| {
+        let path = entry_path.path();
+        path.extension().is_some_and(|extension| extension == "mpk")
+            && archive_contains(&path, &entry)
     })
 }
 
