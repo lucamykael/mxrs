@@ -22,6 +22,19 @@ use crate::catalog::PropertyType;
 /// returns [`crate::error::PluggableError::NeedsFormsIntegration`]
 /// instead of a value, per this workspace's rule that an unported gap
 /// must fail loudly, never guess or silently drop data.
+/// The polymorphic `target` a semantic [`Value::Reference`] wraps —
+/// mirrors `Pluggable.reference(kind, target)`'s duck-typed `target` in
+/// mxrb: a bare storage path for `File`/`Form`/`Image`/`Microflow`/
+/// `Nanoflow` and an `Association` routed through `AttributeRef`, or a
+/// structured domain-model reference for an `Association` routed through
+/// `EntityRef`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReferenceTarget {
+    Path(String),
+    Attribute(mxrs_forms_refs::AttributeReference),
+    Entity(mxrs_forms_refs::EntityReference),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// An absent optional reference (mxrb's `nil` — a `File`/`Form`/
@@ -42,15 +55,22 @@ pub enum Value {
     /// are read directly, not through `mxrs-forms`). One `(language, text)`
     /// pair per translation, same order as stored.
     Text(Vec<(String, String)>),
-    /// Covers the `File`/`Form`/`Image`/`Microflow`/`Nanoflow` value kinds
-    /// and a non-`EntityRef` `Association` (an `AttributeRef`-shaped
-    /// reference mxrb's `reference_path` reads as a bare string) — ports
-    /// `Pluggable.reference(kind, target)` for the string-target cases
-    /// only; an `Association`/`Entity` value backed by an `EntityRef`
-    /// still needs `mxrs-forms` (see above).
+    /// An `Attribute`-kind value's `AttributeRef` — ports the `when
+    /// 'Attribute'` arm of mxrb's `decode_value`, which returns
+    /// `forms_codec.decode_attribute_reference_value(...)` directly (not
+    /// wrapped in `Pluggable.reference`).
+    AttributeReference(mxrs_forms_refs::AttributeReference),
+    /// An `Entity`-kind value's `EntityRef` — ports the `when 'Entity'`
+    /// arm the same way.
+    EntityReference(mxrs_forms_refs::EntityReference),
+    /// Covers `File`/`Form`/`Image`/`Microflow`/`Nanoflow`, and
+    /// `Association` (routed through either `EntityRef` or `AttributeRef`
+    /// — mxrb's `decode_semantic_reference` wraps both in the same
+    /// `Pluggable.reference(kind, target)` shape, so `target`'s shape
+    /// depends on which branch decoded it).
     Reference {
         kind: String,
-        target: String,
+        target: ReferenceTarget,
     },
     /// A nested pluggable object (`Object`-kind property) — `None` means
     /// an unset single (non-list) nested object, mirroring mxrb's

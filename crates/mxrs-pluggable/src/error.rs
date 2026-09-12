@@ -41,6 +41,9 @@ pub enum PluggableError {
 
     #[error("BSON codec error: {0}")]
     Bson(#[from] mxrs_bson::BsonCodecError),
+
+    #[error("invalid domain-model reference: {0}")]
+    InvalidReference(#[from] mxrs_forms_refs::RefError),
 }
 
 pub type Result<T> = std::result::Result<T, PluggableError>;

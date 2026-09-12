@@ -12,7 +12,9 @@ workspace = true
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
+mxrs-forms-refs = { path = "../mxrs-forms-refs" }
 mxrs-fragment-store = { path = "../mxrs-fragment-store" }
+mxrs-pluggable = { path = "../mxrs-pluggable" }
 regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

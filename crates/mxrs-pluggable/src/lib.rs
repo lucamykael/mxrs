@@ -26,4 +26,4 @@ pub use catalog::{
 };
 pub use error::{PluggableError, Result};
 pub use mpr_codec::{SchemaContext, decode_object, decode_widget_type};
-pub use node::{Assignment, ObjectNode, Value};
+pub use node::{Assignment, ObjectNode, ReferenceTarget, Value};

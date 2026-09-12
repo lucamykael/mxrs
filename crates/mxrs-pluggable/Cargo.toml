@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
+mxrs-forms-refs = { path = "../mxrs-forms-refs" }
 thiserror.workspace = true
 
 [dev-dependencies]

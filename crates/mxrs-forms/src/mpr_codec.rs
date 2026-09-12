@@ -37,12 +37,19 @@
 //! fallback (mirroring `native_fragment_store.rb`) or porting the specific
 //! dual-field shims mxrb's writer.rb emits — not a defect in this port.
 //!
+//! **`CustomWidgets$CustomWidget` handling**: decoding now delegates to
+//! `mxrs-pluggable` for real (`decode_one` returns `Value::Pluggable` —
+//! see `decode_pluggable` below), matching `Mxrb::Forms::MprCodec
+//! #decode_embedded`'s `pluggable_codec.decode` branch. Still explicitly
+//! erroring rather than silently dropping data: (a) a small remaining set
+//! of pluggable value kinds that need a *stateful, catalog-driven*
+//! embedded-node decode this crate doesn't expose to `mxrs-pluggable` yet
+//! (`TextTemplate`/`Action`/`Icon`/`DataSource`/`Widgets` — see
+//! `mxrs-pluggable::mpr_codec`'s doc for the real numbers), and (b)
+//! encoding a `Value::Pluggable` back to BSON at all
+//! (`mxrs-pluggable::encode_object`/`encode_value` aren't ported yet).
+//!
 //! Deliberately **not** ported:
-//! - `CustomWidgets$CustomWidget` handling (delegates to `Pluggable::*` in
-//!   mxrb, which doesn't exist in mxrs yet — `mxrs-pluggable` is deferred
-//!   post-MVP; confirmed to matter even for trivial pages, since Mendix
-//!   11's default Data Grid widget is itself pluggable under the hood).
-//!   Encountering one is a clear, explicit error, not silent data loss.
 //! - The `OBSOLETE_DEFAULT_FIELDS` shim and the legacy attribute-path/
 //!   label-text/source-variable/design-property/placeholder branches, and
 //!   the boolean-as-enum shim — these are for genuinely pre-11.x document
@@ -69,8 +76,11 @@ use crate::error::{FormsError, Result};
 use crate::node::{Node, Value};
 use crate::storage_naming;
 use crate::values::{
-    AttributeReference, BinaryAsset, Condition, DataType, EntityPathStep, EntityReference,
-    Reference, Text, TextTemplate, Translation, XPathConstraint,
+    BinaryAsset, Condition, DataType, Reference, Text, TextTemplate, Translation, XPathConstraint,
+};
+use mxrs_forms_refs::{
+    decode_attribute_reference, decode_entity_reference, encode_attribute_reference,
+    encode_entity_reference,
 };
 
 const INTERNAL_PREFIXES: &[&str] = &["Forms$", "Pages$"];
@@ -150,7 +160,15 @@ impl MprCodec {
                 path: path.to_string(),
             })?;
         if type_field == "CustomWidgets$CustomWidget" {
-            return Err(FormsError::PluggableNotSupported {
+            // Never hit by real Mendix data (a page's root/element document
+            // is never itself a `CustomWidgets$CustomWidget` — it's always
+            // nested inside a widget-typed property, handled in
+            // `decode_one` instead, which can return `Value::Pluggable`).
+            // `Node` has no representation for pluggable content, so this
+            // stays a defensive, explicit error rather than a silent
+            // `todo!()` if that assumption ever turns out wrong.
+            return Err(FormsError::InvalidShape {
+                shape: "top-level CustomWidgets$CustomWidget (must be nested in a widget property)",
                 path: path.to_string(),
             });
         }
@@ -214,6 +232,42 @@ impl MprCodec {
         Ok(node)
     }
 
+    /// Decodes a `CustomWidgets$CustomWidget` document (`Type` +
+    /// `Object` sub-documents) via `mxrs-pluggable`, translating its
+    /// `PluggableError` into `FormsError::PluggableDecodeFailed` — never a
+    /// silent drop, matching every other codec boundary in this crate.
+    /// Ports the `pluggable_codec.decode` branch of
+    /// `Mxrb::Forms::MprCodec#decode_embedded`.
+    fn decode_pluggable(
+        &self,
+        document: &Document,
+        path: &str,
+    ) -> Result<mxrs_pluggable::ObjectNode> {
+        let wrap = |source| FormsError::PluggableDecodeFailed {
+            path: path.to_string(),
+            source,
+        };
+        let type_path = format!("{path}.Type");
+        let type_document =
+            document
+                .get_document("Type")
+                .map_err(|_| FormsError::InvalidShape {
+                    shape: "CustomWidgets$CustomWidget.Type",
+                    path: path.to_string(),
+                })?;
+        let (_widget_type, context) =
+            mxrs_pluggable::decode_widget_type(type_document, &type_path).map_err(wrap)?;
+        let object_path = format!("{path}.Object");
+        let object_document =
+            document
+                .get_document("Object")
+                .map_err(|_| FormsError::InvalidShape {
+                    shape: "CustomWidgets$CustomWidget.Object",
+                    path: path.to_string(),
+                })?;
+        mxrs_pluggable::decode_object(object_document, &context, &object_path).map_err(wrap)
+    }
+
     fn decode_property(
         &self,
         property: &Property,
@@ -275,6 +329,9 @@ impl MprCodec {
                         path: path.to_string(),
                     });
                 };
+                if doc.get_str("$Type").ok() == Some("CustomWidgets$CustomWidget") {
+                    return self.decode_pluggable(doc, path).map(Value::Pluggable);
+                }
                 return Ok(Value::Node(self.decode_node(
                     doc,
                     path,
@@ -291,12 +348,12 @@ impl MprCodec {
             "Expression" => self
                 .expect_string(raw, path)
                 .map(|s| Value::Expression(crate::values::Expression::new(s))),
-            "AttributeReference" => self
-                .decode_attribute_reference(raw, path)
-                .map(Value::AttributeReference),
-            "EntityReference" => self
-                .decode_entity_reference(raw, path)
-                .map(Value::EntityReference),
+            "AttributeReference" => decode_attribute_reference(raw, path)
+                .map(Value::AttributeReference)
+                .map_err(Self::ref_error),
+            "EntityReference" => decode_entity_reference(raw, path)
+                .map(Value::EntityReference)
+                .map_err(Self::ref_error),
             "DataType" => self.decode_data_type(raw, path).map(Value::DataType),
             "Condition" => self.decode_condition(raw, path).map(Value::Condition),
             "TextTemplate" => self
@@ -470,70 +527,13 @@ impl MprCodec {
         Ok(TextTemplate::build(text, parameters))
     }
 
-    fn decode_attribute_reference(&self, raw: &Bson, path: &str) -> Result<AttributeReference> {
-        let Bson::Document(doc) = raw else {
-            let attribute = self.expect_string(raw, path)?;
-            return Ok(AttributeReference {
-                attribute,
-                entity_reference: None,
-            });
-        };
-        if !doc
-            .get_str("$Type")
-            .map(|t| t.ends_with("$AttributeRef"))
-            .unwrap_or(false)
-        {
-            return Err(FormsError::InvalidShape {
-                shape: "AttributeReference",
-                path: path.to_string(),
-            });
-        }
-        let entity_reference = match doc.get("EntityRef") {
-            Some(v) => Some(self.decode_entity_reference(v, &format!("{path}.EntityRef"))?),
-            None => None,
-        };
-        let attribute = doc.get_str("Attribute").unwrap_or("").to_string();
-        Ok(AttributeReference {
-            attribute,
-            entity_reference,
-        })
-    }
-
-    fn decode_entity_reference(&self, raw: &Bson, path: &str) -> Result<EntityReference> {
-        let Bson::Document(doc) = raw else {
-            let entity = self.expect_string(raw, path)?;
-            return Ok(EntityReference::direct(entity));
-        };
-        let type_name = doc.get_str("$Type").unwrap_or("");
-        if type_name.ends_with("$DirectEntityRef") {
-            return Ok(EntityReference::direct(doc.get_str("Entity").unwrap_or("")));
-        }
-        if type_name.ends_with("$IndirectEntityRef") {
-            let steps = match doc.get("Steps") {
-                Some(Bson::Array(a)) => mxrs_bson::parse_array(Some(a))
-                    .items
-                    .iter()
-                    .filter_map(|step| {
-                        let Bson::Document(step_doc) = step else {
-                            return None;
-                        };
-                        Some(EntityPathStep {
-                            association: step_doc.get_str("Association").unwrap_or("").to_string(),
-                            destination_entity: step_doc
-                                .get_str("DestinationEntity")
-                                .unwrap_or("")
-                                .to_string(),
-                        })
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            return Ok(EntityReference::through(steps));
-        }
-        Err(FormsError::InvalidShape {
-            shape: "EntityReference",
-            path: path.to_string(),
-        })
+    /// `decode_attribute_reference`/`decode_entity_reference` themselves
+    /// now live in `mxrs_forms_refs` (shared with `mxrs-pluggable` — see
+    /// that crate's doc comment for why); this just maps its error type
+    /// onto `FormsError` at the boundary.
+    fn ref_error(error: mxrs_forms_refs::RefError) -> FormsError {
+        let mxrs_forms_refs::RefError::InvalidShape { shape, path } = error;
+        FormsError::InvalidShape { shape, path }
     }
 
     fn decode_condition(&self, raw: &Bson, path: &str) -> Result<Condition> {
@@ -766,6 +766,9 @@ impl MprCodec {
             Value::List(_) => Err(FormsError::Other(format!(
                 "unexpected nested list at {path}"
             ))),
+            Value::Pluggable(_) => Err(FormsError::PluggableEncodeNotSupported {
+                path: path.to_string(),
+            }),
         }
     }
 
@@ -901,49 +904,6 @@ fn encode_text_template(template: &TextTemplate, path: &str) -> Document {
     document.insert("Text", Bson::Document(encode_text(&template.text)));
     document.insert("Parameters", mxrs_bson::build_array(parameters, 2));
     let _ = path;
-    document
-}
-
-fn encode_attribute_reference(reference: &AttributeReference) -> Document {
-    let mut document = Document::new();
-    document.insert("$ID", uuid::Uuid::new_v4().to_string());
-    document.insert("$Type", "DomainModels$AttributeRef");
-    document.insert("Attribute", reference.attribute.clone());
-    document.insert(
-        "EntityRef",
-        reference
-            .entity_reference
-            .as_ref()
-            .map(|e| Bson::Document(encode_entity_reference(e)))
-            .unwrap_or(Bson::Null),
-    );
-    document
-}
-
-fn encode_entity_reference(reference: &EntityReference) -> Document {
-    if reference.indirect {
-        let steps: Vec<Bson> = reference
-            .steps
-            .iter()
-            .map(|step| {
-                let mut d = Document::new();
-                d.insert("$ID", uuid::Uuid::new_v4().to_string());
-                d.insert("$Type", "DomainModels$EntityRefStep");
-                d.insert("Association", step.association.clone());
-                d.insert("DestinationEntity", step.destination_entity.clone());
-                Bson::Document(d)
-            })
-            .collect();
-        let mut document = Document::new();
-        document.insert("$ID", uuid::Uuid::new_v4().to_string());
-        document.insert("$Type", "DomainModels$IndirectEntityRef");
-        document.insert("Steps", mxrs_bson::build_array(steps, 2));
-        return document;
-    }
-    let mut document = Document::new();
-    document.insert("$ID", uuid::Uuid::new_v4().to_string());
-    document.insert("$Type", "DomainModels$DirectEntityRef");
-    document.insert("Entity", reference.entity.clone());
     document
 }
 

@@ -65,8 +65,18 @@ pub enum FormsError {
     #[error("invalid {shape} at {path}")]
     InvalidShape { shape: &'static str, path: String },
 
-    #[error("custom (pluggable) widgets are not yet supported by mxrs-forms: {path}")]
-    PluggableNotSupported { path: String },
+    #[error("custom (pluggable) widget at {path} could not be decoded: {source}")]
+    PluggableDecodeFailed {
+        path: String,
+        #[source]
+        source: mxrs_pluggable::PluggableError,
+    },
+
+    #[error(
+        "encoding a custom (pluggable) widget is not supported yet (mxrs-pluggable's encode \
+         side isn't ported): {path}"
+    )]
+    PluggableEncodeNotSupported { path: String },
 
     #[error("{0}")]
     Other(String),

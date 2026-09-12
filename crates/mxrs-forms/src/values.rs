@@ -107,46 +107,14 @@ impl Expression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntityPathStep {
-    pub association: String,
-    pub destination_entity: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntityReference {
-    pub entity: String,
-    pub steps: Vec<EntityPathStep>,
-    pub indirect: bool,
-}
-
-impl EntityReference {
-    pub fn direct(entity: impl Into<String>) -> Self {
-        Self {
-            entity: entity.into(),
-            steps: Vec::new(),
-            indirect: false,
-        }
-    }
-
-    pub fn through(steps: Vec<EntityPathStep>) -> Self {
-        let entity = steps
-            .last()
-            .map(|s| s.destination_entity.clone())
-            .unwrap_or_default();
-        Self {
-            entity,
-            steps,
-            indirect: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttributeReference {
-    pub attribute: String,
-    pub entity_reference: Option<EntityReference>,
-}
+/// `EntityPathStep`/`EntityReference`/`AttributeReference` now live in
+/// `mxrs-forms-refs` — shared with `mxrs-pluggable`, which needs the same
+/// two reference kinds to decode `CustomWidgets$WidgetValue`'s
+/// `Attribute`/`Entity`/`Association` kinds without creating a dependency
+/// cycle (`mxrs-forms` already depends on `mxrs-pluggable` to decode
+/// embedded `CustomWidgets$CustomWidget` nodes). Re-exported here so
+/// nothing about this crate's own public API changes.
+pub use mxrs_forms_refs::{AttributeReference, EntityPathStep, EntityReference};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataType {

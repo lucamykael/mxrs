@@ -36,6 +36,12 @@ pub enum Value {
     XPathConstraint(XPathConstraint),
     Binary(crate::values::BinaryAsset),
     List(Vec<Value>),
+    /// A decoded `CustomWidgets$CustomWidget` (Data Grid 2/Gallery/
+    /// ComboBox and any third-party pluggable widget) — not a [`Node`]
+    /// because pluggable widgets aren't part of this crate's fixed
+    /// `Catalog` schema; see `mxrs-pluggable` for why. Decode-only for now
+    /// (`mxrs-pluggable::encode_object`/`encode_value` aren't ported yet).
+    Pluggable(mxrs_pluggable::ObjectNode),
 }
 
 #[derive(Debug, Clone, PartialEq)]

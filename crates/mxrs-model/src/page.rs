@@ -6,10 +6,12 @@
 //! widgets but several of Studio Pro's own modern built-ins like Data Grid 2,
 //! Gallery and ComboBox) decodes to a shallow [`Widget`] (type "pluggable" +
 //! name + `native_type`, nested widgets still recursed into `children`)
-//! rather than mxrb's fully typed per-widget option shape. The pluggable
-//! `Object`/`Type` custom-property model is explicitly deferred post-MVP as
-//! `mxrs-pluggable` — see `decisions/mxrs-rust-rewrite-plan.md` in this
-//! project's ai-memory, and `mxrs-forms`'s own `FormsError::PluggableNotSupported`.
+//! rather than mxrb's fully typed per-widget option shape. This crate's own
+//! `Page` model still has no typed representation for a pluggable widget's
+//! `Object`/`Type` custom properties — `mxrs-pluggable` now decodes those
+//! (see its crate doc for exactly which value kinds), but nothing here
+//! consumes that yet. See `decisions/mxrs-rust-rewrite-plan.md` in this
+//! project's ai-memory for the fuller history.
 //! Every native (non-pluggable) widget kind mxrb supports — including
 //! composite ones like DataGrid, TabControl, Table and LayoutGrid — is fully
 //! ported.

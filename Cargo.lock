@@ -591,10 +591,21 @@ name = "mxrs-forms"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-forms-refs",
  "mxrs-fragment-store",
+ "mxrs-pluggable",
  "regex",
  "serde",
  "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "mxrs-forms-refs"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
  "thiserror",
  "uuid",
 ]
@@ -682,6 +693,7 @@ name = "mxrs-pluggable"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-forms-refs",
  "mxrs-mpr",
  "thiserror",
 ]

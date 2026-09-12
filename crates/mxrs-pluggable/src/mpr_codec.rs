@@ -11,23 +11,31 @@
 //! every value kind that's self-contained (`Boolean`/`Integer`/`Decimal`/
 //! `String`/`Enumeration`/`Selection`/`Expression`/`EntityConstraint`/
 //! `TranslatableString`/`System`/`Object` recursion, plus the
-//! `File`/`Form`/`Image`/`Microflow`/`Nanoflow` string-path references).
-//! See [`node`](crate::node) for the decoded shape.
+//! `File`/`Form`/`Image`/`Microflow`/`Nanoflow` string-path references)
+//! *and* for `Attribute`/`Entity`/`Association` — these three route
+//! through `mxrs-forms-refs::{decode_attribute_reference,
+//! decode_entity_reference}` (extracted out of `mxrs-forms` specifically
+//! so this crate could reach them without creating a dependency cycle —
+//! see that crate's doc comment for why). See [`node`](crate::node) for
+//! the decoded shape, including [`node::ReferenceTarget`] for how an
+//! `Association`'s two possible reference shapes are represented.
 //!
 //! Still open, correctly erroring rather than guessing
-//! (`PluggableError::NeedsFormsIntegration`): `Attribute`, `Entity`,
-//! `Association` (both of mxrb's own branches for it need `forms_codec`),
-//! `TextTemplate`, `Action`, `Icon`, `DataSource`, and `Widgets` — every
-//! one of these delegates to `Mxrb::Forms::MprCodec`'s *private* decode
-//! helpers in mxrb (`decode_attribute_reference_value`/
-//! `decode_entity_reference_value`/`decode_embedded`), which
-//! `mxrs-forms::MprCodec` doesn't expose yet (it only exposes whole-`Node`
-//! `decode`/`encode` today — see its `lib.rs`). Real-world weight of this
-//! gap, measured (not guessed) by `tests/instance_oracle.rs` against
-//! every real `CustomWidgets$CustomWidget` instance in QRQC/SPC: only
-//! 10/378 (QRQC) and 11/682 (SPC) decode *fully* end-to-end today — the
-//! rest each hit one of these kinds first (`TextTemplate`, `DataSource`,
-//! and `Attribute` dominate). What's landed here is real, independently
+//! (`PluggableError::NeedsFormsIntegration`): `TextTemplate`, `Action`,
+//! `Icon`, `DataSource`, and `Widgets` — every one of these needs a
+//! *catalog-driven, recursive* embedded-Forms-node decode
+//! (`Mxrb::Forms::MprCodec#decode_embedded`/`#decode_node`), which is
+//! stateful (tied to `mxrs-forms`'s `Catalog`) in a way the reference
+//! types above aren't — closing this needs either a similar type
+//! extraction for `mxrs-forms::Node` itself (a much bigger crate to split)
+//! or a trait-based callback from `mxrs-forms` into this crate, not
+//! attempted yet. Real-world weight of this remaining gap, measured (not
+//! guessed) by `tests/instance_oracle.rs` against every real
+//! `CustomWidgets$CustomWidget` instance in QRQC/SPC: 23/378 (QRQC) and
+//! 13/682 (SPC) decode *fully* end-to-end today (up from 10/378 and
+//! 11/682 before `Attribute`/`Entity`/`Association` closed) — the rest
+//! each hit one of the five remaining kinds first (`TextTemplate` and
+//! `DataSource` now dominate). What's landed here is real, independently
 //! useful, zero-panic progress (every self-contained property decodes
 //! correctly, and every blocked instance fails with this exact named
 //! error, never a guess or a silent drop), not the finish line.
@@ -37,10 +45,11 @@
 //! `mxrs-compiler-widgets` needs to read real pages), encode is symmetric
 //! follow-up work once decode's remaining gaps close.
 //!
-//! Wiring `mxrs-forms::mpr_codec`'s own `FormsError::PluggableNotSupported`
-//! case to delegate here is deferred until decode covers enough real
-//! instances end-to-end to be worth it — today it would just trade one
-//! named error for another on nearly every real widget.
+//! `mxrs-forms::mpr_codec`'s `CustomWidgets$CustomWidget` branch now
+//! delegates here for real (`Value::Pluggable` in `mxrs-forms::node`) —
+//! see that crate's `decode_pluggable`. Encoding a `Value::Pluggable`
+//! back to BSON is not supported yet (`FormsError::PluggableEncodeNotSupported`),
+//! symmetric with `encode_object`/`encode_value` not being ported here.
 
 use mxrs_bson::{Bson, Document, extract_id, parse_array};
 
@@ -501,12 +510,70 @@ fn decode_value(
         "TranslatableString" => Ok(Value::Text(decode_translatable(document, path)?)),
         "System" => Ok(Value::System),
         "Object" => decode_object_value(document, value_type, context, path),
-        "Attribute" | "Entity" | "TextTemplate" | "Action" | "Icon" | "DataSource" | "Widgets"
-        | "Association" => Err(PluggableError::NeedsFormsIntegration {
-            kind: value_type.kind.clone(),
-            path: path.to_string(),
-        }),
+        "Attribute" => decode_attribute_value(document, path),
+        "Entity" => decode_entity_value(document, path),
+        "Association" => decode_association_value(document, path),
+        "TextTemplate" | "Action" | "Icon" | "DataSource" | "Widgets" => {
+            Err(PluggableError::NeedsFormsIntegration {
+                kind: value_type.kind.clone(),
+                path: path.to_string(),
+            })
+        }
         other => Ok(decode_reference(other, document)),
+    }
+}
+
+/// Ports the `when 'Attribute'` arm of mxrb's `decode_value`:
+/// `document['AttributeRef'] && forms_codec.decode_attribute_reference_value(...)`.
+fn decode_attribute_value(document: &Document, path: &str) -> Result<Value> {
+    match document.get("AttributeRef") {
+        None | Some(Bson::Null) => Ok(Value::Null),
+        Some(raw) => {
+            mxrs_forms_refs::decode_attribute_reference(raw, &format!("{path}.AttributeRef"))
+                .map(Value::AttributeReference)
+                .map_err(PluggableError::from)
+        }
+    }
+}
+
+/// Ports the `when 'Entity'` arm the same way, over `EntityRef`.
+fn decode_entity_value(document: &Document, path: &str) -> Result<Value> {
+    match document.get("EntityRef") {
+        None | Some(Bson::Null) => Ok(Value::Null),
+        Some(raw) => mxrs_forms_refs::decode_entity_reference(raw, &format!("{path}.EntityRef"))
+            .map(Value::EntityReference)
+            .map_err(PluggableError::from),
+    }
+}
+
+/// Ports the `Association` half of `decode_semantic_reference`: routed
+/// through `EntityRef` when present, else through `AttributeRef` (both
+/// wrapped as `Pluggable.reference('Association', target)` in mxrb —
+/// see [`crate::node::ReferenceTarget`]).
+fn decode_association_value(document: &Document, path: &str) -> Result<Value> {
+    if let Some(raw) = document
+        .get("EntityRef")
+        .filter(|v| !matches!(v, Bson::Null))
+    {
+        let target = mxrs_forms_refs::decode_entity_reference(raw, &format!("{path}.EntityRef"))?;
+        return Ok(Value::Reference {
+            kind: "Association".to_string(),
+            target: crate::node::ReferenceTarget::Entity(target),
+        });
+    }
+    match document
+        .get("AttributeRef")
+        .filter(|v| !matches!(v, Bson::Null))
+    {
+        None => Ok(Value::Null),
+        Some(raw) => {
+            let target =
+                mxrs_forms_refs::decode_attribute_reference(raw, &format!("{path}.AttributeRef"))?;
+            Ok(Value::Reference {
+                kind: "Association".to_string(),
+                target: crate::node::ReferenceTarget::Attribute(target),
+            })
+        }
     }
 }
 
@@ -569,7 +636,7 @@ fn decode_reference(kind: &str, document: &Document) -> Value {
     } else {
         Value::Reference {
             kind: kind.to_string(),
-            target,
+            target: crate::node::ReferenceTarget::Path(target),
         }
     }
 }
