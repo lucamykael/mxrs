@@ -94,33 +94,56 @@ pub enum Value<N> {
     /// An `Icon`-kind value's embedded element — ports
     /// `decode_optional_forms(document['Icon'])` the same way.
     Icon(N),
-    /// A `DataSource`-kind value's XPath/database source — self-contained
-    /// only when neither the value's own `SourceVariable` nor the nested
-    /// source's `SortBar` is present (both need `mxrs-forms`'s embedded
-    /// Node decode). `None` mirrors mxrb's `nil` (no source and no
-    /// variable at all). Ports the self-contained slice of
-    /// `decode_data_source`/`XPathSource`.
-    DataSource(Option<DataSource>),
-    /// A `Widgets`-kind value all of whose items are themselves nested
-    /// `CustomWidgets$CustomWidget` instances — decoded fully via this
-    /// crate's own `decode_widget_type`/`decode_object`, discarding each
-    /// nested widget's own schema/outer-properties the same way
-    /// `mxrs-forms::decode_pluggable` already does for the top-level case.
-    /// A list containing any non-pluggable (native Forms) item can't be
-    /// represented here at all — decoding it returns
-    /// [`crate::error::PluggableError::NeedsFormsIntegration`] instead of
-    /// silently dropping the native items.
-    Widgets(Vec<ObjectNode<N>>),
+    /// A `DataSource`-kind value — ports `decode_data_source` in full
+    /// (mxrb's `XPathSource` branch, or a source of some other `$Type`
+    /// decoded whole via the injected [`crate::embedded::EmbeddedFormsDecoder`],
+    /// mirroring `forms_codec.decode_embedded(source, ...)`). `None`
+    /// mirrors mxrb's `nil` (no source and no variable at all).
+    DataSource(Option<DataSourceValue<N>>),
+    /// A `Widgets`-kind value — one [`WidgetItem`] per entry, mirroring
+    /// mxrb's `decode_widgets`: a `CustomWidgets$CustomWidget` item
+    /// recurses into this crate's own `decode_widget_type`/`decode_object`
+    /// (discarding the nested widget's own schema/outer-properties, same
+    /// as `mxrs-forms::decode_pluggable` does for the top-level case); any
+    /// other item routes through the injected `EmbeddedFormsDecoder`
+    /// (mxrb's `forms_codec.decode_embedded`).
+    Widgets(Vec<WidgetItem<N>>),
 }
 
-/// See [`Value::DataSource`]. Ports the fields of mxrb's `XPathSource` that
-/// don't require an embedded `mxrs-forms` Node decode (`entity`/
-/// `constraint`/`force_full_objects` — never `sort_bar`/`source_variable`).
+/// See [`Value::DataSource`]. Ports mxrb's `decode_data_source` return
+/// shape: either a `CustomWidgets$CustomWidgetXPathSource`/
+/// `...DatabaseSource` decoded field-by-field (`XPath`), or a source of
+/// some other `$Type` decoded whole via `forms_codec.decode_embedded`
+/// (`Embedded`) — mxrb returns either shape untyped (duck-typed), this
+/// enum makes the two cases explicit.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DataSource {
+pub enum DataSourceValue<N> {
+    XPath(DataSource<N>),
+    Embedded(N),
+}
+
+/// See [`DataSourceValue::XPath`]. Ports every field of mxrb's
+/// `XPathSource`, now that `sort_bar`/`source_variable` route through the
+/// injected `EmbeddedFormsDecoder` instead of being unreachable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataSource<N> {
     pub entity: Option<mxrs_forms_refs::EntityReference>,
     pub constraint: String,
+    pub sort_bar: Option<N>,
+    pub source_variable: Option<N>,
     pub force_full_objects: bool,
+}
+
+/// See [`Value::Widgets`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum WidgetItem<N> {
+    /// A nested `CustomWidgets$CustomWidget` item, decoded via this
+    /// crate's own schema/object decode (mxrb's `decode(item)` branch).
+    Pluggable(ObjectNode<N>),
+    /// Any other (native Forms) item, decoded via the injected
+    /// `EmbeddedFormsDecoder` (mxrb's `forms_codec.decode_embedded`
+    /// branch).
+    Native(N),
 }
 
 /// One assigned property on an [`ObjectNode`]. Ports the read side of

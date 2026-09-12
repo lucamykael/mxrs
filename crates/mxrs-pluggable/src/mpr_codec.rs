@@ -20,74 +20,58 @@
 //! the decoded shape, including [`node::ReferenceTarget`] for how an
 //! `Association`'s two possible reference shapes are represented.
 //!
-//! `DataSource` and `Widgets` now each have a self-contained *slice*
-//! ported too: `DataSource` closes the XPath/database-source shape when
-//! neither its own nor the nested source's `SourceVariable`/`SortBar` is
-//! present (`decode_data_source_value`); `Widgets` closes a list all of
-//! whose items are themselves a nested `CustomWidgets$CustomWidget`
-//! (`decode_widgets_value`, pure self-recursion through this crate's own
-//! `decode_widget_type`/`decode_object`, no `mxrs-forms` involved). Both
-//! still return `NeedsFormsIntegration` for the rest of their shape (a
-//! non-XPath/database source, a present `SourceVariable`/`SortBar`, or a
-//! native item in a `Widgets` list) — confirmed against real QRQC/SPC data
-//! that this *never* happens to close any additional real instance today
-//! (every real `DataSource` there is `Forms$MicroflowSource`/
-//! `Forms$AssociationSource`, which mxrb itself only decodes via
-//! `forms_codec.decode_embedded` too — not a shortcut this dataset
-//! happens to skip; every real `Widgets` list has at least one native
-//! child). Landed anyway because it's real, oracle-verified-safe coverage
-//! for whatever data *does* fall in the narrow safe case, and it narrows
-//! exactly what's left un-analyzed.
+//! **`DataSource`/`Widgets`/`TextTemplate`/`Action`/`Icon` are all closed
+//! in full now**, via [`crate::embedded::EmbeddedFormsDecoder`] — a
+//! dependency-inversion trait this crate defines and `mxrs-forms::MprCodec`
+//! implements, instead of the full `Node`/`Catalog` crate-extraction this
+//! doc previously proposed (that plan is superseded: it would have moved
+//! ~850 lines for no reason beyond avoiding a trait, when mxrb's own
+//! architecture already names the exact right seam — `Pluggable::MprCodec`
+//! is constructed with a `forms_codec:` callback object it calls
+//! `decode_embedded` on. The trait here is that callback, typed).
+//! `decode_value`'s `TextTemplate`/`Action`/`Icon` arms decode straight
+//! through [`decode_embedded_field`]; `decode_data_source_value` ports
+//! `decode_data_source` in full (an XPath/database source decoded
+//! field-by-field, `sort_bar`/`source_variable` included, or a source of
+//! any other `$Type` decoded whole via the same decoder — mirroring
+//! mxrb's untyped `forms_codec.decode_embedded(source, ...)` return with
+//! the explicit [`node::DataSourceValue`] sum type); `decode_widgets_value`
+//! ports `decode_widgets` in full (`CustomWidgets$CustomWidget` items
+//! self-recurse, any other item routes through the decoder — see
+//! [`node::WidgetItem`]). `Value`/`ObjectNode`/`Assignment` are generic
+//! over the embedded-node type (`N` / `D::Node`) as a direct consequence.
 //!
-//! **`TextTemplate`/`Action`/`Icon` are now closed too**, via
-//! [`crate::embedded::EmbeddedFormsDecoder`] — a dependency-inversion trait
-//! this crate defines and `mxrs-forms::MprCodec` implements, instead of the
-//! full `Node`/`Catalog` crate-extraction this doc previously proposed
-//! (that plan is superseded: it would have moved ~850 lines for no reason
-//! beyond avoiding a trait, when mxrb's own architecture already names the
-//! exact right seam — `Pluggable::MprCodec` is constructed with a
-//! `forms_codec:` callback object it calls `decode_embedded` on. The trait
-//! here is that callback, typed). `decode_value`'s `TextTemplate`/`Action`/
-//! `Icon` arms now take a `decoder: &impl EmbeddedFormsDecoder` and return
-//! `Value::TextTemplate(D::Node)`/`Action(D::Node)`/`Icon(D::Node)` (or
-//! `Value::Null` when the field is absent) — see
-//! [`decode_embedded_field`]. `Value`/`ObjectNode`/`Assignment` are
-//! generic over the embedded-node type (`N` / `D::Node`) as a direct
-//! consequence.
+//! **`PluggableError::NeedsFormsIntegration` is consequently dead code as
+//! of this pass** — every `ValueType::kind` mxrb's own schema can produce
+//! now has a real decode path. Left in the enum (not removed) as a
+//! documented, still-typed escape hatch should a genuinely new kind show
+//! up in a Mendix version this crate hasn't seen yet; nothing constructs
+//! it today.
 //!
-//! Still open, correctly erroring rather than guessing
-//! (`PluggableError::NeedsFormsIntegration`): the non-self-contained
-//! slices of `DataSource`/`Widgets` (a non-XPath/database source, a
-//! present `SourceVariable`/`SortBar`, or a native item in a `Widgets`
-//! list) — these route through the *same* `EmbeddedFormsDecoder` seam in
-//! mxrb (`forms_codec.decode_embedded`), so closing them now is
-//! mechanical (thread `decoder` through `decode_data_source_value`/
-//! `decode_widgets_value`'s remaining branches the same way this pass did
-//! for `TextTemplate`/`Action`/`Icon`) — not attempted this pass, no new
-//! architectural blocker. Real-world weight, measured (not guessed) by
-//! `tests/instance_oracle.rs` against every real
-//! `CustomWidgets$CustomWidget` instance in QRQC/SPC:
+//! Real-world weight, measured (not guessed) by `tests/instance_oracle.rs`
+//! against every real `CustomWidgets$CustomWidget` instance in QRQC/SPC,
+//! across every pass that landed this crate's instance-decode support:
 //!
-//! | | before this pass | after this pass |
-//! |---|---|---|
-//! | QRQC (378 instances) | 23 fully decoded | **174** fully decoded |
-//! | SPC (682 instances) | 13 fully decoded | **460** fully decoded |
+//! | | schema+refs only | + TextTemplate/Action/Icon | + DataSource/Widgets (this pass) |
+//! |---|---|---|---|
+//! | QRQC (378 instances) | 23 fully decoded | 174 fully decoded | **358** fully decoded |
+//! | SPC (682 instances) | 13 fully decoded | 460 fully decoded | **657** fully decoded |
 //!
-//! Per-kind breakdown before: QRQC blocked by `TextTemplate` 156,
-//! `DataSource` 82, `Widgets` 70, `Action` 46, `Icon` 1; SPC blocked by
-//! `TextTemplate` 427, `DataSource` 158, `Widgets` 47, `Action` 37. After:
-//! `TextTemplate`/`Action`/`Icon` no longer appear at all — QRQC's
-//! remaining 204 blocked instances are exactly `DataSource` 94 + `Widgets`
-//! 110; SPC's remaining 222 are exactly `DataSource` 160 + `Widgets` 62.
-//! Zero unexpected errors and zero `EmbeddedDecodeFailed` in either file
-//! (the injected `mxrs-forms::MprCodec` decoded every real `TextTemplate`/
-//! `Action`/`Icon` element it was handed without hitting a gap of its
-//! own).
+//! The remaining 20 (QRQC) / 25 (SPC) instances are **not** a
+//! `mxrs-pluggable` gap: `instance_oracle.rs` categorizes every one of
+//! them as `PluggableError::EmbeddedDecodeFailed` — a real `TextTemplate`/
+//! `Action`/`Icon`/`DataSource`/`Widgets` element exists and this crate
+//! correctly handed it to `mxrs-forms`, but `mxrs-forms` itself hit one of
+//! its *own*, separately-tracked gaps decoding whatever native Forms
+//! element was nested inside (not diagnosed further here — that's
+//! `mxrs-forms`'s backlog, not this crate's). Zero unexpected errors (a
+//! panic, or any error variant other than `EmbeddedDecodeFailed`) in
+//! either file — every failure is named and expected.
 //!
-//! `encode_object`/`encode_value` (the writer-side counterpart) are also
-//! not ported yet — decode was the priority (it's what
-//! `mxrs-compiler-widgets` needs to read real pages), encode is symmetric
-//! follow-up work once decode's remaining gaps close.
+//! `encode_object`/`encode_value` (the writer-side counterpart) are **not
+//! ported yet** — decode was the priority (it's what
+//! `mxrs-compiler-widgets` needs to read real pages first), encode is
+//! symmetric follow-up work, not attempted this pass.
 //!
 //! `mxrs-forms::mpr_codec`'s `CustomWidgets$CustomWidget` branch now
 //! delegates here for real (`Value::Pluggable` in `mxrs-forms::node`) —
@@ -103,7 +87,7 @@ use crate::catalog::{
 };
 use crate::embedded::EmbeddedFormsDecoder;
 use crate::error::{PluggableError, Result};
-use crate::node::{Assignment, ObjectNode, Value};
+use crate::node::{Assignment, DataSource, DataSourceValue, ObjectNode, Value, WidgetItem};
 
 /// Decoded alongside a widget type: storage-id -> property/object-type,
 /// resolved by identity while decoding a single `CustomWidgets$CustomWidget`
@@ -566,7 +550,7 @@ fn decode_value<D: EmbeddedFormsDecoder>(
         "Attribute" => decode_attribute_value(document, path),
         "Entity" => decode_entity_value(document, path),
         "Association" => decode_association_value(document, path),
-        "DataSource" => decode_data_source_value(document, path),
+        "DataSource" => decode_data_source_value(document, path, decoder),
         "Widgets" => decode_widgets_value(document, path, decoder),
         "TextTemplate" => decode_embedded_field(document, "TextTemplate", path, decoder)
             .map(|opt| opt.map_or(Value::Null, Value::TextTemplate)),
@@ -662,39 +646,62 @@ fn decode_association_value<N>(document: &Document, path: &str) -> Result<Value<
     }
 }
 
-/// Ports the self-contained slice of `decode_data_source`: an XPath or
-/// database source whose `SourceVariable` (at either the value or the
-/// nested-source level) and `SortBar` are both absent. Any of those three
-/// (or a source of some other `$Type`, e.g. one that only
-/// `forms_codec.decode_embedded` can decode) needs `mxrs-forms`'s embedded
-/// Node decode — returns [`PluggableError::NeedsFormsIntegration`] rather
-/// than dropping the field.
-fn decode_data_source_value<N>(document: &Document, path: &str) -> Result<Value<N>> {
-    let needs_forms = || PluggableError::NeedsFormsIntegration {
-        kind: "DataSource".to_string(),
-        path: path.to_string(),
+/// Ports `decode_data_source` in full: an XPath/database source is
+/// decoded field-by-field (`sort_bar`/`source_variable` now routed
+/// through the injected [`EmbeddedFormsDecoder`], same as
+/// `TextTemplate`/`Action`/`Icon`); a source of any other `$Type` is
+/// decoded whole via the same decoder (mxrb's
+/// `forms_codec.decode_embedded(source, ...)`); no source and no
+/// `SourceVariable` at all is `None` (mxrb's `nil`).
+fn decode_data_source_value<D: EmbeddedFormsDecoder>(
+    document: &Document,
+    path: &str,
+    decoder: &D,
+) -> Result<Value<D::Node>> {
+    let source = document.get_document("DataSource").ok();
+    // Mirrors `document['SourceVariable'] || source&.fetch('SourceVariable', nil)`:
+    // the value's own `SourceVariable` wins over the nested source's.
+    let source_variable = match document.get("SourceVariable") {
+        None | Some(Bson::Null) => match source {
+            Some(source) => decode_embedded_field(
+                source,
+                "SourceVariable",
+                &format!("{path}.DataSource"),
+                decoder,
+            )?,
+            None => None,
+        },
+        Some(_) => decode_embedded_field(document, "SourceVariable", path, decoder)?,
     };
-    if !matches!(document.get("SourceVariable"), None | Some(Bson::Null)) {
-        return Err(needs_forms());
-    }
-    let source = match document.get_document("DataSource") {
-        Ok(doc) => doc,
-        Err(_) => return Ok(Value::DataSource(None)),
+
+    let Some(source) = source else {
+        return Ok(match source_variable {
+            Some(variable) => Value::DataSource(Some(DataSourceValue::XPath(DataSource {
+                entity: None,
+                constraint: String::new(),
+                sort_bar: None,
+                source_variable: Some(variable),
+                force_full_objects: false,
+            }))),
+            None => Value::DataSource(None),
+        });
     };
-    if !matches!(source.get("SourceVariable"), None | Some(Bson::Null)) {
-        return Err(needs_forms());
-    }
+
+    let source_path = format!("{path}.DataSource");
     let type_name = source.get_str("$Type").unwrap_or("");
     if !matches!(
         type_name,
         "CustomWidgets$CustomWidgetXPathSource" | "CustomWidgets$CustomWidgetDatabaseSource"
     ) {
-        return Err(needs_forms());
+        let node = decoder
+            .decode_embedded(source, &source_path)
+            .map_err(|source| PluggableError::EmbeddedDecodeFailed {
+                path: source_path.clone(),
+                source: Box::new(source),
+            })?;
+        return Ok(Value::DataSource(Some(DataSourceValue::Embedded(node))));
     }
-    if !matches!(source.get("SortBar"), None | Some(Bson::Null)) {
-        return Err(needs_forms());
-    }
-    let source_path = format!("{path}.DataSource");
+
     let entity = match source.get("EntityRef") {
         None | Some(Bson::Null) => None,
         Some(raw) => Some(mxrs_forms_refs::decode_entity_reference(
@@ -702,6 +709,7 @@ fn decode_data_source_value<N>(document: &Document, path: &str) -> Result<Value<
             &format!("{source_path}.EntityRef"),
         )?),
     };
+    let sort_bar = decode_embedded_field(source, "SortBar", &source_path, decoder)?;
     assert_known(
         source,
         &[
@@ -716,46 +724,52 @@ fn decode_data_source_value<N>(document: &Document, path: &str) -> Result<Value<
         ],
         &source_path,
     )?;
-    Ok(Value::DataSource(Some(crate::node::DataSource {
-        entity,
-        constraint: get_str_fallback(source, "XPathConstraint", "DatabaseConstraints", ""),
-        force_full_objects: get_bool_or(source, "ForceFullObjects", false),
-    })))
+    Ok(Value::DataSource(Some(DataSourceValue::XPath(
+        DataSource {
+            entity,
+            constraint: get_str_fallback(source, "XPathConstraint", "DatabaseConstraints", ""),
+            sort_bar,
+            source_variable,
+            force_full_objects: get_bool_or(source, "ForceFullObjects", false),
+        },
+    ))))
 }
 
-/// Ports the self-contained slice of `decode_widgets`: a list all of whose
-/// items are themselves a nested `CustomWidgets$CustomWidget`, decoded via
-/// this crate's own `decode_widget_type`/`decode_object` (self-recursion,
-/// no `mxrs-forms` involved). Any native (non-pluggable) item in the list
-/// needs `forms_codec.decode_embedded` — returns
-/// [`PluggableError::NeedsFormsIntegration`] for the whole value rather
-/// than silently dropping that item from the list.
+/// Ports `decode_widgets` in full: a nested `CustomWidgets$CustomWidget`
+/// item recurses into this crate's own `decode_widget_type`/
+/// `decode_object` (self-recursion, no `mxrs-forms` involved); any other
+/// item routes through the injected [`EmbeddedFormsDecoder`] (mxrb's
+/// `forms_codec.decode_embedded`).
 fn decode_widgets_value<D: EmbeddedFormsDecoder>(
     document: &Document,
     path: &str,
     decoder: &D,
 ) -> Result<Value<D::Node>> {
-    let mut nodes = Vec::new();
+    let mut items = Vec::new();
     for (index, item) in array_docs(document, "Widgets").into_iter().enumerate() {
         let item_path = format!("{path}.Widgets[{index}]");
         if item.get_str("$Type").ok() != Some("CustomWidgets$CustomWidget") {
-            return Err(PluggableError::NeedsFormsIntegration {
-                kind: "Widgets".to_string(),
-                path: item_path,
-            });
+            let node = decoder
+                .decode_embedded(&item, &item_path)
+                .map_err(|source| PluggableError::EmbeddedDecodeFailed {
+                    path: item_path.clone(),
+                    source: Box::new(source),
+                })?;
+            items.push(WidgetItem::Native(node));
+            continue;
         }
         let type_path = format!("{item_path}.Type");
         let (_widget_type, context) =
             decode_widget_type(get_doc(&item, "Type", &type_path)?, &type_path)?;
         let object_path = format!("{item_path}.Object");
-        nodes.push(decode_object(
+        items.push(WidgetItem::Pluggable(decode_object(
             get_doc(&item, "Object", &object_path)?,
             &context,
             &object_path,
             decoder,
-        )?);
+        )?));
     }
-    Ok(Value::Widgets(nodes))
+    Ok(Value::Widgets(items))
 }
 
 /// Ports the `Object`-kind arm of `decode_value` (`decode_objects`):
