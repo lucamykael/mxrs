@@ -54,6 +54,20 @@ mod markers {
             const MODULE: &'static str = "Sales";
             const NAME: &'static str = "ACT_Notify";
         }
+        pub struct Order_Order_Customer;
+        impl mxrs_ir::AssociationMarker for Order_Order_Customer {
+            type From = Order;
+            type To = Customer;
+            const NAME: &'static str = "Order_Customer";
+            const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
+        }
+        pub struct Order_Order_Account;
+        impl mxrs_ir::AssociationMarker for Order_Order_Account {
+            type From = Order;
+            type To = super::CRM::Account;
+            const NAME: &'static str = "Order_Account";
+            const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
+        }
     }
     pub mod CRM {
         pub struct Account;
@@ -134,12 +148,8 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
             e.documentation("A customer order");
             e.string("Number").default_value = Some("A-0000".into());
             e.decimal("Total");
-            e.association(
-                "Order_Customer",
-                Ref::<markers::Sales::Customer>::new(),
-                AssociationType::Reference,
-            )
-            .owner = AssociationOwner::Default;
+            e.association::<markers::Sales::Order_Order_Customer>()
+                .owner = AssociationOwner::Default;
         });
         m.microflow("ACT_CreateOrder", |f| {
             let order = f.create_object(
@@ -230,12 +240,8 @@ fn writes_a_cross_module_association_that_reads_back_as_a_qualified_name() {
     let mut project = ProjectBuilder::new("11.12.1");
     project.module("Sales", |m| {
         m.entity("Order", |e| {
-            e.association(
-                "Order_Account",
-                Ref::<markers::CRM::Account>::new(),
-                AssociationType::Reference,
-            )
-            .owner = AssociationOwner::Default;
+            e.association::<markers::Sales::Order_Order_Account>().owner =
+                AssociationOwner::Default;
         });
     });
     project.module("CRM", |m| {
@@ -308,11 +314,7 @@ fn unknown_cross_module_association_target_fails_at_write_time() {
     let mut project = ProjectBuilder::new("11.12.1");
     project.module("Sales", |m| {
         m.entity("Order", |e| {
-            e.association(
-                "Order_Account",
-                Ref::<markers::CRM::Account>::new(),
-                AssociationType::Reference,
-            );
+            e.association::<markers::Sales::Order_Order_Account>();
         });
     });
     let definition = project.build();
@@ -336,11 +338,7 @@ fn a_valid_marker_for_an_entity_absent_from_this_project_still_fails_at_write_ti
     let mut project = ProjectBuilder::new("11.12.1");
     project.module("Sales", |m| {
         m.entity("Order", |e| {
-            e.association(
-                "Order_Customer",
-                Ref::<markers::Sales::Customer>::new(),
-                AssociationType::Reference,
-            );
+            e.association::<markers::Sales::Order_Order_Customer>();
         });
     });
     let definition = project.build();
@@ -369,11 +367,7 @@ fn a_same_module_association_stays_local_even_though_its_target_is_fully_qualifi
             e.string("Name");
         });
         m.entity("Order", |e| {
-            e.association(
-                "Order_Customer",
-                Ref::<markers::Sales::Customer>::new(),
-                AssociationType::Reference,
-            );
+            e.association::<markers::Sales::Order_Order_Customer>();
         });
     });
     let definition = project.build();
@@ -418,12 +412,8 @@ fn synchronize_domain_associations_preserves_ids_adds_and_removes() {
         });
         m.entity("Order", |e| {
             e.string("Number");
-            e.association(
-                "Order_Customer",
-                Ref::<markers::Sales::Customer>::new(),
-                AssociationType::Reference,
-            )
-            .owner = AssociationOwner::Default;
+            e.association::<markers::Sales::Order_Order_Customer>()
+                .owner = AssociationOwner::Default;
         });
     });
     mxrs_writer::write_project(&path, &project.build()).unwrap();
@@ -888,11 +878,7 @@ fn synchronize_domain_model_adds_an_entity_and_an_association_to_it_in_one_pass(
     project.module("Sales", |m| {
         m.entity("Order", |e| {
             e.string("Number");
-            e.association(
-                "Order_Customer",
-                Ref::<markers::Sales::Customer>::new(),
-                AssociationType::Reference,
-            );
+            e.association::<markers::Sales::Order_Order_Customer>();
         });
         m.entity("Customer", |e| {
             e.string("Name");

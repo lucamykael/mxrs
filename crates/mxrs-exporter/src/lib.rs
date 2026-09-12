@@ -593,11 +593,7 @@ mod tests {
             m.entity("Order", |e| {
                 e.persistable(true);
                 e.string("Number").default_value = Some("A-0".to_string());
-                e.association(
-                    "Order_Customer",
-                    mxrs_ir::Ref::<sales_markers::Customer>::new(),
-                    mxrs_ir::AssociationType::Reference,
-                );
+                e.association::<sales_markers::Order_Order_Customer>();
             });
         });
         mxrs_writer::write_project(&path, &builder.build()).unwrap();
@@ -609,12 +605,24 @@ mod tests {
         assert!(source.contains("::mxrs_macros::project!"));
     }
 
-    #[allow(dead_code, non_snake_case)]
+    #[allow(dead_code, non_snake_case, non_camel_case_types)]
     mod sales_markers {
         pub struct Customer;
         impl mxrs_ir::EntityMarker for Customer {
             const MODULE: &'static str = "Sales";
             const NAME: &'static str = "Customer";
+        }
+        pub struct Order;
+        impl mxrs_ir::EntityMarker for Order {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "Order";
+        }
+        pub struct Order_Order_Customer;
+        impl mxrs_ir::AssociationMarker for Order_Order_Customer {
+            type From = Order;
+            type To = Customer;
+            const NAME: &'static str = "Order_Customer";
+            const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
         }
     }
 }

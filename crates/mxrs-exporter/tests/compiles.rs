@@ -63,11 +63,7 @@ fn exported_source_compiles_as_a_standalone_crate() {
             e.persistable(true);
             e.string("Number").default_value = Some("A-0".to_string());
             e.decimal("Total");
-            e.association(
-                "Order_Customer",
-                mxrs_ir::Ref::<markers::Customer>::new(),
-                mxrs_ir::AssociationType::Reference,
-            );
+            e.association::<markers::Order_Order_Customer>();
         });
     });
     mxrs_writer::write_project(&path, &builder.build()).unwrap();
@@ -81,11 +77,23 @@ fn exported_source_compiles_as_a_standalone_crate() {
     );
 }
 
-#[allow(dead_code, non_snake_case)]
+#[allow(dead_code, non_snake_case, non_camel_case_types)]
 mod markers {
     pub struct Customer;
     impl mxrs_ir::EntityMarker for Customer {
         const MODULE: &'static str = "Sales";
         const NAME: &'static str = "Customer";
+    }
+    pub struct Order;
+    impl mxrs_ir::EntityMarker for Order {
+        const MODULE: &'static str = "Sales";
+        const NAME: &'static str = "Order";
+    }
+    pub struct Order_Order_Customer;
+    impl mxrs_ir::AssociationMarker for Order_Order_Customer {
+        type From = Order;
+        type To = Customer;
+        const NAME: &'static str = "Order_Customer";
+        const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
     }
 }

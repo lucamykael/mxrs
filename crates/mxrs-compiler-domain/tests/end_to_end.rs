@@ -6,11 +6,10 @@
 use mxrs_bson::Bson;
 use mxrs_compiler_domain::{DomainCompiler, SecurityCompiler};
 use mxrs_dsl::ProjectBuilder;
-use mxrs_ir::{AssociationType, Ref};
 use mxrs_model::Project;
 use mxrs_model::entity::{AccessMember, AccessMemberKind, AccessRule};
 
-#[allow(dead_code, non_snake_case)]
+#[allow(dead_code, non_snake_case, non_camel_case_types)]
 mod markers {
     pub mod Sales {
         pub struct Customer;
@@ -22,6 +21,20 @@ mod markers {
         impl mxrs_ir::EntityMarker for Order {
             const MODULE: &'static str = "Sales";
             const NAME: &'static str = "Order";
+        }
+        pub struct Order_Order_Customer;
+        impl mxrs_ir::AssociationMarker for Order_Order_Customer {
+            type From = Order;
+            type To = Customer;
+            const NAME: &'static str = "Order_Customer";
+            const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
+        }
+        pub struct Order_Order_Account;
+        impl mxrs_ir::AssociationMarker for Order_Order_Account {
+            type From = Order;
+            type To = super::CRM::Account;
+            const NAME: &'static str = "Order_Account";
+            const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
         }
     }
     pub mod CRM {
@@ -42,16 +55,8 @@ fn write_fixture(path: &std::path::Path) {
         m.entity("Order", |e| {
             e.persistable(true);
             e.string("Number");
-            e.association(
-                "Order_Customer",
-                Ref::<markers::Sales::Customer>::new(),
-                AssociationType::Reference,
-            );
-            e.association(
-                "Order_Account",
-                Ref::<markers::CRM::Account>::new(),
-                AssociationType::Reference,
-            );
+            e.association::<markers::Sales::Order_Order_Customer>();
+            e.association::<markers::Sales::Order_Order_Account>();
         });
     });
     project.module("CRM", |m| {

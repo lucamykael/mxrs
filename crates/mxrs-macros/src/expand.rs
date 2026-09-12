@@ -150,7 +150,11 @@ fn expression_type(kind: &AttrKind) -> TokenStream {
 
 fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
     let name = module.name.to_string();
-    let entity_stmts: Vec<TokenStream> = module.entities.iter().map(expand_entity).collect();
+    let entity_stmts: Vec<TokenStream> = module
+        .entities
+        .iter()
+        .map(|entity| expand_entity(entity, &module.name))
+        .collect();
     let microflow_stmts: Vec<TokenStream> = module
         .microflows
         .iter()
@@ -164,7 +168,7 @@ fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
     })
 }
 
-fn expand_entity(entity: &EntityInput) -> TokenStream {
+fn expand_entity(entity: &EntityInput, module_name: &Ident) -> TokenStream {
     let name = entity.name.to_string();
     let documentation_stmt = entity
         .documentation
@@ -175,7 +179,10 @@ fn expand_entity(entity: &EntityInput) -> TokenStream {
         .as_ref()
         .map(|value| quote! { e.persistable(#value); });
     let attr_stmts = entity.attributes.iter().map(expand_attribute);
-    let assoc_stmts = entity.associations.iter().map(expand_association);
+    let assoc_stmts = entity
+        .associations
+        .iter()
+        .map(|association| expand_association(association, &entity.name, module_name));
     quote! {
         m.entity(#name, |e| {
             #documentation_stmt
@@ -403,16 +410,17 @@ fn expand_attribute(attribute: &AttributeInput) -> TokenStream {
     }
 }
 
-fn expand_association(association: &AssociationInput) -> TokenStream {
-    let name = association.name.to_string();
-    let target = &association.target;
-    let association_type = &association.association_type;
+fn expand_association(
+    association: &AssociationInput,
+    entity_name: &Ident,
+    module_name: &Ident,
+) -> TokenStream {
+    // Mirrors the exact marker this same association statement caused
+    // `expand_entity_markers` to generate — see that function for the
+    // struct/impl this path resolves to.
+    let marker = format_ident!("{}_{}", entity_name, association.name);
     quote! {
-        e.association(
-            #name,
-            ::mxrs_ir::Ref::<#target>::new(),
-            ::mxrs_ir::AssociationType::#association_type,
-        );
+        e.association::<#module_name::#marker>();
     }
 }
 

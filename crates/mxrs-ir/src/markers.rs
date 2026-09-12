@@ -87,15 +87,17 @@ pub trait AttributeMarker: 'static {
 /// Implemented by a generated marker type for one *declared* association of
 /// one entity (e.g. `markers::Sales::Order_Order_Customer`, generated from
 /// a manifest entity's `associations` list — see `mxrs-typegen`'s manifest
-/// docs). Unlike `EntityMarker`/`AttributeMarker`, `mxrs-dsl` doesn't
-/// require this one: `EntityBuilder::association`'s target parameter is
-/// `Ref<M: EntityMarker>` (validating the *target*), not an
-/// `AssociationMarker` (which would validate the whole declaration —
-/// name, direction, and type — against the manifest). This trait exists so
-/// the manifest can still describe associations and generate *something*
-/// checkable from that description, without forcing a second, more
-/// invasive change to the builder's already-shipped signature in the same
-/// pass that just wired `Ref<M>` in.
+/// docs, or auto-generated inline by `project! {}` from an `association`
+/// statement — see `mxrs-macros::expand::expand_entity_markers`).
+/// `EntityBuilder::association<A: AssociationMarker>()` requires this
+/// directly (no raw `name`/`target`/`association_type` parameters at all
+/// anymore) — validates the whole declaration against the manifest/macro
+/// input, not just the target. `A::From` is *not* cross-checked against the
+/// entity `association` is actually called on: `EntityBuilder` has no
+/// compile-time or runtime handle on its own qualified name at that point,
+/// so this stays a one-sided guarantee, same boundary `Ref<M>` already
+/// draws for the target-only case (see `EntityBuilder::association`'s own
+/// doc comment for the full reasoning).
 #[cfg_attr(
     not(doctest),
     diagnostic::on_unimplemented(

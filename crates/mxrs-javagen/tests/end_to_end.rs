@@ -2,7 +2,7 @@ use std::fs;
 
 use mxrs_bson::{Bson, doc};
 use mxrs_dsl::ProjectBuilder;
-use mxrs_ir::{AssociationType, AttributeType, Ref};
+use mxrs_ir::AttributeType;
 use mxrs_mpr::MprFile;
 
 struct Detail;
@@ -10,6 +10,23 @@ struct Detail;
 impl mxrs_ir::EntityMarker for Detail {
     const MODULE: &'static str = "Demo";
     const NAME: &'static str = "Detail";
+}
+
+struct Record;
+
+impl mxrs_ir::EntityMarker for Record {
+    const MODULE: &'static str = "Demo";
+    const NAME: &'static str = "Record";
+}
+
+#[allow(non_camel_case_types)]
+struct Record_Record_Detail;
+
+impl mxrs_ir::AssociationMarker for Record_Record_Detail {
+    type From = Record;
+    type To = Detail;
+    const NAME: &'static str = "Record_Detail";
+    const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
 }
 
 #[test]
@@ -23,11 +40,7 @@ fn generates_every_referenced_proxy_family_without_overwriting_files() {
             let state = entity.string("State");
             state.attribute_type = AttributeType::Enumeration;
             state.enumeration = Some("Demo.State".into());
-            entity.association(
-                "Record_Detail",
-                Ref::<Detail>::new(),
-                AssociationType::Reference,
-            );
+            entity.association::<Record_Record_Detail>();
         });
         module.entity("Detail", |entity| {
             entity.integer("Number");
