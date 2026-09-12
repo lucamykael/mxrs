@@ -280,6 +280,23 @@ impl MprFile {
         Ok(None)
     }
 
+    pub fn schema_hash(&self) -> Result<Option<String>> {
+        match self
+            .conn
+            .query_row("SELECT _SchemaHash FROM _MetaData LIMIT 1", [], |row| {
+                row.get::<_, Option<String>>(0)
+            }) {
+            Ok(value) => Ok(value),
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("no such column") =>
+            {
+                Ok(None)
+            }
+            Err(rusqlite::Error::InvalidColumnName(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn update_version(&mut self, version: &str, schema_hash: &str) -> Result<()> {
         let result = self.conn.execute(
             "UPDATE _MetaData SET _ProductVersion = ?1, _BuildVersion = ?2, _SchemaHash = ?3",
@@ -1216,6 +1233,7 @@ mod tests {
         let mpr = MprFile::open(&path, false).unwrap();
         assert_eq!(mpr.format(), StorageFormat::V2);
         assert_eq!(mpr.mendix_version().unwrap().as_deref(), Some("11.12.1"));
+        assert_eq!(mpr.schema_hash().unwrap().as_deref(), Some("test-hash"));
     }
 
     #[test]

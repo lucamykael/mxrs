@@ -132,7 +132,7 @@ impl Attribute {
             type_doc.insert("length", self.length.unwrap_or(DEFAULT_STRING_LENGTH));
         }
         if matches!(self.attribute_type, AttributeType::DateTime) {
-            type_doc.insert("localizeDate", true);
+            type_doc.insert("localizeDate", self.localize_date.unwrap_or(true));
         }
         if matches!(self.attribute_type, AttributeType::Enum) {
             type_doc.insert("enumeration", self.enumeration.clone().unwrap_or_default());

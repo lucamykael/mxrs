@@ -427,6 +427,8 @@ fn fresh_entity(
     identity: ProjectIdentity,
 ) -> Entity {
     let entity_name = format!("{module_name}.{}", decl.name);
+    let validation_rules =
+        reconcile_validation_rules(module_name, &decl.name, &decl.attributes, vec![], identity);
     Entity {
         id: Some(id),
         name: Some(decl.name.clone()),
@@ -442,7 +444,7 @@ fn fresh_entity(
         indexes: vec![],
         system_members: SystemMembers::default(),
         lifecycle: vec![],
-        validation_rules: vec![],
+        validation_rules,
         source: None,
         oql_query: None,
         native_type: None,
@@ -469,6 +471,108 @@ fn doc_name(doc: &Document) -> Option<String> {
     }
 }
 
+fn validation_rule_key(document: &Document) -> Option<(String, &'static str)> {
+    let attribute = document
+        .get_str("Attribute")
+        .ok()?
+        .rsplit('.')
+        .next()?
+        .to_string();
+    let rule_type = document
+        .get_document("RuleInfo")
+        .ok()?
+        .get_str("$Type")
+        .ok()?;
+    let kind = if rule_type.ends_with("RequiredRuleInfo") {
+        "required"
+    } else if rule_type.ends_with("UniqueRuleInfo") {
+        "unique"
+    } else {
+        return None;
+    };
+    Some((attribute, kind))
+}
+
+fn new_validation_rule(
+    module_name: &str,
+    entity_name: &str,
+    attribute_name: &str,
+    kind: &'static str,
+    identity: ProjectIdentity,
+) -> Document {
+    let qualified_attribute = format!("{module_name}.{entity_name}.{attribute_name}");
+    let identity_name = format!("{qualified_attribute}.{kind}");
+    let description = if kind == "required" {
+        "is required"
+    } else {
+        "must be unique"
+    };
+    mxrs_bson::doc! {
+        "$ID": identity.artifact_id(ArtifactKind::ValidationRule, &identity_name),
+        "$Type": "DomainModels$ValidationRule",
+        "Attribute": qualified_attribute,
+        "Message": {
+            "$ID": identity.artifact_id(ArtifactKind::ValidationRule, &format!("{identity_name}.message")),
+            "$Type": "Texts$Text",
+            "Items": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                "$ID": identity.artifact_id(ArtifactKind::ValidationRule, &format!("{identity_name}.translation.en_US")),
+                "$Type": "Texts$Translation",
+                "LanguageCode": "en_US",
+                "Text": format!("{attribute_name} {description}"),
+            })], 3),
+        },
+        "RuleInfo": {
+            "$ID": identity.artifact_id(ArtifactKind::ValidationRule, &format!("{identity_name}.info")),
+            "$Type": if kind == "required" {
+                "DomainModels$RequiredRuleInfo"
+            } else {
+                "DomainModels$UniqueRuleInfo"
+            },
+        },
+    }
+}
+
+fn reconcile_validation_rules(
+    module_name: &str,
+    entity_name: &str,
+    attributes: &[AttributeDecl],
+    previous: Vec<Document>,
+    identity: ProjectIdentity,
+) -> Vec<Document> {
+    let mut controlled = HashMap::new();
+    let mut output = Vec::new();
+    for rule in previous {
+        if let Some(key) = validation_rule_key(&rule) {
+            controlled.insert(key, rule);
+        } else {
+            output.push(rule);
+        }
+    }
+    for attribute in attributes {
+        for (kind, enabled) in [
+            ("required", attribute.required),
+            ("unique", attribute.unique),
+        ] {
+            if enabled {
+                output.push(
+                    controlled
+                        .remove(&(attribute.name.clone(), kind))
+                        .unwrap_or_else(|| {
+                            new_validation_rule(
+                                module_name,
+                                entity_name,
+                                &attribute.name,
+                                kind,
+                                identity,
+                            )
+                        }),
+                );
+            }
+        }
+    }
+    output
+}
+
 /// Rebuilds one attribute doc for a declared `AttributeDecl`, preserving the
 /// prior attribute's `$ID`/`dataStorageGuid` when its name matches — every
 /// other field (type, default, length, ...) is fully re-derived from the
@@ -480,7 +584,7 @@ fn reconcile_attribute_doc(
     qualified_name: &str,
     identity: ProjectIdentity,
 ) -> Document {
-    let decl = model_attribute(
+    let built = model_attribute(
         decl,
         Some(identity.artifact_id(ArtifactKind::Attribute, qualified_name)),
         Some(identity.artifact_id(ArtifactKind::DataStorage, qualified_name)),
@@ -488,14 +592,36 @@ fn reconcile_attribute_doc(
     match previous {
         Some(prev) => {
             let prior = Attribute::from_bson(prev);
-            Attribute {
+            let generated = Attribute {
                 id: prior.id,
                 data_storage_guid: prior.data_storage_guid,
-                ..decl
+                export_level: prior.export_level,
+                ..built
             }
-            .to_bson()
+            .to_bson();
+            let mut output = prev.clone();
+            for (lower, upper) in [
+                ("name", "Name"),
+                ("documentation", "Documentation"),
+                ("type", "Type"),
+                ("value", "Value"),
+            ] {
+                let output_key = native_key(prev, lower, upper);
+                let generated_key = native_key(&generated, lower, upper);
+                if let Some(mut value) = generated.get(generated_key).cloned() {
+                    if matches!(lower, "type" | "value")
+                        && let (Bson::Document(new_doc), Some(Bson::Document(old_doc))) =
+                            (&mut value, prev.get(output_key))
+                        && let Some(id) = old_doc.get("$ID")
+                    {
+                        new_doc.insert("$ID", id.clone());
+                    }
+                    output.insert(output_key, value);
+                }
+            }
+            output
         }
-        None => decl.to_bson(),
+        None => built.to_bson(),
     }
 }
 
@@ -503,11 +629,12 @@ fn reconcile_attribute_doc(
 /// on-disk counterpart (`None` for a brand-new entity). For an existing
 /// entity, everything **not** explicitly re-declared — `location`,
 /// `generalization`, `accessRules`, `indexes`, `eventHandlers`,
-/// `validationRules`, `source`/`oqlQuery`, and any unknown/foreign fields —
+/// `source`/`oqlQuery`, and any unknown/foreign fields —
 /// survives untouched, because this merges onto a clone of the prior raw
 /// document rather than rebuilding it from `Entity::to_bson` (which has no
-/// surface to round-trip those fields — see its doc comment). Only `name`,
-/// `documentation`, and the reconciled `attributes` array are overwritten.
+/// surface to round-trip those fields — see its doc comment). `name`,
+/// `documentation`, attributes, and required/unique validation rules are
+/// authoritative; unrelated validation-rule kinds remain untouched.
 /// Mirrors `Writer#entity_doc`, narrowed the same way `fresh_entity` is.
 fn build_entity_doc(
     module_name: &str,
@@ -550,6 +677,30 @@ fn build_entity_doc(
     out.insert(
         attrs_key,
         Bson::Array(mxrs_bson::build_array(new_attrs, prev_attrs_raw.marker)),
+    );
+    let validation_key = native_key(prev, "validationRules", "ValidationRules");
+    let previous_validation = mxrs_bson::parse_array(array_field(prev, validation_key));
+    let previous_documents = previous_validation
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            Bson::Document(document) => Some(document),
+            _ => None,
+        })
+        .collect();
+    let validation_rules = reconcile_validation_rules(
+        module_name,
+        &decl.name,
+        &decl.attributes,
+        previous_documents,
+        identity,
+    );
+    out.insert(
+        validation_key,
+        Bson::Array(mxrs_bson::build_array(
+            validation_rules.into_iter().map(Bson::Document).collect(),
+            previous_validation.marker,
+        )),
     );
     let _ = index; // reserved: mxrb positions brand-new entities by index; fresh_entity already defaults to (0, 0)
     out

@@ -181,3 +181,54 @@ fn synchronize_project_upserts_a_microflow_by_name() {
     assert_eq!(sales.microflows.len(), 1, "upsert, not a duplicate insert");
     assert_eq!(sales.microflows[0].name.as_deref(), Some("ACT_GetConstant"));
 }
+
+#[test]
+fn validation_rules_are_authoritative_and_keep_stable_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Project.mpr");
+
+    let declaration = |required: bool, unique: bool| {
+        let mut project = ProjectBuilder::new("11.12.1");
+        project.module("Sales", |module| {
+            module.entity("Order", |entity| {
+                let number = entity.string("Number");
+                number.required = required;
+                number.unique = unique;
+            });
+        });
+        project.build()
+    };
+
+    mxrs_writer::write_project(&path, &declaration(true, true)).unwrap();
+    let first = Project::open(&path, true).unwrap();
+    let first_modules = first.modules().unwrap();
+    let order = &first_modules[0].entities()[0];
+    assert!(order.attributes[0].required);
+    assert!(order.attributes[0].unique);
+    let first_rule_ids: Vec<String> = order
+        .validation_rules
+        .iter()
+        .filter_map(|rule| rule.get_str("$ID").ok().map(str::to_string))
+        .collect();
+    drop(first);
+
+    mxrs_writer::synchronize_project(&path, &declaration(true, true)).unwrap();
+    let second = Project::open(&path, true).unwrap();
+    let second_modules = second.modules().unwrap();
+    let order = &second_modules[0].entities()[0];
+    let second_rule_ids: Vec<String> = order
+        .validation_rules
+        .iter()
+        .filter_map(|rule| rule.get_str("$ID").ok().map(str::to_string))
+        .collect();
+    assert_eq!(second_rule_ids, first_rule_ids);
+    drop(second);
+
+    mxrs_writer::synchronize_project(&path, &declaration(false, false)).unwrap();
+    let third = Project::open(&path, true).unwrap();
+    let third_modules = third.modules().unwrap();
+    let order = &third_modules[0].entities()[0];
+    assert!(!order.attributes[0].required);
+    assert!(!order.attributes[0].unique);
+    assert!(order.validation_rules.is_empty());
+}

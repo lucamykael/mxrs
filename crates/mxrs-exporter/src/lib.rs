@@ -30,18 +30,17 @@
 //!   existing microflow on disk untouched, not deleted.
 //! - **All eleven attribute types are represented** by `project! {}`:
 //!   string/integer/long/float/decimal/boolean/datetime/autonumber,
-//!   hash-string, binary, and enumeration.
-//! - **Association `Owner`/`StorageFormat`/`Documentation` aren't
-//!   round-tripped** — not an exporter gap specifically, `project! {}`'s
-//!   own grammar has no syntax for them yet (`EntityBuilder::association`
-//!   itself only takes name/target/type; see `mxrs-macros`' grammar doc).
-//!   Every exported association compiles back with `mxrs-dsl`'s defaults
-//!   (`Owner::Default`, `StorageFormat::Column`) regardless of the real
-//!   project's values.
+//!   hash-string, binary, and enumeration. Attribute documentation, string
+//!   length, date localization, required and unique validation are emitted
+//!   too.
+//! - **Association `Owner`/`StorageFormat`/`Documentation` round-trip** via
+//!   typed options in `project!`.
 //! - **Entity `Image`/`indexes`/`access rules`/`lifecycle callbacks`/
 //!   `generalization target`** have no `EntityDecl` DSL surface at all yet
 //!   (same gap `mxrs-writer`'s own doc comment already names) — not
-//!   emitted.
+//!   emitted into typed Rust. `mxrs import` retains these fields in the
+//!   generated snapshot and the writer preserves them during typed domain
+//!   synchronization, so they are opaque rather than lossy.
 //!
 //! Marker types are emitted by `project!` from these same entity
 //! declarations, so exported source is self-contained without a second
@@ -49,7 +48,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use mxrs_model::Attribute;
@@ -71,6 +70,19 @@ pub enum ExportError {
     #[error(transparent)]
     Model(#[from] mxrs_model::ModelError),
 
+    #[error(transparent)]
+    Project(#[from] mxrs_project::ProjectError),
+
+    #[error("cannot write {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Cargo project destination {0} already exists")]
+    DestinationExists(String),
+
     #[error(
         "refusing a lossy Rust export; {0} unsupported model feature(s) would not round-trip (pass --allow-lossy only if this is intentional)"
     )]
@@ -81,9 +93,22 @@ impl ExportError {
     pub fn gaps(&self) -> &[RoundTripGap] {
         match self {
             ExportError::Lossy(_, gaps) => gaps,
-            ExportError::Model(_) => &[],
+            ExportError::Model(_)
+            | ExportError::Project(_)
+            | ExportError::Io { .. }
+            | ExportError::DestinationExists(_) => &[],
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoProjectImport {
+    pub root: PathBuf,
+    pub package_name: String,
+    pub project_name: String,
+    pub mendix_version: String,
+    pub imported_units: usize,
+    pub typed_round_trip_gaps: Vec<RoundTripGap>,
 }
 
 pub type Result<T> = std::result::Result<T, ExportError>;
@@ -115,6 +140,252 @@ pub fn export_project_lossy(path: impl AsRef<Path>) -> mxrs_model::Result<String
     Ok(render(&mendix_version, &modules))
 }
 
+/// Imports an `.mpr` into a standalone Cargo project whose source tree and
+/// generated `.mxdoc` snapshot are sufficient to build a new `.mpr`.
+///
+/// `mxrs_workspace` points at this repository while the crates are still
+/// unpublished. Omitting it emits git dependencies suitable for a normal
+/// checkout with network access.
+pub fn import_cargo_project(
+    mpr_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    mxrs_workspace: Option<&Path>,
+) -> Result<CargoProjectImport> {
+    let destination = destination.as_ref();
+    if destination.exists() {
+        return Err(ExportError::DestinationExists(
+            destination.display().to_string(),
+        ));
+    }
+    std::fs::create_dir_all(destination).map_err(|source| io_error(destination, source))?;
+    let result = import_cargo_project_inner(mpr_path.as_ref(), destination, mxrs_workspace);
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(destination);
+    }
+    result
+}
+
+fn import_cargo_project_inner(
+    mpr_path: &Path,
+    destination: &Path,
+    mxrs_workspace: Option<&Path>,
+) -> Result<CargoProjectImport> {
+    let project = Project::open(mpr_path, true)?;
+    let mendix_version = project.mendix_version()?.unwrap_or_default();
+    let mut modules = project.modules()?;
+    modules.sort_by(|left, right| left.name.cmp(&right.name));
+    let gaps = round_trip_gaps(&modules);
+    let model_source = render(&mendix_version, &modules);
+    let identity_source = render_identity_table(&modules);
+    drop(project);
+
+    let imported = destination.join("model/imported");
+    let manifest = mxrs_project::capture_imported_project(mpr_path, &imported)?;
+    let package_name = cargo_package_name(&manifest.project_name);
+    let crate_name = package_name.replace('-', "_");
+    let generated_directory = destination.join("src/generated");
+    std::fs::create_dir_all(&generated_directory)
+        .map_err(|source| io_error(&generated_directory, source))?;
+    let domain_directory = destination.join("src/domain");
+    std::fs::create_dir_all(&domain_directory)
+        .map_err(|source| io_error(&domain_directory, source))?;
+
+    write_text(
+        &destination.join("Cargo.toml"),
+        &cargo_manifest(&package_name, mxrs_workspace),
+    )?;
+    write_text(
+        &destination.join("mxrs.toml"),
+        &format!(
+            "[project]\nname = {}\nmendix_version = {}\nimported_snapshot = \"model/imported\"\n",
+            toml_string(&manifest.project_name),
+            toml_string(&manifest.mendix_version),
+        ),
+    )?;
+    write_text(
+        &destination.join("src/lib.rs"),
+        "// Compatibility aliases used by generated macro expansions.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod domain;\npub mod generated;\n\npub use domain::build;\n",
+    )?;
+    write_text(&destination.join("src/domain/mod.rs"), &model_source)?;
+    write_text(
+        &destination.join("src/main.rs"),
+        &build_binary_source(&crate_name, &manifest.project_name),
+    )?;
+    write_text(
+        &destination.join("src/generated/mod.rs"),
+        "pub mod ids;\npub mod imported;\n",
+    )?;
+    write_text(
+        &destination.join("src/generated/ids.rs"),
+        &format!(
+            "//! Stable identities retained from the imported project.\n\npub const PROJECT_ROOT: &str = {};\n\n{identity_source}",
+            rust_string(&manifest.root_id),
+        ),
+    )?;
+    write_text(
+        &destination.join("src/generated/imported.rs"),
+        "//! Opaque model coverage retained until it gains a typed Rust representation.\n\npub const MANIFEST: &str = include_str!(\"../../model/imported/manifest.json\");\n",
+    )?;
+    write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
+    write_text(
+        &destination.join("README.md"),
+        &generated_readme(&manifest.project_name, gaps.len()),
+    )?;
+
+    Ok(CargoProjectImport {
+        root: destination.to_path_buf(),
+        package_name,
+        project_name: manifest.project_name,
+        mendix_version: manifest.mendix_version,
+        imported_units: manifest.units.len(),
+        typed_round_trip_gaps: gaps,
+    })
+}
+
+fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>) -> String {
+    let dependency = match mxrs_workspace {
+        Some(workspace) => format!(
+            "{{ path = {} }}",
+            toml_string(&workspace.join("crates/mxrs").display().to_string())
+        ),
+        None => "{ git = \"https://github.com/lucamykael/mxrs\" }".to_string(),
+    };
+    format!(
+        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nmxrs = {dependency}\n",
+    )
+}
+
+fn build_binary_source(crate_name: &str, project_name: &str) -> String {
+    let default_output = format!("build/{project_name}.mpr");
+    format!(
+        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let snapshot = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"model/imported\");\n    mxrs::rebuild_imported_project(snapshot, &output, &{crate_name}::build())?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n",
+        serde_json::to_string(&default_output).expect("a string always serializes"),
+    )
+}
+
+fn generated_readme(project_name: &str, gaps: usize) -> String {
+    format!(
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Rust under `src/` is the editable source; `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo run -- build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n"
+    )
+}
+
+fn cargo_package_name(project_name: &str) -> String {
+    let mut name = project_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while name.contains("--") {
+        name = name.replace("--", "-");
+    }
+    name = name.trim_matches('-').to_string();
+    if name.is_empty() {
+        name = "mendix-app".to_string();
+    }
+    if name.starts_with(|character: char| character.is_ascii_digit()) {
+        name.insert_str(0, "app-");
+    }
+    name
+}
+
+fn toml_string(value: &str) -> String {
+    rust_string(value)
+}
+
+fn rust_string(value: &str) -> String {
+    serde_json::to_string(value).expect("a string always serializes")
+}
+
+fn write_text(path: &Path, contents: &str) -> Result<()> {
+    std::fs::write(path, contents).map_err(|source| io_error(path, source))
+}
+
+fn io_error(path: &Path, source: std::io::Error) -> ExportError {
+    ExportError::Io {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+fn render_identity_table(modules: &[Module]) -> String {
+    let mut identities = Vec::<(String, String)>::new();
+    for module in modules {
+        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        identities.push((module_name.to_string(), module.id.clone()));
+        if let Some(domain) = &module.domain_model {
+            if let Some(id) = &domain.id {
+                identities.push((format!("{module_name}.$domain"), id.clone()));
+            }
+            for entity in &domain.entities {
+                let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
+                let entity_path = format!("{module_name}.{entity_name}");
+                if let Some(id) = &entity.id {
+                    identities.push((entity_path.clone(), id.clone()));
+                }
+                for attribute in &entity.attributes {
+                    if let (Some(id), Some(name)) = (&attribute.id, &attribute.name) {
+                        identities.push((format!("{entity_path}.{name}"), id.clone()));
+                    }
+                }
+            }
+            for association in domain.all_associations() {
+                if let (Some(id), Some(name)) = (&association.id, &association.name) {
+                    identities.push((format!("{module_name}.{name}"), id.clone()));
+                }
+            }
+        }
+        for page in &module.pages {
+            if let (Some(id), Some(name)) = (&page.id, &page.name) {
+                identities.push((format!("{module_name}.page:{name}"), id.clone()));
+            }
+        }
+        for (kind, documents) in [
+            ("microflow", &module.microflows),
+            ("nanoflow", &module.nanoflows),
+            ("rule", &module.rules),
+        ] {
+            for document in documents {
+                if let (Some(id), Some(name)) = (&document.id, &document.name) {
+                    identities.push((format!("{module_name}.{kind}:{name}"), id.clone()));
+                }
+            }
+        }
+        for role in &module.module_roles {
+            if let (Some(id), Some(name)) = (&role.id, &role.name) {
+                identities.push((format!("{module_name}.role:{name}"), id.clone()));
+            }
+        }
+        for artifact in &module.artifact_units {
+            if let (Ok(id), Ok(kind)) = (artifact.get_str("$ID"), artifact.get_str("$Type")) {
+                let name = artifact.get_str("Name").unwrap_or("Unnamed");
+                identities.push((format!("{module_name}.{kind}:{name}"), id.to_string()));
+            }
+        }
+    }
+    identities.sort();
+    identities.dedup();
+
+    let mut source = String::from(
+        "/// Qualified model path to stable Mendix identity.\n\
+         pub const MODEL_IDS: &[(&str, &str)] = &[\n",
+    );
+    for (path, id) in identities {
+        let _ = writeln!(
+            source,
+            "    ({}, {}),",
+            rust_string(&path),
+            rust_string(&id)
+        );
+    }
+    source.push_str("];\n");
+    source
+}
+
 fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
     let entity_qualified_name_by_id = index_entities_by_id(modules);
     let mut gaps = Vec::new();
@@ -137,16 +408,7 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
                         ),
                     });
                 }
-                if !attribute.documentation.is_empty()
-                    || attribute.length.is_some_and(|length| length != 200)
-                    || attribute.localize_date == Some(false)
-                    || attribute.export_level != "Hidden"
-                {
-                    gaps.push(RoundTripGap {
-                        path,
-                        reason: "attribute metadata has no project! grammar".to_string(),
-                    });
-                }
+                let _ = path;
             }
         }
         for association in domain_model.all_associations() {
@@ -161,16 +423,7 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
                     reason: "association target cannot be resolved".to_string(),
                 });
             }
-            if association.owner != mxrs_model::association::Owner::Default
-                || association.storage_format != mxrs_model::association::StorageFormat::Column
-                || !association.documentation.is_empty()
-                || association.export_level != "Hidden"
-            {
-                gaps.push(RoundTripGap {
-                    path,
-                    reason: "association metadata has no project! grammar".to_string(),
-                });
-            }
+            let _ = path;
         }
     }
     gaps
@@ -301,14 +554,41 @@ fn render_entity(
                     .map(|v| format!(" = {v:?}"))
                     .unwrap_or_default();
                 let name = sanitize_ident(attribute_name);
-                if attribute.attribute_type == AttributeType::Enum {
+                let declaration = if attribute.attribute_type == AttributeType::Enum {
                     let enumeration = attribute.enumeration.as_deref().unwrap_or("");
-                    let _ = writeln!(
-                        out,
-                        "                {keyword} {name}({enumeration:?}){default};"
-                    );
+                    format!("{keyword} {name}({enumeration:?}){default}")
                 } else {
-                    let _ = writeln!(out, "                {keyword} {name}{default};");
+                    format!("{keyword} {name}{default}")
+                };
+                let has_options = !attribute.documentation.is_empty()
+                    || attribute.length.is_some()
+                    || attribute.localize_date.is_some()
+                    || attribute.required
+                    || attribute.unique;
+                if has_options {
+                    let _ = writeln!(out, "                {declaration} {{");
+                    if !attribute.documentation.is_empty() {
+                        let _ = writeln!(
+                            out,
+                            "                    documentation {:?};",
+                            attribute.documentation
+                        );
+                    }
+                    if let Some(length) = attribute.length {
+                        let _ = writeln!(out, "                    length {length};");
+                    }
+                    if let Some(localize_date) = attribute.localize_date {
+                        let _ = writeln!(out, "                    localize_date {localize_date};");
+                    }
+                    if attribute.required {
+                        let _ = writeln!(out, "                    required true;");
+                    }
+                    if attribute.unique {
+                        let _ = writeln!(out, "                    unique true;");
+                    }
+                    let _ = writeln!(out, "                }}");
+                } else {
+                    let _ = writeln!(out, "                {declaration};");
                 }
             }
             None => {
@@ -348,11 +628,32 @@ fn render_entity(
             mxrs_model::association::AssociationType::Reference => "Reference",
             mxrs_model::association::AssociationType::ReferenceSet => "ReferenceSet",
         };
-        let _ = writeln!(
-            out,
-            "                association {} -> {target_path} as {assoc_type};",
+        let declaration = format!(
+            "association {} -> {target_path} as {assoc_type}",
             sanitize_ident(assoc_name)
         );
+        let has_options = association.owner != mxrs_model::association::Owner::Default
+            || association.storage_format != mxrs_model::association::StorageFormat::Column
+            || !association.documentation.is_empty();
+        if has_options {
+            let _ = writeln!(out, "                {declaration} {{");
+            if association.owner != mxrs_model::association::Owner::Default {
+                let _ = writeln!(out, "                    owner Both;");
+            }
+            if association.storage_format != mxrs_model::association::StorageFormat::Column {
+                let _ = writeln!(out, "                    storage Table;");
+            }
+            if !association.documentation.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "                    documentation {:?};",
+                    association.documentation
+                );
+            }
+            let _ = writeln!(out, "                }}");
+        } else {
+            let _ = writeln!(out, "                {declaration};");
+        }
     }
 
     let _ = writeln!(out, "            }}");
@@ -401,7 +702,16 @@ fn sanitize_ident(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
+
+    #[test]
+    fn cargo_package_names_are_valid_and_stable() {
+        assert_eq!(cargo_package_name("My Mendix App"), "my-mendix-app");
+        assert_eq!(cargo_package_name("  2026 / Orders  "), "app-2026-orders");
+        assert_eq!(cargo_package_name("---"), "mendix-app");
+    }
 
     #[test]
     fn sanitize_ident_replaces_invalid_characters() {
@@ -485,13 +795,18 @@ mod tests {
     }
 
     #[test]
-    fn safe_export_refuses_attribute_metadata_the_grammar_would_reset() {
+    fn safe_export_includes_attribute_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Project.mpr");
         let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
         builder.module("Sales", |module| {
             module.entity("Order", |entity| {
-                entity.string("Number");
+                let number = entity.string("Number");
+                number.documentation = "External order number".to_string();
+                number.length = Some(80);
+                number.required = true;
+                number.unique = true;
+                entity.datetime("SubmittedAt").localize_date = Some(false);
             });
         });
         mxrs_writer::write_project(&path, &builder.build()).unwrap();
@@ -525,13 +840,9 @@ mod tests {
         mpr.update_unit(&domain_unit.unit_id, domain_doc).unwrap();
         drop(mpr);
 
-        let error = export_project(&path).unwrap_err();
-        assert_eq!(error.gaps().len(), 1);
-        assert_eq!(error.gaps()[0].path, "Sales.Order.Score");
-        assert!(error.to_string().contains("refusing a lossy Rust export"));
-
-        let source = export_project_lossy(&path).unwrap();
-        assert!(source.contains("float Score;"));
+        let source = export_project(&path).unwrap();
+        assert!(source.contains("float Score {"));
+        assert!(source.contains("documentation \"hand-authored docs\";"));
     }
 
     #[test]
@@ -603,6 +914,102 @@ mod tests {
         assert!(source.contains("string Number = \"A-0\""));
         assert!(source.contains("association Order_Customer -> Sales::Customer as Reference"));
         assert!(source.contains("::mxrs_macros::project!"));
+    }
+
+    #[test]
+    fn imported_cargo_project_checks_and_builds_without_the_source_mpr() {
+        let source_directory = tempfile::tempdir().unwrap();
+        let source_path = source_directory.path().join("OrderManagement.mpr");
+        let generated_directory = tempfile::tempdir().unwrap();
+        let generated = generated_directory.path().join("order-management");
+        let build_directory = tempfile::tempdir().unwrap();
+        let output = build_directory.path().join("OrderManagement.mpr");
+        let target = build_directory.path().join("cargo-target");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap();
+
+        let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+        builder.module("Sales", |module| {
+            module.entity("Order", |entity| {
+                let number = entity.string("Number");
+                number.documentation = "External order number".to_string();
+                number.length = Some(80);
+                number.required = true;
+                number.unique = true;
+                entity.datetime("SubmittedAt").localize_date = Some(false);
+            });
+            module.microflow("ACT_Ping", |_flow| {});
+        });
+        mxrs_writer::write_project(&source_path, &builder.build()).unwrap();
+
+        let imported = import_cargo_project(&source_path, &generated, Some(workspace)).unwrap();
+        assert!(imported.imported_units > 1);
+        assert!(generated.join("Cargo.toml").is_file());
+        assert!(generated.join("mxrs.toml").is_file());
+        assert!(generated.join("src/lib.rs").is_file());
+        assert!(generated.join("src/domain/mod.rs").is_file());
+        assert!(generated.join("model/imported/manifest.json").is_file());
+        let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
+        assert!(
+            domain_source.contains("documentation \"External order number\";"),
+            "{domain_source}"
+        );
+        assert!(domain_source.contains("length 80;"));
+        assert!(domain_source.contains("required true;"));
+        assert!(domain_source.contains("unique true;"));
+        assert!(domain_source.contains("localize_date false;"));
+        let identities = std::fs::read_to_string(generated.join("src/generated/ids.rs")).unwrap();
+        assert!(identities.contains("Sales.Order.Number"));
+        assert!(identities.contains("Sales.microflow:ACT_Ping"));
+
+        std::fs::remove_file(&source_path).unwrap();
+        std::fs::remove_dir_all(mxrs_mpr::format::contents_dir(&source_path)).unwrap();
+
+        let check = Command::new("cargo")
+            .args(["check", "--quiet", "--offline", "--manifest-path"])
+            .arg(generated.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", &target)
+            .status()
+            .unwrap();
+        assert!(check.success());
+
+        let build = Command::new("cargo")
+            .args(["run", "--quiet", "--offline", "--manifest-path"])
+            .arg(generated.join("Cargo.toml"))
+            .arg("--")
+            .arg(&output)
+            .env("CARGO_TARGET_DIR", &target)
+            .status()
+            .unwrap();
+        assert!(build.success());
+
+        let rebuilt = mxrs_mpr::MprFile::open(&output, true).unwrap();
+        assert!(rebuilt.all_units().unwrap().into_iter().any(|unit| {
+            let document = rebuilt.parse_contents(&unit).unwrap();
+            document.get_str("$Type").ok() == Some("Microflows$Microflow")
+                && document.get_str("Name").ok() == Some("ACT_Ping")
+        }));
+        drop(rebuilt);
+        let rebuilt = Project::open(&output, true).unwrap();
+        let modules = rebuilt.modules().unwrap();
+        let order = &modules[0].entities()[0];
+        let number = order
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name.as_deref() == Some("Number"))
+            .unwrap();
+        assert_eq!(number.documentation, "External order number");
+        assert_eq!(number.length, Some(80));
+        assert!(number.required);
+        assert!(number.unique);
+        let submitted_at = order
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name.as_deref() == Some("SubmittedAt"))
+            .unwrap();
+        assert_eq!(submitted_at.localize_date, Some(false));
     }
 
     #[allow(dead_code, non_snake_case, non_camel_case_types)]

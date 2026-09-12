@@ -9,10 +9,18 @@
 //! entity-item:= <attribute> | <association>
 //!             | "documentation" <string-lit> ";"
 //!             | "persistable" <bool-lit> ";"
-//! attribute  := <attr-kind> <ident> ("(" <expr> ")")? ("=" <expr>)? ";"
+//! attribute  := <attr-kind> <ident> ("(" <expr> ")")? ("=" <expr>)?
+//!               (";" | "{" <attribute-option>* "}" ";"?)
+//! attribute-option := "documentation" <string-lit> ";" | "length" <int-lit> ";"
+//!               | "localize_date" <bool-lit> ";" | "required" <bool-lit> ";"
+//!               | "unique" <bool-lit> ";"
 //! attr-kind  := "string" | "integer" | "long" | "float" | "decimal" | "boolean"
 //!             | "datetime" | "autonumber" | "hash_string" | "binary" | "enumeration"
-//! association:= "association" <ident> "->" <rust-path> "as" <ident> ";"
+//! association:= "association" <ident> "->" <rust-path> "as" <ident>
+//!               (";" | "{" <association-option>* "}" ";"?)
+//! association-option := "owner" ("Default" | "Both") ";"
+//!               | "storage" ("Column" | "Table") ";"
+//!               | "documentation" <string-lit> ";"
 //! microflow  := "microflow" <ident> "{" <flow-item>* <rescue>? ("return" <expr> ";")? "}"
 //! flow-item  := <create> | <create-list> | <change> | <delete> | <commit> | <call> | <if>
 //!             | <for> | <while> | "break" ";" | "continue" ";"
@@ -217,6 +225,11 @@ pub struct AttributeInput {
     pub name: Ident,
     pub enumeration: Option<Expr>,
     pub default: Option<Expr>,
+    pub documentation: Option<LitStr>,
+    pub length: Option<syn::LitInt>,
+    pub localize_date: Option<syn::LitBool>,
+    pub required: Option<syn::LitBool>,
+    pub unique: Option<syn::LitBool>,
 }
 
 pub struct AssociationInput {
@@ -226,6 +239,9 @@ pub struct AssociationInput {
     /// macro call site's own scope — see this module's doc comment.
     pub target: syn::Path,
     pub association_type: Ident,
+    pub owner: Option<Ident>,
+    pub storage: Option<Ident>,
+    pub documentation: Option<LitStr>,
 }
 
 impl Parse for ProjectInput {
@@ -619,12 +635,47 @@ impl Parse for AttributeInput {
         } else {
             None
         };
-        input.parse::<Token![;]>()?;
+        let mut documentation = None;
+        let mut length = None;
+        let mut localize_date = None;
+        let mut required = None;
+        let mut unique = None;
+        if input.peek(syn::token::Brace) {
+            let content;
+            braced!(content in input);
+            while !content.is_empty() {
+                let option: Ident = content.parse()?;
+                match option.to_string().as_str() {
+                    "documentation" => documentation = Some(content.parse()?),
+                    "length" => length = Some(content.parse()?),
+                    "localize_date" => localize_date = Some(content.parse()?),
+                    "required" => required = Some(content.parse()?),
+                    "unique" => unique = Some(content.parse()?),
+                    other => {
+                        return Err(syn::Error::new(
+                            option.span(),
+                            format!("unknown attribute option `{other}`"),
+                        ));
+                    }
+                }
+                content.parse::<Token![;]>()?;
+            }
+            if input.peek(Token![;]) {
+                input.parse::<Token![;]>()?;
+            }
+        } else {
+            input.parse::<Token![;]>()?;
+        }
         Ok(AttributeInput {
             kind,
             name,
             enumeration,
             default,
+            documentation,
+            length,
+            localize_date,
+            required,
+            unique,
         })
     }
 }
@@ -645,11 +696,58 @@ impl Parse for AssociationInput {
                 ),
             ));
         }
-        input.parse::<Token![;]>()?;
+        let mut owner = None;
+        let mut storage = None;
+        let mut documentation = None;
+        if input.peek(syn::token::Brace) {
+            let content;
+            braced!(content in input);
+            while !content.is_empty() {
+                let option: Ident = content.parse()?;
+                match option.to_string().as_str() {
+                    "owner" => {
+                        let value: Ident = content.parse()?;
+                        if value != "Default" && value != "Both" {
+                            return Err(syn::Error::new(
+                                value.span(),
+                                "association owner must be `Default` or `Both`",
+                            ));
+                        }
+                        owner = Some(value);
+                    }
+                    "storage" => {
+                        let value: Ident = content.parse()?;
+                        if value != "Column" && value != "Table" {
+                            return Err(syn::Error::new(
+                                value.span(),
+                                "association storage must be `Column` or `Table`",
+                            ));
+                        }
+                        storage = Some(value);
+                    }
+                    "documentation" => documentation = Some(content.parse()?),
+                    other => {
+                        return Err(syn::Error::new(
+                            option.span(),
+                            format!("unknown association option `{other}`"),
+                        ));
+                    }
+                }
+                content.parse::<Token![;]>()?;
+            }
+            if input.peek(Token![;]) {
+                input.parse::<Token![;]>()?;
+            }
+        } else {
+            input.parse::<Token![;]>()?;
+        }
         Ok(AssociationInput {
             name,
             target,
             association_type,
+            owner,
+            storage,
+            documentation,
         })
     }
 }

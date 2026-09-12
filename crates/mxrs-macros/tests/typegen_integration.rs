@@ -89,3 +89,47 @@ fn generated_association_markers_resolve_their_from_and_to() {
         "CRM.Account"
     );
 }
+
+#[test]
+fn project_macro_carries_domain_metadata_into_the_ir() {
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Customer {
+                string Name;
+            }
+            entity Order {
+                string Number {
+                    documentation "External order number";
+                    length 80;
+                    required true;
+                    unique true;
+                }
+                datetime SubmittedAt {
+                    localize_date false;
+                }
+                association Order_Customer -> Sales::Customer as Reference {
+                    owner Both;
+                    storage Table;
+                    documentation "Owning customer";
+                }
+            }
+        }
+    };
+
+    let order = definition.modules[0]
+        .entities
+        .iter()
+        .find(|entity| entity.name == "Order")
+        .unwrap();
+    let number = &order.attributes[0];
+    assert_eq!(number.documentation, "External order number");
+    assert_eq!(number.length, Some(80));
+    assert!(number.required);
+    assert!(number.unique);
+    assert_eq!(order.attributes[1].localize_date, Some(false));
+    let association = &order.associations[0];
+    assert_eq!(association.owner, mxrs_ir::AssociationOwner::Both);
+    assert_eq!(association.storage, mxrs_ir::AssociationStorage::Table);
+    assert_eq!(association.documentation, "Owning customer");
+}

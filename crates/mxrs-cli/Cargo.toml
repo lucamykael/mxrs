@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The `mxrs` binary: validate/compare/inspect/units/dump-unit/sql/modules/export/javagen over mxrs-mpr and mxrs-model — a narrow slice of bin/mxrb's ~80-command surface, growing as engine crates land. See the crate's module docs for exactly what's narrowed per command."
+description = "The `mxrs` binary: import an MPR into a Cargo-native project, rebuild it, and inspect/validate/compare Mendix model artifacts."
 
 [lints]
 workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "mxrs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Public facade for Cargo-native Mendix applications built with mxrs."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-expr = { path = "../mxrs-expr" }
+mxrs-ir = { path = "../mxrs-ir" }
+mxrs-macros = { path = "../mxrs-macros" }
+mxrs-project = { path = "../mxrs-project" }
+

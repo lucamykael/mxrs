@@ -462,6 +462,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs"
+version = "0.1.0"
+dependencies = [
+ "mxrs-dsl",
+ "mxrs-expr",
+ "mxrs-ir",
+ "mxrs-macros",
+ "mxrs-project",
+]
+
+[[package]]
 name = "mxrs-bson"
 version = "0.1.0"
 dependencies = [
@@ -574,7 +585,9 @@ dependencies = [
  "mxrs-macros",
  "mxrs-model",
  "mxrs-mpr",
+ "mxrs-project",
  "mxrs-writer",
+ "serde_json",
  "tempfile",
  "thiserror",
  "uuid",
@@ -699,6 +712,21 @@ dependencies = [
  "mxrs-mpr",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "mxrs-project"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-dsl",
+ "mxrs-ir",
+ "mxrs-mpr",
+ "mxrs-writer",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

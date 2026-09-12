@@ -21,6 +21,7 @@ fn main() -> ExitCode {
         Some("dump-unit") => run_dump_unit(args.collect()),
         Some("sql") => run_sql(args.collect()),
         Some("modules") => run_modules(args.collect()),
+        Some("import") => run_import(args.collect()),
         Some("export") => run_export(args.collect()),
         Some("javagen") => run_javagen(args.collect()),
         Some(other) => {
@@ -43,6 +44,7 @@ fn usage() {
     eprintln!("       mxrs dump-unit <file.mpr> <unit_id>");
     eprintln!("       mxrs sql <file.mpr> \"<query>\"");
     eprintln!("       mxrs modules <file.mpr>");
+    eprintln!("       mxrs import <file.mpr> --output <directory> [--mxrs-workspace <path>]");
     eprintln!("       mxrs export <file.mpr> [-o <out.rs>] [--allow-lossy]");
     eprintln!("       mxrs javagen <file.mpr> [--project-root <directory>]");
 }
@@ -301,6 +303,40 @@ fn run_export(mut args: Vec<String>) -> ExitCode {
         }
         None => print!("{source}"),
     }
+    ExitCode::SUCCESS
+}
+
+fn run_import(mut args: Vec<String>) -> ExitCode {
+    let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
+    let workspace = take_value(&mut args, "--mxrs-workspace").map(std::path::PathBuf::from);
+    if args.len() != 1 || output.is_none() {
+        eprintln!(
+            "[mxrs] error: usage: mxrs import <file.mpr> --output <directory> [--mxrs-workspace <path>]"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let output = output.expect("validated above");
+    let imported =
+        match mxrs_exporter::import_cargo_project(&args[0], &output, workspace.as_deref()) {
+            Ok(imported) => imported,
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+    println!(
+        "[mxrs] imported {} as Cargo package {} ({} model units)",
+        imported.project_name, imported.package_name, imported.imported_units
+    );
+    if !imported.typed_round_trip_gaps.is_empty() {
+        println!(
+            "[mxrs] {} feature(s) remain losslessly backed by model/imported until typed support is added",
+            imported.typed_round_trip_gaps.len()
+        );
+    }
+    println!("[mxrs] next: cd {output} && cargo check");
     ExitCode::SUCCESS
 }
 

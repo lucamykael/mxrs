@@ -404,10 +404,39 @@ fn expand_attribute(attribute: &AttributeInput) -> TokenStream {
         Some(enumeration) => quote! { e.#method(#name, #enumeration) },
         None => quote! { e.#method(#name) },
     };
-    match &attribute.default {
-        Some(default) => quote! { #builder.default_value = Some((#default).to_string()); },
-        None => quote! { #builder; },
-    }
+    let default = attribute
+        .default
+        .as_ref()
+        .map(|value| quote! { __mxrs_attribute.default_value = Some((#value).to_string()); });
+    let documentation = attribute
+        .documentation
+        .as_ref()
+        .map(|value| quote! { __mxrs_attribute.documentation = (#value).to_string(); });
+    let length = attribute
+        .length
+        .as_ref()
+        .map(|value| quote! { __mxrs_attribute.length = Some(#value); });
+    let localize_date = attribute
+        .localize_date
+        .as_ref()
+        .map(|value| quote! { __mxrs_attribute.localize_date = Some(#value); });
+    let required = attribute
+        .required
+        .as_ref()
+        .map(|value| quote! { __mxrs_attribute.required = #value; });
+    let unique = attribute
+        .unique
+        .as_ref()
+        .map(|value| quote! { __mxrs_attribute.unique = #value; });
+    quote! {{
+        let __mxrs_attribute = #builder;
+        #default
+        #documentation
+        #length
+        #localize_date
+        #required
+        #unique
+    }}
 }
 
 fn expand_association(
@@ -419,8 +448,23 @@ fn expand_association(
     // `expand_entity_markers` to generate — see that function for the
     // struct/impl this path resolves to.
     let marker = format_ident!("{}_{}", entity_name, association.name);
+    let owner = association.owner.as_ref().map(|value| {
+        quote! { __mxrs_association.owner = ::mxrs_ir::AssociationOwner::#value; }
+    });
+    let storage = association.storage.as_ref().map(|value| {
+        quote! { __mxrs_association.storage = ::mxrs_ir::AssociationStorage::#value; }
+    });
+    let documentation = association
+        .documentation
+        .as_ref()
+        .map(|value| quote! { __mxrs_association.documentation = (#value).to_string(); });
     quote! {
-        e.association::<#module_name::#marker>();
+        {
+            let __mxrs_association = e.association::<#module_name::#marker>();
+            #owner
+            #storage
+            #documentation
+        }
     }
 }
 
