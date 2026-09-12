@@ -35,8 +35,13 @@ pub enum ReferenceTarget {
     Entity(mxrs_forms_refs::EntityReference),
 }
 
+/// `N` is the type an embedded (non-pluggable) Forms element decodes to —
+/// always `mxrs_forms::Node` in practice, injected via
+/// [`crate::embedded::EmbeddedFormsDecoder`] rather than named directly
+/// here, to avoid a dependency cycle (`mxrs-forms` already depends on
+/// this crate). See `mpr_codec`'s module doc for which kinds need it.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Value {
+pub enum Value<N> {
     /// An absent optional reference (mxrb's `nil` — a `File`/`Form`/
     /// `Image`/`Microflow`/`Nanoflow`-kind property with no target set).
     Null,
@@ -75,9 +80,20 @@ pub enum Value {
     /// A nested pluggable object (`Object`-kind property) — `None` means
     /// an unset single (non-list) nested object, mirroring mxrb's
     /// `items.first` on an empty collection.
-    Object(Option<Box<ObjectNode>>),
-    ObjectList(Vec<ObjectNode>),
+    Object(Option<Box<ObjectNode<N>>>),
+    ObjectList(Vec<ObjectNode<N>>),
     System,
+    /// A `TextTemplate`-kind value's embedded `Texts$TextTemplate`
+    /// element — ports `decode_optional_forms(document['TextTemplate'])`,
+    /// i.e. `forms_codec.decode_embedded(...)`. `Null` (not this variant)
+    /// when the field is absent, same convention as `Attribute`/`Entity`.
+    TextTemplate(N),
+    /// An `Action`-kind value's embedded element — ports
+    /// `decode_optional_forms(document['Action'])` the same way.
+    Action(N),
+    /// An `Icon`-kind value's embedded element — ports
+    /// `decode_optional_forms(document['Icon'])` the same way.
+    Icon(N),
     /// A `DataSource`-kind value's XPath/database source — self-contained
     /// only when neither the value's own `SourceVariable` nor the nested
     /// source's `SortBar` is present (both need `mxrs-forms`'s embedded
@@ -94,7 +110,7 @@ pub enum Value {
     /// represented here at all — decoding it returns
     /// [`crate::error::PluggableError::NeedsFormsIntegration`] instead of
     /// silently dropping the native items.
-    Widgets(Vec<ObjectNode>),
+    Widgets(Vec<ObjectNode<N>>),
 }
 
 /// See [`Value::DataSource`]. Ports the fields of mxrb's `XPathSource` that
@@ -114,34 +130,42 @@ pub struct DataSource {
 /// document rather than a decoded `Forms` node — decoding it needs the
 /// same `mxrs-forms` primitives this module's `Value` gaps do.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Assignment {
+pub struct Assignment<N> {
     pub property: PropertyType,
-    pub value: Value,
+    pub value: Value<N>,
     pub source_variable: Option<mxrs_bson::Document>,
 }
 
 /// A decoded pluggable-widget object instance — the `Object` field of a
 /// `CustomWidgets$CustomWidget` (or a nested `Object`-kind property).
 /// Ports the read side of `Pluggable::ObjectNode`.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct ObjectNode {
-    assignments: Vec<Assignment>,
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectNode<N> {
+    assignments: Vec<Assignment<N>>,
 }
 
-impl ObjectNode {
+impl<N> Default for ObjectNode<N> {
+    fn default() -> Self {
+        Self {
+            assignments: Vec::new(),
+        }
+    }
+}
+
+impl<N> ObjectNode<N> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn assignments(&self) -> &[Assignment] {
+    pub fn assignments(&self) -> &[Assignment<N>] {
         &self.assignments
     }
 
-    pub fn push(&mut self, assignment: Assignment) {
+    pub fn push(&mut self, assignment: Assignment<N>) {
         self.assignments.push(assignment);
     }
 
-    pub fn get(&self, key: &str) -> Option<&Value> {
+    pub fn get(&self, key: &str) -> Option<&Value<N>> {
         self.assignments
             .iter()
             .find(|assignment| assignment.property.key == key)

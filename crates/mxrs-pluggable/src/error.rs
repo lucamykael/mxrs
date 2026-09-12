@@ -44,6 +44,16 @@ pub enum PluggableError {
 
     #[error("invalid domain-model reference: {0}")]
     InvalidReference(#[from] mxrs_forms_refs::RefError),
+
+    #[error("embedded Forms element decode failed at {path}: {source}")]
+    EmbeddedDecodeFailed {
+        path: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    #[error("expected an embedded Forms element document at {path}, got a non-document value")]
+    ExpectedEmbeddedDocument { path: String },
 }
 
 pub type Result<T> = std::result::Result<T, PluggableError>;

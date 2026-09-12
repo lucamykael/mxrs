@@ -41,7 +41,7 @@ pub enum Value {
     /// because pluggable widgets aren't part of this crate's fixed
     /// `Catalog` schema; see `mxrs-pluggable` for why. Decode-only for now
     /// (`mxrs-pluggable::encode_object`/`encode_value` aren't ported yet).
-    Pluggable(mxrs_pluggable::ObjectNode),
+    Pluggable(mxrs_pluggable::ObjectNode<Node>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

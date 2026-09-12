@@ -20,6 +20,7 @@
 //! as the codebase changes.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use mxrs_bson::{Bson, Document};
 use mxrs_mpr::MprFile;
@@ -65,8 +66,19 @@ fn run_against(path: &str, label: &str) {
         "[{label}] found zero CustomWidgets$CustomWidget instances — expected at least one"
     );
 
+    // A real `mxrs-forms` codec, not a stand-in — this is what lets
+    // `TextTemplate`/`Action`/`Icon` actually decode via
+    // `EmbeddedFormsDecoder` instead of only ever hitting
+    // `NeedsFormsIntegration`, so the numbers this test prints reflect
+    // real end-to-end capability.
+    let catalog = Rc::new(
+        mxrs_forms::Catalog::for_version("11.12.1").expect("embedded 11.12.1 schema must load"),
+    );
+    let forms_codec = mxrs_forms::MprCodec::new(catalog);
+
     let mut full_success = 0usize;
     let mut blocked_by_kind: BTreeMap<String, usize> = BTreeMap::new();
+    let mut embedded_decode_failures = 0usize;
     let mut unexpected_errors = Vec::new();
 
     for (index, instance) in instances.iter().enumerate() {
@@ -88,10 +100,22 @@ fn run_against(path: &str, label: &str) {
             unexpected_errors.push(format!("{item_path}: missing Object document"));
             continue;
         };
-        match decode_object(object_document, &context, &format!("{item_path}.Object")) {
+        match decode_object(
+            object_document,
+            &context,
+            &format!("{item_path}.Object"),
+            &forms_codec,
+        ) {
             Ok(_) => full_success += 1,
             Err(PluggableError::NeedsFormsIntegration { kind, .. }) => {
                 *blocked_by_kind.entry(kind).or_default() += 1;
+            }
+            // A real TextTemplate/Action/Icon element exists but hits a
+            // `mxrs-forms` gap of its own (e.g. an unsupported native
+            // widget nested inside it) — a legitimate, separately-named
+            // failure mode, not this crate's own gap and not a panic.
+            Err(PluggableError::EmbeddedDecodeFailed { .. }) => {
+                embedded_decode_failures += 1;
             }
             Err(other) => {
                 unexpected_errors.push(format!("{item_path} ({}): {other}", widget_type.id))
@@ -101,10 +125,12 @@ fn run_against(path: &str, label: &str) {
 
     println!(
         "[{label}] {} widget instance(s): {} fully decoded, {} blocked on a not-yet-integrated \
-         value kind, {} unexpected error(s)",
+         value kind, {} blocked on an mxrs-forms decode failure inside an embedded element, {} \
+         unexpected error(s)",
         instances.len(),
         full_success,
         blocked_by_kind.values().sum::<usize>(),
+        embedded_decode_failures,
         unexpected_errors.len()
     );
     for (kind, count) in &blocked_by_kind {

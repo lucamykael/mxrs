@@ -693,6 +693,7 @@ name = "mxrs-pluggable"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-forms",
  "mxrs-forms-refs",
  "mxrs-mpr",
  "thiserror",

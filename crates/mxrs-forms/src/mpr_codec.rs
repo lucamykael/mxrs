@@ -40,14 +40,19 @@
 //! **`CustomWidgets$CustomWidget` handling**: decoding now delegates to
 //! `mxrs-pluggable` for real (`decode_one` returns `Value::Pluggable` —
 //! see `decode_pluggable` below), matching `Mxrb::Forms::MprCodec
-//! #decode_embedded`'s `pluggable_codec.decode` branch. Still explicitly
-//! erroring rather than silently dropping data: (a) a small remaining set
-//! of pluggable value kinds that need a *stateful, catalog-driven*
-//! embedded-node decode this crate doesn't expose to `mxrs-pluggable` yet
-//! (`TextTemplate`/`Action`/`Icon`/`DataSource`/`Widgets` — see
-//! `mxrs-pluggable::mpr_codec`'s doc for the real numbers), and (b)
-//! encoding a `Value::Pluggable` back to BSON at all
-//! (`mxrs-pluggable::encode_object`/`encode_value` aren't ported yet).
+//! #decode_embedded`'s `pluggable_codec.decode` branch. `MprCodec` also
+//! now implements `mxrs_pluggable::EmbeddedFormsDecoder` (see the
+//! `EmbeddedDecoder` wrapper below `impl MprCodec`) — the dependency-
+//! inversion seam that lets `mxrs-pluggable` decode a `TextTemplate`/
+//! `Action`/`Icon` value's embedded Forms element without this crate
+//! depending back on it (mirroring mxrb's `Pluggable::MprCodec`
+//! constructor taking a `forms_codec:` callback). Still explicitly
+//! erroring rather than silently dropping data: (a) the remaining
+//! non-self-contained slices of `DataSource`/`Widgets` in
+//! `mxrs-pluggable` (see that crate's module doc — mechanical follow-up,
+//! same seam, not a new blocker), and (b) encoding a `Value::Pluggable`
+//! back to BSON at all (`mxrs-pluggable::encode_object`/`encode_value`
+//! aren't ported yet).
 //!
 //! Deliberately **not** ported:
 //! - The `OBSOLETE_DEFAULT_FIELDS` shim and the legacy attribute-path/
@@ -242,7 +247,8 @@ impl MprCodec {
         &self,
         document: &Document,
         path: &str,
-    ) -> Result<mxrs_pluggable::ObjectNode> {
+        local_references: &HashMap<String, String>,
+    ) -> Result<mxrs_pluggable::ObjectNode<Node>> {
         let wrap = |source| FormsError::PluggableDecodeFailed {
             path: path.to_string(),
             source,
@@ -265,7 +271,18 @@ impl MprCodec {
                     shape: "CustomWidgets$CustomWidget.Object",
                     path: path.to_string(),
                 })?;
-        mxrs_pluggable::decode_object(object_document, &context, &object_path).map_err(wrap)
+        // Nested pluggable values share the root document's semantic
+        // reference maps (same comment mxrb's own `decode_embedded` makes)
+        // — this hook closes over the *caller's* `local_references` rather
+        // than recomputing a fresh (and wrong: scoped only to the tiny
+        // embedded fragment) map for whatever `TextTemplate`/`Action`/
+        // `Icon` element ends up nested inside this widget's properties.
+        let embedded = EmbeddedDecoder {
+            codec: self,
+            local_references,
+        };
+        mxrs_pluggable::decode_object(object_document, &context, &object_path, &embedded)
+            .map_err(wrap)
     }
 
     fn decode_property(
@@ -330,7 +347,9 @@ impl MprCodec {
                     });
                 };
                 if doc.get_str("$Type").ok() == Some("CustomWidgets$CustomWidget") {
-                    return self.decode_pluggable(doc, path).map(Value::Pluggable);
+                    return self
+                        .decode_pluggable(doc, path, local_references)
+                        .map(Value::Pluggable);
                 }
                 return Ok(Value::Node(self.decode_node(
                     doc,
@@ -830,6 +849,46 @@ impl MprCodec {
                 }
             })
             .collect()
+    }
+}
+
+/// Implements [`mxrs_pluggable::EmbeddedFormsDecoder`] for [`MprCodec`],
+/// closing over the `local_references` map live for whatever top-level
+/// `decode` call is in progress — see `decode_pluggable`'s call site and
+/// mxrb's own "nested pluggable values share the root's semantic
+/// reference maps" comment on `decode_embedded`. A plain `&MprCodec`
+/// can't implement the trait directly since the trait has no way to pass
+/// that extra map through `decode_embedded`'s fixed two-argument shape.
+struct EmbeddedDecoder<'a> {
+    codec: &'a MprCodec,
+    local_references: &'a HashMap<String, String>,
+}
+
+impl mxrs_pluggable::EmbeddedFormsDecoder for EmbeddedDecoder<'_> {
+    type Node = Node;
+    type Error = FormsError;
+
+    fn decode_embedded(&self, document: &Document, path: &str) -> Result<Node> {
+        self.codec
+            .decode_node(document, path, self.local_references)
+    }
+}
+
+/// A standalone (non-nested) [`mxrs_pluggable::EmbeddedFormsDecoder`] impl
+/// on `MprCodec` itself — the public entry point for anyone decoding a
+/// pluggable widget's instance data directly (e.g.
+/// `mxrs-pluggable`'s own `instance_oracle.rs`), as opposed to
+/// `decode_pluggable`'s internal nested case (which needs the
+/// outer document's `local_references`, via the private `EmbeddedDecoder`
+/// wrapper above). Computes `local_references` fresh from whatever
+/// document is passed in, same as top-level `MprCodec::decode`.
+impl mxrs_pluggable::EmbeddedFormsDecoder for MprCodec {
+    type Node = Node;
+    type Error = FormsError;
+
+    fn decode_embedded(&self, document: &Document, path: &str) -> Result<Node> {
+        let local_references = storage_reference_names(document);
+        self.decode_node(document, path, &local_references)
     }
 }
 

@@ -4,11 +4,14 @@
 //! directly: `mxrs-forms`'s own crate doc notes encountering one is a
 //! deliberate, explicit error today, not silent data loss).
 //!
-//! Ports the schema half of `lib/mxrb/pluggable/{catalog,mpr_codec}.rb`
-//! from mxrb. See `mpr_codec`'s module doc for exactly what's deferred
-//! (the widget-*instance* decode/encode half, which needs an instance
-//! value model this crate doesn't build yet plus a small expansion of
-//! `mxrs-forms`'s public surface) and why.
+//! Ports `lib/mxrb/pluggable/{catalog,mpr_codec}.rb` from mxrb: schema
+//! decode plus instance decode for every value kind mxrb's own
+//! `Pluggable::MprCodec#decode_value` supports, via a dependency-inversion
+//! seam ([`embedded::EmbeddedFormsDecoder`]) that `mxrs-forms::MprCodec`
+//! implements. See `mpr_codec`'s module doc for exactly which small slice
+//! (non-self-contained `DataSource`/`Widgets` shapes) and which whole
+//! side (`encode_object`/`encode_value`, the writer direction) are still
+//! open, and the real numbers behind that.
 //!
 //! Deliberately not ported at all: `schema_dsl.rb`/`schema_source_emitter.rb`
 //! (Ruby-authoring DSL + Ruby codegen for hand-writing widget schemas —
@@ -16,6 +19,7 @@
 //! workspace draws against mxrb's Ruby ergonomics/codegen).
 
 pub mod catalog;
+pub mod embedded;
 pub mod error;
 pub mod mpr_codec;
 pub mod node;
@@ -24,6 +28,7 @@ pub use catalog::{
     ActionVariable, Catalog, EnumerationValue, ObjectType, PropertyType, ReturnType, Translation,
     ValueType, WidgetType,
 };
+pub use embedded::EmbeddedFormsDecoder;
 pub use error::{PluggableError, Result};
 pub use mpr_codec::{SchemaContext, decode_object, decode_widget_type};
 pub use node::{Assignment, ObjectNode, ReferenceTarget, Value};
