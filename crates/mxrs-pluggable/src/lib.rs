@@ -18,10 +18,12 @@
 pub mod catalog;
 pub mod error;
 pub mod mpr_codec;
+pub mod node;
 
 pub use catalog::{
     ActionVariable, Catalog, EnumerationValue, ObjectType, PropertyType, ReturnType, Translation,
     ValueType, WidgetType,
 };
 pub use error::{PluggableError, Result};
-pub use mpr_codec::{SchemaContext, decode_widget_type};
+pub use mpr_codec::{SchemaContext, decode_object, decode_widget_type};
+pub use node::{Assignment, ObjectNode, Value};

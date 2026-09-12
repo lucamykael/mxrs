@@ -20,6 +20,25 @@ pub enum PluggableError {
     #[error("unknown pluggable widget property {0:?}")]
     UnknownProperty(String),
 
+    #[error("unresolved widget property pointer at {path}")]
+    UnresolvedPropertyPointer { path: String },
+
+    #[error(
+        "value kind {kind:?} at {path} needs mxrs-forms to expose more of its private codec \
+         surface first (see mxrs-pluggable::mpr_codec's module doc) — not a silent gap, a known \
+         follow-up"
+    )]
+    NeedsFormsIntegration { kind: String, path: String },
+
+    #[error("invalid {kind} value {value:?} at {path}: {source}")]
+    InvalidPrimitive {
+        kind: &'static str,
+        value: String,
+        path: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+
     #[error("BSON codec error: {0}")]
     Bson(#[from] mxrs_bson::BsonCodecError),
 }

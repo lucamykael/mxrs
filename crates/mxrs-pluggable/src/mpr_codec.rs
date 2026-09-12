@@ -6,34 +6,41 @@
 //! helpers for enumerations/action variables/return types/translations)
 //! from `Mxrb::Pluggable::MprCodec` in `lib/mxrb/pluggable/mpr_codec.rb`.
 //!
-//! This is deliberately a *slice* of that file, not the whole thing.
-//! `Mxrb::Pluggable::MprCodec` also decodes/encodes the widget *instance*
-//! (`decode_object`/`decode_value`/`encode_*`, `Object`/`Properties` on the
-//! `CustomWidgets$CustomWidget` document itself) — that half is **not**
-//! ported here. Two reasons, both concrete:
+//! This is a *slice* of that file, not the whole thing. The widget
+//! *instance* half — `decode_object`/`decode_value` — is now ported for
+//! every value kind that's self-contained (`Boolean`/`Integer`/`Decimal`/
+//! `String`/`Enumeration`/`Selection`/`Expression`/`EntityConstraint`/
+//! `TranslatableString`/`System`/`Object` recursion, plus the
+//! `File`/`Form`/`Image`/`Microflow`/`Nanoflow` string-path references).
+//! See [`node`](crate::node) for the decoded shape.
 //!
-//! 1. It needs the instance-value model (`Mxrb::Pluggable::Node`/
-//!    `ObjectNode`), not built yet — `node.rb`'s own API is Ruby
-//!    `method_missing`-ergonomics building-block code (same category
-//!    `mxrs-forms` already declined to port for its own `Node`), so this
-//!    would be a from-scratch Rust design, not a direct port.
-//! 2. Several `WidgetValue` kinds (`Attribute`, `Entity`, `TranslatableString`,
-//!    `Expression`, `EntityConstraint`, embedded `Icon`/`Action`/`TextTemplate`/
-//!    non-custom `Widgets` children) delegate to `Mxrb::Forms::MprCodec`'s
-//!    *private* decode helpers in mxrb — `mxrs-forms::MprCodec` only exposes
-//!    whole-`Node` `decode`/`encode` today (see its `lib.rs`), not the
-//!    individual primitives this would need to call. Wiring this in is a
-//!    small, targeted expansion of `mxrs-forms`'s public surface (name the
-//!    specific functions needed when picking this up), not a blocker in
-//!    the "impossible" sense — just genuinely separate follow-up work.
+//! Still open, correctly erroring rather than guessing
+//! (`PluggableError::NeedsFormsIntegration`): `Attribute`, `Entity`,
+//! `Association` (both of mxrb's own branches for it need `forms_codec`),
+//! `TextTemplate`, `Action`, `Icon`, `DataSource`, and `Widgets` — every
+//! one of these delegates to `Mxrb::Forms::MprCodec`'s *private* decode
+//! helpers in mxrb (`decode_attribute_reference_value`/
+//! `decode_entity_reference_value`/`decode_embedded`), which
+//! `mxrs-forms::MprCodec` doesn't expose yet (it only exposes whole-`Node`
+//! `decode`/`encode` today — see its `lib.rs`). Real-world weight of this
+//! gap, measured (not guessed) by `tests/instance_oracle.rs` against
+//! every real `CustomWidgets$CustomWidget` instance in QRQC/SPC: only
+//! 10/378 (QRQC) and 11/682 (SPC) decode *fully* end-to-end today — the
+//! rest each hit one of these kinds first (`TextTemplate`, `DataSource`,
+//! and `Attribute` dominate). What's landed here is real, independently
+//! useful, zero-panic progress (every self-contained property decodes
+//! correctly, and every blocked instance fails with this exact named
+//! error, never a guess or a silent drop), not the finish line.
 //!
-//! Concretely still open, in dependency order: an instance value/`Node`
-//! model here, `mxrs-forms` exposing the primitives above, then
-//! `decode_object`/`decode_value`/`encode_object`/`encode_value` here, and
-//! finally wiring `mxrs-forms::mpr_codec`'s own
-//! `FormsError::PluggableNotSupported` case to delegate here instead of
-//! erroring — that last step is what actually unblocks a real Data Grid
-//! 2/Gallery/ComboBox page decoding end to end.
+//! `encode_object`/`encode_value` (the writer-side counterpart) are also
+//! not ported yet — decode was the priority (it's what
+//! `mxrs-compiler-widgets` needs to read real pages), encode is symmetric
+//! follow-up work once decode's remaining gaps close.
+//!
+//! Wiring `mxrs-forms::mpr_codec`'s own `FormsError::PluggableNotSupported`
+//! case to delegate here is deferred until decode covers enough real
+//! instances end-to-end to be worth it — today it would just trade one
+//! named error for another on nearly every real widget.
 
 use mxrs_bson::{Bson, Document, extract_id, parse_array};
 
@@ -42,6 +49,7 @@ use crate::catalog::{
     WidgetType,
 };
 use crate::error::{PluggableError, Result};
+use crate::node::{Assignment, ObjectNode, Value};
 
 /// Decoded alongside a widget type: storage-id -> property/object-type,
 /// resolved by identity while decoding a single `CustomWidgets$CustomWidget`
@@ -364,6 +372,206 @@ fn decode_translations(document: &Document, field: &str, path: &str) -> Result<V
             })
         })
         .collect()
+}
+
+/// Ports mxrb's `WIDGET_VALUE_FIELDS` — every storage field a
+/// `CustomWidgets$WidgetValue` document may carry, across every value
+/// kind (most are unused for any given kind; that's normal, mxrb's own
+/// codec is written the same way).
+const WIDGET_VALUE_FIELDS: &[&str] = &[
+    "$ID",
+    "$Type",
+    "Action",
+    "AttributeRef",
+    "DataSource",
+    "EntityRef",
+    "Expression",
+    "Form",
+    "Icon",
+    "Image",
+    "Microflow",
+    "Nanoflow",
+    "Objects",
+    "PrimitiveValue",
+    "Selection",
+    "SourceVariable",
+    "TextTemplate",
+    "TranslatableValue",
+    "TypePointer",
+    "Widgets",
+    "XPathConstraint",
+];
+
+/// Decodes a `CustomWidgets$WidgetObject` document's assigned properties
+/// into an [`ObjectNode`], resolving each stored `TypePointer` against
+/// `context` (as populated by [`decode_widget_type`] for the same widget).
+/// Ports the read side of `decode_object`.
+///
+/// Stops at the first property whose value kind isn't self-contained yet
+/// — see this module's doc for exactly which kinds those are and why —
+/// returning [`PluggableError::NeedsFormsIntegration`] rather than
+/// guessing or dropping data, same as every other unported gap in this
+/// workspace.
+pub fn decode_object(
+    document: &Document,
+    context: &SchemaContext,
+    path: &str,
+) -> Result<ObjectNode> {
+    require_type(document, "CustomWidgets$WidgetObject", path)?;
+    let mut node = ObjectNode::new();
+    for (index, stored) in array_docs(document, "Properties").into_iter().enumerate() {
+        let item_path = format!("{path}.Properties[{index}]");
+        let property = stored
+            .get("TypePointer")
+            .and_then(extract_id)
+            .as_deref()
+            .and_then(|id| context.property_types.get(id))
+            .ok_or_else(|| PluggableError::UnresolvedPropertyPointer {
+                path: item_path.clone(),
+            })?
+            .clone();
+        let value_doc = get_doc(&stored, "Value", &item_path)?;
+        let value_path = format!("{item_path}.{}", property.key);
+        let value = decode_value(value_doc, &property.value_type, context, &value_path)?;
+        let source_variable = if property.value_type.kind != "DataSource" {
+            value_doc.get_document("SourceVariable").ok().cloned()
+        } else {
+            None
+        };
+        node.push(Assignment {
+            property,
+            value,
+            source_variable,
+        });
+        assert_known(
+            &stored,
+            &["$ID", "$Type", "TypePointer", "Value"],
+            &item_path,
+        )?;
+    }
+    assert_known(
+        document,
+        &["$ID", "$Type", "TypePointer", "Properties"],
+        path,
+    )?;
+    Ok(node)
+}
+
+/// Ports the self-contained slice of `decode_value` — see this module's
+/// doc for which kinds are covered and which return
+/// [`PluggableError::NeedsFormsIntegration`] instead.
+fn decode_value(
+    document: &Document,
+    value_type: &ValueType,
+    context: &SchemaContext,
+    path: &str,
+) -> Result<Value> {
+    require_type(document, "CustomWidgets$WidgetValue", path)?;
+    assert_known(document, WIDGET_VALUE_FIELDS, path)?;
+    match value_type.kind.as_str() {
+        "Boolean" => Ok(Value::Boolean(
+            get_str_or(document, "PrimitiveValue", "false") == "true",
+        )),
+        "Integer" => {
+            let raw = get_str_or(document, "PrimitiveValue", "0");
+            raw.parse::<i64>().map(Value::Integer).map_err(|source| {
+                PluggableError::InvalidPrimitive {
+                    kind: "Integer",
+                    value: raw,
+                    path: path.to_string(),
+                    source,
+                }
+            })
+        }
+        "Decimal" => Ok(Value::Primitive(get_str_or(
+            document,
+            "PrimitiveValue",
+            "0",
+        ))),
+        "String" | "Enumeration" => {
+            Ok(Value::Primitive(get_str_or(document, "PrimitiveValue", "")))
+        }
+        "Selection" => Ok(Value::Selection(get_str_or(document, "Selection", "None"))),
+        "Expression" => Ok(Value::Expression(get_str_or(document, "Expression", ""))),
+        "EntityConstraint" => Ok(Value::XPathConstraint(get_str_or(
+            document,
+            "XPathConstraint",
+            "",
+        ))),
+        "TranslatableString" => Ok(Value::Text(decode_translatable(document, path)?)),
+        "System" => Ok(Value::System),
+        "Object" => decode_object_value(document, value_type, context, path),
+        "Attribute" | "Entity" | "TextTemplate" | "Action" | "Icon" | "DataSource" | "Widgets"
+        | "Association" => Err(PluggableError::NeedsFormsIntegration {
+            kind: value_type.kind.clone(),
+            path: path.to_string(),
+        }),
+        other => Ok(decode_reference(other, document)),
+    }
+}
+
+/// Ports the `Object`-kind arm of `decode_value` (`decode_objects`):
+/// self-contained recursion into nested `ObjectNode`s, no `mxrs-forms`
+/// involved.
+fn decode_object_value(
+    document: &Document,
+    value_type: &ValueType,
+    context: &SchemaContext,
+    path: &str,
+) -> Result<Value> {
+    let mut nodes = Vec::new();
+    for (index, item) in array_docs(document, "Objects").into_iter().enumerate() {
+        nodes.push(decode_object(&item, context, &format!("{path}[{index}]"))?);
+    }
+    if value_type.list {
+        Ok(Value::ObjectList(nodes))
+    } else {
+        Ok(Value::Object(nodes.into_iter().next().map(Box::new)))
+    }
+}
+
+/// Ports `decode_text` (self-contained: `Texts$Text`/`Texts$Translation`
+/// are read directly, no `forms_codec` call in mxrb either).
+fn decode_translatable(document: &Document, _path: &str) -> Result<Vec<(String, String)>> {
+    let Ok(text) = document.get_document("TranslatableValue") else {
+        return Ok(Vec::new());
+    };
+    Ok(array_docs(text, "Items")
+        .into_iter()
+        .map(|item| {
+            (
+                get_str_or(&item, "LanguageCode", ""),
+                get_str_or(&item, "Text", ""),
+            )
+        })
+        .collect())
+}
+
+/// Ports the string-path half of `decode_semantic_reference` —
+/// `File`/`Form`/`Image`/`Microflow`/`Nanoflow` (an `Association` is
+/// handled by the caller before reaching here: it always needs
+/// `forms_codec`, in both of mxrb's own branches for it). A `Hash`-shaped
+/// field (mxrb's defensive `value[key] || value["#{key}Path"]` case) is
+/// checked before falling back to a plain string.
+fn decode_reference(kind: &str, document: &Document) -> Value {
+    let field = if kind == "File" { "Image" } else { kind };
+    let target = match document.get(field) {
+        Some(Bson::String(value)) => value.clone(),
+        Some(Bson::Document(nested)) => nested
+            .get_str(field)
+            .or_else(|_| nested.get_str(format!("{field}Path")))
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    };
+    if target.is_empty() {
+        Value::Null
+    } else {
+        Value::Reference {
+            kind: kind.to_string(),
+            target,
+        }
+    }
 }
 
 fn require_type(document: &Document, expected: &'static str, path: &str) -> Result<()> {
