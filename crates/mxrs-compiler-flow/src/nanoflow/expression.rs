@@ -83,8 +83,9 @@ static FUNCTION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\A(not|isNew|isSynced)\((.*)\)\z").unwrap());
 static BINARY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\A(.+?)\s+(and|or|!=|=|>=|<=|>|<)\s+(.+)\z").unwrap());
-static VARIABLE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\A\$[A-Za-z_]\w*(?:/[A-Za-z_]\w*)*\z").unwrap());
+static VARIABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\A\$[A-Za-z_]\w*(?:/[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)*\z").unwrap()
+});
 static NUMERIC_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A-?\d+(?:\.\d+)?\z").unwrap());
 static WORD_AND_OR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(and|or)\b").unwrap());
 
@@ -307,6 +308,19 @@ mod tests {
             Expression::Variable {
                 name: "Order".to_string(),
                 path: Some("Customer/Name".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_qualified_association_segments_in_a_variable_path() {
+        let (expr, _) =
+            parse_expression("$Order/Sales.Order_Customer/Sales.Customer/AccountManager");
+        assert_eq!(
+            expr,
+            Expression::Variable {
+                name: "Order".to_string(),
+                path: Some("Sales.Order_Customer/Sales.Customer/AccountManager".to_string()),
             }
         );
     }

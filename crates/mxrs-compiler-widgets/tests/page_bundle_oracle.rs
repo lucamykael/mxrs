@@ -30,15 +30,25 @@ fn audits_page_bundle_coverage_against_a_real_project() {
     let compilation_started = Instant::now();
     let mut native = BTreeMap::<String, usize>::new();
     let mut custom = BTreeMap::<String, usize>::new();
+    let mut native_pages = BTreeMap::<String, Vec<String>>::new();
+    let mut custom_pages = BTreeMap::<String, Vec<String>>::new();
     let mut pages = 0usize;
     for result in compiler.compile_pages() {
         let bundle = result.expect("every real page must emit a module");
         pages += 1;
         for kind in bundle.unsupported_widgets {
-            *native.entry(kind).or_default() += 1;
+            *native.entry(kind.clone()).or_default() += 1;
+            native_pages
+                .entry(kind)
+                .or_default()
+                .push(bundle.qualified_name.clone());
         }
         for kind in bundle.unsupported_custom_widgets {
-            *custom.entry(kind).or_default() += 1;
+            *custom.entry(kind.clone()).or_default() += 1;
+            custom_pages
+                .entry(kind)
+                .or_default()
+                .push(bundle.qualified_name.clone());
         }
     }
     println!("page bundle oracle: {pages} pages");
@@ -47,6 +57,8 @@ fn audits_page_bundle_coverage_against_a_real_project() {
         compilation_started.elapsed()
     );
     println!("unsupported native kinds: {native:#?}");
+    println!("unsupported native pages: {native_pages:#?}");
     println!("unsupported custom widget ids: {custom:#?}");
+    println!("unsupported custom widget pages: {custom_pages:#?}");
     assert!(pages > 0);
 }

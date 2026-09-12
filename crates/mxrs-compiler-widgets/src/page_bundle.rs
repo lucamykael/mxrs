@@ -1133,6 +1133,74 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         ))
     }
 
+    fn builtin_custom_list_property(
+        &self,
+        widget: &Document,
+        value: &Document,
+        current_scope: Option<&str>,
+        current_entity: &str,
+    ) -> Option<String> {
+        let source = crate::WebListDataSource::from_documents(self.compiler.documents, value);
+        if !source.supported() || !qualified_name_valid(&source.entity) || source.xpath() {
+            return None;
+        }
+        let key = self.widget_key(widget);
+        let operation = operation_id(
+            self.qualified_name,
+            widget.get_str("Name").unwrap_or_default(),
+        );
+        if source.association() {
+            return Some(format!(
+                "AssociationObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(&key)),
+                    ("operationId", js_string(&operation)),
+                    ("scope", js_string(current_scope?)),
+                    ("directPath", js_string(&source.association_path)),
+                    ("sort", "[]".to_string()),
+                ])
+            ));
+        }
+        let direct = value.get_document("DataSource").ok()?;
+        if source.microflow() {
+            let settings = direct.get_document("MicroflowSettings").unwrap_or(direct);
+            let arg_map = self.flow_argument_map(
+                settings,
+                &source.microflow_name,
+                current_scope,
+                current_entity,
+            )?;
+            return Some(format!(
+                "MicroflowObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(&key)),
+                    ("operationId", js_string(&operation)),
+                    ("argMap", arg_map),
+                    ("fetchOnlyWithAllParams", "false".to_string()),
+                ])
+            ));
+        }
+        let reference = self
+            .compiler
+            .nanoflow_renderer
+            .and_then(|renderer| renderer(&source.nanoflow_name))?;
+        let settings = direct.get_document("NanoflowSettings").unwrap_or(direct);
+        let arg_map = if array_docs(settings, "ParameterMappings").is_empty() {
+            "{}".to_string()
+        } else {
+            self.explicit_argument_map(settings, current_scope)?
+        };
+        Some(format!(
+            "NanoflowObjectListProperty({})",
+            js_object(&[
+                ("dataSourceId", js_string(&key)),
+                ("source", format!("{{ nanoflow: {reference} }}")),
+                ("argMap", arg_map),
+                ("fetchOnlyWithAllParams", "false".to_string()),
+            ])
+        ))
+    }
+
     fn render_static_image(&self, widget: &Document) -> Option<String> {
         let reference = widget.get_str("Image").ok()?;
         let mut parts = reference.splitn(3, '.');
@@ -2546,6 +2614,8 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                 .and_then(|renderer| renderer(action))
                 .or_else(|| self.builtin_action_property(widget, action, scope, entity))
         };
+        let data_source =
+            |value: &Document| self.builtin_custom_list_property(widget, value, scope, entity);
         let mut image =
             ImageBundleCompiler::new(self.compiler.documents, self.qualified_name, widget)
                 .with_key_prefix(self.key_prefix)
@@ -2602,7 +2672,8 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             .with_key_prefix(self.key_prefix)
             .with_package_available(available)
             .with_widget_renderer(&generic_nested)
-            .with_action_renderer(&action);
+            .with_action_renderer(&action)
+            .with_data_source_renderer(&data_source);
         if generic.supported() {
             let mut state = self.state.borrow_mut();
             state.used.insert(UsedBundle::Generic);
@@ -2850,11 +2921,14 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                 &mut imports,
                 &[
                     "ActionProperty",
+                    "AssociationObjectListProperty",
                     "AttributeProperty",
                     "DatabaseObjectListProperty",
                     "ExpressionProperty",
                     "ListAttributeProperty",
                     "ListExpressionProperty",
+                    "MicroflowObjectListProperty",
+                    "NanoflowObjectListProperty",
                     "SelectionProperty",
                     "TemplatedWidgetProperty",
                 ],
@@ -3423,6 +3497,62 @@ mod tests {
         assert!(bundle.source.contains("React.createElement($ActionWidget"));
         assert!(bundle.source.contains("ActionProperty"));
         assert!(bundle.source.contains("signOut"));
+    }
+
+    #[test]
+    fn renders_microflow_sources_inside_generic_widgets() {
+        let temp = tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("widgets/example")).unwrap();
+        fs::write(
+            temp.path().join("widgets/example/ListWidget.mjs"),
+            "export default {};",
+        )
+        .unwrap();
+        let project = temp.path().join("App.mpr");
+        let widget = doc! {
+            "$Type": "CustomWidgets$CustomWidget",
+            "Name": "listWidget",
+            "Type": {
+                "WidgetId": "example.ListWidget",
+                "ObjectType": {
+                    "$ID": "list-object",
+                    "PropertyTypes": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "$ID": "source-property",
+                        "PropertyKey": "items",
+                        "ValueType": { "Type": "DataSource" },
+                    })], 2),
+                },
+            },
+            "Object": {
+                "TypePointer": "list-object",
+                "Properties": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "TypePointer": "source-property",
+                    "Value": { "DataSource": {
+                        "$Type": "Forms$MicroflowSource",
+                        "MicroflowSettings": {
+                            "Microflow": "Demo.LoadOrders",
+                            "ParameterMappings": mxrs_bson::build_array(Vec::new(), 2),
+                        },
+                    } },
+                })], 2),
+            },
+        };
+        let documents = vec![(
+            "Demo".to_string(),
+            doc! {
+                "$Type": "Microflows$Microflow",
+                "Name": "LoadOrders",
+                "MicroflowReturnType": { "Entity": "Demo.Order" },
+            },
+        )];
+        let bundle = PageBundleCompiler::new(&documents, &project)
+            .compile_page("Demo", &page(vec![widget]))
+            .unwrap();
+
+        assert!(bundle.unsupported_custom_widgets.is_empty());
+        assert!(bundle.source.contains("React.createElement($ListWidget"));
+        assert!(bundle.source.contains("MicroflowObjectListProperty"));
+        assert!(bundle.source.contains("fetchOnlyWithAllParams"));
     }
 
     #[test]

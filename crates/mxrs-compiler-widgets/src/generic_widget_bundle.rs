@@ -5,10 +5,13 @@ use std::fs;
 use std::path::Path;
 
 use mxrs_bson::{Bson, Document, extract_id, parse_array};
+use mxrs_compiler_flow::nanoflow::expression::{Expression, LiteralValue, parse_expression};
+use mxrs_compiler_flow::nanoflow::js_value::JsValue;
 use mxrs_compiler_support::operation_id;
 
 type WidgetRenderer<'a> = dyn Fn(&[Document]) -> String + 'a;
 type ActionRenderer<'a> = dyn Fn(&Document) -> Option<String> + 'a;
+type DataSourceRenderer<'a> = dyn Fn(&Document) -> Option<String> + 'a;
 
 #[derive(Debug, Clone)]
 struct PropertyValue {
@@ -29,6 +32,7 @@ pub struct GenericWidgetBundleCompiler<'a> {
     key_prefix: &'a str,
     renderer: Option<&'a WidgetRenderer<'a>>,
     action_renderer: Option<&'a ActionRenderer<'a>>,
+    data_source_renderer: Option<&'a DataSourceRenderer<'a>>,
     package_available: Option<bool>,
     index: HashMap<String, Document>,
     values: Vec<PropertyValue>,
@@ -57,6 +61,7 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
             key_prefix: "p",
             renderer: None,
             action_renderer: None,
+            data_source_renderer: None,
             package_available: None,
             index,
             values,
@@ -72,6 +77,11 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
 
     pub fn with_action_renderer(mut self, renderer: &'a ActionRenderer<'a>) -> Self {
         self.action_renderer = Some(renderer);
+        self
+    }
+
+    pub fn with_data_source_renderer(mut self, renderer: &'a DataSourceRenderer<'a>) -> Self {
+        self.data_source_renderer = Some(renderer);
         self
     }
 
@@ -130,7 +140,7 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
                     .value
                     .get("DataSource")
                     .is_none_or(|value| matches!(value, Bson::Null))
-                    || self.database_list_property(&property.value).is_some()
+                    || self.compiled_data_source(&property.value).is_some()
             }
             "Attribute"
                 if property
@@ -198,7 +208,7 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
             "Decimal" => Some(primitive().parse::<f64>().unwrap_or_default().to_string()),
             "Enumeration" | "String" => Some(js_string(primitive())),
             "Expression" | "TextTemplate" => self.expression_property(property, list_source),
-            "DataSource" => self.database_list_property(&property.value),
+            "DataSource" => self.compiled_data_source(&property.value),
             "Action" => self.compiled_action(&property.value),
             "Attribute" => self.attribute_property(property, list_source),
             "Selection" => Some(format!(
@@ -261,11 +271,17 @@ impl<'a> GenericWidgetBundleCompiler<'a> {
         values.iter().find_map(|property| {
             (property.kind == "DataSource")
                 .then(|| {
-                    self.database_list_property(&property.value)
+                    self.compiled_data_source(&property.value)
                         .map(|_| property.metadata.clone())
                 })
                 .flatten()
         })
+    }
+
+    fn compiled_data_source(&self, value: &Document) -> Option<String> {
+        self.data_source_renderer
+            .and_then(|renderer| renderer(value))
+            .or_else(|| self.database_list_property(value))
     }
 
     fn expression_property(
@@ -534,37 +550,57 @@ fn index_documents(document: &Document, index: &mut HashMap<String, Document>) {
 
 fn compile_expression(source: &str) -> Option<String> {
     let value = source.trim();
-    if value.is_empty() || value == "empty" {
-        return Some(literal_value("null"));
+    let expression = if let Some(inner) = function_argument(value, "toString") {
+        Expression::Function("toString".to_string(), vec![compile_expression_ast(inner)?])
+    } else {
+        compile_expression_ast(value)?
+    };
+    Some(JsValue::from(normalize_expression_variables(expression)).render())
+}
+
+fn compile_expression_ast(source: &str) -> Option<Expression> {
+    let (expression, _) = parse_expression(source);
+    (!contains_opaque(&expression)).then_some(expression)
+}
+
+fn contains_opaque(expression: &Expression) -> bool {
+    match expression {
+        Expression::Literal(LiteralValue::Opaque(_)) => true,
+        Expression::Conditional(condition, then, otherwise) => {
+            contains_opaque(condition) || contains_opaque(then) || contains_opaque(otherwise)
+        }
+        Expression::Function(_, parameters) => parameters.iter().any(contains_opaque),
+        _ => false,
     }
-    if let Some(variable_name) = value.strip_prefix('$')
-        && variable_name
-            .split('/')
-            .all(|part| !part.is_empty() && identifier(part))
-    {
-        return Some(variable(
-            variable_name
-                .split_once('/')
-                .map(|(_, path)| path)
-                .unwrap_or(""),
-        ));
+}
+
+fn normalize_expression_variables(expression: Expression) -> Expression {
+    match expression {
+        Expression::Variable { path, .. } => Expression::Variable {
+            name: "currentObject".to_string(),
+            path,
+        },
+        Expression::Conditional(condition, then, otherwise) => Expression::Conditional(
+            Box::new(normalize_expression_variables(*condition)),
+            Box::new(normalize_expression_variables(*then)),
+            Box::new(normalize_expression_variables(*otherwise)),
+        ),
+        Expression::Function(name, parameters) => Expression::Function(
+            name,
+            parameters
+                .into_iter()
+                .map(normalize_expression_variables)
+                .collect(),
+        ),
+        expression => expression,
     }
-    if numeric(value) {
-        return Some(js_object(&[
-            ("type", js_string("literalNumeric")),
-            ("value", js_string(value)),
-        ]));
-    }
-    if matches!(value, "true" | "false") {
-        return Some(literal_value(value));
-    }
-    if value.len() >= 2
-        && matches!(value.as_bytes()[0], b'\'' | b'"')
-        && value.as_bytes()[0] == *value.as_bytes().last().unwrap_or(&0)
-    {
-        return Some(literal(&value[1..value.len() - 1]));
-    }
-    None
+}
+
+fn function_argument<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    source
+        .strip_prefix(name)?
+        .strip_prefix('(')?
+        .strip_suffix(')')
 }
 
 fn variable(path: &str) -> String {
@@ -698,18 +734,6 @@ fn identifier(value: &str) -> bool {
 
 fn qualified_name(value: &str) -> bool {
     value.split('.').count() >= 2 && value.split('.').all(identifier)
-}
-
-fn numeric(value: &str) -> bool {
-    let value = value.strip_prefix('-').unwrap_or(value);
-    let mut parts = value.split('.');
-    parts
-        .next()
-        .is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
-        && parts
-            .next()
-            .is_none_or(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
-        && parts.next().is_none()
 }
 
 fn translated_text(template: Option<&Document>) -> String {
@@ -949,6 +973,15 @@ mod tests {
             ("-1.5", "literalNumeric"),
             ("true", "\"value\": true"),
             ("'text'", "\"value\": \"text\""),
+            ("toString(false)", "\"name\": \"toString\""),
+            (
+                "if $Item/Active = true then 'yes' else 'no'",
+                "\"type\": \"conditional\"",
+            ),
+            (
+                "$Item/Sales.Order_Customer/Sales.Customer/Name",
+                "Sales.Order_Customer/Sales.Customer/Name",
+            ),
         ] {
             assert!(compile_expression(source).unwrap().contains(expected));
         }
