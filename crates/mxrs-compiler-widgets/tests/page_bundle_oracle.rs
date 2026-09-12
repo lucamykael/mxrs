@@ -36,6 +36,16 @@ fn audits_page_bundle_coverage_against_a_real_project() {
     for result in compiler.compile_pages() {
         let bundle = result.expect("every real page must emit a module");
         pages += 1;
+        if !bundle.unsupported_widget_instances.is_empty()
+            || !bundle.unsupported_custom_widget_instances.is_empty()
+        {
+            println!(
+                "unsupported instances in {}: native={:?}, custom={:?}",
+                bundle.qualified_name,
+                bundle.unsupported_widget_instances,
+                bundle.unsupported_custom_widget_instances,
+            );
+        }
         for kind in bundle.unsupported_widgets {
             *native.entry(kind.clone()).or_default() += 1;
             native_pages

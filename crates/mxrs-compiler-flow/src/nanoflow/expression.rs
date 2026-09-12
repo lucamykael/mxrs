@@ -44,13 +44,14 @@ pub enum Expression {
     /// that must round-trip through JS as exact text.
     LiteralNumeric(String),
     Constant(String),
+    Token(String),
     Variable {
         name: String,
         path: Option<String>,
     },
     Conditional(Box<Expression>, Box<Expression>, Box<Expression>),
-    /// `and`/`or`/comparison operators and the three unary functions
-    /// (`not`/`isNew`/`isSynced`) are all represented as generic named
+    /// `and`/`or`/comparison operators and supported unary functions are
+    /// all represented as generic named
     /// function calls — mirrors the Ruby's own shape, not a distinct
     /// binary-op node type.
     Function(String, Vec<Expression>),
@@ -79,14 +80,19 @@ pub struct ExpressionDiagnostic {
 
 static CONDITIONAL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\Aif\s+(.+?)\s+then\s+(.+?)\s+else\s+(.+)\z").unwrap());
-static FUNCTION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)\A(not|isNew|isSynced)\((.*)\)\z").unwrap());
+static FUNCTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)\A(not|isNew|isSynced|toString|trim|length)\((.*)\)\z").unwrap()
+});
 static BINARY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)\A(.+?)\s+(and|or|!=|=|>=|<=|>|<)\s+(.+)\z").unwrap());
+    LazyLock::new(|| Regex::new(r"(?is)\A(.+?)\s+(and|or|!=|=|>=|<=|>|<|\+)\s+(.+)\z").unwrap());
 static VARIABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\A\$[A-Za-z_]\w*(?:/[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)*\z").unwrap()
 });
 static NUMERIC_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A-?\d+(?:\.\d+)?\z").unwrap());
+static ENUM_VALUE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\A[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}\z").unwrap());
+static TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\A\[%([A-Za-z_]\w*)%\]\z").unwrap());
 static WORD_AND_OR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(and|or)\b").unwrap());
 
 pub fn parse_expression(raw: &str) -> (Expression, Vec<ExpressionDiagnostic>) {
@@ -147,6 +153,15 @@ pub fn parse_expression(raw: &str) -> (Expression, Vec<ExpressionDiagnostic>) {
     if let Some(rest) = source.strip_prefix('@') {
         return (Expression::Constant(rest.to_string()), vec![]);
     }
+    if let Some(caps) = TOKEN_RE.captures(source) {
+        let name = caps[1].to_string();
+        let mut characters = name.chars();
+        let normalized = characters
+            .next()
+            .map(|first| first.to_ascii_lowercase().to_string() + characters.as_str())
+            .unwrap_or_default();
+        return (Expression::Token(normalized), vec![]);
+    }
     if source == "true" || source == "false" {
         return (
             Expression::Literal(LiteralValue::Bool(source == "true")),
@@ -162,6 +177,14 @@ pub fn parse_expression(raw: &str) -> (Expression, Vec<ExpressionDiagnostic>) {
     }
     if NUMERIC_RE.is_match(source) {
         return (Expression::LiteralNumeric(source.to_string()), vec![]);
+    }
+    if ENUM_VALUE_RE.is_match(source) {
+        return (
+            Expression::Literal(LiteralValue::Quoted(
+                source.rsplit('.').next().unwrap_or_default().to_string(),
+            )),
+            vec![],
+        );
     }
     (
         Expression::Literal(LiteralValue::Opaque(source.to_string())),
@@ -211,18 +234,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_three_unary_functions() {
-        let (expr, _) = parse_expression("not($a)");
-        assert_eq!(
-            expr,
-            Expression::Function(
-                "not".to_string(),
-                vec![Expression::Variable {
-                    name: "a".to_string(),
-                    path: None
-                }],
-            )
-        );
+    fn parses_supported_unary_functions() {
+        for name in ["not", "isNew", "isSynced", "toString", "trim", "length"] {
+            let (expr, _) = parse_expression(&format!("{name}($a)"));
+            assert_eq!(
+                expr,
+                Expression::Function(
+                    name.to_string(),
+                    vec![Expression::Variable {
+                        name: "a".to_string(),
+                        path: None
+                    }],
+                )
+            );
+        }
     }
 
     #[test]
@@ -329,6 +354,18 @@ mod tests {
     fn parses_a_constant() {
         let (expr, _) = parse_expression("@Module.MyConstant");
         assert_eq!(expr, Expression::Constant("Module.MyConstant".to_string()));
+    }
+
+    #[test]
+    fn parses_runtime_tokens_and_enumeration_values() {
+        assert_eq!(
+            parse_expression("[%CurrentDateTime%]").0,
+            Expression::Token("currentDateTime".to_string())
+        );
+        assert_eq!(
+            parse_expression("Sales.OrderStatus.Open").0,
+            Expression::Literal(LiteralValue::Quoted("Open".to_string()))
+        );
     }
 
     #[test]

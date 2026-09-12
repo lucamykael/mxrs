@@ -86,6 +86,10 @@ impl From<Expression> for JsValue {
                 ("type", JsValue::Str("constant".to_string())),
                 ("name", JsValue::Str(name)),
             ]),
+            Expression::Token(name) => JsValue::object(vec![
+                ("type", JsValue::Str("token".to_string())),
+                ("name", JsValue::Str(name)),
+            ]),
             Expression::Variable { name, path } => {
                 let mut entries = vec![
                     ("type", JsValue::Str("variable".to_string())),

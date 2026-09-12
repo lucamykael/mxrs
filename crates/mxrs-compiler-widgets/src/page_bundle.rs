@@ -23,6 +23,8 @@ pub struct PageBundle {
     pub source: String,
     pub unsupported_widgets: Vec<String>,
     pub unsupported_custom_widgets: Vec<String>,
+    pub unsupported_widget_instances: Vec<String>,
+    pub unsupported_custom_widget_instances: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,6 +55,8 @@ struct RenderState {
     generic_widgets: BTreeMap<String, String>,
     unsupported: BTreeSet<String>,
     unsupported_custom: BTreeSet<String>,
+    unsupported_instances: BTreeSet<String>,
+    unsupported_custom_instances: BTreeSet<String>,
 }
 
 /// Emits Runtime-loadable page and layout modules. Native Forms widgets not
@@ -384,12 +388,13 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         if let Some(rendered) = self.render_builtin_native(widget, scope, entity) {
             return rendered;
         }
-        self.state.borrow_mut().unsupported.insert(
-            widget
-                .get_str("$Type")
-                .unwrap_or("<missing $Type>")
-                .to_string(),
-        );
+        let type_name = widget.get_str("$Type").unwrap_or("<missing $Type>");
+        let name = widget.get_str("Name").unwrap_or("<unnamed>");
+        let mut state = self.state.borrow_mut();
+        state.unsupported.insert(type_name.to_string());
+        state
+            .unsupported_instances
+            .insert(format!("{type_name}:{name}"));
         "null".to_string()
     }
 
@@ -674,20 +679,30 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             .into_iter()
             .enumerate()
             .map(|(index, parameter)| {
-                let reference = parameter.get_document("AttributeRef").ok()?;
-                let qualified = reference.get_str("Attribute").ok()?;
-                let (entity, attribute) = qualified.rsplit_once('.')?;
-                if !qualified_name_valid(entity) || !identifier(attribute) {
-                    return None;
+                if let Some(reference) = parameter.get_document("AttributeRef").ok()
+                    && let Some((entity, attribute)) = reference
+                        .get_str("Attribute")
+                        .ok()
+                        .and_then(|qualified| qualified.rsplit_once('.'))
+                    && qualified_name_valid(entity)
+                    && identifier(attribute)
+                {
+                    let path = reference
+                        .get_document("EntityRef")
+                        .ok()
+                        .map(entity_ref_path)
+                        .unwrap_or_default();
+                    return Some((
+                        format!("value{}", index + 1),
+                        bound_text_attribute_property(scope, entity, attribute, &path),
+                    ));
                 }
-                let path = reference
-                    .get_document("EntityRef")
-                    .ok()
-                    .map(entity_ref_path)
-                    .unwrap_or_default();
+                let expression = crate::generic_widget_bundle::compile_expression(
+                    parameter.get_str("Expression").ok()?,
+                )?;
                 Some((
                     format!("value{}", index + 1),
-                    bound_text_attribute_property(scope, entity, attribute, &path),
+                    client_expression_property(&expression, Some(scope)),
                 ))
             })
             .collect::<Option<Vec<_>>>()?;
@@ -2697,6 +2712,13 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             .borrow_mut()
             .unsupported_custom
             .insert(id.to_string());
+        self.state
+            .borrow_mut()
+            .unsupported_custom_instances
+            .insert(format!(
+                "{id}:{}",
+                widget.get_str("Name").unwrap_or("<unnamed>")
+            ));
         "null".to_string()
     }
 
@@ -2884,6 +2906,7 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                 &[
                     "ActionProperty",
                     "ExpressionProperty",
+                    "WebIconProperty",
                     "WebStaticImageProperty",
                 ],
             );
@@ -2964,6 +2987,12 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             source,
             unsupported_widgets: state.unsupported.iter().cloned().collect(),
             unsupported_custom_widgets: state.unsupported_custom.iter().cloned().collect(),
+            unsupported_widget_instances: state.unsupported_instances.iter().cloned().collect(),
+            unsupported_custom_widget_instances: state
+                .unsupported_custom_instances
+                .iter()
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -3185,6 +3214,31 @@ fn bound_text_attribute_property(scope: &str, entity: &str, attribute: &str, pat
             ("validation", "null".to_string()),
             ("formatting", "{}".to_string()),
         ])
+    )
+}
+
+fn client_expression_property(expression: &str, scope: Option<&str>) -> String {
+    let args = if expression.contains("\"variable\": \"currentObject\"") {
+        scope
+            .map(|scope| {
+                js_object(&[(
+                    "currentObject",
+                    js_object(&[
+                        ("widget", js_string(scope)),
+                        ("source", js_string("object")),
+                    ]),
+                )])
+            })
+            .unwrap_or_else(|| "{}".to_string())
+    } else {
+        "{}".to_string()
+    };
+    format!(
+        "ExpressionProperty({})",
+        js_object(&[(
+            "expression",
+            js_object(&[("expr", expression.to_string()), ("args", args)]),
+        )])
     )
 }
 
@@ -3702,6 +3756,18 @@ mod tests {
                 "LanguageCode": "en_US", "Text": "Save",
             })], 3) } },
         };
+        let summary = doc! {
+            "$Type": "Forms$DynamicText",
+            "Name": "summary",
+            "Content": {
+                "Template": { "Items": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "LanguageCode": "en_US", "Text": "{1}",
+                })], 3) },
+                "Parameters": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "Expression": "if $Order/CustomerName != empty then $Order/CustomerName else 'Unknown'",
+                })], 2),
+            },
+        };
         let data_view = doc! {
             "$Type": "Forms$DataView",
             "Name": "orderView",
@@ -3710,7 +3776,7 @@ mod tests {
                 "EntityRef": { "Entity": "Demo.Order" },
                 "SourceVariable": { "PageParameter": "Order" },
             },
-            "Widgets": mxrs_bson::build_array(vec![Bson::Document(text_box), Bson::Document(save)], 2),
+            "Widgets": mxrs_bson::build_array(vec![Bson::Document(text_box), Bson::Document(summary), Bson::Document(save)], 2),
             "FooterWidgets": mxrs_bson::build_array(Vec::new(), 2),
         };
         let documents = Vec::new();
@@ -3725,6 +3791,8 @@ mod tests {
             "AttributeProperty",
             "React.createElement($FormGroup",
             "React.createElement($ActionButton",
+            "\"type\": \"conditional\"",
+            "\"path\": \"CustomerName\"",
             "saveChanges",
             "Customer",
             "Enter a name",

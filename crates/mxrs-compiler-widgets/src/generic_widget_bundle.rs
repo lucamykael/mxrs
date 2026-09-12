@@ -548,7 +548,7 @@ fn index_documents(document: &Document, index: &mut HashMap<String, Document>) {
     }
 }
 
-fn compile_expression(source: &str) -> Option<String> {
+pub(crate) fn compile_expression(source: &str) -> Option<String> {
     let value = source.trim();
     let expression = if let Some(inner) = function_argument(value, "toString") {
         Expression::Function("toString".to_string(), vec![compile_expression_ast(inner)?])

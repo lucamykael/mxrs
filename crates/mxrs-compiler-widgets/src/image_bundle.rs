@@ -100,6 +100,17 @@ impl<'a> ImageBundleCompiler<'a> {
                 "imageUrl",
                 expression(&self.text_value("imageUrl")),
             );
+        } else if self.primitive("datasource") == Some("icon") {
+            set(
+                &mut properties,
+                "imageUrl",
+                expression(&self.text_value("imageUrl")),
+            );
+            set(
+                &mut properties,
+                "imageIcon",
+                self.icon_property().unwrap_or_default(),
+            );
         } else if let Some(url) = self.dynamic_image_url() {
             set(&mut properties, "imageUrl", url);
         }
@@ -174,6 +185,7 @@ impl<'a> ImageBundleCompiler<'a> {
     fn supported_source(&self) -> bool {
         match self.primitive("datasource") {
             Some("image") => self.image_uri().is_some(),
+            Some("icon") => self.icon_property().is_some(),
             Some("imageUrl") => self.dynamic_image_url().is_some(),
             _ => false,
         }
@@ -255,6 +267,25 @@ impl<'a> ImageBundleCompiler<'a> {
 
     fn image_uri(&self) -> Option<String> {
         let reference = self.value("imageObject")?.get_str("Image").ok()?;
+        self.image_uri_for(reference)
+    }
+
+    fn icon_property(&self) -> Option<String> {
+        let icon = self.value("imageIcon")?.get_document("Icon").ok()?;
+        if icon.get_str("$Type").ok() != Some("Forms$ImageIcon") {
+            return None;
+        }
+        let uri = self.image_uri_for(icon.get_str("Image").ok()?)?;
+        Some(format!(
+            "WebIconProperty({})",
+            js_object(&[(
+                "icon",
+                js_object(&[("type", js_string("image")), ("iconUrl", js_string(&uri)),]),
+            )])
+        ))
+    }
+
+    fn image_uri_for(&self, reference: &str) -> Option<String> {
         let mut parts = reference.splitn(3, '.');
         let module = parts.next()?;
         let collection = parts.next()?;
@@ -505,6 +536,7 @@ mod tests {
         let types = vec![
             property_type("source", "datasource", "Enumeration"),
             property_type("object", "imageObject", "Image"),
+            property_type("icon", "imageIcon", "Icon"),
             property_type("url", "imageUrl", "TextTemplate"),
             property_type("alt", "alternativeText", "TextTemplate"),
             property_type("responsive", "responsive", "Boolean"),
@@ -617,5 +649,39 @@ mod tests {
         let rendered = compiler.render();
         assert!(rendered.contains("Demo.Order_Photo/Demo.Photo/Url"));
         assert!(rendered.contains("ActionProperty({})"));
+    }
+
+    #[test]
+    fn compiles_an_image_backed_icon_source() {
+        let image = Binary {
+            subtype: BinarySubtype::Generic,
+            bytes: b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".to_vec(),
+        };
+        let documents = vec![(
+            "Demo".to_string(),
+            doc! {
+                "$Type": "Images$ImageCollection",
+                "Name": "Icons",
+                "Images": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "Name": "User", "Image": image,
+                })], 2),
+            },
+        )];
+        let widget = widget(vec![
+            property("source", doc! { "PrimitiveValue": "icon" }),
+            property(
+                "icon",
+                doc! { "Icon": { "$Type": "Forms$ImageIcon", "Image": "Demo.Icons.User" } },
+            ),
+            property("url", template("", Vec::new())),
+            property("alt", template("User", Vec::new())),
+        ]);
+        let compiler = ImageBundleCompiler::new(&documents, "Demo.Home", &widget);
+
+        assert!(compiler.supported());
+        let rendered = compiler.render();
+        assert!(rendered.contains("WebIconProperty"));
+        assert!(rendered.contains("img/Demo$Icons$User.svg"));
+        assert!(rendered.contains("\"type\": \"image\""));
     }
 }
