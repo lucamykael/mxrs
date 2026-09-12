@@ -709,6 +709,7 @@ dependencies = [
  "flate2",
  "mxrs-bson",
  "serde_json",
+ "tempfile",
  "thiserror",
  "uuid",
 ]

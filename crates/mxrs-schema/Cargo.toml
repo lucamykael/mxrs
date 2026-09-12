@@ -17,3 +17,6 @@ mxrs-bson = { path = "../mxrs-bson" }
 serde_json.workspace = true
 thiserror.workspace = true
 uuid = { version = "1.26.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
