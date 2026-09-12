@@ -1,6 +1,6 @@
 //! ES-module emitter that integrates specialized and generic widget bundles.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -9,7 +9,7 @@ use mxrs_compiler_support::operation_id;
 
 use crate::{
     ComboBoxBundleCompiler, CompilerError, DataGridBundleCompiler, GalleryBundleCompiler,
-    GenericWidgetBundleCompiler, ImageBundleCompiler,
+    GenericWidgetBundleCompiler, ImageBundleCompiler, LegacyWidgetBundleCompiler,
 };
 
 type NativeRenderer<'a> = dyn Fn(&Document, Option<&str>, &str) -> Option<String> + 'a;
@@ -40,6 +40,8 @@ enum UsedBundle {
     Gallery,
     Image,
     ListView,
+    LocalVariables,
+    Legacy,
     NativeImage,
     NavigationList,
     ReferenceSelector,
@@ -198,6 +200,23 @@ impl ProjectPageBundleCompiler {
             .collect()
     }
 
+    pub fn compile_page(&self, qualified_name: &str) -> Option<Result<PageBundle, CompilerError>> {
+        let (module_name, page_name) = qualified_name.split_once('.')?;
+        let (module, page) = self.documents.iter().find(|(owner, document)| {
+            owner == module_name
+                && document.get_str("$Type").ok() == Some("Forms$Page")
+                && document.get_str("Name").ok() == Some(page_name)
+        })?;
+        let programs = ProjectNanoflowCache::new(&self.flow_index, self.project_path.parent());
+        let render = |name: &str| programs.reference(name);
+        let declarations = || programs.declarations();
+        Some(
+            PageBundleCompiler::new(&self.documents, &self.project_path)
+                .with_nanoflow_programs(&render, &declarations)
+                .compile_page(module, page),
+        )
+    }
+
     pub fn compile_layouts(&self) -> Vec<Result<PageBundle, CompilerError>> {
         let programs = ProjectNanoflowCache::new(&self.flow_index, self.project_path.parent());
         self.documents
@@ -279,7 +298,7 @@ impl<'a> PageBundleCompiler<'a> {
             .unwrap_or_default();
         let mut slots = Vec::new();
         let mut names = BTreeSet::new();
-        for argument in arguments {
+        for (argument_index, argument) in arguments.into_iter().enumerate() {
             let slot = argument.get_str("Parameter").unwrap_or_default();
             if !qualified_name_valid(slot) {
                 return Err(CompilerError::InvalidPageSlot {
@@ -291,7 +310,12 @@ impl<'a> PageBundleCompiler<'a> {
                     name: slot.to_string(),
                 });
             }
-            let rendered = context.render_widgets(&array_docs(&argument, "Widgets"), None, "");
+            let mut rendered = context.render_widgets(&array_docs(&argument, "Widgets"), None, "");
+            if argument_index == 0
+                && let Some(local_variables) = context.render_local_variables(page)
+            {
+                rendered = format!("[{local_variables}, ...{rendered}]");
+            }
             slots.push((
                 slot.to_string(),
                 format!(
@@ -347,6 +371,7 @@ struct RenderContext<'a, 'b> {
     qualified_name: &'b str,
     key_prefix: &'b str,
     state: RefCell<RenderState>,
+    active_document: Cell<Option<usize>>,
 }
 
 impl<'a, 'b> RenderContext<'a, 'b> {
@@ -360,6 +385,7 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             qualified_name,
             key_prefix,
             state: RefCell::new(RenderState::default()),
+            active_document: Cell::new(None),
         }
     }
 
@@ -522,7 +548,14 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                     .or_else(|| widget.get_document("CaptionTemplate").ok());
                 if template.is_some_and(|template| !array_docs(template, "Parameters").is_empty()) {
                     return (type_name == "Forms$DynamicText")
-                        .then(|| self.render_bound_text(widget, template.expect("checked"), scope))
+                        .then(|| {
+                            self.render_bound_text(
+                                widget,
+                                template.expect("checked"),
+                                scope,
+                                entity,
+                            )
+                        })
                         .flatten();
                 }
                 let tag = text_mode(widget.get_str("RenderMode").unwrap_or(
@@ -676,8 +709,8 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         widget: &Document,
         template: &Document,
         scope: Option<&str>,
+        entity: &str,
     ) -> Option<String> {
-        let scope = scope?;
         let values = array_docs(template, "Parameters")
             .into_iter()
             .enumerate()
@@ -690,6 +723,7 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                     && qualified_name_valid(entity)
                     && identifier(attribute)
                 {
+                    let scope = scope?;
                     let path = reference
                         .get_document("EntityRef")
                         .ok()
@@ -700,12 +734,11 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                         bound_text_attribute_property(scope, entity, attribute, &path),
                     ));
                 }
-                let expression = crate::generic_widget_bundle::compile_expression(
-                    parameter.get_str("Expression").ok()?,
-                )?;
+                let expression =
+                    self.compile_client_expression(parameter.get_str("Expression").ok()?, entity)?;
                 Some((
                     format!("value{}", index + 1),
-                    client_expression_property(&expression, Some(scope)),
+                    client_expression_property(&expression, scope),
                 ))
             })
             .collect::<Option<Vec<_>>>()?;
@@ -727,6 +760,55 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         Some(format!(
             "React.createElement($MxrbFormattedText, {})",
             js_object_owned(&props)
+        ))
+    }
+
+    fn render_local_variables(&self, page: &Document) -> Option<String> {
+        let variables = array_docs(page, "Variables")
+            .into_iter()
+            .filter_map(|variable| {
+                let name = variable
+                    .get_str("Name")
+                    .ok()
+                    .filter(|name| identifier(name))?;
+                let expression = crate::generic_widget_bundle::compile_expression(
+                    variable.get_str("DefaultValue").unwrap_or_default(),
+                )?;
+                Some(js_object(&[
+                    (
+                        "localVariableId",
+                        js_string(&format!(
+                            "{}.{}.{}",
+                            self.key_prefix, self.qualified_name, name
+                        )),
+                    ),
+                    (
+                        "defaultValue",
+                        client_expression_property(&expression, None),
+                    ),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        if variables.is_empty() {
+            return None;
+        }
+        self.state
+            .borrow_mut()
+            .used
+            .insert(UsedBundle::LocalVariables);
+        Some(format!(
+            "React.createElement($RegisterLocalVariables, {})",
+            js_object(&[
+                (
+                    "key",
+                    js_string(&format!(
+                        "{}.{}.$localVariables",
+                        self.key_prefix, self.qualified_name
+                    )),
+                ),
+                ("localVariables", format!("[{}]", variables.join(", "))),
+                ("useStorePath", "false".to_string()),
+            ])
         ))
     }
 
@@ -1493,11 +1575,16 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         if !qualified_name_valid(source_entity) {
             return None;
         }
-        let reference = widget.get_document("AttributeRef").ok()?;
-        let steps = reference
-            .get_document("EntityRef")
-            .ok()
-            .map(|reference| array_docs(reference, "Steps"))?;
+        let attribute_reference = widget.get_document("AttributeRef").ok();
+        let entity_reference = attribute_reference
+            .and_then(|reference| reference.get_document("EntityRef").ok())
+            .or_else(|| {
+                reference_set
+                    .then(|| widget.get_document("DataSource").ok())
+                    .flatten()
+                    .and_then(|source| source.get_document("EntityRef").ok())
+            })?;
+        let steps = array_docs(entity_reference, "Steps");
         let association = steps.last()?;
         let association_name = association
             .get_str("Association")
@@ -1507,7 +1594,20 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             .get_str("DestinationEntity")
             .ok()
             .filter(|name| qualified_name_valid(name))?;
-        let caption = reference.get_str("Attribute").ok()?;
+        let caption = attribute_reference
+            .and_then(|reference| reference.get_str("Attribute").ok())
+            .map(str::to_string)
+            .or_else(|| {
+                array_docs(widget, "Columns")
+                    .into_iter()
+                    .find_map(|column| {
+                        column
+                            .get_document("AttributeRef")
+                            .ok()
+                            .and_then(|reference| reference.get_str("Attribute").ok())
+                            .map(str::to_string)
+                    })
+            })?;
         let (caption_entity, caption_attribute) = caption.rsplit_once('.')?;
         if !qualified_name_valid(caption_entity) || !identifier(caption_attribute) {
             return None;
@@ -1634,6 +1734,15 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         scope: Option<&str>,
         entity: &str,
     ) -> Option<String> {
+        if widget.get_document("AttributeRef").is_err()
+            && let Some(local) = widget
+                .get_document("SourceVariable")
+                .ok()
+                .and_then(|source| source.get_str("LocalVariable").ok())
+                .filter(|name| identifier(name))
+        {
+            return Some(self.render_local_variable_text_area(widget, local, entity));
+        }
         let (attribute_entity, attribute) = bound_attribute(widget, scope)?;
         let key = self.widget_key(widget);
         let max_length = widget.get_i32("MaxLengthCode").unwrap_or_default();
@@ -1705,6 +1814,71 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             ],
         );
         Some(self.render_form_group(widget, &key, &input, "mx-textarea", entity))
+    }
+
+    fn render_local_variable_text_area(
+        &self,
+        widget: &Document,
+        local: &str,
+        entity: &str,
+    ) -> String {
+        let key = self.widget_key(widget);
+        let scope = format!("{}.{}.{}", self.key_prefix, self.qualified_name, local);
+        let input = format!(
+            "React.createElement($TextArea, {})",
+            js_object(&[
+                ("key", js_string(&key)),
+                ("$widgetId", js_string(&key)),
+                ("id", js_string(&key)),
+                (
+                    "inputValue",
+                    format!(
+                        "PrimitiveVariableProperty({})",
+                        js_object(&[
+                            ("scope", js_string(&scope)),
+                            ("type", js_string("String")),
+                            ("onChange", simple_client_action("doNothing", "false")),
+                            ("validation", "null".to_string()),
+                        ])
+                    ),
+                ),
+                (
+                    "numberOfLines",
+                    positive_i32(widget.get_i32("NumberOfLines").unwrap_or_default(), 5)
+                        .to_string(),
+                ),
+                (
+                    "autoGrow",
+                    widget.get_bool("AutoGrow").unwrap_or(false).to_string()
+                ),
+                (
+                    "placeholder",
+                    text_property(widget.get_document("PlaceholderTemplate").ok())
+                ),
+                ("readOnlyStyle", js_string(&read_only_style(widget))),
+                (
+                    "submitWhileEditing",
+                    matches!(
+                        widget.get_str("SubmitBehaviour").ok(),
+                        Some("WhileEditing" | "OnTyping")
+                    )
+                    .to_string(),
+                ),
+                (
+                    "submitDelay",
+                    widget
+                        .get_i32("SubmitOnInputDelay")
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            ])
+        );
+        let mut state = self.state.borrow_mut();
+        state.used.insert(UsedBundle::FormInput);
+        state.used.insert(UsedBundle::LocalVariables);
+        state.form_widgets.insert("TextArea".to_string());
+        drop(state);
+        self.render_form_group(widget, &key, &input, "mx-textarea", entity)
     }
 
     fn render_date_picker(
@@ -2271,8 +2445,10 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         let reference = self
             .compiler
             .nanoflow_renderer
-            .and_then(|renderer| renderer(name))?;
-        let arg_map = self.explicit_argument_map(source, current_scope)?;
+            .and_then(|renderer| renderer(name));
+        let reference = reference?;
+        let arg_map = self.explicit_argument_map(source, current_scope);
+        let arg_map = arg_map?;
         Some(format!(
             "NanoflowObjectProperty({})",
             js_object(&[
@@ -2348,10 +2524,13 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                 let scope = if expression == "$currentObject" {
                     current_scope.map(str::to_string)
                 } else if expression.is_empty() {
-                    source_variable_scope(
-                        mapping.get_document("Variable").ok(),
-                        self.current_document(),
-                    )
+                    let variable = mapping.get_document("Variable").ok();
+                    source_variable_scope(variable, self.current_document()).or_else(|| {
+                        variable
+                            .and_then(|variable| variable.get_str("SnippetParameter").ok())
+                            .filter(|name| identifier(name))
+                            .and_then(|_| current_scope.map(str::to_string))
+                    })
                 } else if expression.starts_with('$') {
                     Some(expression.to_string())
                 } else {
@@ -2436,6 +2615,13 @@ impl<'a, 'b> RenderContext<'a, 'b> {
     }
 
     fn current_document(&self) -> Option<&Document> {
+        if let Some(index) = self.active_document.get() {
+            return self
+                .compiler
+                .documents
+                .get(index)
+                .map(|(_, document)| document);
+        }
         let (module, name) = self.qualified_name.rsplit_once('.')?;
         self.compiler
             .documents
@@ -2461,8 +2647,16 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                     .and_then(|source| source.get_document("SourceVariable").ok())
             })
             .or_else(|| custom_widget_source_variable(widget));
-        let explicit_scope =
-            source_variable_scope(variable, self.current_document()).or_else(|| {
+        let expression_parameter = widget_expression_variable(widget)
+            .filter(|name| name != "currentObject")
+            .filter(|name| identifier(name));
+        let explicit_scope = source_variable_scope(variable, self.current_document())
+            .or_else(|| {
+                expression_parameter
+                    .as_deref()
+                    .map(|name| format!("${name}"))
+            })
+            .or_else(|| {
                 variable
                     .and_then(|variable| variable.get_str("Widget").ok())
                     .filter(|name| identifier(name))
@@ -2470,12 +2664,46 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             });
         let parameter = variable
             .and_then(|variable| variable.get_str("PageParameter").ok())
-            .filter(|name| identifier(name));
+            .filter(|name| identifier(name))
+            .or(expression_parameter.as_deref());
         let explicit_entity = parameter.and_then(|name| self.page_parameter_entity(name));
         (
             explicit_scope.or_else(|| inherited_scope.map(str::to_string)),
             explicit_entity.unwrap_or_else(|| inherited_entity.to_string()),
         )
+    }
+
+    fn compile_client_expression(&self, source: &str, entity: &str) -> Option<String> {
+        let value = source.trim();
+        if let Some(argument) = value
+            .strip_prefix("getCaption(")
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            let argument = argument.trim();
+            let path = argument.strip_prefix('$')?.split_once('/')?.1;
+            let attribute = path.rsplit('/').next()?;
+            let enumeration = enumeration_name(self.compiler.documents, entity, attribute)?;
+            return Some(js_object(&[
+                ("type", js_string("function")),
+                ("name", js_string("getCaption")),
+                (
+                    "parameters",
+                    format!(
+                        "[{}, {}]",
+                        js_object(&[
+                            ("type", js_string("variable")),
+                            ("variable", js_string("currentObject")),
+                            ("path", js_string(path)),
+                        ]),
+                        js_object(&[
+                            ("type", js_string("literal")),
+                            ("value", js_string(&enumeration)),
+                        ]),
+                    ),
+                ),
+            ]));
+        }
+        crate::generic_widget_bundle::compile_expression(value)
     }
 
     fn page_parameter_entity(&self, name: &str) -> Option<String> {
@@ -2617,20 +2845,40 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                     .and_then(|settings| settings.get_str("Snippet").ok())
             })?;
         let (module, name) = reference.split_once('.')?;
-        let snippet = self
-            .compiler
-            .documents
-            .iter()
-            .find_map(|(owner, document)| {
-                (owner == module
-                    && document.get_str("$Type").ok() == Some("Forms$Snippet")
-                    && document.get_str("Name").ok() == Some(name))
-                .then_some(document)
+        let exact =
+            self.compiler
+                .documents
+                .iter()
+                .enumerate()
+                .find_map(|(index, (owner, document))| {
+                    (owner == module
+                        && document.get_str("$Type").ok() == Some("Forms$Snippet")
+                        && document.get_str("Name").ok() == Some(name))
+                    .then_some((index, document))
+                });
+        let (snippet_index, snippet) =
+            exact.or_else(|| {
+                // Some imported projects retain a stale owning module in FormCall
+                // after a snippet is moved. Mendix can still identify that target by
+                // its document id; the decoded model currently exposes only its
+                // name. Recover only when the unqualified name is globally unique.
+                let mut candidates = self.compiler.documents.iter().enumerate().filter_map(
+                    |(index, (_, document))| {
+                        (document.get_str("$Type").ok() == Some("Forms$Snippet")
+                            && document.get_str("Name").ok() == Some(name))
+                        .then_some((index, document))
+                    },
+                );
+                let candidate = candidates.next()?;
+                candidates.next().is_none().then_some(candidate)
             })?;
+        let previous_document = self.active_document.replace(Some(snippet_index));
+        let children = self.render_widgets(&array_docs(snippet, "Widgets"), scope, entity);
+        self.active_document.set(previous_document);
         Some(format!(
             "React.createElement(React.Fragment, {{ key: {} }}, {})",
             js_string(&self.widget_key(widget)),
-            self.render_widgets(&array_docs(snippet, "Widgets"), scope, entity),
+            children,
         ))
     }
 
@@ -2752,6 +3000,45 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             drop(state);
             return generic.render();
         }
+        let legacy = LegacyWidgetBundleCompiler::new(
+            self.compiler.documents,
+            self.compiler.project_path,
+            widget,
+        );
+        if legacy.supported() {
+            self.state.borrow_mut().used.insert(UsedBundle::Legacy);
+            let key = self.widget_key(widget);
+            let context = scope
+                .map(|scope| {
+                    client_expression_property(
+                        &js_object(&[
+                            ("type", js_string("variable")),
+                            ("variable", js_string("currentObject")),
+                        ]),
+                        Some(scope),
+                    )
+                })
+                .unwrap_or_else(|| "null".to_string());
+            return format!(
+                "React.createElement($MxrsLegacyWidget, {})",
+                js_object(&[
+                    ("key", js_string(&key)),
+                    ("id", js_string(&key)),
+                    ("widgetType", js_string(legacy.widget_id())),
+                    (
+                        "widgetProps",
+                        serde_json::to_string(&legacy.properties().unwrap_or_default())
+                            .expect("legacy widget properties serialize"),
+                    ),
+                    ("context", context),
+                    ("className", js_string(&css_class(widget))),
+                    (
+                        "tabIndex",
+                        widget.get_i32("TabIndex").unwrap_or_default().to_string(),
+                    ),
+                ])
+            );
+        }
         self.unsupported_custom(widget)
     }
 
@@ -2866,6 +3153,22 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                 "import { Image as NativeImage } from \"mendix/widgets/web/Image\";".to_string(),
             );
             widgets.insert("NativeImage".to_string());
+        }
+        if state.used.contains(&UsedBundle::LocalVariables) {
+            add_property_imports(&mut imports, &["PrimitiveVariableProperty"]);
+            imports.insert(
+                "import { RegisterLocalVariables } from \"mendix/widgets/web/RegisterLocalVariables\";"
+                    .to_string(),
+            );
+            widgets.insert("RegisterLocalVariables".to_string());
+        }
+        if state.used.contains(&UsedBundle::Legacy) {
+            add_property_imports(&mut imports, &["ExpressionProperty"]);
+            imports.insert(
+                "const MxrsLegacyWidget = ({ widgetType, widgetProps, context, id, className, tabIndex }) => { const node = React.useRef(null); const instance = React.useRef(null); React.useEffect(() => { let disposed = false; const loader = globalThis.require; if (typeof loader !== \"function\") return undefined; loader([widgetType.replace(/\\./g, \"/\")], WidgetModule => { if (disposed || !node.current) return; const Widget = WidgetModule?.default || WidgetModule; const mxform = globalThis.mx?.ui?.getContentForm?.(); instance.current = new Widget({ ...widgetProps, id, mxform }, node.current); instance.current.startup?.(); instance.current.update?.(context?.value ?? null, () => {}); }); return () => { disposed = true; const widget = instance.current; instance.current = null; widget?.uninitialize?.(); if (widget?.destroyRecursive) widget.destroyRecursive(); else widget?.destroy?.(); }; }, [widgetType, id]); React.useEffect(() => { instance.current?.update?.(context?.value ?? null, () => {}); }, [context?.value]); return React.createElement(\"div\", { ref: node, \"data-mendix-id\": id, className, tabIndex }); };".to_string(),
+            );
+            imports.insert("MxrsLegacyWidget.displayName = \"MxrsLegacyWidget\";".to_string());
+            widgets.insert("MxrsLegacyWidget".to_string());
         }
         if state.used.contains(&UsedBundle::ReferenceSelector)
             || state.used.contains(&UsedBundle::ReferenceSetSelector)
@@ -3403,6 +3706,49 @@ fn custom_widget_source_variable(widget: &Document) -> Option<&Document> {
         })
 }
 
+fn widget_expression_variable(widget: &Document) -> Option<String> {
+    let template = widget
+        .get_document("Content")
+        .ok()
+        .or_else(|| widget.get_document("CaptionTemplate").ok())?;
+    array_docs(template, "Parameters")
+        .into_iter()
+        .find_map(|parameter| {
+            let expression = parameter.get_str("Expression").ok()?;
+            let start = expression.find('$')? + 1;
+            let name = expression[start..]
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                .collect::<String>();
+            identifier(&name).then_some(name)
+        })
+}
+
+fn enumeration_name(
+    documents: &[(String, Document)],
+    entity: &str,
+    attribute: &str,
+) -> Option<String> {
+    let (module, entity_name) = entity.split_once('.')?;
+    documents.iter().find_map(|(owner, document)| {
+        (owner == module && document.get_str("$Type").ok() == Some("DomainModels$DomainModel"))
+            .then(|| {
+                array_docs(document, "Entities")
+                    .into_iter()
+                    .find(|candidate| candidate.get_str("Name").ok() == Some(entity_name))
+                    .and_then(|entity| {
+                        array_docs(&entity, "Attributes")
+                            .into_iter()
+                            .find(|candidate| candidate.get_str("Name").ok() == Some(attribute))
+                    })
+                    .and_then(|attribute| attribute.get_document("NewType").ok().cloned())
+                    .and_then(|type_| type_.get_str("Enumeration").ok().map(str::to_string))
+                    .filter(|name| !name.is_empty())
+            })
+            .flatten()
+    })
+}
+
 fn entity_ref_destination(reference: &Document) -> Option<String> {
     array_docs(reference, "Steps")
         .last()
@@ -3904,5 +4250,46 @@ mod tests {
         assert!(bundle.unsupported_widgets.is_empty());
         assert!(bundle.source.contains("\"scope\": \"$Order\""));
         assert!(bundle.source.contains("Demo.Order_Lines/Demo.Line"));
+    }
+
+    #[test]
+    fn resolves_a_stale_snippet_module_only_when_the_name_is_unique() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("App.mpr");
+        let snippet = doc! {
+            "$Type": "Forms$Snippet",
+            "Name": "Entity_Menu",
+            "Widgets": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                "$Type": "Forms$DynamicText",
+                "Name": "menuCaption",
+                "Content": {
+                    "Template": { "Items": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "LanguageCode": "en_US", "Text": "Menu",
+                    })], 3) },
+                    "Parameters": mxrs_bson::build_array(Vec::new(), 2),
+                },
+            })], 2),
+        };
+        let call = doc! {
+            "$Type": "Forms$SnippetCall",
+            "Name": "entityMenu",
+            "FormCall": { "Form": "OldModule.Entity_Menu" },
+        };
+        let documents = vec![("ActualModule".to_string(), snippet.clone())];
+        let bundle = PageBundleCompiler::new(&documents, &project)
+            .compile_page("Demo", &page(vec![call.clone()]))
+            .unwrap();
+
+        assert!(bundle.unsupported_widgets.is_empty());
+        assert!(bundle.source.contains("Menu"));
+
+        let ambiguous = vec![
+            ("First".to_string(), snippet.clone()),
+            ("Second".to_string(), snippet),
+        ];
+        let bundle = PageBundleCompiler::new(&ambiguous, &project)
+            .compile_page("Demo", &page(vec![call]))
+            .unwrap();
+        assert_eq!(bundle.unsupported_widgets, vec!["Forms$SnippetCall"]);
     }
 }

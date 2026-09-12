@@ -94,10 +94,7 @@ impl<'a> ComboBoxBundleCompiler<'a> {
 
     fn supported_source(&self) -> bool {
         if self.primitive("source") == Some("database") {
-            return self.target_attribute().is_some()
-                && self.database_caption_attribute().is_some()
-                && self.database_value_attribute().is_some()
-                && self.list_source_supported();
+            return self.database_caption_attribute().is_some() && self.list_source_supported();
         }
         if self.primitive("optionsSourceType") == Some("enumeration") {
             return self.primitive("source") == Some("context")
@@ -129,8 +126,12 @@ impl<'a> ComboBoxBundleCompiler<'a> {
     }
 
     fn database_properties(&self) -> Vec<(String, String)> {
-        let target = self.target_attribute().unwrap_or_default();
-        if !entity_steps(&target).is_empty() {
+        let target = self.target_attribute();
+        if target
+            .as_ref()
+            .is_some_and(|target| !entity_steps(target).is_empty())
+        {
+            let target = target.unwrap_or_default();
             return vec![
                 ("source".to_string(), js_string("context")),
                 (
@@ -149,18 +150,10 @@ impl<'a> ComboBoxBundleCompiler<'a> {
                 ),
             ];
         }
-        vec![
-            (
-                "databaseAttributeString".to_string(),
-                self.attribute_property(target),
-            ),
+        let mut properties = vec![
             (
                 "optionsSourceDatabaseCaptionAttribute".to_string(),
                 self.list_attribute_property(self.database_caption_attribute().unwrap_or_default()),
-            ),
-            (
-                "optionsSourceDatabaseValueAttribute".to_string(),
-                self.list_attribute_property(self.database_value_attribute().unwrap_or_default()),
             ),
             (
                 "optionsSourceDatabaseDataSource".to_string(),
@@ -170,7 +163,20 @@ impl<'a> ComboBoxBundleCompiler<'a> {
                 "optionsSourceDatabaseItemSelection".to_string(),
                 self.selection_property(),
             ),
-        ]
+        ];
+        if let Some(target) = target {
+            properties.push((
+                "databaseAttributeString".to_string(),
+                self.attribute_property(target),
+            ));
+        }
+        if let Some(value) = self.database_value_attribute() {
+            properties.push((
+                "optionsSourceDatabaseValueAttribute".to_string(),
+                self.list_attribute_property(value),
+            ));
+        }
+        properties
     }
 
     fn association_properties(&self) -> Vec<(String, String)> {

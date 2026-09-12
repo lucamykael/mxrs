@@ -12,21 +12,10 @@
 //!   equivalent), not real unescaping — an embedded escaped quote inside a
 //!   Mendix string literal won't round-trip correctly. Not something this
 //!   pass can safely improve without diverging from `mxrb`'s own output.
-//! - `binary_expression`'s left operand match is lazy (`(.+?)`), so it
-//!   splits at the *first* operator keyword encountered scanning
-//!   left-to-right, not by any real operator-precedence grammar. Recursion
-//!   into the matched right-hand remainder often produces a reasonable
-//!   tree anyway (the lazy match means the left capture itself can never
-//!   contain an *earlier* operator — if one existed, it would have split
-//!   there instead), but not always: a comparison operator can still win
-//!   the top-level split ahead of a lower-precedence `and`/`or` that
-//!   appears later in the string, e.g. `$a = $b and $c = $d` parses as
-//!   `=($a, and($b, =($c, $d)))` instead of the presumably-intended
-//!   `and(=($a,$b), =($c,$d))`. [`ExpressionDiagnostic::AmbiguousBinaryLeftOperand`]
-//!   is a best-effort (not exhaustive) detector for exactly that shape —
-//!   a non-`and`/`or` operator chosen while the remainder still contains
-//!   one. The parse tree itself is left exactly as `mxrb` would produce
-//!   it either way.
+//! - Binary expressions are split only at the top parenthesis/quote level
+//!   and respect Mendix's `or`, `and`, comparison, then arithmetic
+//!   precedence. This intentionally fixes the old mxrb regex ambiguity and
+//!   permits nested arithmetic used by real page templates.
 //! - The final fallback treats any string none of the other nine rules
 //!   recognized as an opaque string literal, silently, with no error.
 //!   [`LiteralValue::Opaque`] distinguishes this from a *real* quoted
@@ -81,10 +70,8 @@ pub struct ExpressionDiagnostic {
 static CONDITIONAL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\Aif\s+(.+?)\s+then\s+(.+?)\s+else\s+(.+)\z").unwrap());
 static FUNCTION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)\A(not|isNew|isSynced|toString|trim|length)\((.*)\)\z").unwrap()
+    Regex::new(r"(?is)\A(not|isNew|isSynced|toString|trim|length|getCaption)\((.*)\)\z").unwrap()
 });
-static BINARY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)\A(.+?)\s+(and|or|!=|=|>=|<=|>|<|\+)\s+(.+)\z").unwrap());
 static VARIABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\A\$[A-Za-z_]\w*(?:/[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)*\z").unwrap()
 });
@@ -93,12 +80,14 @@ static ENUM_VALUE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\A[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}\z").unwrap());
 static TOKEN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\A\[%([A-Za-z_]\w*)%\]\z").unwrap());
-static WORD_AND_OR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(and|or)\b").unwrap());
 
 pub fn parse_expression(raw: &str) -> (Expression, Vec<ExpressionDiagnostic>) {
     let source = raw.trim();
     if source.is_empty() || source == "empty" {
         return (Expression::Literal(LiteralValue::Null), vec![]);
+    }
+    if let Some(inner) = outer_parenthesized(source) {
+        return parse_expression(inner);
     }
     if let Some(caps) = CONDITIONAL_RE.captures(source) {
         let (condition, mut diagnostics) = parse_expression(&caps[1]);
@@ -116,29 +105,10 @@ pub fn parse_expression(raw: &str) -> (Expression, Vec<ExpressionDiagnostic>) {
         let (inner, diagnostics) = parse_expression(&caps[2]);
         return (Expression::Function(name, vec![inner]), diagnostics);
     }
-    if let Some(caps) = BINARY_RE.captures(source) {
-        let left_source = caps[1].to_string();
-        let right_source = caps[3].to_string();
-        let operator = caps[2].to_lowercase();
-        let (left, mut diagnostics) = parse_expression(&left_source);
-        let (right, right_diagnostics) = parse_expression(&right_source);
+    if let Some((left_source, operator, right_source)) = top_level_binary(source) {
+        let (left, mut diagnostics) = parse_expression(left_source);
+        let (right, right_diagnostics) = parse_expression(right_source);
         diagnostics.extend(right_diagnostics);
-        // The lazy left match always stops at the *first* operator keyword
-        // found scanning left-to-right, so `left_source` itself can never
-        // contain an earlier one — the real ambiguity is the other
-        // direction: a comparison operator (=, !=, <, ...) gets picked as
-        // the top-level split *before* a lower-precedence `and`/`or` that
-        // appears later in the string, e.g. `$a = $b and $c = $d` splits
-        // as `=($a, and($b, =($c, $d)))` instead of the presumably-intended
-        // `and(=($a,$b), =($c,$d))`. Flagged when that specific shape
-        // occurs; the parse tree itself is left exactly as `mxrb` would
-        // produce it.
-        if !matches!(operator.as_str(), "and" | "or") && WORD_AND_OR_RE.is_match(&right_source) {
-            diagnostics.push(ExpressionDiagnostic {
-                kind: ExpressionDiagnosticKind::AmbiguousBinaryLeftOperand,
-                source: source.to_string(),
-            });
-        }
         let name = operator;
         return (Expression::Function(name, vec![left, right]), diagnostics);
     }
@@ -192,6 +162,126 @@ pub fn parse_expression(raw: &str) -> (Expression, Vec<ExpressionDiagnostic>) {
     )
 }
 
+fn outer_parenthesized(source: &str) -> Option<&str> {
+    if !source.starts_with('(') || !source.ends_with(')') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in source.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            }
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 && index + character.len_utf8() != source.len() {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    (depth == 0 && quote.is_none()).then(|| source[1..source.len() - 1].trim())
+}
+
+fn top_level_binary(source: &str) -> Option<(&str, String, &str)> {
+    const PRECEDENCE: &[&[&str]] = &[
+        &["or"],
+        &["and"],
+        &["!=", ">=", "<=", "=", ">", "<"],
+        &["+", "-"],
+    ];
+    let mut candidates = Vec::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in source.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            }
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => candidates.push(index),
+            _ => {}
+        }
+    }
+    for operators in PRECEDENCE {
+        for index in candidates.iter().rev().copied() {
+            for operator in *operators {
+                let Some(rest) = source.get(index..) else {
+                    continue;
+                };
+                if !rest.starts_with(operator) || !operator_boundary(source, index, operator) {
+                    continue;
+                }
+                let left = source[..index].trim();
+                let right = source[index + operator.len()..].trim();
+                if !left.is_empty() && !right.is_empty() {
+                    return Some((left, operator.to_lowercase(), right));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn operator_boundary(source: &str, index: usize, operator: &str) -> bool {
+    if operator == "="
+        && source[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|value| matches!(value, '!' | '>' | '<'))
+    {
+        return false;
+    }
+    if matches!(operator, ">" | "<") && source[index + operator.len()..].starts_with('=') {
+        return false;
+    }
+    if !matches!(operator, "and" | "or") {
+        return true;
+    }
+    let before = source[..index].chars().next_back();
+    let after = source[index + operator.len()..].chars().next();
+    before.is_none_or(|value| !value.is_alphanumeric() && value != '_')
+        && after.is_none_or(|value| !value.is_alphanumeric() && value != '_')
+}
+
 fn is_quoted(value: &str) -> bool {
     (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
         || (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
@@ -235,7 +325,15 @@ mod tests {
 
     #[test]
     fn parses_supported_unary_functions() {
-        for name in ["not", "isNew", "isSynced", "toString", "trim", "length"] {
+        for name in [
+            "not",
+            "isNew",
+            "isSynced",
+            "toString",
+            "trim",
+            "length",
+            "getCaption",
+        ] {
             let (expr, _) = parse_expression(&format!("{name}($a)"));
             assert_eq!(
                 expr,
@@ -248,6 +346,42 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn parses_parenthesized_arithmetic_at_top_level() {
+        let (expression, diagnostics) = parse_expression(
+            "toString($currentObject/TestCount - ($currentObject/TestPassedCount + $currentObject/TestFailedCount))",
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            expression,
+            Expression::Function(
+                "toString".to_string(),
+                vec![Expression::Function(
+                    "-".to_string(),
+                    vec![
+                        Expression::Variable {
+                            name: "currentObject".to_string(),
+                            path: Some("TestCount".to_string()),
+                        },
+                        Expression::Function(
+                            "+".to_string(),
+                            vec![
+                                Expression::Variable {
+                                    name: "currentObject".to_string(),
+                                    path: Some("TestPassedCount".to_string()),
+                                },
+                                Expression::Variable {
+                                    name: "currentObject".to_string(),
+                                    path: Some("TestFailedCount".to_string()),
+                                },
+                            ],
+                        ),
+                    ],
+                )],
+            )
+        );
     }
 
     #[test]
@@ -273,43 +407,34 @@ mod tests {
     }
 
     #[test]
-    fn flags_a_comparison_that_wins_the_split_ahead_of_a_later_and_or() {
-        // First operator found scanning left-to-right is "=" (before
-        // "and" ever appears), so it wins the top-level split even though
-        // a human reading this almost certainly intends
-        // `($a = $b) and $c`, not `$a = ($b and $c)`.
+    fn logical_and_has_lower_precedence_than_comparison() {
         let (expr, diagnostics) = parse_expression("$a = $b and $c");
         assert_eq!(
             expr,
             Expression::Function(
-                "=".to_string(),
+                "and".to_string(),
                 vec![
-                    Expression::Variable {
-                        name: "a".to_string(),
-                        path: None
-                    },
                     Expression::Function(
-                        "and".to_string(),
+                        "=".to_string(),
                         vec![
+                            Expression::Variable {
+                                name: "a".to_string(),
+                                path: None
+                            },
                             Expression::Variable {
                                 name: "b".to_string(),
                                 path: None
                             },
-                            Expression::Variable {
-                                name: "c".to_string(),
-                                path: None
-                            },
                         ],
                     ),
+                    Expression::Variable {
+                        name: "c".to_string(),
+                        path: None
+                    },
                 ],
-            ),
-            "reproduces mxrb's actual (mis-)parse verbatim"
+            )
         );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.kind == ExpressionDiagnosticKind::AmbiguousBinaryLeftOperand)
-        );
+        assert!(diagnostics.is_empty());
     }
 
     #[test]
