@@ -9,10 +9,9 @@
 //!     --test instance_oracle -- --ignored --nocapture
 //! ```
 //!
-//! Unlike `schema_oracle.rs`, this one does **not** assert zero decode
-//! errors: a pluggable value can contain a native Forms element whose own
-//! type is not implemented yet. Every successfully decoded widget is also
-//! encoded and decoded again, and the test asserts semantic equality.
+//! A pluggable value can contain a native Forms element, so this gate also
+//! exercises the real `mxrs-forms` integration. Every instance must decode,
+//! encode, and decode again with semantic equality.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -130,10 +129,23 @@ fn run_against(path: &str, label: &str) {
         println!("[{label}]   embedded failure ({count}x): {detail}");
     }
     assert!(
+        blocked_by_kind.is_empty(),
+        "[{label}] pluggable value kinds still need Forms integration: {blocked_by_kind:#?}"
+    );
+    assert!(
+        embedded_failure_details.is_empty(),
+        "[{label}] embedded Forms values failed decoding: {embedded_failure_details:#?}"
+    );
+    assert!(
         unexpected_errors.is_empty(),
         "[{label}] {} unexpected (non-NeedsFormsIntegration) error(s):\n{}",
         unexpected_errors.len(),
         unexpected_errors.join("\n")
+    );
+    assert_eq!(
+        full_success,
+        instances.len(),
+        "[{label}] not every pluggable widget completed its semantic round-trip"
     );
 }
 

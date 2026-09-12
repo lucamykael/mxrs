@@ -139,6 +139,26 @@ fn run_against(path: &str, label: &str, model_package: Option<&str>) {
     for (kind, count) in &unsupported_counts {
         println!("  {count:>4}x unsupported {kind}");
     }
+    assert!(flow_total > 0, "[{label}] found no flow documents");
+    assert!(
+        flow_err.is_empty(),
+        "[{label}] {} flow(s) failed compilation: {flow_err:#?}",
+        flow_total - flow_ok
+    );
+    assert!(
+        code_action_err.is_empty(),
+        "[{label}] {} code action(s) failed compilation: {code_action_err:#?}",
+        code_action_total - code_action_ok
+    );
+    assert_eq!(
+        nano_ok,
+        names.len(),
+        "[{label}] not every nanoflow produced a JS program"
+    );
+    assert!(
+        unsupported_counts.is_empty(),
+        "[{label}] unsupported nanoflow nodes remain: {unsupported_counts:#?}"
+    );
 }
 
 #[test]

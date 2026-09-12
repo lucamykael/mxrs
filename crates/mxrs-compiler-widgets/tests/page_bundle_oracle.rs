@@ -71,4 +71,12 @@ fn audits_page_bundle_coverage_against_a_real_project() {
     println!("unsupported custom widget ids: {custom:#?}");
     println!("unsupported custom widget pages: {custom_pages:#?}");
     assert!(pages > 0);
+    assert!(
+        native.is_empty(),
+        "unsupported native widget kinds remain: {native_pages:#?}"
+    );
+    assert!(
+        custom.is_empty(),
+        "unsupported custom widget ids remain: {custom_pages:#?}"
+    );
 }
