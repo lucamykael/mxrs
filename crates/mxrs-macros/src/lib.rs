@@ -29,6 +29,7 @@
 //! `#[derive(MxEntity)]` (M8.3) is a second, independent front end onto the
 //! same `mxrs-dsl` surface — see `derive`'s doc comment.
 
+mod application;
 mod derive;
 mod expand;
 mod parse;
@@ -37,6 +38,21 @@ use proc_macro::TokenStream;
 use syn::parse_macro_input;
 
 use crate::parse::ProjectInput;
+
+/// Declares the root of a Cargo-native Mendix application.
+///
+/// The default `project` function is `crate::domain::build`; applications
+/// with a different composition root can pass
+/// `project = crate::application_model` explicitly.
+#[proc_macro_attribute]
+pub fn application(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attributes as application::ApplicationArgs);
+    let item = parse_macro_input!(item as syn::ItemStruct);
+    match application::expand(&args, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
 
 #[proc_macro]
 pub fn project(input: TokenStream) -> TokenStream {

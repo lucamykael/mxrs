@@ -204,7 +204,10 @@ fn import_cargo_project_inner(
     )?;
     write_text(
         &destination.join("src/lib.rs"),
-        "// Compatibility aliases used by generated macro expansions.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod domain;\npub mod generated;\n\npub use domain::build;\n",
+        &format!(
+            "// Compatibility aliases used by generated macro expansions.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod domain;\npub mod generated;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
+            rust_string(&manifest.mendix_version),
+        ),
     )?;
     write_text(&destination.join("src/domain/mod.rs"), &model_source)?;
     write_text(
@@ -224,7 +227,7 @@ fn import_cargo_project_inner(
     )?;
     write_text(
         &destination.join("src/generated/imported.rs"),
-        "//! Opaque model coverage retained until it gains a typed Rust representation.\n\npub const MANIFEST: &str = include_str!(\"../../model/imported/manifest.json\");\n",
+        &render_imported_registry(&manifest),
     )?;
     write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
     write_text(
@@ -258,14 +261,14 @@ fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>) -> String {
 fn build_binary_source(crate_name: &str, project_name: &str) -> String {
     let default_output = format!("build/{project_name}.mpr");
     format!(
-        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let snapshot = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"model/imported\");\n    mxrs::rebuild_imported_project(snapshot, &output, &{crate_name}::build())?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n",
+        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let snapshot = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"model/imported\");\n    mxrs::replace_imported_project(snapshot, &output, &{crate_name}::Application::build())?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n",
         serde_json::to_string(&default_output).expect("a string always serializes"),
     )
 }
 
 fn generated_readme(project_name: &str, gaps: usize) -> String {
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Rust under `src/` is the editable source; `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo run -- build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Rust under `src/` is the editable source; `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n"
     )
 }
 
@@ -380,6 +383,35 @@ fn render_identity_table(modules: &[Module]) -> String {
             "    ({}, {}),",
             rust_string(&path),
             rust_string(&id)
+        );
+    }
+    source.push_str("];\n");
+    source
+}
+
+fn render_imported_registry(manifest: &mxrs_project::ImportedProjectManifest) -> String {
+    let mut source = String::from(
+        "//! Lossless model documents retained until they gain a friendly Rust representation.\n\
+         //! This registry is generated; edit the typed modules under `src/` instead.\n\n\
+         use mxrs::ImportedDocumentRef;\n\n\
+         pub const MANIFEST: &str = include_str!(\"../../model/imported/manifest.json\");\n\n\
+         pub const DOCUMENTS: &[ImportedDocumentRef] = &[\n",
+    );
+    for unit in &manifest.units {
+        let option = |value: Option<&str>| match value {
+            Some(value) => format!("Some({})", rust_string(value)),
+            None => "None".to_string(),
+        };
+        let _ = writeln!(
+            source,
+            "    ImportedDocumentRef {{ unit_id: {}, container_id: {}, containment_name: {}, native_type: {}, name: {}, qualified_name: {}, file: {} }},",
+            rust_string(&unit.unit_id),
+            rust_string(&unit.container_id),
+            rust_string(&unit.containment_name),
+            rust_string(&unit.native_type),
+            option(unit.name.as_deref()),
+            option(unit.qualified_name.as_deref()),
+            rust_string(&unit.file),
         );
     }
     source.push_str("];\n");
@@ -963,6 +995,9 @@ mod tests {
         let identities = std::fs::read_to_string(generated.join("src/generated/ids.rs")).unwrap();
         assert!(identities.contains("Sales.Order.Number"));
         assert!(identities.contains("Sales.microflow:ACT_Ping"));
+        let opaque = std::fs::read_to_string(generated.join("src/generated/imported.rs")).unwrap();
+        assert!(opaque.contains("Microflows$Microflow"));
+        assert!(opaque.contains("Some(\"ACT_Ping\")"));
 
         std::fs::remove_file(&source_path).unwrap();
         std::fs::remove_dir_all(mxrs_mpr::format::contents_dir(&source_path)).unwrap();

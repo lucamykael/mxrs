@@ -13,7 +13,7 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-25 crates + a dev-only `xtask` harness, ~49k lines of Rust, 477 tests
+25 crates + a dev-only `xtask` harness, ~49k lines of Rust, 480 tests
 passing. The primary direction is now Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 
@@ -67,10 +67,11 @@ workspace:
 cargo run -p mxrs-cli -- import ExistingApp.mpr \
   --output existing-app \
   --mxrs-workspace "$PWD"
+cargo install --path crates/mxrs-cli --bin cargo-mxrs
 cd existing-app
 cargo check
 cargo test
-cargo run -- build/ExistingApp.mpr
+cargo mxrs build --output build/ExistingApp.mpr
 ```
 
 Installed/released builds omit `--mxrs-workspace` and generate the normal Git

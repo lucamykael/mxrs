@@ -9,12 +9,14 @@
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use mxrs_mpr::{MprFile, format};
 use serde::{Deserialize, Serialize};
 
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 const MANIFEST_NAME: &str = "manifest.json";
+static BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -61,7 +63,24 @@ pub struct ImportedUnit {
     pub unit_id: String,
     pub container_id: String,
     pub containment_name: String,
+    pub native_type: String,
+    pub name: Option<String>,
+    pub qualified_name: Option<String>,
     pub file: String,
+}
+
+/// Compile-time entry emitted into an imported application's generated Rust
+/// registry. The `.mxdoc` remains the lossless payload; this metadata makes
+/// every opaque document discoverable without parsing the snapshot manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportedDocumentRef {
+    pub unit_id: &'static str,
+    pub container_id: &'static str,
+    pub containment_name: &'static str,
+    pub native_type: &'static str,
+    pub name: Option<&'static str>,
+    pub qualified_name: Option<&'static str>,
+    pub file: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,11 +141,23 @@ pub fn capture_imported_project(
             let bytes = source
                 .content_bytes(&unit)?
                 .ok_or_else(|| ProjectError::MissingUnitContents(unit.unit_id.clone()))?;
+            let document = mxrs_bson::parse(&bytes)?;
             std::fs::write(&path, bytes).map_err(|error| io_error(&path, error))?;
             Ok(ImportedUnit {
                 unit_id: unit.unit_id,
                 container_id: unit.container_id,
                 containment_name: unit.containment_name,
+                native_type: document.get_str("$Type").unwrap_or("").to_string(),
+                name: document
+                    .get_str("Name")
+                    .or_else(|_| document.get_str("name"))
+                    .ok()
+                    .map(str::to_string),
+                qualified_name: document
+                    .get_str("$QualifiedName")
+                    .or_else(|_| document.get_str("QualifiedName"))
+                    .ok()
+                    .map(str::to_string),
                 file,
             })
         })
@@ -180,6 +211,67 @@ pub fn rebuild_imported_project(
         let _ = std::fs::remove_dir_all(&contents);
     }
     result.map(|()| output.to_path_buf())
+}
+
+/// Builds through a sibling staging directory and replaces an earlier build
+/// only after the new `.mpr` and `mprcontents` pair has completed.
+pub fn replace_imported_project(
+    snapshot: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    declaration: &mxrs_ir::ProjectDecl,
+) -> Result<PathBuf> {
+    let output =
+        std::path::absolute(output.as_ref()).map_err(|error| io_error(output.as_ref(), error))?;
+    let output_contents = format::contents_dir(&output);
+    if !output.exists() && !output_contents.exists() {
+        return rebuild_imported_project(snapshot, &output, declaration);
+    }
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let sequence = BUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging = parent.join(format!(".mxrs-build-{}-{sequence}", std::process::id()));
+    let fresh_directory = staging.join("fresh");
+    let previous_directory = staging.join("previous");
+    std::fs::create_dir_all(&fresh_directory).map_err(|error| io_error(&fresh_directory, error))?;
+    std::fs::create_dir_all(&previous_directory)
+        .map_err(|error| io_error(&previous_directory, error))?;
+    let file_name = output.file_name().unwrap_or_default();
+    let fresh_output = fresh_directory.join(file_name);
+    if let Err(error) = rebuild_imported_project(snapshot, &fresh_output, declaration) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    let previous_output = previous_directory.join(file_name);
+    let previous_contents = previous_directory.join("mprcontents");
+    let had_output = output.exists();
+    let had_contents = output_contents.exists();
+    let replacement = (|| -> Result<()> {
+        if had_output {
+            std::fs::rename(&output, &previous_output).map_err(|error| io_error(&output, error))?;
+        }
+        if had_contents {
+            std::fs::rename(&output_contents, &previous_contents)
+                .map_err(|error| io_error(&output_contents, error))?;
+        }
+        std::fs::rename(&fresh_output, &output).map_err(|error| io_error(&output, error))?;
+        std::fs::rename(format::contents_dir(&fresh_output), &output_contents)
+            .map_err(|error| io_error(&output_contents, error))?;
+        Ok(())
+    })();
+    if let Err(error) = replacement {
+        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_dir_all(&output_contents);
+        if had_output {
+            let _ = std::fs::rename(&previous_output, &output);
+        }
+        if had_contents {
+            let _ = std::fs::rename(&previous_contents, &output_contents);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    std::fs::remove_dir_all(&staging).map_err(|error| io_error(&staging, error))?;
+    Ok(output)
 }
 
 fn rebuild(
@@ -290,6 +382,9 @@ mod tests {
 
         let manifest = capture_imported_project(&source_path, &snapshot).unwrap();
         assert!(manifest.units.len() > 1);
+        assert!(manifest.units.iter().any(|unit| {
+            unit.native_type == "Microflows$Microflow" && unit.name.as_deref() == Some("ACT_Ping")
+        }));
         std::fs::remove_file(&source_path).unwrap();
         std::fs::remove_dir_all(format::contents_dir(&source_path)).unwrap();
 
@@ -368,5 +463,42 @@ mod tests {
         ));
         assert!(!output.exists());
         assert!(!format::contents_dir(&output).exists());
+    }
+
+    #[test]
+    fn replace_build_supports_repeatable_artifact_builds() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("Source.mpr");
+        let snapshot = directory.path().join("imported");
+        let output_directory = tempfile::tempdir().unwrap();
+        let output = output_directory.path().join("Built.mpr");
+        let mut project = ProjectBuilder::new("11.12.1");
+        project.module("Sales", |module| {
+            module.entity("Order", |entity| {
+                entity.string("Number");
+            });
+        });
+        let declaration = project.build();
+        mxrs_writer::write_project(&source, &declaration).unwrap();
+        capture_imported_project(&source, &snapshot).unwrap();
+
+        replace_imported_project(&snapshot, &output, &declaration).unwrap();
+        replace_imported_project(&snapshot, &output, &declaration).unwrap();
+
+        let rebuilt = MprFile::open(&output, true).unwrap();
+        assert_eq!(
+            rebuilt.mendix_version().unwrap().as_deref(),
+            Some("11.12.1")
+        );
+        assert!(format::contents_dir(&output).is_dir());
+        assert!(
+            std::fs::read_dir(output_directory.path())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".mxrs-build-"))
+        );
     }
 }

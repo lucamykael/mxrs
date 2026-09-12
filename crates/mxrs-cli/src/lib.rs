@@ -25,6 +25,7 @@
 //! above, a more useful default for that name). See `browse`'s module doc.
 
 pub mod browse;
+pub mod cargo_project;
 pub mod compare;
 pub mod inspect;
 pub mod validate;

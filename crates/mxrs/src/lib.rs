@@ -7,18 +7,27 @@
 pub use mxrs_dsl::{CallArgument, EntityBuilder, FlowBuilder, ModuleBuilder, ProjectBuilder};
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
-pub use mxrs_macros::{MxEntity, project};
+pub use mxrs_macros::{MxEntity, application, project};
 pub use mxrs_project::{
-    ImportedProjectManifest, ImportedUnit, ProjectError, capture_imported_project,
-    read_imported_manifest, rebuild_imported_project,
+    ImportedDocumentRef, ImportedProjectManifest, ImportedUnit, ProjectError,
+    capture_imported_project, read_imported_manifest, rebuild_imported_project,
+    replace_imported_project,
 };
+
+/// Implemented by `#[mxrs::application]` for the root application type.
+pub trait ApplicationDefinition {
+    const MENDIX_VERSION: &'static str;
+
+    fn declaration() -> ProjectDecl;
+}
 
 /// Imports commonly used authoring types and macros.
 pub mod prelude {
     pub use crate::{
-        AssociationMarker, AttributeMarker, CallArgument, EntityMarker, Expr, FlowBuilder,
-        MendixType, MicroflowMarker, MicroflowRef, ModuleBuilder, MxBool, MxDecimal, MxEntity,
-        MxFloat, MxInteger, MxLong, MxString, ProjectBuilder, Ref, RenderExpr,
-        TypedAttributeMarker, Var, boolean, decimal, float, integer, long, project, string,
+        ApplicationDefinition, AssociationMarker, AttributeMarker, CallArgument, EntityMarker,
+        Expr, FlowBuilder, MendixType, MicroflowMarker, MicroflowRef, ModuleBuilder, MxBool,
+        MxDecimal, MxEntity, MxFloat, MxInteger, MxLong, MxString, ProjectBuilder, Ref, RenderExpr,
+        TypedAttributeMarker, Var, application, boolean, decimal, float, integer, long, project,
+        string,
     };
 }
