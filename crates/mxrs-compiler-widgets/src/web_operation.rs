@@ -912,7 +912,7 @@ fn xpath(entity: &str, constraint: &str) -> String {
     }
 }
 
-fn xpath_variables(constraint: &str) -> Vec<String> {
+pub(crate) fn xpath_variables(constraint: &str) -> Vec<String> {
     let bytes = constraint.as_bytes();
     let mut result = Vec::new();
     let mut index = 0;
@@ -934,7 +934,10 @@ fn xpath_variables(constraint: &str) -> Vec<String> {
     result
 }
 
-fn object_page_parameters(page: &Document, names: &[String]) -> Option<BTreeMap<String, String>> {
+pub(crate) fn object_page_parameters(
+    page: &Document,
+    names: &[String],
+) -> Option<BTreeMap<String, String>> {
     let types: HashMap<_, _> = array_docs(page, &["Parameters"])
         .into_iter()
         .filter_map(|parameter| {

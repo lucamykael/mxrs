@@ -7,24 +7,31 @@
 //!   (plus `compiler/model_values.rb#image_format`/`#image_bytes` — `image_format`)
 //! - `page_document_compiler.rb` — page Runtime metadata
 //! - `web_operation_compiler.rb` — the project-wide operation catalog
+//! - `web_list_data_source.rb` — shared modern-widget list-source resolver
+//! - `gallery_bundle_compiler.rb` — official React Gallery properties
 //!
-//! Widget bundle generation remains the next roadmap slice.
+//! Data Grid 2, Combo Box, generic pluggable, and the surrounding page
+//! bundle/module emitter remain in the widget-bundle roadmap slice.
 
 mod artifact;
+mod gallery_bundle;
 mod image_format;
 mod navigation;
 mod page_document;
 mod settings;
+mod web_list_data_source;
 mod web_operation;
 
 use mxrs_bson::Document;
 use mxrs_schema::RuntimeModelSchema;
 
 pub use artifact::{ArtifactCompiler, NAME_ONLY_TYPES, TYPES};
-pub use mxrs_compiler_support::{menu_operation_id, operation_id};
+pub use gallery_bundle::{GALLERY_WIDGET_ID, GalleryBundleCompiler};
+pub use mxrs_compiler_support::{menu_operation_id, operation_id, widget_data_source_id};
 pub use navigation::NavigationCompiler;
 pub use page_document::PageDocumentCompiler;
 pub use settings::SettingsCompiler;
+pub use web_list_data_source::WebListDataSource;
 pub use web_operation::{DATA_GRID_WIDGET_ID, WebOperationCompiler};
 
 #[derive(Debug, thiserror::Error)]

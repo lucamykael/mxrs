@@ -216,6 +216,14 @@ pub fn operation_id(page_name: &str, widget_name: &str) -> String {
         .to_string()
 }
 
+/// Stable client-side list-property id used by Data Grid 2, Gallery, and
+/// Combo Box. Matches mxrb's first 24 bits of SHA-256 interpreted as hex.
+pub fn widget_data_source_id(widget_key: &str) -> String {
+    let digest = Sha256::digest(widget_key.as_bytes());
+    let value = (u32::from(digest[0]) << 16) | (u32::from(digest[1]) << 8) | u32::from(digest[2]);
+    format!("p.{value}")
+}
+
 pub fn menu_operation_id(action: &Document) -> String {
     let identifier = action
         .get("$ID")
@@ -322,5 +330,17 @@ mod tests {
             menu_operation_id(&action),
             operation_id("Navigation", "Sales.ACT_Run")
         );
+    }
+
+    #[test]
+    fn widget_data_source_ids_match_the_first_six_sha256_hex_digits() {
+        let key = "p.Sales.Orders.gallery";
+        let digest = Sha256::digest(key.as_bytes());
+        let expected = u32::from_str_radix(
+            &format!("{:02x}{:02x}{:02x}", digest[0], digest[1], digest[2]),
+            16,
+        )
+        .unwrap();
+        assert_eq!(widget_data_source_id(key), format!("p.{expected}"));
     }
 }

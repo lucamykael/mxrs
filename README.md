@@ -28,7 +28,8 @@ other half of the round trip).
 `mxrs-compiler-domain` (entities/security) →
 `mxrs-compiler-flow` (microflow/nanoflow/code-action) →
 `mxrs-compiler-widgets` (page metadata/web operations/navigation/settings/
-artifact; widget bundles remain) →
+artifact plus the Gallery bundle and shared modern list sources; remaining
+widget bundles are in progress) →
 `mxrs-javagen` (generated Java proxies). Materializers/packaging
 (`mxrs-materializers`, `mxrs-packager`) and the runtime/OQL/semantic/scaffold
 subsystems are not started yet.
