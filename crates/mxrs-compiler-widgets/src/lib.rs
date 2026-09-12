@@ -9,11 +9,13 @@
 //! - `web_operation_compiler.rb` — the project-wide operation catalog
 //! - `web_list_data_source.rb` — shared modern-widget list-source resolver
 //! - `gallery_bundle_compiler.rb` — official React Gallery properties
+//! - `data_grid_bundle_compiler.rb` — Data Grid 2 properties and columns
 //!
-//! Data Grid 2, Combo Box, generic pluggable, and the surrounding page
-//! bundle/module emitter remain in the widget-bundle roadmap slice.
+//! Combo Box, Image, generic pluggable, and the surrounding page bundle/module
+//! emitter remain in the widget-bundle roadmap slice.
 
 mod artifact;
+mod data_grid_bundle;
 mod gallery_bundle;
 mod image_format;
 mod navigation;
@@ -26,6 +28,7 @@ use mxrs_bson::Document;
 use mxrs_schema::RuntimeModelSchema;
 
 pub use artifact::{ArtifactCompiler, NAME_ONLY_TYPES, TYPES};
+pub use data_grid_bundle::DataGridBundleCompiler;
 pub use gallery_bundle::{GALLERY_WIDGET_ID, GalleryBundleCompiler};
 pub use mxrs_compiler_support::{menu_operation_id, operation_id, widget_data_source_id};
 pub use navigation::NavigationCompiler;
