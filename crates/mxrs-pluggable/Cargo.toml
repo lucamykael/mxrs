@@ -1,0 +1,18 @@
+[package]
+name = "mxrs-pluggable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Schema model and BSON schema decode for Mendix pluggable (CustomWidgets) widgets. Ports the schema half of lib/mxrb/pluggable/{catalog,mpr_codec}.rb from mxrb."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../mxrs-bson" }
+thiserror.workspace = true
+
+[dev-dependencies]
+mxrs-mpr = { path = "../mxrs-mpr" }

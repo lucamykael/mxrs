@@ -678,6 +678,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-pluggable"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-mpr",
+ "thiserror",
+]
+
+[[package]]
 name = "mxrs-schema"
 version = "0.1.0"
 dependencies = [
