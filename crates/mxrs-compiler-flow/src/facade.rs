@@ -57,7 +57,8 @@ impl FlowCompiler {
     ) -> Result<mxrs_bson::Document, CompilerError> {
         let connector =
             DatabaseConnectorCompiler::new(&self.index.database_connections, &self.index.constants);
-        let nodes = FlowNodeCompiler::new(&self.schema, &self.index.associations, Some(connector));
+        let nodes = FlowNodeCompiler::new(&self.schema, &self.index.associations, Some(connector))
+            .with_attribute_types(&self.index.attribute_types);
         let document_compiler =
             FlowDocumentCompiler::new(&self.schema, nodes, &self.index.role_map);
         let result = document_compiler.compile(source, module_name);

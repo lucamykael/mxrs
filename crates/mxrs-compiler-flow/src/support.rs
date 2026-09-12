@@ -3,7 +3,7 @@
 //! `mxrs-model::Module` doesn't load (`DatabaseConnector$DatabaseConnection`,
 //! `Constants$Constant`, `JavaScriptActions$JavaScriptAction`,
 //! `Microflows$Nanoflow` by qualified name, `DomainModels$DomainModel`
-//! associations by qualified name) plus the module-role → user-role map
+//! associations and aggregate attribute types by qualified name) plus the module-role → user-role map
 //! (`project_role_map`, identical purpose to
 //! `mxrs-compiler-domain::security::project_role_map`, duplicated for the
 //! same reason as the BSON readers above). Mirrors
@@ -39,6 +39,9 @@ pub struct ProjectFlowIndex {
     pub nanoflows: HashMap<String, Document>,
     /// `"Module.AssocName"` -> association direction/cardinality info.
     pub associations: HashMap<String, AssociationInfo>,
+    /// `"Module.Entity.Attribute"` -> Runtime scalar type used by aggregate
+    /// actions whose output type is omitted from editor-shape BSON.
+    pub attribute_types: HashMap<String, String>,
     /// Module role qualified name -> user role names that grant it.
     pub role_map: HashMap<String, Vec<String>>,
 }
@@ -71,12 +74,25 @@ impl ProjectFlowIndex {
                     })
             })
             .collect();
+        let enumeration_qualified_name_by_id = documents
+            .iter()
+            .filter(|(_, document)| {
+                get_str_any(document, &["$Type"]).as_deref() == Some("Enumerations$Enumeration")
+            })
+            .filter_map(|(module_name, document)| {
+                Some((
+                    get_id_any(document, &["$ID"])?,
+                    format!("{module_name}.{}", get_str_any(document, &["Name"])?),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
         let mut index = ProjectFlowIndex {
             database_connections: HashMap::new(),
             constants: HashMap::new(),
             javascript_actions: HashMap::new(),
             nanoflows: HashMap::new(),
             associations: HashMap::new(),
+            attribute_types: HashMap::new(),
             role_map: HashMap::new(),
         };
         for (module_name, document) in documents {
@@ -106,6 +122,11 @@ impl ProjectFlowIndex {
                         .insert(format!("{module_name}.{name}"), document.clone());
                 }
                 "DomainModels$DomainModel" => {
+                    index.index_domain_attributes(
+                        module_name,
+                        document,
+                        &enumeration_qualified_name_by_id,
+                    );
                     index.index_domain_associations(
                         module_name,
                         document,
@@ -116,6 +137,38 @@ impl ProjectFlowIndex {
             }
         }
         index
+    }
+
+    fn index_domain_attributes(
+        &mut self,
+        module_name: &str,
+        document: &Document,
+        enumeration_qualified_name_by_id: &HashMap<String, String>,
+    ) {
+        for entity in array_docs(document, &["Entities", "entities"]) {
+            let Some(entity_name) = get_str_any(&entity, &["Name", "name"]) else {
+                continue;
+            };
+            for attribute in array_docs(&entity, &["Attributes", "attributes"]) {
+                let Some(attribute_name) = get_str_any(&attribute, &["Name", "name"]) else {
+                    continue;
+                };
+                let Some(attribute_type) =
+                    get_doc_any(&attribute, &["NewType", "newType", "Type", "type"])
+                else {
+                    continue;
+                };
+                let Some(runtime_type) =
+                    aggregate_attribute_type(&attribute_type, enumeration_qualified_name_by_id)
+                else {
+                    continue;
+                };
+                self.attribute_types.insert(
+                    format!("{module_name}.{entity_name}.{attribute_name}"),
+                    runtime_type,
+                );
+            }
+        }
     }
 
     fn index_domain_associations(
@@ -176,6 +229,23 @@ impl ProjectFlowIndex {
             .flat_map(|module| module.entities())
             .filter_map(|entity| Some((entity.id.clone()?, entity.qualified_name.clone()?)))
             .collect();
+        let enumeration_qualified_name_by_id = modules
+            .iter()
+            .filter_map(|module| module.name.as_deref().map(|name| (name, module)))
+            .flat_map(|(module_name, module)| {
+                module.artifact_units.iter().filter_map(move |document| {
+                    (get_str_any(document, &["$Type"]).as_deref()
+                        == Some("Enumerations$Enumeration"))
+                    .then(|| {
+                        Some((
+                            get_id_any(document, &["$ID"])?,
+                            format!("{module_name}.{}", get_str_any(document, &["Name"])?),
+                        ))
+                    })
+                    .flatten()
+                })
+            })
+            .collect::<HashMap<_, _>>();
 
         let mut index = ProjectFlowIndex {
             database_connections: HashMap::new(),
@@ -183,6 +253,7 @@ impl ProjectFlowIndex {
             javascript_actions: HashMap::new(),
             nanoflows: HashMap::new(),
             associations: HashMap::new(),
+            attribute_types: HashMap::new(),
             role_map: project_role_map(project)?,
         };
 
@@ -247,6 +318,11 @@ impl ProjectFlowIndex {
                     let Some(module_name) = module_name_by_unit_id.get(&unit.container_id) else {
                         continue;
                     };
+                    index.index_domain_attributes(
+                        module_name,
+                        &document,
+                        &enumeration_qualified_name_by_id,
+                    );
                     for association in array_docs(&document, &["Associations", "associations"]) {
                         let Some(name) = get_str_any(&association, &["Name", "name"]) else {
                             continue;
@@ -301,6 +377,36 @@ impl ProjectFlowIndex {
     }
 }
 
+fn aggregate_attribute_type(
+    attribute_type: &Document,
+    enumeration_qualified_name_by_id: &HashMap<String, String>,
+) -> Option<String> {
+    Some(match get_str_any(attribute_type, &["$Type"])?.as_str() {
+        "DomainModels$StringAttributeType" | "DomainModels$HashedStringAttributeType" => {
+            "String".to_string()
+        }
+        "DomainModels$IntegerAttributeType"
+        | "DomainModels$LongAttributeType"
+        | "DomainModels$AutoNumberAttributeType" => "Integer".to_string(),
+        "DomainModels$FloatAttributeType" | "DomainModels$DecimalAttributeType" => {
+            "Decimal".to_string()
+        }
+        "DomainModels$BooleanAttributeType" => "Boolean".to_string(),
+        "DomainModels$DateTimeAttributeType" => "DateTime".to_string(),
+        "DomainModels$BinaryAttributeType" => "Binary".to_string(),
+        "DomainModels$EnumerationAttributeType" => {
+            let enumeration = get_str_any(attribute_type, &["Enumeration", "enumeration"])
+                .filter(|name| name.contains('.'))
+                .or_else(|| {
+                    get_id_any(attribute_type, &["Enumeration", "enumeration"])
+                        .and_then(|id| enumeration_qualified_name_by_id.get(&id).cloned())
+                })?;
+            format!("#{enumeration}")
+        }
+        _ => return None,
+    })
+}
+
 /// Walks a unit's container chain up to the owning `Projects$Module` —
 /// mirrors `mxrs-compiler-domain::domain::owning_module_name` exactly
 /// (same duplication rationale as this module's own doc comment).
@@ -321,4 +427,67 @@ fn owning_module_name(
         current = parent;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use mxrs_bson::{Bson, doc};
+
+    use super::*;
+
+    #[test]
+    fn indexes_runtime_scalar_types_for_aggregate_attributes() {
+        let enumeration_id = "11111111-1111-4111-8111-111111111111";
+        let documents = vec![
+            (
+                "Sales".to_string(),
+                doc! {
+                    "$ID": enumeration_id,
+                    "$Type": "Enumerations$Enumeration",
+                    "Name": "Status",
+                },
+            ),
+            (
+                "Sales".to_string(),
+                doc! {
+                    "$Type": "DomainModels$DomainModel",
+                    "Entities": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "$ID": "entity-id",
+                        "Name": "Order",
+                        "Attributes": mxrs_bson::build_array(vec![
+                            Bson::Document(doc! {
+                                "Name": "Amount",
+                                "NewType": { "$Type": "DomainModels$DecimalAttributeType" },
+                            }),
+                            Bson::Document(doc! {
+                                "Name": "Sequence",
+                                "NewType": { "$Type": "DomainModels$LongAttributeType" },
+                            }),
+                            Bson::Document(doc! {
+                                "Name": "Status",
+                                "NewType": {
+                                    "$Type": "DomainModels$EnumerationAttributeType",
+                                    "Enumeration": enumeration_id,
+                                },
+                            }),
+                        ], 3),
+                    })], 3),
+                },
+            ),
+        ];
+
+        let index = ProjectFlowIndex::from_documents(&documents);
+        assert_eq!(
+            index.attribute_types.get("Sales.Order.Amount"),
+            Some(&"Decimal".to_string())
+        );
+        assert_eq!(
+            index.attribute_types.get("Sales.Order.Sequence"),
+            Some(&"Integer".to_string())
+        );
+        assert_eq!(
+            index.attribute_types.get("Sales.Order.Status"),
+            Some(&"#Sales.Status".to_string())
+        );
+    }
 }

@@ -1816,6 +1816,7 @@ mod tests {
             javascript_actions: HashMap::new(),
             nanoflows: HashMap::new(),
             associations: HashMap::new(),
+            attribute_types: HashMap::new(),
             role_map: HashMap::new(),
         }
     }

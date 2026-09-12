@@ -83,6 +83,7 @@ pub struct FlowNodeCompiler<'a> {
     schema: &'a RuntimeModelSchema,
     database_connector: Option<DatabaseConnectorCompiler<'a>>,
     associations: &'a HashMap<String, AssociationInfo>,
+    attribute_types: Option<&'a HashMap<String, String>>,
     /// Interior mutability, not shared cross-call state like the nanoflow
     /// compiler's `@programs` cache: `compile`/`compile_hash`/`compile_node`
     /// stay `&self` (this crate's house style — see the module doc comment),
@@ -103,8 +104,14 @@ impl<'a> FlowNodeCompiler<'a> {
             schema,
             database_connector,
             associations,
+            attribute_types: None,
             diagnostics: RefCell::new(Vec::new()),
         }
+    }
+
+    pub fn with_attribute_types(mut self, attribute_types: &'a HashMap<String, String>) -> Self {
+        self.attribute_types = Some(attribute_types);
+        self
     }
 
     pub fn diagnostics(&self) -> Vec<FlowDiagnostic> {
@@ -384,8 +391,16 @@ impl<'a> FlowNodeCompiler<'a> {
         if get_str_any(source, &["$Type"]).as_deref() == Some("Microflows$AggregateAction") {
             let aggregate_function =
                 get_str_any(source, &["AggregateFunction"]).unwrap_or_default();
-            if aggregate_function == "Count" {
-                return Ok(Bson::String("Integer".to_string()));
+            match aggregate_function.as_str() {
+                "Count" => return Ok(Bson::String("Integer".to_string())),
+                "All" | "Any" => return Ok(Bson::String("Boolean".to_string())),
+                _ => {}
+            }
+            if let Some(attribute_type) = get_str_any(source, &["Attribute"]).and_then(|name| {
+                self.attribute_types
+                    .and_then(|attribute_types| attribute_types.get(&name))
+            }) {
+                return Ok(Bson::String(attribute_type.clone()));
             }
             return Err(CompilerError::CannotDeriveAggregateType { aggregate_function });
         }
@@ -753,17 +768,40 @@ mod tests {
     }
 
     #[test]
-    fn only_count_aggregate_functions_derive_a_type() {
+    fn aggregate_types_follow_the_function_and_domain_attribute() {
         let schema = schema();
         let associations = HashMap::new();
-        let c = compiler(&schema, &associations);
+        let attribute_types = HashMap::from([
+            ("Sales.Order.Amount".to_string(), "Decimal".to_string()),
+            ("Sales.Order.Number".to_string(), "Integer".to_string()),
+        ]);
+        let c = compiler(&schema, &associations).with_attribute_types(&attribute_types);
         let count = doc! { "$Type": "Microflows$AggregateAction", "AggregateFunction": "Count" };
         assert_eq!(
             c.derived_runtime_type(&count, &VariableTypes::new())
                 .unwrap(),
             Bson::String("Integer".to_string())
         );
-        let sum = doc! { "$Type": "Microflows$AggregateAction", "AggregateFunction": "Sum" };
+        let all = doc! { "$Type": "Microflows$AggregateAction", "AggregateFunction": "All" };
+        assert_eq!(
+            c.derived_runtime_type(&all, &VariableTypes::new()).unwrap(),
+            Bson::String("Boolean".to_string())
+        );
+        let average = doc! {
+            "$Type": "Microflows$AggregateAction",
+            "AggregateFunction": "Average",
+            "Attribute": "Sales.Order.Amount",
+        };
+        assert_eq!(
+            c.derived_runtime_type(&average, &VariableTypes::new())
+                .unwrap(),
+            Bson::String("Decimal".to_string())
+        );
+        let sum = doc! {
+            "$Type": "Microflows$AggregateAction",
+            "AggregateFunction": "Sum",
+            "Attribute": "Sales.Order.Missing",
+        };
         let err = c
             .derived_runtime_type(&sum, &VariableTypes::new())
             .unwrap_err();
