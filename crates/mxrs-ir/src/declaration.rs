@@ -106,6 +106,40 @@ pub struct EntityDecl {
     pub associations: Vec<AssociationDecl>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumerationValueDecl {
+    pub name: String,
+    /// Localized captions as `(language_code, text)` pairs.
+    pub captions: Vec<(String, String)>,
+}
+
+impl EnumerationValueDecl {
+    pub fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            captions: vec![("en_US".to_string(), name.clone())],
+            name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumerationDecl {
+    pub name: String,
+    pub documentation: String,
+    pub values: Vec<EnumerationValueDecl>,
+}
+
+impl EnumerationDecl {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            documentation: String::new(),
+            values: vec![],
+        }
+    }
+}
+
 impl EntityDecl {
     pub fn new(name: impl Into<String>) -> Self {
         EntityDecl {
@@ -122,6 +156,7 @@ impl EntityDecl {
 pub struct ModuleDecl {
     pub name: String,
     pub entities: Vec<EntityDecl>,
+    pub enumerations: Vec<EnumerationDecl>,
     pub microflows: Vec<MicroflowDecl>,
 }
 

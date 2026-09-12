@@ -11,6 +11,20 @@ use mxrs_dsl::ProjectBuilder;
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_model::Project;
 
+fn enumeration_document(path: &std::path::Path, name: &str) -> mxrs_bson::Document {
+    let mpr = mxrs_mpr::MprFile::open(path, true).unwrap();
+    mpr.all_units()
+        .unwrap()
+        .into_iter()
+        .find_map(|unit| {
+            let document = mpr.parse_contents(&unit).ok()?;
+            (document.get_str("$Type").ok() == Some("Enumerations$Enumeration")
+                && document.get_str("Name").ok() == Some(name))
+            .then_some(document)
+        })
+        .unwrap()
+}
+
 #[test]
 fn fresh_projects_with_the_same_logical_name_reuse_all_unit_identities() {
     let dir = tempfile::tempdir().unwrap();
@@ -180,6 +194,58 @@ fn synchronize_project_upserts_a_microflow_by_name() {
         .unwrap();
     assert_eq!(sales.microflows.len(), 1, "upsert, not a duplicate insert");
     assert_eq!(sales.microflows[0].name.as_deref(), Some("ACT_GetConstant"));
+}
+
+#[test]
+fn synchronize_project_preserves_enumeration_and_value_identities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Project.mpr");
+
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |module| {
+        module.enumeration("Status", |enumeration| {
+            enumeration.documentation("Initial");
+            enumeration.value("Open");
+        });
+    });
+    mxrs_writer::write_project(&path, &initial.build()).unwrap();
+    let initial = enumeration_document(&path, "Status");
+    let enumeration_id = mxrs_bson::extract_id(initial.get("$ID").unwrap()).unwrap();
+    let initial_values =
+        mxrs_bson::parse_array(initial.get_array("Values").ok().map(Vec::as_slice));
+    let open_id = mxrs_bson::extract_id(
+        initial_values.items[0]
+            .as_document()
+            .unwrap()
+            .get("$ID")
+            .unwrap(),
+    )
+    .unwrap();
+
+    let mut updated = ProjectBuilder::new("11.12.1");
+    updated.module("Sales", |module| {
+        module.enumeration("Status", |enumeration| {
+            enumeration.documentation("Updated");
+            enumeration.value("Open").captions =
+                vec![("en_US".to_string(), "Open order".to_string())];
+            enumeration.value("Closed");
+        });
+    });
+    mxrs_writer::synchronize_project(&path, &updated.build()).unwrap();
+
+    let updated = enumeration_document(&path, "Status");
+    assert_eq!(updated.get_str("Documentation").unwrap(), "Updated");
+    assert_eq!(
+        mxrs_bson::extract_id(updated.get("$ID").unwrap()).as_deref(),
+        Some(enumeration_id.as_str())
+    );
+    let values = mxrs_bson::parse_array(updated.get_array("Values").ok().map(Vec::as_slice));
+    assert_eq!(values.items.len(), 2);
+    let open = values.items[0].as_document().unwrap();
+    assert_eq!(
+        mxrs_bson::extract_id(open.get("$ID").unwrap()).as_deref(),
+        Some(open_id.as_str())
+    );
 }
 
 #[test]

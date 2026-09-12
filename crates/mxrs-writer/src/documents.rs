@@ -1,9 +1,10 @@
-//! Incremental re-sync for microflow `Documents` units — mirrors the
-//! microflow slice of `Writer#write_documents`/`#upsert_document` (mxrb's
+//! Incremental re-sync for microflow and enumeration `Documents` units —
+//! mirrors the corresponding slices of `Writer#write_documents`/
+//! `#upsert_document` (mxrb's
 //! own method upserts pages/microflows/nanoflows/rules/menus/enumerations/
-//! constants/scheduled_events; this crate only has DSL/model surface for
-//! microflows so far, same narrowing every other pass in this codebase has
-//! made — widen incrementally as those grow a typed surface).
+//! constants/scheduled_events; this crate now has DSL/model surface for
+//! microflows and enumerations, widened incrementally like the rest of the
+//! codebase).
 //!
 //! Unlike domain-model entity/association sync, this is **upsert-only**:
 //! `microflows` is not treated as the module's complete authoritative
@@ -26,7 +27,9 @@
 
 use std::collections::HashMap;
 
+use mxrs_bson::{Bson, Document, build_array, doc, extract_id, parse_array};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
+use mxrs_ir::EnumerationDecl;
 use mxrs_ir::flow::MicroflowDecl;
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
@@ -116,4 +119,166 @@ pub(crate) fn synchronize_microflows_with_identity(
         }
     }
     Ok(())
+}
+
+pub(crate) fn synchronize_enumerations_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    enumerations: &[EnumerationDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let existing_by_name: HashMap<String, (String, Document)> = mpr
+        .children_of(module_id)?
+        .into_iter()
+        .filter(|unit| unit.containment_name == "Documents")
+        .filter_map(|unit| {
+            let document = mpr.parse_contents(&unit).ok()?;
+            if document.get_str("$Type").ok()? != "Enumerations$Enumeration" {
+                return None;
+            }
+            let name = document.get_str("Name").ok()?.to_string();
+            Some((name, (unit.unit_id, document)))
+        })
+        .collect();
+
+    for declaration in enumerations {
+        let qualified_name = format!("{module_name}.{}", declaration.name);
+        let existing = existing_by_name.get(&declaration.name);
+        let enumeration_id = existing
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| identity.artifact_id(ArtifactKind::Enumeration, &qualified_name));
+        let document = enumeration_document(
+            declaration,
+            &qualified_name,
+            &enumeration_id,
+            existing.map(|(_, document)| document),
+            identity,
+        );
+        if existing.is_some() {
+            mpr.update_unit(&enumeration_id, document)?;
+        } else {
+            mpr.insert_unit(module_id, "Documents", document, Some(&enumeration_id))?;
+        }
+    }
+    Ok(())
+}
+
+fn enumeration_document(
+    declaration: &EnumerationDecl,
+    qualified_name: &str,
+    enumeration_id: &str,
+    existing: Option<&Document>,
+    identity: ProjectIdentity,
+) -> Document {
+    let existing_values = parse_array(
+        existing
+            .and_then(|document| document.get_array("Values").ok())
+            .map(Vec::as_slice),
+    );
+    let existing_by_name: HashMap<&str, &Document> = existing_values
+        .items
+        .iter()
+        .filter_map(Bson::as_document)
+        .filter_map(|value| Some((value.get_str("Name").ok()?, value)))
+        .collect();
+    let values = declaration
+        .values
+        .iter()
+        .map(|value| {
+            let value_key = format!("{qualified_name}.{}", value.name);
+            let previous = existing_by_name.get(value.name.as_str()).copied();
+            let value_id = previous
+                .and_then(|document| document.get("$ID"))
+                .and_then(extract_id)
+                .unwrap_or_else(|| {
+                    identity.artifact_id(ArtifactKind::EnumerationValue, &value_key)
+                });
+            let mut value_document = previous.cloned().unwrap_or_default();
+            value_document.insert("$ID", value_id);
+            value_document.insert("$Type", "Enumerations$EnumerationValue");
+            value_document.insert("Name", value.name.clone());
+            value_document.insert(
+                "Image",
+                value_document.get_str("Image").unwrap_or("").to_string(),
+            );
+            value_document.insert(
+                "ExportLevel",
+                value_document
+                    .get_str("ExportLevel")
+                    .unwrap_or("Hidden")
+                    .to_string(),
+            );
+            value_document.insert(
+                "Caption",
+                caption_document(value, &value_key, previous, identity),
+            );
+            Bson::Document(value_document)
+        })
+        .collect();
+
+    let mut document = existing.cloned().unwrap_or_default();
+    document.insert("$ID", enumeration_id);
+    document.insert("$Type", "Enumerations$Enumeration");
+    document.insert("Name", declaration.name.clone());
+    document.insert("Documentation", declaration.documentation.clone());
+    document.insert("Excluded", document.get_bool("Excluded").unwrap_or(false));
+    document.insert(
+        "ExportLevel",
+        document
+            .get_str("ExportLevel")
+            .unwrap_or("Hidden")
+            .to_string(),
+    );
+    document.insert("Values", build_array(values, existing_values.marker));
+    document
+}
+
+fn caption_document(
+    value: &mxrs_ir::EnumerationValueDecl,
+    value_key: &str,
+    previous_value: Option<&Document>,
+    identity: ProjectIdentity,
+) -> Document {
+    let previous = previous_value.and_then(|document| document.get_document("Caption").ok());
+    let caption_id = previous
+        .and_then(|document| document.get("$ID"))
+        .and_then(extract_id)
+        .unwrap_or_else(|| identity.artifact_id(ArtifactKind::EnumerationCaption, value_key));
+    let previous_items = parse_array(
+        previous
+            .and_then(|document| document.get_array("Items").ok())
+            .map(Vec::as_slice),
+    );
+    let previous_by_language: HashMap<&str, &Document> = previous_items
+        .items
+        .iter()
+        .filter_map(Bson::as_document)
+        .filter_map(|item| Some((item.get_str("LanguageCode").ok()?, item)))
+        .collect();
+    let translations = value
+        .captions
+        .iter()
+        .map(|(language, text)| {
+            let previous = previous_by_language.get(language.as_str()).copied();
+            let translation_key = format!("{value_key}.{language}");
+            let translation_id = previous
+                .and_then(|document| document.get("$ID"))
+                .and_then(extract_id)
+                .unwrap_or_else(|| {
+                    identity.artifact_id(ArtifactKind::Translation, &translation_key)
+                });
+            Bson::Document(doc! {
+                "$ID": translation_id,
+                "$Type": "Texts$Translation",
+                "LanguageCode": language.clone(),
+                "Text": text.clone(),
+            })
+        })
+        .collect();
+    doc! {
+        "$ID": caption_id,
+        "$Type": "Texts$Text",
+        "Items": build_array(translations, previous_items.marker),
+    }
 }

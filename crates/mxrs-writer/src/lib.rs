@@ -19,8 +19,10 @@
 //! instead of always inserting a new one — is ported too, in
 //! `documents::synchronize_microflows` (upsert-only, unlike the domain
 //! model: a microflow absent from a given call isn't deleted, matching
-//! mxrb's own `write_documents`). **Not ported at all**: pages/widgets,
-//! menus, enumerations/constants, and every
+//! mxrb's own `write_documents`). Cargo-native enumerations are also written
+//! and incrementally synchronized, including values, localized captions, and
+//! stable identity preservation. **Not ported at all**: pages/widgets, menus,
+//! constants, and every
 //! other document type `Module` supports beyond microflows; DSL-level
 //! customization of security/navigation content (`scaffold` writes sane,
 //! empty defaults for both, matching what `mxrb generate` produces for a

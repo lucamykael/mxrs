@@ -4,7 +4,7 @@
 //! standard `project! {}` (M8.1) is held to, proving this second front end
 //! genuinely produces the same kind of output, not a parallel shape.
 
-use mxrs_macros::MxEntity;
+use mxrs_macros::{MxEntity, MxEnumeration};
 use mxrs_model::Project;
 
 #[derive(MxEntity)]
@@ -32,6 +32,38 @@ struct Customer {
     full_name: String,
 }
 
+#[derive(MxEntity)]
+#[mxrs(
+    module = "Sales",
+    documentation = "A Cargo-native order",
+    persistable = false
+)]
+#[allow(dead_code)]
+struct TypedOrder {
+    #[mxrs(
+        name = "OrderNumber",
+        default = "A-0001",
+        documentation = "Human-readable order number",
+        length = 80,
+        required,
+        unique
+    )]
+    number: mxrs_expr::MxString,
+    total: mxrs_expr::MxDecimal,
+    #[mxrs(localize_date = false)]
+    submitted_at: Option<mxrs_expr::MxDateTime>,
+    status: OrderStatus,
+}
+
+#[derive(MxEnumeration)]
+#[mxrs(module = "Sales", documentation = "Order lifecycle")]
+#[allow(dead_code)]
+enum OrderStatus {
+    #[mxrs(caption = "Open order")]
+    Open,
+    Closed,
+}
+
 #[test]
 fn derived_entities_write_and_read_back_correctly() {
     let dir = tempfile::tempdir().unwrap();
@@ -41,6 +73,8 @@ fn derived_entities_write_and_read_back_correctly() {
     project.module("Sales", |m| {
         Order::mx_register(m);
         Customer::mx_register(m);
+        TypedOrder::mx_register(m);
+        OrderStatus::mx_register(m);
     });
     mxrs_writer::write_project(&path, &project.build()).unwrap();
 
@@ -52,7 +86,7 @@ fn derived_entities_write_and_read_back_correctly() {
         .find(|m| m.name.as_deref() == Some("Sales"))
         .unwrap();
     let entities = sales.entities();
-    assert_eq!(entities.len(), 2);
+    assert_eq!(entities.len(), 3);
 
     let order = entities
         .iter()
@@ -94,4 +128,60 @@ fn derived_entities_write_and_read_back_correctly() {
             .iter()
             .any(|a| a.name.as_deref() == Some("FullName"))
     );
+
+    assert_eq!(
+        <TypedOrder as mxrs_ir::EntityMarker>::qualified_name(),
+        "Sales.TypedOrder"
+    );
+    let typed = entities
+        .iter()
+        .find(|entity| entity.name.as_deref() == Some("TypedOrder"))
+        .unwrap();
+    assert_eq!(typed.documentation, "A Cargo-native order");
+    assert!(!typed.persistable);
+    let number = typed
+        .attributes
+        .iter()
+        .find(|attribute| attribute.name.as_deref() == Some("OrderNumber"))
+        .unwrap();
+    assert_eq!(number.default_value.as_deref(), Some("A-0001"));
+    assert_eq!(number.documentation, "Human-readable order number");
+    assert_eq!(number.length, Some(80));
+    assert!(number.required);
+    assert!(number.unique);
+    let submitted_at = typed
+        .attributes
+        .iter()
+        .find(|attribute| attribute.name.as_deref() == Some("SubmittedAt"))
+        .unwrap();
+    assert_eq!(submitted_at.localize_date, Some(false));
+    let status = typed
+        .attributes
+        .iter()
+        .find(|attribute| attribute.name.as_deref() == Some("Status"))
+        .unwrap();
+    assert_eq!(status.enumeration.as_deref(), Some("Sales.OrderStatus"));
+
+    let enumeration = read
+        .mpr()
+        .all_units()
+        .unwrap()
+        .into_iter()
+        .find(|unit| {
+            read.mpr()
+                .parse_contents(unit)
+                .ok()
+                .is_some_and(|document| {
+                    document.get_str("$Type").ok() == Some("Enumerations$Enumeration")
+                        && document.get_str("Name").ok() == Some("OrderStatus")
+                })
+        })
+        .unwrap();
+    let enumeration = read.mpr().parse_contents(&enumeration).unwrap();
+    assert_eq!(
+        enumeration.get_str("Documentation").unwrap(),
+        "Order lifecycle"
+    );
+    let values = mxrs_bson::parse_array(enumeration.get_array("Values").ok().map(Vec::as_slice));
+    assert_eq!(values.items.len(), 2);
 }

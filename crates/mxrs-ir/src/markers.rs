@@ -69,6 +69,17 @@ pub trait EntityMarker: 'static {
     }
 }
 
+/// Implemented by a Cargo-native Mendix enumeration. Attribute derives use
+/// this marker to resolve the qualified name without embedding a string.
+pub trait EnumerationMarker: 'static {
+    const MODULE: &'static str;
+    const NAME: &'static str;
+
+    fn qualified_name() -> String {
+        format!("{}.{}", Self::MODULE, Self::NAME)
+    }
+}
+
 /// Implemented by a generated marker type for one attribute of one entity
 /// (e.g. `markers::Sales::Order_Number`, generated from a manifest entity's
 /// `attributes` list).

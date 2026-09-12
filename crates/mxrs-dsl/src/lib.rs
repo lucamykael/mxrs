@@ -50,11 +50,13 @@
 //! ```
 
 mod entity;
+mod enumeration;
 mod flow;
 mod module;
 mod project;
 
 pub use entity::EntityBuilder;
+pub use enumeration::EnumerationBuilder;
 pub use flow::{CallArgument, FlowBuilder};
 pub use module::ModuleBuilder;
 pub use mxrs_expr::{

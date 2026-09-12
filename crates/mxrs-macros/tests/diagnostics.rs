@@ -189,24 +189,24 @@ fn a_duplicate_documentation_field_fails_to_compile() {
 }
 
 #[test]
-fn a_field_missing_mx_attribute_fails_to_compile() {
+fn an_uninferable_field_type_fails_to_compile() {
     let output = try_compile(
         r#"
         #[derive(mxrs_macros::MxEntity)]
         struct Order {
-            number: String,
+            unsupported: (String, String),
         }
         pub fn make() {}
         "#,
     );
     assert!(
         !output.status.success(),
-        "expected a compile failure for a field with no #[mx_attribute(...)]"
+        "expected a compile failure for a field whose type cannot be inferred"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("mx_attribute"),
-        "expected the diagnostic to mention the missing attribute, got:\n{stderr}"
+        stderr.contains("cannot infer a Mendix attribute type"),
+        "expected the diagnostic to explain type inference, got:\n{stderr}"
     );
 }
 

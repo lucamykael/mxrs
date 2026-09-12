@@ -13,7 +13,7 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-25 crates + a dev-only `xtask` harness, ~49k lines of Rust, 480 tests
+25 crates + a dev-only `xtask` harness, ~49k lines of Rust, 481 tests
 passing. The primary direction is now Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 
@@ -59,6 +59,13 @@ domain import covers all attribute kinds plus documentation, length, date
 localization, required/unique validation, and association owner/storage/docs.
 Pages, flows, security, navigation, and unknown documents remain complete in
 the generated snapshot while their ergonomic Rust front ends are built.
+
+Cargo-native domain code can use `#[derive(MxEntity)]` on structs and
+`#[derive(MxEnumeration)]` on enums. Scalar field kinds are inferred from
+`MxString`, `MxDecimal`, `MxDateTime`, and the other Mendix value types;
+entity/attribute metadata uses `#[mxrs(...)]`. Enumeration references are
+trait-checked rather than written as qualified-name strings, and enumeration
+documents and localized captions retain stable identities across rebuilds.
 
 ## Cargo-native import
 

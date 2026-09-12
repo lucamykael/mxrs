@@ -31,6 +31,7 @@
 
 mod application;
 mod derive;
+mod derive_enumeration;
 mod expand;
 mod parse;
 
@@ -63,11 +64,20 @@ pub fn project(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(MxEntity, attributes(mx_entity, mx_attribute))]
+#[proc_macro_derive(MxEntity, attributes(mx_entity, mx_attribute, mxrs))]
 pub fn derive_mx_entity(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as syn::DeriveInput);
     match derive::expand_derive(&parsed) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(MxEnumeration, attributes(mxrs))]
+pub fn derive_mx_enumeration(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as syn::DeriveInput);
+    match derive_enumeration::expand_derive(&parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
     }
 }

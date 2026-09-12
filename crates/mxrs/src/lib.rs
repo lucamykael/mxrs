@@ -4,10 +4,12 @@
 //! remain available for framework development, but are not part of the
 //! normal application-facing dependency surface.
 
-pub use mxrs_dsl::{CallArgument, EntityBuilder, FlowBuilder, ModuleBuilder, ProjectBuilder};
+pub use mxrs_dsl::{
+    CallArgument, EntityBuilder, EnumerationBuilder, FlowBuilder, ModuleBuilder, ProjectBuilder,
+};
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
-pub use mxrs_macros::{MxEntity, application, project};
+pub use mxrs_macros::{MxEntity, MxEnumeration, application, project};
 pub use mxrs_project::{
     ImportedDocumentRef, ImportedProjectManifest, ImportedUnit, PROJECT_ASSET_DIRECTORIES,
     ProjectError, capture_imported_project, capture_project_assets, materialize_project_assets,
@@ -26,9 +28,9 @@ pub trait ApplicationDefinition {
 pub mod prelude {
     pub use crate::{
         ApplicationDefinition, AssociationMarker, AttributeMarker, CallArgument, EntityMarker,
-        Expr, FlowBuilder, MendixType, MicroflowMarker, MicroflowRef, ModuleBuilder, MxBool,
-        MxDecimal, MxEntity, MxFloat, MxInteger, MxLong, MxString, ProjectBuilder, Ref, RenderExpr,
-        TypedAttributeMarker, Var, application, boolean, decimal, float, integer, long, project,
-        string,
+        EnumerationBuilder, EnumerationMarker, Expr, FlowBuilder, MendixType, MicroflowMarker,
+        MicroflowRef, ModuleBuilder, MxBool, MxDecimal, MxEntity, MxEnumeration, MxFloat,
+        MxInteger, MxLong, MxString, ProjectBuilder, Ref, RenderExpr, TypedAttributeMarker, Var,
+        application, boolean, decimal, float, integer, long, project, string,
     };
 }

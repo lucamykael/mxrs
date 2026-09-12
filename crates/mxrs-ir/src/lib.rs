@@ -14,9 +14,10 @@ pub mod markers;
 
 pub use declaration::{
     AssociationDecl, AssociationOwner, AssociationStorage, AssociationType, AttributeDecl,
-    AttributeType, EntityDecl, ModuleDecl, ProjectDecl,
+    AttributeType, EntityDecl, EnumerationDecl, EnumerationValueDecl, ModuleDecl, ProjectDecl,
 };
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{
-    AssociationMarker, AttributeMarker, EntityMarker, MicroflowMarker, MicroflowRef, Ref,
+    AssociationMarker, AttributeMarker, EntityMarker, EnumerationMarker, MicroflowMarker,
+    MicroflowRef, Ref,
 };

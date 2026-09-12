@@ -1,6 +1,7 @@
 use mxrs_ir::declaration::ModuleDecl;
 
 use crate::entity::EntityBuilder;
+use crate::enumeration::EnumerationBuilder;
 use crate::flow::FlowBuilder;
 
 pub struct ModuleBuilder {
@@ -13,6 +14,7 @@ impl ModuleBuilder {
             decl: ModuleDecl {
                 name: name.into(),
                 entities: vec![],
+                enumerations: vec![],
                 microflows: vec![],
             },
         }
@@ -41,6 +43,17 @@ impl ModuleBuilder {
         let mut builder = FlowBuilder::new(name);
         configure(&mut builder);
         self.decl.microflows.push(builder.into_decl());
+        self
+    }
+
+    pub fn enumeration(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut EnumerationBuilder),
+    ) -> &mut Self {
+        let mut builder = EnumerationBuilder::new(name);
+        configure(&mut builder);
+        self.decl.enumerations.push(builder.into_decl());
         self
     }
 }

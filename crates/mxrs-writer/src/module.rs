@@ -11,7 +11,7 @@ use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
 
 use crate::error::Result;
-use crate::{domain, flow_compiler};
+use crate::{documents, domain, flow_compiler};
 
 pub fn write_module(
     mpr: &mut MprFile,
@@ -66,6 +66,14 @@ pub fn write_module(
             Some(&microflow_id),
         )?;
     }
+
+    documents::synchronize_enumerations_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.enumerations,
+        identity,
+    )?;
 
     Ok(())
 }
