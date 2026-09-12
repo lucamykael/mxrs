@@ -2544,6 +2544,7 @@ impl<'a, 'b> RenderContext<'a, 'b> {
             self.compiler
                 .action_renderer
                 .and_then(|renderer| renderer(action))
+                .or_else(|| self.builtin_action_property(widget, action, scope, entity))
         };
         let mut image =
             ImageBundleCompiler::new(self.compiler.documents, self.qualified_name, widget)
@@ -3379,6 +3380,49 @@ mod tests {
                 bundle.source
             );
         }
+    }
+
+    #[test]
+    fn renders_builtin_actions_inside_generic_widgets() {
+        let temp = tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("widgets/example")).unwrap();
+        fs::write(
+            temp.path().join("widgets/example/ActionWidget.mjs"),
+            "export default {};",
+        )
+        .unwrap();
+        let project = temp.path().join("App.mpr");
+        let widget = doc! {
+            "$Type": "CustomWidgets$CustomWidget",
+            "Name": "actionWidget",
+            "Type": {
+                "WidgetId": "example.ActionWidget",
+                "ObjectType": {
+                    "$ID": "action-object",
+                    "PropertyTypes": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "$ID": "action-property",
+                        "PropertyKey": "onClick",
+                        "ValueType": { "Type": "Action" },
+                    })], 2),
+                },
+            },
+            "Object": {
+                "TypePointer": "action-object",
+                "Properties": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "TypePointer": "action-property",
+                    "Value": { "Action": { "$Type": "Forms$SignOutClientAction" } },
+                })], 2),
+            },
+        };
+        let documents = Vec::new();
+        let bundle = PageBundleCompiler::new(&documents, &project)
+            .compile_page("Demo", &page(vec![widget]))
+            .unwrap();
+
+        assert!(bundle.unsupported_custom_widgets.is_empty());
+        assert!(bundle.source.contains("React.createElement($ActionWidget"));
+        assert!(bundle.source.contains("ActionProperty"));
+        assert!(bundle.source.contains("signOut"));
     }
 
     #[test]
