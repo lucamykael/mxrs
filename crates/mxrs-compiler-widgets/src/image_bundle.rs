@@ -211,7 +211,7 @@ impl<'a> ImageBundleCompiler<'a> {
         let path = reference
             .get_document("EntityRef")
             .ok()
-            .map(|reference| entity_ref_path(reference))
+            .map(entity_ref_path)
             .unwrap_or_default();
         let name = attribute.rsplit_once('.').map(|(_, name)| name)?;
         let member = [path.as_str(), name]

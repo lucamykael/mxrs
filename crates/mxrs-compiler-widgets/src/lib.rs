@@ -10,12 +10,14 @@
 //! - `web_list_data_source.rb` — shared modern-widget list-source resolver
 //! - `gallery_bundle_compiler.rb` — official React Gallery properties
 //! - `data_grid_bundle_compiler.rb` — Data Grid 2 properties and columns
+//! - `combo_box_bundle_compiler.rb` — association/database/enumeration Combo Box
 //! - `image_bundle_compiler.rb` — static and dynamically-bound Image properties
 //!
-//! Combo Box, generic pluggable, and the surrounding page bundle/module emitter
+//! Generic pluggable compilation and the surrounding page bundle/module emitter
 //! remain in the widget-bundle roadmap slice.
 
 mod artifact;
+mod combo_box_bundle;
 mod data_grid_bundle;
 mod gallery_bundle;
 mod image_bundle;
@@ -30,6 +32,7 @@ use mxrs_bson::Document;
 use mxrs_schema::RuntimeModelSchema;
 
 pub use artifact::{ArtifactCompiler, NAME_ONLY_TYPES, TYPES};
+pub use combo_box_bundle::{COMBO_BOX_WIDGET_ID, ComboBoxBundleCompiler};
 pub use data_grid_bundle::DataGridBundleCompiler;
 pub use gallery_bundle::{GALLERY_WIDGET_ID, GalleryBundleCompiler};
 pub use image_bundle::{IMAGE_WIDGET_ID, ImageBundleCompiler, StaticImageOptions};
