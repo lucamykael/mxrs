@@ -78,6 +78,33 @@ pub enum Value {
     Object(Option<Box<ObjectNode>>),
     ObjectList(Vec<ObjectNode>),
     System,
+    /// A `DataSource`-kind value's XPath/database source — self-contained
+    /// only when neither the value's own `SourceVariable` nor the nested
+    /// source's `SortBar` is present (both need `mxrs-forms`'s embedded
+    /// Node decode). `None` mirrors mxrb's `nil` (no source and no
+    /// variable at all). Ports the self-contained slice of
+    /// `decode_data_source`/`XPathSource`.
+    DataSource(Option<DataSource>),
+    /// A `Widgets`-kind value all of whose items are themselves nested
+    /// `CustomWidgets$CustomWidget` instances — decoded fully via this
+    /// crate's own `decode_widget_type`/`decode_object`, discarding each
+    /// nested widget's own schema/outer-properties the same way
+    /// `mxrs-forms::decode_pluggable` already does for the top-level case.
+    /// A list containing any non-pluggable (native Forms) item can't be
+    /// represented here at all — decoding it returns
+    /// [`crate::error::PluggableError::NeedsFormsIntegration`] instead of
+    /// silently dropping the native items.
+    Widgets(Vec<ObjectNode>),
+}
+
+/// See [`Value::DataSource`]. Ports the fields of mxrb's `XPathSource` that
+/// don't require an embedded `mxrs-forms` Node decode (`entity`/
+/// `constraint`/`force_full_objects` — never `sort_bar`/`source_variable`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataSource {
+    pub entity: Option<mxrs_forms_refs::EntityReference>,
+    pub constraint: String,
+    pub force_full_objects: bool,
 }
 
 /// One assigned property on an [`ObjectNode`]. Ports the read side of

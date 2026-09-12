@@ -20,22 +20,50 @@
 //! the decoded shape, including [`node::ReferenceTarget`] for how an
 //! `Association`'s two possible reference shapes are represented.
 //!
+//! `DataSource` and `Widgets` now each have a self-contained *slice*
+//! ported too: `DataSource` closes the XPath/database-source shape when
+//! neither its own nor the nested source's `SourceVariable`/`SortBar` is
+//! present (`decode_data_source_value`); `Widgets` closes a list all of
+//! whose items are themselves a nested `CustomWidgets$CustomWidget`
+//! (`decode_widgets_value`, pure self-recursion through this crate's own
+//! `decode_widget_type`/`decode_object`, no `mxrs-forms` involved). Both
+//! still return `NeedsFormsIntegration` for the rest of their shape (a
+//! non-XPath/database source, a present `SourceVariable`/`SortBar`, or a
+//! native item in a `Widgets` list) — confirmed against real QRQC/SPC data
+//! that this *never* happens to close any additional real instance today
+//! (every real `DataSource` there is `Forms$MicroflowSource`/
+//! `Forms$AssociationSource`, which mxrb itself only decodes via
+//! `forms_codec.decode_embedded` too — not a shortcut this dataset
+//! happens to skip; every real `Widgets` list has at least one native
+//! child). Landed anyway because it's real, oracle-verified-safe coverage
+//! for whatever data *does* fall in the narrow safe case, and it narrows
+//! exactly what's left un-analyzed.
+//!
 //! Still open, correctly erroring rather than guessing
 //! (`PluggableError::NeedsFormsIntegration`): `TextTemplate`, `Action`,
-//! `Icon`, `DataSource`, and `Widgets` — every one of these needs a
-//! *catalog-driven, recursive* embedded-Forms-node decode
+//! `Icon`, and the non-self-contained slices of `DataSource`/`Widgets`
+//! above — every one of these needs a *catalog-driven, recursive*
+//! embedded-Forms-node decode
 //! (`Mxrb::Forms::MprCodec#decode_embedded`/`#decode_node`), which is
 //! stateful (tied to `mxrs-forms`'s `Catalog`) in a way the reference
 //! types above aren't — closing this needs either a similar type
-//! extraction for `mxrs-forms::Node` itself (a much bigger crate to split)
-//! or a trait-based callback from `mxrs-forms` into this crate, not
-//! attempted yet. Real-world weight of this remaining gap, measured (not
-//! guessed) by `tests/instance_oracle.rs` against every real
-//! `CustomWidgets$CustomWidget` instance in QRQC/SPC: 23/378 (QRQC) and
-//! 13/682 (SPC) decode *fully* end-to-end today (up from 10/378 and
-//! 11/682 before `Attribute`/`Entity`/`Association` closed) — the rest
-//! each hit one of the five remaining kinds first (`TextTemplate` and
-//! `DataSource` now dominate). What's landed here is real, independently
+//! extraction for `mxrs-forms::Node` itself (a much bigger crate to split
+//! — `Node`+`Catalog`+the recursive `decode_one` dispatch are ~850 lines
+//! together, and `Node`'s own `Value::Pluggable(mxrs_pluggable::ObjectNode)`
+//! variant would need to become a dependency-inversion hook instead of a
+//! hard type, to avoid a `mxrs-forms-node ↔ mxrs-pluggable` cycle — not
+//! attempted, this doc is the concrete plan for whoever does) or a
+//! trait-based callback from `mxrs-forms` into this crate. Real-world
+//! weight of this remaining gap, measured (not guessed) by
+//! `tests/instance_oracle.rs` against every real `CustomWidgets$CustomWidget`
+//! instance in QRQC/SPC: still 23/378 (QRQC) and 13/682 (SPC) decode
+//! *fully* end-to-end today — unchanged by this pass, per the paragraph
+//! above; per-kind breakdown as of this pass: QRQC blocked by
+//! `TextTemplate` 156, `DataSource` 82, `Widgets` 70, `Action` 46, `Icon`
+//! 1; SPC blocked by `TextTemplate` 427, `DataSource` 158, `Widgets` 47,
+//! `Action` 37. `TextTemplate` is by far the single biggest remaining
+//! kind in both files — the natural next target once the `Node`
+//! extraction above happens. What's landed here is real, independently
 //! useful, zero-panic progress (every self-contained property decodes
 //! correctly, and every blocked instance fails with this exact named
 //! error, never a guess or a silent drop), not the finish line.
@@ -513,12 +541,12 @@ fn decode_value(
         "Attribute" => decode_attribute_value(document, path),
         "Entity" => decode_entity_value(document, path),
         "Association" => decode_association_value(document, path),
-        "TextTemplate" | "Action" | "Icon" | "DataSource" | "Widgets" => {
-            Err(PluggableError::NeedsFormsIntegration {
-                kind: value_type.kind.clone(),
-                path: path.to_string(),
-            })
-        }
+        "DataSource" => decode_data_source_value(document, path),
+        "Widgets" => decode_widgets_value(document, path),
+        "TextTemplate" | "Action" | "Icon" => Err(PluggableError::NeedsFormsIntegration {
+            kind: value_type.kind.clone(),
+            path: path.to_string(),
+        }),
         other => Ok(decode_reference(other, document)),
     }
 }
@@ -575,6 +603,97 @@ fn decode_association_value(document: &Document, path: &str) -> Result<Value> {
             })
         }
     }
+}
+
+/// Ports the self-contained slice of `decode_data_source`: an XPath or
+/// database source whose `SourceVariable` (at either the value or the
+/// nested-source level) and `SortBar` are both absent. Any of those three
+/// (or a source of some other `$Type`, e.g. one that only
+/// `forms_codec.decode_embedded` can decode) needs `mxrs-forms`'s embedded
+/// Node decode — returns [`PluggableError::NeedsFormsIntegration`] rather
+/// than dropping the field.
+fn decode_data_source_value(document: &Document, path: &str) -> Result<Value> {
+    let needs_forms = || PluggableError::NeedsFormsIntegration {
+        kind: "DataSource".to_string(),
+        path: path.to_string(),
+    };
+    if !matches!(document.get("SourceVariable"), None | Some(Bson::Null)) {
+        return Err(needs_forms());
+    }
+    let source = match document.get_document("DataSource") {
+        Ok(doc) => doc,
+        Err(_) => return Ok(Value::DataSource(None)),
+    };
+    if !matches!(source.get("SourceVariable"), None | Some(Bson::Null)) {
+        return Err(needs_forms());
+    }
+    let type_name = source.get_str("$Type").unwrap_or("");
+    if !matches!(
+        type_name,
+        "CustomWidgets$CustomWidgetXPathSource" | "CustomWidgets$CustomWidgetDatabaseSource"
+    ) {
+        return Err(needs_forms());
+    }
+    if !matches!(source.get("SortBar"), None | Some(Bson::Null)) {
+        return Err(needs_forms());
+    }
+    let source_path = format!("{path}.DataSource");
+    let entity = match source.get("EntityRef") {
+        None | Some(Bson::Null) => None,
+        Some(raw) => Some(mxrs_forms_refs::decode_entity_reference(
+            raw,
+            &format!("{source_path}.EntityRef"),
+        )?),
+    };
+    assert_known(
+        source,
+        &[
+            "$ID",
+            "$Type",
+            "EntityRef",
+            "XPathConstraint",
+            "DatabaseConstraints",
+            "SortBar",
+            "SourceVariable",
+            "ForceFullObjects",
+        ],
+        &source_path,
+    )?;
+    Ok(Value::DataSource(Some(crate::node::DataSource {
+        entity,
+        constraint: get_str_fallback(source, "XPathConstraint", "DatabaseConstraints", ""),
+        force_full_objects: get_bool_or(source, "ForceFullObjects", false),
+    })))
+}
+
+/// Ports the self-contained slice of `decode_widgets`: a list all of whose
+/// items are themselves a nested `CustomWidgets$CustomWidget`, decoded via
+/// this crate's own `decode_widget_type`/`decode_object` (self-recursion,
+/// no `mxrs-forms` involved). Any native (non-pluggable) item in the list
+/// needs `forms_codec.decode_embedded` — returns
+/// [`PluggableError::NeedsFormsIntegration`] for the whole value rather
+/// than silently dropping that item from the list.
+fn decode_widgets_value(document: &Document, path: &str) -> Result<Value> {
+    let mut nodes = Vec::new();
+    for (index, item) in array_docs(document, "Widgets").into_iter().enumerate() {
+        let item_path = format!("{path}.Widgets[{index}]");
+        if item.get_str("$Type").ok() != Some("CustomWidgets$CustomWidget") {
+            return Err(PluggableError::NeedsFormsIntegration {
+                kind: "Widgets".to_string(),
+                path: item_path,
+            });
+        }
+        let type_path = format!("{item_path}.Type");
+        let (_widget_type, context) =
+            decode_widget_type(get_doc(&item, "Type", &type_path)?, &type_path)?;
+        let object_path = format!("{item_path}.Object");
+        nodes.push(decode_object(
+            get_doc(&item, "Object", &object_path)?,
+            &context,
+            &object_path,
+        )?);
+    }
+    Ok(Value::Widgets(nodes))
 }
 
 /// Ports the `Object`-kind arm of `decode_value` (`decode_objects`):
