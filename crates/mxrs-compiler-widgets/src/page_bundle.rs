@@ -2505,9 +2505,12 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         let nested = |widgets: &[Document], nested_scope: &str, nested_entity: &str| {
             self.render_widgets(widgets, Some(nested_scope), nested_entity)
         };
-        let grid =
+        let mut grid =
             DataGridBundleCompiler::new(self.compiler.documents, self.qualified_name, widget)
                 .with_widget_renderer(&nested);
+        if let Some(scope) = scope {
+            grid = grid.with_scope(scope);
+        }
         if grid.supported() {
             self.state.borrow_mut().used.insert(UsedBundle::DataGrid);
             return grid.render();
@@ -2638,10 +2641,12 @@ impl<'a, 'b> RenderContext<'a, 'b> {
                 &mut imports,
                 &[
                     "DatabaseObjectListProperty",
+                    "AssociationObjectListProperty",
                     "ExpressionProperty",
                     "ListAssociationProperty",
                     "ListAttributeProperty",
                     "ListExpressionProperty",
+                    "MicroflowObjectListProperty",
                     "SelectionProperty",
                     "TemplatedWidgetProperty",
                 ],

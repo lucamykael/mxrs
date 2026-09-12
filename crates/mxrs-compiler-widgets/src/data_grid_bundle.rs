@@ -29,6 +29,7 @@ pub struct DataGridBundleCompiler<'a> {
     index: HashMap<String, Document>,
     properties: Vec<PropertyValue>,
     data_source: WebListDataSource,
+    scope: Option<&'a str>,
     render_widgets: Option<&'a WidgetRenderer<'a>>,
 }
 
@@ -48,6 +49,7 @@ impl<'a> DataGridBundleCompiler<'a> {
             index,
             properties,
             data_source: WebListDataSource::from_documents(documents, widget),
+            scope: None,
             render_widgets: None,
         }
     }
@@ -59,9 +61,15 @@ impl<'a> DataGridBundleCompiler<'a> {
         self
     }
 
+    pub fn with_scope(mut self, scope: &'a str) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
     pub fn supported(&self) -> bool {
         widget_id(self.widget).as_deref() == Some(DATA_GRID_WIDGET_ID)
-            && self.data_source.xpath()
+            && self.data_source.supported()
+            && (!self.data_source.association() || self.scope.is_some())
             && !self.data_source.entity.is_empty()
             && !self.columns().is_empty()
             && self
@@ -138,11 +146,7 @@ impl<'a> DataGridBundleCompiler<'a> {
             .unwrap_or_default();
         match mode {
             "attribute" | "dynamicText" => attribute_name(&values).contains('.'),
-            "customContent" => {
-                self.render_widgets.is_some()
-                    && value(&values, "content")
-                        .is_some_and(|value| !array_docs(value, "Widgets").is_empty())
-            }
+            "customContent" => self.render_widgets.is_some() && value(&values, "content").is_some(),
             _ => false,
         }
     }
@@ -182,18 +186,40 @@ impl<'a> DataGridBundleCompiler<'a> {
     }
 
     fn data_source_js(&self) -> String {
+        let data_source_id = self.data_source_id();
+        let operation = operation_id(
+            self.page_name,
+            self.widget.get_str("Name").unwrap_or_default(),
+        );
+        if self.data_source.association() {
+            return format!(
+                "AssociationObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(&data_source_id)),
+                    ("operationId", js_string(&operation)),
+                    ("scope", js_string(self.scope.unwrap_or_default())),
+                    ("directPath", js_string(&self.data_source.association_path)),
+                    ("sort", "[]".to_string()),
+                ])
+            );
+        }
+        if self.data_source.microflow() {
+            return format!(
+                "MicroflowObjectListProperty({})",
+                js_object(&[
+                    ("dataSourceId", js_string(&data_source_id)),
+                    ("operationId", js_string(&operation)),
+                    ("argMap", "{}".to_string()),
+                    ("fetchOnlyWithAllParams", "false".to_string()),
+                ])
+            );
+        }
         format!(
             "DatabaseObjectListProperty({})",
             js_object(&[
-                ("dataSourceId", js_string(&self.data_source_id())),
+                ("dataSourceId", js_string(&data_source_id)),
                 ("entity", js_string(&self.data_source.entity)),
-                (
-                    "operationId",
-                    js_string(&operation_id(
-                        self.page_name,
-                        self.widget.get_str("Name").unwrap_or_default(),
-                    )),
-                ),
+                ("operationId", js_string(&operation)),
                 ("sort", "[]".to_string()),
             ])
         )
@@ -840,6 +866,76 @@ mod tests {
                 "missing {expected}: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn compiles_microflow_and_association_grid_sources() {
+        let set_source = |widget: &mut Document, source: Document| {
+            widget
+                .get_document_mut("Object")
+                .unwrap()
+                .get_array_mut("Properties")
+                .unwrap()[1]
+                .as_document_mut()
+                .unwrap()
+                .get_document_mut("Value")
+                .unwrap()
+                .insert("DataSource", source);
+        };
+        let mut documents = documents();
+        documents.push((
+            "Demo".to_string(),
+            doc! {
+                "$Type": "Microflows$Microflow",
+                "Name": "LoadItems",
+                "MicroflowReturnType": { "Entity": "Demo.Item" },
+            },
+        ));
+        let mut microflow = grid(vec![column("attribute", "Demo.Item.Name")]);
+        set_source(
+            &mut microflow,
+            doc! {
+                "$Type": "Forms$MicroflowSource",
+                "MicroflowSettings": { "Microflow": "Demo.LoadItems" },
+            },
+        );
+        let compiler = DataGridBundleCompiler::new(&documents, "Demo.Home", &microflow);
+        assert!(compiler.supported());
+        assert!(compiler.render().contains("MicroflowObjectListProperty"));
+
+        let mut association = grid(vec![column("attribute", "Demo.Item.Name")]);
+        set_source(
+            &mut association,
+            doc! {
+                "$Type": "Forms$AssociationSource",
+                "EntityRef": { "Steps": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "Association": "Demo.Order_Items",
+                    "DestinationEntity": "Demo.Item",
+                })], 2) },
+            },
+        );
+        let compiler = DataGridBundleCompiler::new(&documents, "Demo.Home", &association)
+            .with_scope("p.Demo.Home.order");
+        assert!(compiler.supported());
+        let rendered = compiler.render();
+        assert!(rendered.contains("AssociationObjectListProperty"));
+        assert!(rendered.contains("Demo.Order_Items/Demo.Item"));
+    }
+
+    #[test]
+    fn accepts_an_empty_custom_content_column() {
+        let mut custom = column("customContent", "");
+        custom
+            .get_array_mut("Properties")
+            .unwrap()
+            .push(property("content", value("")));
+        let documents = documents();
+        let widget = grid(vec![custom]);
+        let renderer = |_widgets: &[Document], _scope: &str, _entity: &str| "[]".to_string();
+        let compiler = DataGridBundleCompiler::new(&documents, "Demo.Home", &widget)
+            .with_widget_renderer(&renderer);
+        assert!(compiler.supported());
+        assert!(compiler.render().contains("TemplatedWidgetProperty"));
     }
 
     #[test]
