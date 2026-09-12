@@ -67,6 +67,18 @@ impl<'a> GalleryBundleCompiler<'a> {
             .unwrap_or_default()
     }
 
+    pub fn filter_widgets(&self) -> Vec<Document> {
+        self.value("filtersPlaceholder")
+            .map(|value| array_docs(value, "Widgets"))
+            .unwrap_or_default()
+    }
+
+    pub fn nanoflow_name(&self) -> Option<&str> {
+        self.data_source
+            .nanoflow()
+            .then_some(self.data_source.nanoflow_name.as_str())
+    }
+
     pub fn widget_key(&self) -> String {
         format!(
             "p.{}.{}",

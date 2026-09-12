@@ -13,8 +13,7 @@
 //! - `combo_box_bundle_compiler.rb` — association/database/enumeration Combo Box
 //! - `image_bundle_compiler.rb` — static and dynamically-bound Image properties
 //! - `generic_widget_bundle_compiler.rb` — schema-driven pluggable fallback
-//!
-//! The surrounding page bundle/module emitter remains in this roadmap slice.
+//! - `page_bundle_compiler.rb` — page/layout module emitter and bundle dispatch
 
 mod artifact;
 mod combo_box_bundle;
@@ -24,6 +23,7 @@ mod generic_widget_bundle;
 mod image_bundle;
 mod image_format;
 mod navigation;
+mod page_bundle;
 mod page_document;
 mod settings;
 mod web_list_data_source;
@@ -40,6 +40,7 @@ pub use generic_widget_bundle::GenericWidgetBundleCompiler;
 pub use image_bundle::{IMAGE_WIDGET_ID, ImageBundleCompiler, StaticImageOptions};
 pub use mxrs_compiler_support::{menu_operation_id, operation_id, widget_data_source_id};
 pub use navigation::NavigationCompiler;
+pub use page_bundle::{PageBundle, PageBundleCompiler};
 pub use page_document::PageDocumentCompiler;
 pub use settings::SettingsCompiler;
 pub use web_list_data_source::WebListDataSource;
@@ -62,6 +63,10 @@ pub enum CompilerError {
     CannotDetermineImageFormat { name: String },
     #[error("unsupported page root {type_name:?}")]
     UnsupportedPageRoot { type_name: String },
+    #[error("invalid page slot {name:?}")]
+    InvalidPageSlot { name: String },
+    #[error("duplicate page slot {name:?}")]
+    DuplicatePageSlot { name: String },
     #[error("unsupported Runtime data type {type_name:?}")]
     UnsupportedDataType { type_name: String },
     #[error(transparent)]
