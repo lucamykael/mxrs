@@ -13,7 +13,7 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-31 crates + a dev-only `xtask` harness, ~50k lines of Rust, over 500 tests
+33 crates + a dev-only `xtask` harness, ~63k lines of Rust, over 560 tests
 passing. The primary direction is now Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 
@@ -57,15 +57,18 @@ structural/text rendering) →
 hash-verified React bundle plus stable `model.json`, embedded so normal builds
 need no Node) → `mxrs-packager` (reproducible ustar deployment archives with
 per-file SHA-256 integrity) → `mxrs-runtime` (transactional unit-of-work store,
-fail-closed role/member authorization, and an action registry) → `mxrs-oql`
+fail-closed role/member authorization, and an action registry) →
+`mxrs-runtime-http` (async static-app/action boundary that never trusts client
+roles) → `mxrs-runtime-sqlite` (atomic durable snapshots) → `mxrs-oql`
 (native OQL discovery, safe logical SQL projection, parameter extraction, and
 query-risk analysis) → `mxrs-semantic` (deterministic artifact/reference index,
 search, reverse references, and transitive impact) → `mxrs-scaffold`
-(transactional new-project generation). HTTP/storage adapters and semantic
-mutation plans remain follow-up layers.
+(transactional new-project generation). Auth/session adapters, a native flow
+interpreter, offline synchronization, and semantic mutation plans remain
+follow-up layers.
 
-`mxrs-cli` (binary `mxrs`) exposes `import`, `validate`, `compare`, `inspect`,
-`units`, `dump-unit`, `sql`, `modules`, `export`, and `javagen` today. Typed
+`mxrs-cli` (binary `mxrs`) exposes import/build inspection, packaging, OQL,
+semantic search/impact, and project scaffolding commands. Typed
 domain import covers all attribute kinds plus documentation, length, date
 localization, required/unique validation, and association owner/storage/docs.
 Microflows and nanoflows can be authored and incrementally synchronized with
@@ -98,9 +101,12 @@ Gallery, and ComboBox through `mxrs-pluggable`. All compile through
 `mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms codec.
 `mxrs import` detects the lossless structural subset, renders real builders
 into `src/domain/pages/mod.rs`, and wires them into `build()` automatically.
-Data-bound widgets, flow-calling buttons, and pluggable widget identities
-remain opaque on import until generated markers and richer decode metadata
-land; they are preserved in the imported snapshot, never guessed or dropped.
+Data-bound widgets, flow-calling buttons, empty official pluggable shells,
+page metadata, object page parameters, and context-inherited DataViews import
+to typed builders when every reference can be proven. Configured pluggable
+widgets, action argument mappings, DataView footers, dynamic visibility/class
+expressions, and unsupported native widgets remain snapshot-backed, never
+guessed or dropped.
 See `mxrs_ir::page` and `mxrs-exporter::page_export` for the explicit boundary.
 
 ## Cargo-native import
