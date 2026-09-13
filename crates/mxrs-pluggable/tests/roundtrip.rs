@@ -257,3 +257,32 @@ fn source_variable_only_data_source_round_trips_in_value_field() {
     let decoded = decode_widget(&encoded, "$", &DocumentCodec).unwrap();
     assert_eq!(decoded, widget);
 }
+
+/// Ports a real fallback behavior of `Mxrb::Writer#pluggable_widget_doc`
+/// (`lib/mxrb/writer.rb`'s `configure_fallback_data_grid!`): without the
+/// real Studio-Pro-side widget package to hydrate a Data Grid 2's actual
+/// property schema from, mxrb still emits a recognizable widget by writing
+/// native-widget-shaped fields (a `DataSource`, here) directly onto the
+/// outer `CustomWidgets$CustomWidget` document, alongside an otherwise
+/// empty pluggable schema.
+#[test]
+fn a_freshly_authored_widget_carries_its_extra_fallback_fields_into_the_encoded_document() {
+    let schema = widget_type("com.mendix.widget.web.datagrid.Datagrid", vec![]);
+    let mut widget = WidgetNode::new(schema, ObjectNode::new());
+    widget.extra = doc! {
+        "DataSource": { "$ID": "ds-id", "$Type": "Forms$DatabaseSource", "Entity": "Sales.Order" },
+    };
+
+    let encoded = encode_widget(&widget, "$", &DocumentCodec).unwrap();
+    let data_source = encoded.get_document("DataSource").unwrap();
+    assert_eq!(data_source.get_str("Entity").unwrap(), "Sales.Order");
+    // `Type`/`Object` still come from the real widget-type schema, not `extra`.
+    assert_eq!(
+        encoded
+            .get_document("Type")
+            .unwrap()
+            .get_str("WidgetId")
+            .unwrap(),
+        "com.mendix.widget.web.datagrid.Datagrid"
+    );
+}

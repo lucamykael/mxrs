@@ -146,6 +146,10 @@ pub fn decode_widget<D: EmbeddedFormsDecoder>(
         widget_type,
         object,
         storage_baseline: Some(document.clone()),
+        // `storage_baseline` already carries every original field verbatim
+        // — see `WidgetNode::extra`'s doc comment for why this only needs
+        // to be populated on the from-scratch authoring path.
+        extra: Document::new(),
     })
 }
 
@@ -673,11 +677,14 @@ pub fn encode_widget<E: EmbeddedFormsEncoder>(
         }
         None => {
             let (type_document, context) = encode_widget_type(&widget.widget_type);
-            (
-                type_document,
-                context,
-                identified("CustomWidgets$CustomWidget"),
-            )
+            let mut document = identified("CustomWidgets$CustomWidget");
+            // See `WidgetNode::extra`'s doc comment: only meaningful on this
+            // from-scratch path — a decoded widget's `storage_baseline`
+            // already carries these fields (if any) verbatim.
+            for (key, value) in &widget.extra {
+                document.insert(key, value.clone());
+            }
+            (type_document, context, document)
         }
     };
     let object = encode_object(

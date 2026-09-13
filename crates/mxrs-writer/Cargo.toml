@@ -17,6 +17,7 @@ mxrs-ir = { path = "../mxrs-ir" }
 mxrs-identity = { path = "../mxrs-identity" }
 mxrs-model = { path = "../mxrs-model" }
 mxrs-mpr = { path = "../mxrs-mpr" }
+mxrs-pluggable = { path = "../mxrs-pluggable" }
 mxrs-schema = { path = "../mxrs-schema" }
 thiserror.workspace = true
 uuid = { version = "1", features = ["v4"] }

@@ -31,9 +31,15 @@
 //!   (`ReferenceSetSelector`, `FileManager`, image/navigation/menu
 //!   widgets, ...) have no `WidgetDecl` variant yet — a real, separately
 //!   trackable follow-up, not implemented here.
-//! - **Pluggable widgets** (Data Grid 2/Gallery/ComboBox/the generic
-//!   `CustomWidgets$CustomWidget` bundle) have no `WidgetDecl` variant yet —
-//!   see `mxrs-writer::page_compiler`'s crate doc for the fuller reasoning.
+//! - **Pluggable widgets**: [`WidgetDecl::DataGrid2`]/[`WidgetDecl::Gallery`]/
+//!   [`WidgetDecl::ComboBox`] — Mendix 11's own modern built-ins, which are
+//!   `CustomWidgets$CustomWidget` instances under the hood (see
+//!   `mxrs-model::page`'s module doc). **Deliberately name/class only, no
+//!   per-widget configuration** (columns, data source, entity, bound
+//!   attribute, ...) — a genuine blocker, not an unfinished-breadth cut:
+//!   see `mxrs-writer::page_compiler`'s doc comment for why. The generic
+//!   third-party `CustomWidgets$CustomWidget` bundle (an arbitrary
+//!   marketplace widget by id) has no `WidgetDecl` variant at all yet.
 //! - **Button actions**: [`ButtonAction::None`], [`ButtonAction::ClosePage`],
 //!   plus [`ButtonAction::CallMicroflow`]/[`ButtonAction::CallNanoflow`] —
 //!   marker-checked via `crate::markers::MicroflowRef`/`NanoflowRef`, the
@@ -140,6 +146,23 @@ pub enum WidgetDecl {
     DropDown {
         name: Option<String>,
         attribute: String,
+        class: Option<String>,
+    },
+    /// Mendix's official React Data Grid 2 (`com.mendix.widget.web.datagrid.Datagrid`).
+    /// See this module's doc comment for why there's no column/data-source
+    /// configuration yet.
+    DataGrid2 {
+        name: Option<String>,
+        class: Option<String>,
+    },
+    /// Mendix's official Gallery widget (`com.mendix.widget.web.gallery.Gallery`).
+    Gallery {
+        name: Option<String>,
+        class: Option<String>,
+    },
+    /// Mendix's official Combo Box widget (`com.mendix.widget.web.combobox.Combobox`).
+    ComboBox {
+        name: Option<String>,
         class: Option<String>,
     },
 }

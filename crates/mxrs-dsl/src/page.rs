@@ -20,8 +20,9 @@
 //! locked-scope precedent); pages are authored by calling this builder API
 //! from ordinary Rust, not through macro sugar, until a later pass decides
 //! that's worth it. See `mxrs_ir::page` for the current widget vocabulary
-//! and every remaining deferred gap (pluggable widgets, `ReferenceSelector`,
-//! call-argument mappings on microflow/nanoflow actions).
+//! and every remaining deferred gap (`ReferenceSelector`, per-widget
+//! configuration on `data_grid_2`/`gallery`/`combo_box`, call-argument
+//! mappings on microflow/nanoflow actions).
 //!
 //! **`DataViewBuilder`'s entry point takes the data source up front**
 //! (`data_view_from_microflow`/`data_view_from_nanoflow`), not as a call
@@ -133,6 +134,36 @@ impl PageBuilder {
         );
         self
     }
+
+    pub fn data_grid_2(
+        &mut self,
+        configure: impl FnOnce(&mut PluggableWidgetBuilder),
+    ) -> &mut Self {
+        push_pluggable_widget(
+            &mut self.decl.widgets,
+            PluggableWidgetKind::DataGrid2,
+            configure,
+        );
+        self
+    }
+
+    pub fn gallery(&mut self, configure: impl FnOnce(&mut PluggableWidgetBuilder)) -> &mut Self {
+        push_pluggable_widget(
+            &mut self.decl.widgets,
+            PluggableWidgetKind::Gallery,
+            configure,
+        );
+        self
+    }
+
+    pub fn combo_box(&mut self, configure: impl FnOnce(&mut PluggableWidgetBuilder)) -> &mut Self {
+        push_pluggable_widget(
+            &mut self.decl.widgets,
+            PluggableWidgetKind::ComboBox,
+            configure,
+        );
+        self
+    }
 }
 
 pub struct ContainerBuilder {
@@ -214,6 +245,28 @@ impl ContainerBuilder {
             DataSourceDecl::Nanoflow(target.qualified_name()),
             configure,
         );
+        self
+    }
+
+    pub fn data_grid_2(
+        &mut self,
+        configure: impl FnOnce(&mut PluggableWidgetBuilder),
+    ) -> &mut Self {
+        push_pluggable_widget(
+            &mut self.children,
+            PluggableWidgetKind::DataGrid2,
+            configure,
+        );
+        self
+    }
+
+    pub fn gallery(&mut self, configure: impl FnOnce(&mut PluggableWidgetBuilder)) -> &mut Self {
+        push_pluggable_widget(&mut self.children, PluggableWidgetKind::Gallery, configure);
+        self
+    }
+
+    pub fn combo_box(&mut self, configure: impl FnOnce(&mut PluggableWidgetBuilder)) -> &mut Self {
+        push_pluggable_widget(&mut self.children, PluggableWidgetKind::ComboBox, configure);
         self
     }
 
@@ -400,6 +453,28 @@ impl LayoutGridColumnBuilder {
         );
         self
     }
+
+    pub fn data_grid_2(
+        &mut self,
+        configure: impl FnOnce(&mut PluggableWidgetBuilder),
+    ) -> &mut Self {
+        push_pluggable_widget(
+            &mut self.children,
+            PluggableWidgetKind::DataGrid2,
+            configure,
+        );
+        self
+    }
+
+    pub fn gallery(&mut self, configure: impl FnOnce(&mut PluggableWidgetBuilder)) -> &mut Self {
+        push_pluggable_widget(&mut self.children, PluggableWidgetKind::Gallery, configure);
+        self
+    }
+
+    pub fn combo_box(&mut self, configure: impl FnOnce(&mut PluggableWidgetBuilder)) -> &mut Self {
+        push_pluggable_widget(&mut self.children, PluggableWidgetKind::ComboBox, configure);
+        self
+    }
 }
 
 pub struct DataViewBuilder {
@@ -537,6 +612,67 @@ fn push_data_view(
     let mut builder = DataViewBuilder::new(source);
     configure(&mut builder);
     widgets.push(builder.into_decl());
+}
+
+/// Which of Mendix's three pluggable built-ins `PluggableWidgetBuilder` is
+/// configuring — see `mxrs_ir::page`'s doc comment for why all three share
+/// the exact same (name/class-only) builder shape today.
+enum PluggableWidgetKind {
+    DataGrid2,
+    Gallery,
+    ComboBox,
+}
+
+/// Shared builder behind `.data_grid_2`/`.gallery`/`.combo_box` — all three
+/// compile to the same shape (see `mxrs_ir::page::WidgetDecl::DataGrid2`'s
+/// doc comment for why there's nothing to configure yet beyond
+/// name/appearance), so one builder type serves all three rather than
+/// tripling identical boilerplate.
+pub struct PluggableWidgetBuilder {
+    name: Option<String>,
+    class: Option<String>,
+}
+
+impl PluggableWidgetBuilder {
+    fn new() -> Self {
+        PluggableWidgetBuilder {
+            name: None,
+            class: None,
+        }
+    }
+
+    pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn class(&mut self, class: impl Into<String>) -> &mut Self {
+        self.class = Some(class.into());
+        self
+    }
+}
+
+fn push_pluggable_widget(
+    widgets: &mut Vec<WidgetDecl>,
+    kind: PluggableWidgetKind,
+    configure: impl FnOnce(&mut PluggableWidgetBuilder),
+) {
+    let mut builder = PluggableWidgetBuilder::new();
+    configure(&mut builder);
+    widgets.push(match kind {
+        PluggableWidgetKind::DataGrid2 => WidgetDecl::DataGrid2 {
+            name: builder.name,
+            class: builder.class,
+        },
+        PluggableWidgetKind::Gallery => WidgetDecl::Gallery {
+            name: builder.name,
+            class: builder.class,
+        },
+        PluggableWidgetKind::ComboBox => WidgetDecl::ComboBox {
+            name: builder.name,
+            class: builder.class,
+        },
+    });
 }
 
 #[cfg(test)]
@@ -691,5 +827,27 @@ mod tests {
             WidgetDecl::Button { action: ButtonAction::CallNanoflow(name), .. }
                 if name == "Sales.NF_ValidateOrder"
         ));
+    }
+
+    #[test]
+    fn builds_a_page_with_data_grid_2_gallery_and_combo_box() {
+        let mut page = PageBuilder::new("Dashboard");
+        page.layout("Atlas_Core.ApplicationLayout", "Main");
+        page.data_grid_2(|dg| {
+            dg.name("ordersGrid");
+            dg.class("orders-grid");
+        });
+        page.gallery(|_| {});
+        page.combo_box(|_| {});
+        let decl = page.into_decl();
+
+        assert_eq!(decl.widgets.len(), 3);
+        assert!(matches!(
+            &decl.widgets[0],
+            WidgetDecl::DataGrid2 { name, class }
+                if name.as_deref() == Some("ordersGrid") && class.as_deref() == Some("orders-grid")
+        ));
+        assert!(matches!(&decl.widgets[1], WidgetDecl::Gallery { .. }));
+        assert!(matches!(&decl.widgets[2], WidgetDecl::ComboBox { .. }));
     }
 }

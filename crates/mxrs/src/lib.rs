@@ -7,7 +7,7 @@
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, ContainerBuilder, DataViewBuilder, EntityBuilder,
     EnumerationBuilder, FlowBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
-    LayoutGridRowBuilder, ModuleBuilder, PageBuilder, ProjectBuilder,
+    LayoutGridRowBuilder, ModuleBuilder, PageBuilder, PluggableWidgetBuilder, ProjectBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;

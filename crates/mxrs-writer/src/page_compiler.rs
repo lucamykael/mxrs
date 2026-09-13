@@ -45,6 +45,50 @@
 //! `MprCodec` accepts what this compiler emits and decodes it back
 //! losslessly (see `page_compiler` tests in `mxrs-writer`'s own test
 //! suite).
+//!
+//! **Pluggable widgets (`WidgetDecl::DataGrid2`/`Gallery`/`ComboBox`) via
+//! `mxrs-pluggable`, name/class only — a real, checked blocker on more, not
+//! an unfinished-breadth cut.** `mxrs_pluggable::encode_widget` can build a
+//! from-scratch `CustomWidgets$CustomWidget` two ways: with an inline
+//! property *schema* (`WidgetType::object_type`), or without one — Data
+//! Grid 2/Gallery/ComboBox's *real* schemas (dozens of properties each,
+//! e.g. Data Grid 2's `columns`/`datasource`/`itemSelection`) only exist
+//! inside the actual widget package Studio Pro installs into a project,
+//! which this environment has no access to (confirmed against `mxrb`'s own
+//! oracle: `lib/mxrb/writer.rb#pluggable_widget_doc` calls
+//! `WidgetPackage.find(...)` first and only reaches its own
+//! `configure_data_grid2!`/`configure_combo_box!` property-filling logic
+//! when that lookup succeeds). When it doesn't — the case for every
+//! `mxrs`-authored project, same as any project not opened by a real
+//! Studio Pro install — mxrb's own fallback
+//! (`configure_fallback_data_grid!`/`configure_fallback_combo_box!`) emits
+//! an **empty** inline schema (`ObjectType` with zero `PropertyTypes`) so
+//! Studio Pro can recognize the widget by its real `WidgetId` and
+//! "hydrate" the schema itself on next open. This compiler ports exactly
+//! that empty-schema shape (see `pluggable_widget_type` below) — real,
+//! oracle-confirmed `WidgetId`s
+//! (`com.mendix.widget.web.datagrid.Datagrid`/`.gallery.Gallery`/
+//! `.combobox.Combobox`, also used verifiably elsewhere in this workspace
+//! by `mxrs-compiler-widgets::{DATA_GRID_WIDGET_ID,GALLERY_WIDGET_ID,COMBO_BOX_WIDGET_ID}`),
+//! real `Name`/`Appearance` (reusing `widget_name`/`appearance_node` below,
+//! not duplicated). **Deliberately not ported**: mxrb's fallback additionally
+//! writes a handful of native-Forms-shaped convenience keys directly onto
+//! the wrapper document outside the pluggable schema entirely (e.g. a
+//! Data Grid 2's fallback `DataSource`/`Columns`/`ToolBar`, a Combo Box's
+//! `AttributePath`/`SelectorType`) — inert metadata `mxrb`'s own comment
+//! says exists only "until Studio Pro can hydrate the widget", consumed by
+//! no decoder anywhere in this workspace (`mxrs-model::page::pluggable_widget`
+//! only ever reads a `CustomWidget`'s `Name`). Reproducing them exactly
+//! would mean guessing at Mendix-version-specific raw type names mxrb's own
+//! fallback code doesn't consistently match against this workspace's own
+//! `forms-11.12.1.json` schema (e.g. it writes `Forms$DataGridColumn`,
+//! `Forms$GridDeleteButton` — the schema's real names, per
+//! `mxrs-forms::storage_naming`'s `TYPE_ALIASES`, are `GridColumn`/
+//! `DataGridRemoveButton`) — exactly the "risky BSON shape" this
+//! project's own rules say not to guess at. Entity/attribute/column/data-source
+//! configuration for these three widgets is therefore a real, separately
+//! trackable follow-up, blocked on either a genuine widget-package schema
+//! source or a deliberate decision to accept an unverified shape.
 
 use std::rc::Rc;
 
@@ -55,6 +99,7 @@ use mxrs_forms::values::{AttributeReference, Reference, Text};
 use mxrs_ir::page::{
     ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, PageDecl, WidgetDecl,
 };
+use mxrs_pluggable::{ObjectNode, ObjectType, WidgetNode, WidgetType};
 
 use crate::error::{Result, WriterError};
 
@@ -229,7 +274,124 @@ fn compile_widget(catalog: &Rc<Catalog>, widget: &WidgetDecl, counter: &mut u32)
         } => attribute_widget_node(
             catalog, "DropDown", "dropDown", name, attribute, class, counter,
         ),
+        WidgetDecl::DataGrid2 { name, class } => pluggable_widget_value(
+            catalog,
+            data_grid_2_widget_type(),
+            "dataGrid2",
+            name,
+            class,
+            counter,
+        ),
+        WidgetDecl::Gallery { name, class } => pluggable_widget_value(
+            catalog,
+            gallery_widget_type(),
+            "gallery",
+            name,
+            class,
+            counter,
+        ),
+        WidgetDecl::ComboBox { name, class } => pluggable_widget_value(
+            catalog,
+            combo_box_widget_type(),
+            "comboBox",
+            name,
+            class,
+            counter,
+        ),
     }
+}
+
+/// Real, oracle-confirmed `WidgetId`s — see this module's doc comment.
+/// `studio_category`/`studio_pro_category` for Data Grid 2 and Combo Box
+/// are also taken directly from `lib/mxrb/writer.rb`'s
+/// `data_grid2_descriptor`/`combo_box_descriptor`; Gallery has no
+/// equivalent descriptor in the oracle (mxrb's own DSL has no
+/// Gallery-specific writer support either — only the fully generic
+/// `:pluggable_widget` path), so its category reuses Data Grid 2's as a
+/// reasonable placeholder, not an oracle-derived value.
+fn data_grid_2_widget_type() -> WidgetType {
+    empty_pluggable_widget_type(
+        "com.mendix.widget.web.datagrid.Datagrid",
+        "Data grid 2",
+        "Data containers",
+        "Data Containers",
+    )
+}
+
+fn gallery_widget_type() -> WidgetType {
+    empty_pluggable_widget_type(
+        "com.mendix.widget.web.gallery.Gallery",
+        "Gallery",
+        "Data containers",
+        "Data Containers",
+    )
+}
+
+fn combo_box_widget_type() -> WidgetType {
+    empty_pluggable_widget_type(
+        "com.mendix.widget.web.combobox.Combobox",
+        "Combo box",
+        "Input widgets",
+        "Input Widgets",
+    )
+}
+
+/// Empty-schema shell matching `mxrb`'s own fallback shape — see this
+/// module's doc comment for why. `offline: true`/`needs_context: false`/
+/// `plugin: true`/`help_url: ""`/`description: ""` mirror
+/// `Mxrb::Writer#pluggable_widget_doc`'s fallback literal exactly
+/// (`"OfflineCapable" => true`, `"WidgetNeedsEntityContext" => false`,
+/// `"WidgetPluginWidget" => true`).
+fn empty_pluggable_widget_type(
+    id: &str,
+    name: &str,
+    studio_category: &str,
+    studio_pro_category: &str,
+) -> WidgetType {
+    WidgetType {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: String::new(),
+        prompt: String::new(),
+        studio_pro_category: studio_pro_category.to_string(),
+        studio_category: studio_category.to_string(),
+        platform: "Web".to_string(),
+        offline: true,
+        needs_context: false,
+        plugin: true,
+        help_url: String::new(),
+        object_type: ObjectType { properties: vec![] },
+    }
+}
+
+/// Builds a `Value::Pluggable` for an empty-schema custom widget — the
+/// same mechanism `mxrs-forms::node::Value::Pluggable` uses for any
+/// pluggable widget embedded in a page's widget list (verified round-trip
+/// coverage in `mxrs-forms/tests/native_page.rs`). `Name`/`Appearance` are
+/// set via `extra` (see `mxrs_pluggable::WidgetNode::extra`'s doc comment)
+/// rather than through the (empty) pluggable property schema, reusing this
+/// file's own `widget_name`/`appearance_node` — not duplicated — encoded
+/// through the same schema-driven `MprCodec` the rest of this compiler
+/// uses, rather than hand-rolled BSON.
+fn pluggable_widget_value(
+    catalog: &Rc<Catalog>,
+    widget_type: WidgetType,
+    default_prefix: &str,
+    name: &Option<String>,
+    class: &Option<String>,
+    counter: &mut u32,
+) -> Result<Value> {
+    let mut widget = WidgetNode::new(widget_type, ObjectNode::new());
+    widget
+        .extra
+        .insert("Name", widget_name(name, default_prefix, counter));
+    if let Some(appearance) = appearance_node(catalog, class.as_deref(), None)? {
+        let codec = mxrs_forms::MprCodec::new(catalog.clone());
+        widget
+            .extra
+            .insert("Appearance", codec.encode(&appearance)?);
+    }
+    Ok(Value::Pluggable(Box::new(widget)))
 }
 
 /// Shared shape behind `TextBox`/`CheckBox`/`DatePicker`/`DropDown`: all
@@ -544,5 +706,67 @@ mod tests {
         let re_encoded = codec.encode(&node).unwrap();
         let re_decoded = codec.decode(&re_encoded).unwrap();
         assert_eq!(node, re_decoded);
+    }
+
+    #[test]
+    fn data_grid_2_gallery_and_combo_box_compile_to_real_pluggable_widget_ids_and_round_trip() {
+        let catalog = catalog();
+        let mut decl = PageDecl::new("Dashboard");
+        decl.layout = Some(LayoutRef::new("Atlas_Core.ApplicationLayout", "Main"));
+        decl.widgets.push(WidgetDecl::DataGrid2 {
+            name: Some("ordersGrid".into()),
+            class: Some("orders-grid".into()),
+        });
+        decl.widgets.push(WidgetDecl::Gallery {
+            name: None,
+            class: None,
+        });
+        decl.widgets.push(WidgetDecl::ComboBox {
+            name: None,
+            class: None,
+        });
+
+        let document = compile_page(&catalog, &decl).unwrap();
+        let codec = mxrs_forms::MprCodec::new(catalog);
+        let node = codec.decode(&document).unwrap();
+        let re_encoded = codec.encode(&node).unwrap();
+        let re_decoded = codec.decode(&re_encoded).unwrap();
+        assert_eq!(node, re_decoded);
+
+        // `mxrs_bson::build_array` prepends a marker int at index 0 (see
+        // that function) — real elements start at index 1.
+        let layout_call = document.get_document("FormCall").unwrap();
+        let arguments = layout_call.get_array("Arguments").unwrap();
+        let argument = arguments[1].as_document().unwrap();
+        let widgets = argument.get_array("Widgets").unwrap();
+        let grid = widgets[1].as_document().unwrap();
+        assert_eq!(grid.get_str("Name").unwrap(), "ordersGrid");
+        assert_eq!(
+            grid.get_document("Type")
+                .unwrap()
+                .get_str("WidgetId")
+                .unwrap(),
+            "com.mendix.widget.web.datagrid.Datagrid"
+        );
+        assert_eq!(
+            widgets[2]
+                .as_document()
+                .unwrap()
+                .get_document("Type")
+                .unwrap()
+                .get_str("WidgetId")
+                .unwrap(),
+            "com.mendix.widget.web.gallery.Gallery"
+        );
+        assert_eq!(
+            widgets[3]
+                .as_document()
+                .unwrap()
+                .get_document("Type")
+                .unwrap()
+                .get_str("WidgetId")
+                .unwrap(),
+            "com.mendix.widget.web.combobox.Combobox"
+        );
     }
 }

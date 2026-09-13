@@ -66,6 +66,6 @@ pub use mxrs_expr::{
 };
 pub use page::{
     ButtonBuilder, ContainerBuilder, DataViewBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
-    LayoutGridRowBuilder, PageBuilder,
+    LayoutGridRowBuilder, PageBuilder, PluggableWidgetBuilder,
 };
 pub use project::ProjectBuilder;

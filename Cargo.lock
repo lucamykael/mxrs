@@ -780,6 +780,7 @@ dependencies = [
  "mxrs-ir",
  "mxrs-model",
  "mxrs-mpr",
+ "mxrs-pluggable",
  "mxrs-schema",
  "tempfile",
  "thiserror",

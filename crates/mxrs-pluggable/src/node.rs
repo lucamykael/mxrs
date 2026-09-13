@@ -19,6 +19,26 @@ pub struct WidgetNode<N> {
     /// BSON. The encoder uses it to preserve outer properties and the
     /// exact inline-schema identity expected by Studio Pro.
     pub storage_baseline: Option<mxrs_bson::Document>,
+    /// Extra top-level fields merged onto the outer `CustomWidgets$CustomWidget`
+    /// document when encoding *without* a `storage_baseline` — i.e. a
+    /// freshly authored widget, not a decoded one (a decoded widget's
+    /// `storage_baseline` already carries every original field verbatim,
+    /// `extra` included, so this only matters on first write). Ports a real
+    /// behavior of `Mxrb::Writer#pluggable_widget_doc`'s fallback path
+    /// (`lib/mxrb/writer.rb`'s `configure_fallback_data_grid!`/
+    /// `configure_fallback_combo_box!`): when the real Studio-Pro-side
+    /// widget-package property schema isn't available to hydrate from (the
+    /// normal case for any project not opened by an actual Studio Pro
+    /// install — true for every `mxrs`-authored project), mxrb still emits
+    /// a *recognizable, structurally valid* widget by writing a small set
+    /// of native-widget-shaped fields directly onto the wrapper document
+    /// (e.g. a Data Grid 2's `DataSource`/`Columns`/`ToolBar`, mirroring
+    /// `Forms$DataGrid`'s own shape) rather than attempting to fabricate
+    /// the widget's real (and, without Studio Pro, unknowable) pluggable
+    /// property schema. Studio Pro recognizes the `WidgetId` on next open
+    /// and "hydrates" the real schema itself. `mxrs-writer::page_compiler`
+    /// ports the same fallback for the same reason.
+    pub extra: mxrs_bson::Document,
 }
 
 impl<N> WidgetNode<N> {
@@ -27,6 +47,7 @@ impl<N> WidgetNode<N> {
             widget_type,
             object,
             storage_baseline: None,
+            extra: mxrs_bson::Document::new(),
         }
     }
 }
