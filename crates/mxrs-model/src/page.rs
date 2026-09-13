@@ -38,6 +38,14 @@ pub struct Page {
     pub documentation: String,
     pub url: String,
     pub layout_id: Option<String>,
+    /// The `LayoutCallArgument.Parameter` name widgets attach to (e.g.
+    /// `"Main"`) — only resolvable alongside `layout_id` for the modern
+    /// `LayoutCall`-based shape; `None` for the legacy `Layout`/`LayoutId`
+    /// fallback in [`extract_layout`], which has no equivalent parameter
+    /// concept. Needed (not just `layout_id`) to reconstruct a full
+    /// `mxrs_ir::page::LayoutRef` when re-detecting a page as Cargo-native —
+    /// see `mxrs-exporter::page_export`.
+    pub layout_parameter: Option<String>,
     pub title: String,
     pub popup_width: i32,
     pub popup_height: i32,
@@ -71,6 +79,7 @@ impl Page {
             url: get_str_any(doc, &["Url", "URL", "url"]).unwrap_or_default(),
             title: extract_text(get_any(doc, &["Title", "title"])),
             layout_id: extract_layout(doc),
+            layout_parameter: extract_layout_parameter(doc),
             popup_width: get_i32_any(doc, &["PopupWidth"]).unwrap_or(0),
             popup_height: get_i32_any(doc, &["PopupHeight"]).unwrap_or(0),
             popup_resizable: get_bool_any(doc, &["PopupResizable"]).unwrap_or(false),
@@ -142,11 +151,37 @@ fn extract_text(value: Option<&Bson>) -> String {
     }
 }
 
+/// Reads `LayoutCall.Layout` — stored, per real evidence in
+/// `mxrs-forms::storage_naming` (`("Page", "layoutCall") -> "FormCall"`,
+/// `("LayoutCall", "layout") -> "Form"`), under the raw keys `doc.FormCall.Form`
+/// rather than anything spelled `Layout`. `Form` holds the by-name qualified
+/// Layout reference `mxrs-writer::page_compiler` writes (a plain string, not
+/// a `$ID` — Layout references are by-name, see that compiler's doc
+/// comment), so this is read with `get_str_any`, not `get_id_any`. Falls
+/// back to the older, hand-rolled `Layout`/`LayoutId` shape ([`Page::to_bson`]'s
+/// own legacy writer) for documents that predate the schema-driven
+/// `LayoutCall` shape.
 fn extract_layout(doc: &Document) -> Option<String> {
     if let Some(form) = get_doc_any(doc, &["FormCall"]).and_then(|f| get_str_any(&f, &["Form"])) {
         return Some(form);
     }
     get_id_any(doc, &["Layout", "LayoutId"])
+}
+
+/// Companion to [`extract_layout`]: the `LayoutCallArgument.Parameter`
+/// by-name reference (e.g. `"Main"`) widgets attach to on the referenced
+/// Layout. `mxrs-writer::page_compiler` only ever emits a single
+/// `LayoutCallArgument` per page (one `PageDecl.layout` = one parameter), so
+/// taking the first argument is lossless for anything this crate's own
+/// writer produced; a real Studio-Pro page with multiple layout parameters
+/// (uncommon — most Layouts expose one content placeholder) would only have
+/// its first parameter recovered here, same single-argument assumption
+/// `form_call_widgets` already makes when flattening every argument's
+/// widgets into one list.
+fn extract_layout_parameter(doc: &Document) -> Option<String> {
+    let form_call = get_doc_any(doc, &["FormCall"])?;
+    let first_argument = docs_any(&form_call, &["Arguments"]).into_iter().next()?;
+    get_str_any(&first_argument, &["Parameter"])
 }
 
 // ── Structural traversal ─────────────────────────────────────────────────
@@ -627,33 +662,52 @@ fn layout_grid_weight(value: i32) -> Bson {
     }
 }
 
+/// Lossless: every column's actual widget subtree survives as real
+/// `Widget`s nested under a synthetic `"layout_grid_row"` /
+/// `"layout_grid_column"` pair (mirroring how `container`/`data_view`
+/// nest their own children directly), not just a `"widget_count"` summary
+/// the way this function used to. `mxrs-exporter::page_export` depends on
+/// this to reconstruct `WidgetDecl::LayoutGrid` for import detection — see
+/// its module doc for why a count-only summary made that detection
+/// impossible.
 fn layout_grid_widget(widget: &Document) -> Widget {
-    let rows: Vec<Bson> = docs_any(widget, &["Rows"])
+    let rows: Vec<Widget> = docs_any(widget, &["Rows"])
         .iter()
         .map(|row| {
-            let columns: Vec<Bson> = docs_any(row, &["Columns"])
+            let columns: Vec<Widget> = docs_any(row, &["Columns"])
                 .iter()
                 .map(|column| {
                     let mut children = Vec::new();
                     parse_widgets(&docs_any(column, &["Widgets"]), &mut children);
-                    Bson::Document(mxrs_bson::doc! {
-                        "desktop": layout_grid_weight(get_i32_any(column, &["Weight"]).unwrap_or(-1)),
-                        "tablet": layout_grid_weight(get_i32_any(column, &["TabletWeight"]).unwrap_or(-1)),
-                        "phone": layout_grid_weight(get_i32_any(column, &["PhoneWeight"]).unwrap_or(-1)),
-                        "widget_count": children.len() as i32,
-                    })
+                    Widget {
+                        widget_type: "layout_grid_column".into(),
+                        name: None,
+                        options: mxrs_bson::doc! {
+                            "desktop": layout_grid_weight(get_i32_any(column, &["Weight"]).unwrap_or(-1)),
+                            "tablet": layout_grid_weight(get_i32_any(column, &["TabletWeight"]).unwrap_or(-1)),
+                            "phone": layout_grid_weight(get_i32_any(column, &["PhoneWeight"]).unwrap_or(-1)),
+                        },
+                        events: vec![],
+                        children,
+                    }
                 })
                 .collect();
-            Bson::Document(mxrs_bson::doc! { "columns": columns })
+            Widget {
+                widget_type: "layout_grid_row".into(),
+                name: None,
+                options: Document::new(),
+                events: vec![],
+                children: columns,
+            }
         })
         .collect();
 
     Widget {
         widget_type: "layout_grid".into(),
         name: Some(get_str_any(widget, &["Name"]).unwrap_or_else(|| "layoutGrid".into())),
-        options: mxrs_bson::doc! { "rows": rows },
+        options: Document::new(),
         events: vec![],
-        children: vec![],
+        children: rows,
     }
 }
 
@@ -1115,6 +1169,68 @@ mod tests {
         let page = Page::from_bson(&d);
         assert_eq!(page.name.as_deref(), Some("OrderOverview"));
         assert_eq!(page.url, "orderoverview");
+    }
+
+    #[test]
+    fn decodes_the_layout_call_qualified_name_and_parameter_together() {
+        let text = doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Forms$DynamicText", "Name": "hint", "Content": "hi" };
+        let d = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Forms$Page",
+            "Name": "OrderOverview",
+            "FormCall": {
+                "Form": "Atlas_Core.ApplicationLayout",
+                "Arguments": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "Parameter": "Main",
+                    "Widgets": mxrs_bson::build_array(vec![Bson::Document(text)], 3),
+                })], 3),
+            },
+        };
+        let page = Page::from_bson(&d);
+        assert_eq!(
+            page.layout_id.as_deref(),
+            Some("Atlas_Core.ApplicationLayout")
+        );
+        assert_eq!(page.layout_parameter.as_deref(), Some("Main"));
+        assert_eq!(page.widgets.len(), 1);
+        assert_eq!(page.widgets[0].widget_type, "text");
+    }
+
+    #[test]
+    fn a_layout_grid_column_keeps_its_actual_widgets_not_just_a_count() {
+        let text = doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Forms$DynamicText", "Name": "hint", "Content": "Left" };
+        let grid = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Forms$LayoutGrid",
+            "Name": "grid1",
+            "Rows": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                "Columns": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                    "Weight": 1,
+                    "Widgets": mxrs_bson::build_array(vec![Bson::Document(text)], 3),
+                })], 3),
+            })], 3),
+        };
+        let d = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Forms$Page",
+            "Widgets": mxrs_bson::build_array(vec![Bson::Document(grid)], 3),
+        };
+        let page = Page::from_bson(&d);
+        let grid = &page.widgets[0];
+        assert_eq!(grid.widget_type, "layout_grid");
+        assert_eq!(grid.children.len(), 1, "one row");
+        let row = &grid.children[0];
+        assert_eq!(row.widget_type, "layout_grid_row");
+        assert_eq!(row.children.len(), 1, "one column");
+        let column = &row.children[0];
+        assert_eq!(column.widget_type, "layout_grid_column");
+        assert_eq!(column.options.get_i32("desktop").unwrap(), 1);
+        assert_eq!(
+            column.children.len(),
+            1,
+            "the column's real widget, not a count"
+        );
+        assert_eq!(column.children[0].widget_type, "text");
     }
 
     #[test]

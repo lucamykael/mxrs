@@ -1,124 +1,125 @@
 //! Detects pages built entirely from the widget vocabulary
 //! `mxrs-dsl`/`mxrs-writer` can author (see `mxrs_ir::page`'s doc comment)
-//! and renders them as reviewable `mxrs-dsl` source text.
+//! and renders them as real, compiled `mxrs-dsl` source: a standalone
+//! `pub fn <page>() -> ::mxrs_ir::page::PageDecl` per detected page, plus
+//! the `src/domain/mod.rs` wiring (see `lib.rs::render`) that pushes each
+//! one into its module and returns it from `build()`.
 //!
-//! **Deliberately not wired into the live `build()`/`.mpr` output** (unlike
-//! domain entities, which `render`/`import_cargo_project` do wire into
-//! `src/domain/mod.rs`'s `project! {}` call). Two concrete risks made that
-//! the wrong default for this pass:
+//! **Now wired into the live `build()`/`.mpr` output**, same as domain
+//! entities. Two things had to be true first, both now closed:
 //!
-//! 1. **Silent fidelity loss on the very first rebuild.** This IR captures
-//!    far less than a real Studio-Pro-authored page can carry (no
-//!    conditional visibility, no dynamic classes, no data binding, no
-//!    pluggable widgets — see `mxrs_ir::page`). If a detected page were
-//!    auto-wired into `ProjectDecl.modules[].pages`, the very first
-//!    `cargo mxrs build` after import would silently re-derive that page
-//!    from the narrower IR and drop anything outside it — worse than
-//!    leaving it opaque.
-//! 2. **`layout` isn't reliably recoverable from the decoded snapshot.**
-//!    `mxrs_model::page::Page::layout_id` reads a page's `Layout`/`LayoutId`
-//!    field (mxrb's older, hand-rolled-writer page shape); it does not
-//!    (yet) decode the modern schema-driven `LayoutCall.Layout` by-name
-//!    reference `mxrs-writer::page_compiler` itself writes and
-//!    `mxrs-model::page::extract_layout` was never extended to read back
-//!    (a real, separately-trackable gap in `mxrs-model`, out of scope
-//!    here). Concretely: a real imported page's `layout` is usually
-//!    unresolvable, so the rendered source always leaves a `TODO` for it.
+//! 1. **`layout` had to be reliably recoverable.** `mxrs_model::page::Page`
+//!    now exposes `layout_id` *and* `layout_parameter` (the
+//!    `LayoutCallArgument.Parameter` by-name reference), read together by
+//!    `mxrs_model::page::extract_layout`/`extract_layout_parameter` off the
+//!    real `LayoutCall`-based storage shape (`doc.FormCall.Form` /
+//!    `doc.FormCall.Arguments[0].Parameter` — see those functions' doc
+//!    comments for the storage-naming evidence). A page whose widgets exist
+//!    but whose layout isn't resolvable is still treated as unconvertible
+//!    (opaque), rather than emitting a `PageDecl` `compile_page` would
+//!    reject at write time (`WriterError::PageWidgetsRequireLayout`).
+//! 2. **`LayoutGrid` decode had to be lossless.** `mxrs_model::page::
+//!    layout_grid_widget` now nests each column's actual widgets (via
+//!    synthetic `"layout_grid_row"`/`"layout_grid_column"` wrapper
+//!    `Widget`s) instead of a `"widget_count"` summary, so this module can
+//!    walk back to `WidgetDecl::LayoutGrid`.
 //!
-//! Given both, this module writes `src/domain/pages.rs` as syntactically
-//! valid but **uncompiled** reference source (not declared as a module from
-//! `src/domain/mod.rs` or anywhere else in the generated crate — an `.rs`
-//! file cargo never sees is simply inert). Adopting a page means copying
-//! the generated function's body into a `module.page(...)` call the
-//! developer actually wires up themselves, after filling in the `layout`
-//! TODO and reviewing what (if anything) was dropped.
-//!
-//! **Widget vocabulary detected**: `container`/`text`/`button` only — not
-//! `layout_grid`. `mxrs-model::page::layout_grid_widget`'s own decode is a
-//! lossy widget-*count* summary (see that function's `"widget_count"`
-//! field), not the actual nested widgets, so a `LayoutGrid` can never be
-//! losslessly reconstructed from the decoded view this module consumes;
-//! extending that decoder to be lossless is a separate, `mxrs-model`-side
-//! follow-up. `mxrs-writer::page_compiler` still supports writing
-//! `LayoutGrid` for pages hand-authored from scratch — only *import
-//! detection* is narrower.
+//! **Still narrower than a full page**: no pluggable widgets, no native
+//! data-bound widgets outside what `WidgetDecl` already covers, no
+//! conditional visibility/dynamic classes, no security roles. A page using
+//! any of those stays exactly as opaque as before — served from the
+//! generated snapshot, contributing nothing to `build()`.
 
 use std::fmt::Write as _;
 
 use mxrs_bson::Document;
-use mxrs_ir::page::{ButtonAction, PageDecl, WidgetDecl};
+use mxrs_ir::page::{
+    ButtonAction, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl, WidgetDecl,
+};
 use mxrs_model::Module;
 use mxrs_model::page::{Page, Widget};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PageExportReport {
-    /// Pages built entirely from the detected widget vocabulary — rendered
-    /// into `src/domain/pages.rs` for review.
+    /// Pages built entirely from the detected widget vocabulary — wired
+    /// directly into `build()` via `src/domain/pages.rs`.
     pub typed_candidates: usize,
     /// Every other page (pluggable widgets, data binding, conditional
-    /// visibility, security roles, ...) — stays exactly as opaque as
-    /// before this pass, served from the generated snapshot.
+    /// visibility, security roles, unresolvable layout, ...) — stays
+    /// exactly as opaque as before this pass, served from the generated
+    /// snapshot.
     pub opaque: usize,
 }
 
-/// Renders every convertible page across every module into one reviewable
-/// source file, alongside a count of what wasn't convertible. Returns
-/// `None` when there is nothing to show (no point writing an empty file).
-pub fn render_pages_review(modules: &[Module]) -> (Option<String>, PageExportReport) {
+/// One page detected as buildable from `mxrs-dsl`'s native/structural
+/// widget vocabulary, ready to be rendered both as a standalone function
+/// (`pages.rs`) and as a `src/domain/mod.rs` wiring statement that pushes
+/// it into `module_name`'s `ModuleDecl.pages`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvertedPage {
+    pub module_name: String,
+    pub function_name: String,
+    pub decl: PageDecl,
+}
+
+/// Detects every convertible page across every module. Pure detection, no
+/// rendering — shared by `render_pages_module` (the `pages.rs` text) and
+/// `lib.rs::render` (the `build()` wiring), so the two can never drift
+/// apart on which pages qualify.
+pub fn convert_pages(modules: &[Module]) -> (Vec<ConvertedPage>, PageExportReport) {
     let mut report = PageExportReport::default();
-    let mut functions = Vec::new();
+    let mut pages = Vec::new();
     for module in modules {
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        let module_name = module.name.clone().unwrap_or_else(|| "Unnamed".into());
         for page in &module.pages {
             match try_convert_page(page) {
                 Some(decl) => {
                     report.typed_candidates += 1;
-                    functions.push(render_page_function(module_name, &decl));
+                    pages.push(ConvertedPage {
+                        module_name: module_name.clone(),
+                        function_name: to_snake_case(&decl.name),
+                        decl,
+                    });
                 }
                 None => report.opaque += 1,
             }
         }
     }
-    if functions.is_empty() {
-        return (None, report);
+    (pages, report)
+}
+
+/// Renders every converted page into one `src/domain/pages.rs` source file
+/// of real, compiled `pub fn` page-builders. Returns `None` when there is
+/// nothing to show (no point writing an empty file).
+pub fn render_pages_module(pages: &[ConvertedPage]) -> Option<String> {
+    if pages.is_empty() {
+        return None;
     }
 
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "// Generated by `mxrs-exporter` for review only — this file is NOT"
+        "// Generated by `mxrs-exporter`. Each function below reproduces one page"
     );
     let _ = writeln!(
         out,
-        "// declared as a module anywhere and is never compiled. Each function"
+        "// detected as buildable from mxrs-dsl's native/structural widget"
     );
     let _ = writeln!(
         out,
-        "// below reproduces one page detected as buildable from mxrs-dsl's"
+        "// vocabulary (see mxrs_ir::page's doc comment) and is wired into"
     );
     let _ = writeln!(
         out,
-        "// native/structural widget vocabulary (see mxrs_ir::page's doc"
+        "// `build()` by src/domain/mod.rs — edit freely, same as the rest of"
     );
-    let _ = writeln!(
-        out,
-        "// comment). To adopt one: copy its body into your own module setup,"
-    );
-    let _ = writeln!(
-        out,
-        "// e.g. `module.page(\"Name\", |p| {{ .. body .. }});`, filling in the"
-    );
-    let _ = writeln!(
-        out,
-        "// `layout` TODO (not recoverable from the imported snapshot — see"
-    );
-    let _ = writeln!(out, "// this crate's `page_export` module doc for why).");
+    let _ = writeln!(out, "// this crate's generated source.");
     out.push('\n');
-    for function in functions {
-        out.push_str(&function);
+    for page in pages {
+        out.push_str(&render_page_function(page));
         out.push('\n');
     }
-    (Some(out), report)
+    Some(out)
 }
 
 fn try_convert_page(page: &Page) -> Option<PageDecl> {
@@ -138,12 +139,28 @@ fn try_convert_page(page: &Page) -> Option<PageDecl> {
         .map(try_convert_widget)
         .collect::<Option<Vec<_>>>()?;
 
+    let layout = match (&page.layout_id, &page.layout_parameter) {
+        (Some(qualified_name), Some(parameter)) => {
+            Some(LayoutRef::new(qualified_name.clone(), parameter.clone()))
+        }
+        _ => None,
+    };
+    if layout.is_none() && !widgets.is_empty() {
+        // `compile_page` requires a layout whenever a page has widgets
+        // (`WriterError::PageWidgetsRequireLayout`) — a page whose layout
+        // isn't resolvable can never round-trip through this IR, so treat
+        // it as opaque rather than emit a `PageDecl` that would fail at
+        // write time.
+        return None;
+    }
+
     let mut decl = PageDecl::new(name);
     decl.documentation = page.documentation.clone();
     decl.url = page.url.clone();
     if !page.title.is_empty() {
         decl.title = Some(page.title.clone());
     }
+    decl.layout = layout;
     decl.widgets = widgets;
     Some(decl)
 }
@@ -201,8 +218,66 @@ fn try_convert_widget(widget: &Widget) -> Option<WidgetDecl> {
                 action,
             })
         }
+        "layout_grid" => try_convert_layout_grid(widget),
         _ => None,
     }
+}
+
+/// Walks the `"layout_grid_row"`/`"layout_grid_column"` wrapper tree
+/// `mxrs_model::page::layout_grid_widget` now nests real children under
+/// (see that function's doc comment) back into `WidgetDecl::LayoutGrid`.
+/// Only desktop-weight columns with no tablet/phone override convert —
+/// `WidgetDecl::LayoutGrid` has no per-breakpoint weight concept yet (see
+/// `mxrs_ir::page`), so a column that actually uses one stays opaque rather
+/// than silently dropping it.
+fn try_convert_layout_grid(widget: &Widget) -> Option<WidgetDecl> {
+    if !widget.events.is_empty() || !only_keys(&widget.options, &[]) {
+        return None;
+    }
+    let rows = widget
+        .children
+        .iter()
+        .map(try_convert_layout_grid_row)
+        .collect::<Option<Vec<_>>>()?;
+    Some(WidgetDecl::LayoutGrid {
+        name: widget.name.clone(),
+        rows,
+    })
+}
+
+fn try_convert_layout_grid_row(row: &Widget) -> Option<LayoutGridRowDecl> {
+    if row.widget_type != "layout_grid_row" || !row.events.is_empty() {
+        return None;
+    }
+    let columns = row
+        .children
+        .iter()
+        .map(try_convert_layout_grid_column)
+        .collect::<Option<Vec<_>>>()?;
+    Some(LayoutGridRowDecl { columns })
+}
+
+fn try_convert_layout_grid_column(column: &Widget) -> Option<LayoutGridColumnDecl> {
+    if column.widget_type != "layout_grid_column" || !column.events.is_empty() {
+        return None;
+    }
+    let weight = column.options.get_i32("desktop").ok()?;
+    let is_uniform_breakpoint = |key: &str| {
+        column
+            .options
+            .get_i32(key)
+            .ok()
+            .is_some_and(|value| value == weight)
+    };
+    if !is_uniform_breakpoint("tablet") || !is_uniform_breakpoint("phone") {
+        return None;
+    }
+    let children = column
+        .children
+        .iter()
+        .map(try_convert_widget)
+        .collect::<Option<Vec<_>>>()?;
+    Some(LayoutGridColumnDecl { weight, children })
 }
 
 fn only_keys(document: &Document, allowed: &[&str]) -> bool {
@@ -213,53 +288,45 @@ fn string_option(document: &Document, key: &str) -> Option<String> {
     document.get_str(key).ok().map(str::to_string)
 }
 
-fn render_page_function(module_name: &str, decl: &PageDecl) -> String {
+fn render_page_function(page: &ConvertedPage) -> String {
+    let decl = &page.decl;
     let mut out = String::new();
-    let _ = writeln!(out, "/// `{module_name}.{}`", decl.name);
+    let _ = writeln!(out, "/// `{}.{}`", page.module_name, decl.name);
     let _ = writeln!(
         out,
-        "pub fn {}(module: &mut ::mxrs_dsl::ModuleBuilder) {{",
-        to_snake_case(&decl.name)
+        "pub fn {}() -> ::mxrs_ir::page::PageDecl {{",
+        page.function_name
     );
-    let _ = writeln!(out, "    module.page({:?}, |p| {{", decl.name);
+    let _ = writeln!(
+        out,
+        "    let mut p = ::mxrs_dsl::PageBuilder::new({:?});",
+        decl.name
+    );
     if !decl.documentation.is_empty() {
-        let _ = writeln!(out, "        p.documentation({:?});", decl.documentation);
+        let _ = writeln!(out, "    p.documentation({:?});", decl.documentation);
     }
     if !decl.url.is_empty() {
-        let _ = writeln!(out, "        p.url({:?});", decl.url);
+        let _ = writeln!(out, "    p.url({:?});", decl.url);
     }
     if let Some(title) = &decl.title {
-        let _ = writeln!(out, "        p.title({title:?});");
+        let _ = writeln!(out, "    p.title({title:?});");
     }
-    match &decl.layout {
-        Some(layout) => {
-            let _ = writeln!(
-                out,
-                "        p.layout({:?}, {:?});",
-                layout.qualified_name, layout.parameter
-            );
-        }
-        None if !decl.widgets.is_empty() => {
-            let _ = writeln!(
-                out,
-                "        // TODO: layout not recoverable from the imported snapshot; set it, e.g.:"
-            );
-            let _ = writeln!(
-                out,
-                "        // p.layout(\"YourModule.YourLayout\", \"Main\");"
-            );
-        }
-        None => {}
+    if let Some(layout) = &decl.layout {
+        let _ = writeln!(
+            out,
+            "    p.layout({:?}, {:?});",
+            layout.qualified_name, layout.parameter
+        );
     }
     for widget in &decl.widgets {
-        out.push_str(&render_widget(widget, 2));
+        out.push_str(&render_widget(widget, 1, "p"));
     }
-    let _ = writeln!(out, "    }});");
+    let _ = writeln!(out, "    p.into_decl()");
     let _ = writeln!(out, "}}");
     out
 }
 
-fn render_widget(widget: &WidgetDecl, indent: usize) -> String {
+fn render_widget(widget: &WidgetDecl, indent: usize, receiver: &str) -> String {
     let pad = "    ".repeat(indent);
     let mut out = String::new();
     match widget {
@@ -269,7 +336,7 @@ fn render_widget(widget: &WidgetDecl, indent: usize) -> String {
             style,
             children,
         } => {
-            let _ = writeln!(out, "{pad}w.container(|w| {{");
+            let _ = writeln!(out, "{pad}{receiver}.container(|w| {{");
             if let Some(name) = name {
                 let _ = writeln!(out, "{pad}    w.name({name:?});");
             }
@@ -280,27 +347,35 @@ fn render_widget(widget: &WidgetDecl, indent: usize) -> String {
                 let _ = writeln!(out, "{pad}    w.style({style:?});");
             }
             for child in children {
-                out.push_str(&render_widget(child, indent + 1));
+                out.push_str(&render_widget(child, indent + 1, "w"));
             }
             let _ = writeln!(out, "{pad}}});");
         }
-        WidgetDecl::LayoutGrid { .. } => {
-            // Unreachable from `try_convert_widget` (see this module's doc
-            // comment) — kept exhaustive rather than `unreachable!()` so a
-            // future widening of import detection doesn't silently need to
-            // remember to add this arm.
-            let _ = writeln!(
-                out,
-                "{pad}// TODO: layout_grid import detection isn't supported yet"
-            );
+        WidgetDecl::LayoutGrid { name, rows } => {
+            let _ = writeln!(out, "{pad}{receiver}.layout_grid(|grid| {{");
+            if let Some(name) = name {
+                let _ = writeln!(out, "{pad}    grid.name({name:?});");
+            }
+            for row in rows {
+                let _ = writeln!(out, "{pad}    grid.row(|row| {{");
+                for column in &row.columns {
+                    let _ = writeln!(out, "{pad}        row.column({}, |col| {{", column.weight);
+                    for child in &column.children {
+                        out.push_str(&render_widget(child, indent + 3, "col"));
+                    }
+                    let _ = writeln!(out, "{pad}        }});");
+                }
+                let _ = writeln!(out, "{pad}    }});");
+            }
+            let _ = writeln!(out, "{pad}}});");
         }
         WidgetDecl::Text { caption, .. } => {
-            let _ = writeln!(out, "{pad}w.text({caption:?});");
+            let _ = writeln!(out, "{pad}{receiver}.text({caption:?});");
         }
         WidgetDecl::Button {
             caption, action, ..
         } => {
-            let _ = writeln!(out, "{pad}w.button({caption:?}, |b| {{");
+            let _ = writeln!(out, "{pad}{receiver}.button({caption:?}, |b| {{");
             if *action == ButtonAction::ClosePage {
                 let _ = writeln!(out, "{pad}    b.close_page();");
             }
@@ -369,16 +444,74 @@ mod tests {
         }
     }
 
+    fn layout_grid_column(weight: i32, children: Vec<Widget>) -> Widget {
+        Widget {
+            widget_type: "layout_grid_column".into(),
+            name: None,
+            options: mxrs_bson::doc! { "desktop": weight, "tablet": weight, "phone": weight },
+            events: vec![],
+            children,
+        }
+    }
+
+    fn layout_grid_row(columns: Vec<Widget>) -> Widget {
+        Widget {
+            widget_type: "layout_grid_row".into(),
+            name: None,
+            options: Document::new(),
+            events: vec![],
+            children: columns,
+        }
+    }
+
+    fn layout_grid(rows: Vec<Widget>) -> Widget {
+        Widget {
+            widget_type: "layout_grid".into(),
+            name: Some("grid1".into()),
+            options: Document::new(),
+            events: vec![],
+            children: rows,
+        }
+    }
+
     fn bare_page(name: &str, widgets: Vec<Widget>) -> Page {
-        Page::from_bson(&mxrs_bson::doc! {
+        page_with_layout(
+            name,
+            widgets,
+            Some(("Atlas_Core.ApplicationLayout", "Main")),
+        )
+    }
+
+    fn page_with_layout(name: &str, widgets: Vec<Widget>, layout: Option<(&str, &str)>) -> Page {
+        let mut doc = mxrs_bson::doc! {
             "$ID": uuid::Uuid::new_v4().to_string(),
             "$Type": "Forms$Page",
             "Name": name,
-            "Widgets": mxrs_bson::build_array(
-                widgets.into_iter().map(widget_to_bson).collect(),
-                3,
-            ),
-        })
+        };
+        if let Some((qualified_name, parameter)) = layout {
+            doc.insert(
+                "FormCall",
+                mxrs_bson::doc! {
+                    "Form": qualified_name,
+                    "Arguments": mxrs_bson::build_array(
+                        vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                            "Parameter": parameter,
+                            "Widgets": mxrs_bson::build_array(
+                                widgets.into_iter().map(widget_to_bson).collect(),
+                                3,
+                            ),
+                        })],
+                        3,
+                    ),
+                },
+            );
+        } else {
+            doc.insert(
+                "Widgets",
+                mxrs_bson::build_array(widgets.into_iter().map(widget_to_bson).collect(), 3),
+            );
+        }
+        Page::from_bson(&doc)
     }
 
     fn widget_to_bson(widget: Widget) -> mxrs_bson::Bson {
@@ -419,8 +552,38 @@ mod tests {
                 "Caption": widget.options.get_str("caption").unwrap_or("").to_string(),
                 "Action": { "$Type": "Forms$ClosePageClientAction" },
             }),
+            "layout_grid" => mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "Forms$LayoutGrid",
+                "Name": widget.name.unwrap_or_default(),
+                "Rows": mxrs_bson::build_array(
+                    widget.children.into_iter().map(row_to_bson).collect(),
+                    3,
+                ),
+            }),
             other => panic!("unsupported test widget type {other}"),
         }
+    }
+
+    fn row_to_bson(row: Widget) -> mxrs_bson::Bson {
+        mxrs_bson::Bson::Document(mxrs_bson::doc! {
+            "Columns": mxrs_bson::build_array(
+                row.children.into_iter().map(column_to_bson).collect(),
+                3,
+            ),
+        })
+    }
+
+    fn column_to_bson(column: Widget) -> mxrs_bson::Bson {
+        mxrs_bson::Bson::Document(mxrs_bson::doc! {
+            "Weight": column.options.get_i32("desktop").unwrap_or(-1),
+            "TabletWeight": column.options.get_i32("tablet").unwrap_or(-1),
+            "PhoneWeight": column.options.get_i32("phone").unwrap_or(-1),
+            "Widgets": mxrs_bson::build_array(
+                column.children.into_iter().map(widget_to_bson).collect(),
+                3,
+            ),
+        })
     }
 
     #[test]
@@ -435,10 +598,53 @@ mod tests {
         let decl = try_convert_page(&page).expect("should convert");
         assert_eq!(decl.name, "OrderOverview");
         assert_eq!(decl.widgets.len(), 1);
+        let layout = decl.layout.expect("layout recovered from FormCall");
+        assert_eq!(layout.qualified_name, "Atlas_Core.ApplicationLayout");
+        assert_eq!(layout.parameter, "Main");
     }
 
     #[test]
-    fn render_pages_review_counts_typed_and_opaque_pages_separately() {
+    fn a_page_with_widgets_but_no_resolvable_layout_is_left_opaque() {
+        let page = page_with_layout("Broken", vec![text("hi")], None);
+        assert!(try_convert_page(&page).is_none());
+    }
+
+    #[test]
+    fn a_layout_grid_with_uniform_weighted_columns_converts_losslessly() {
+        let page = bare_page(
+            "Dashboard",
+            vec![layout_grid(vec![layout_grid_row(vec![
+                layout_grid_column(1, vec![text("Left")]),
+                layout_grid_column(2, vec![text("Right")]),
+            ])])],
+        );
+        let decl = try_convert_page(&page).expect("should convert");
+        let WidgetDecl::LayoutGrid { rows, .. } = &decl.widgets[0] else {
+            panic!("expected a layout grid");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].columns.len(), 2);
+        assert_eq!(rows[0].columns[0].weight, 1);
+        assert!(matches!(
+            &rows[0].columns[0].children[0],
+            WidgetDecl::Text { caption, .. } if caption == "Left"
+        ));
+        assert_eq!(rows[0].columns[1].weight, 2);
+    }
+
+    #[test]
+    fn a_layout_grid_column_with_a_breakpoint_override_is_left_opaque() {
+        let mut column = layout_grid_column(1, vec![text("Left")]);
+        column.options.insert("tablet", -2);
+        let page = bare_page(
+            "Dashboard",
+            vec![layout_grid(vec![layout_grid_row(vec![column])])],
+        );
+        assert!(try_convert_page(&page).is_none());
+    }
+
+    #[test]
+    fn convert_pages_counts_typed_and_opaque_pages_separately() {
         let convertible = bare_page("Simple", vec![text("hi")]);
         let unsupported = bare_page(
             "WithVisibility",
@@ -468,10 +674,14 @@ mod tests {
             artifact_units: vec![],
         };
 
-        let (source, report) = render_pages_review(std::slice::from_ref(&module));
+        let (pages, report) = convert_pages(std::slice::from_ref(&module));
         assert_eq!(report.typed_candidates, 1);
         assert_eq!(report.opaque, 1);
-        let source = source.expect("one convertible page should still produce a file");
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].module_name, "Sales");
+        assert_eq!(pages[0].function_name, "simple");
+
+        let source = render_pages_module(&pages).expect("one convertible page should render");
         assert!(source.contains("pub fn simple"));
         assert!(!source.contains("with_visibility"));
     }
