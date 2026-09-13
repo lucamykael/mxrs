@@ -22,6 +22,7 @@ path = "src/cargo_mxrs.rs"
 mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-exporter = { path = "../mxrs-exporter" }
 mxrs-javagen = { path = "../../compiler/mxrs-javagen" }
+mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-project = { path = "../mxrs-project" }

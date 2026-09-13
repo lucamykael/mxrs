@@ -32,6 +32,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  frontend-reproducibility:
+    name: embedded React bundle is reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26.2.0"
+          cache: npm
+          cache-dependency-path: crates/compiler/mxrs-materializers/frontend/package-lock.json
+      - run: npm ci --prefix crates/compiler/mxrs-materializers/frontend
+      - run: npm run build --prefix crates/compiler/mxrs-materializers/frontend
+      - run: test -z "$(git status --porcelain -- crates/compiler/mxrs-materializers/assets)"
+
   mxrb-oracle:
     name: oracle-diff + noise-audit (against mxrb)
     runs-on: ubuntu-latest

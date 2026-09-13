@@ -17,6 +17,8 @@ pub enum CargoProjectError {
     Project(#[from] mxrs_project::ProjectError),
     #[error(transparent)]
     Model(#[from] mxrs_model::ModelError),
+    #[error(transparent)]
+    Materialize(#[from] mxrs_materializers::MaterializeError),
 }
 
 /// Builds the current Rust declaration and compares it with the exact
@@ -54,6 +56,23 @@ pub fn build(
     release: bool,
     offline: bool,
 ) -> Result<PathBuf> {
+    let output = std::path::absolute(output.as_ref())?;
+    let web_output = output
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("web");
+    build_with_web_output(manifest, output, web_output, release, offline)
+}
+
+/// Builds and validates the MPR, then materializes the embedded React shell
+/// and stable model contract into `web_output` without invoking Node.
+pub fn build_with_web_output(
+    manifest: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    web_output: impl AsRef<Path>,
+    release: bool,
+    offline: bool,
+) -> Result<PathBuf> {
     let manifest = manifest.as_ref();
     if !manifest.is_file() {
         return Err(CargoProjectError::MissingManifest(
@@ -78,5 +97,12 @@ pub fn build(
     if !report.is_valid() {
         return Err(CargoProjectError::InvalidArtifact(report.errors));
     }
+    mxrs_materializers::materialize_mpr(&output, web_output)?;
+    Ok(output)
+}
+
+pub fn frontend_sources(output: impl AsRef<Path>) -> Result<PathBuf> {
+    let output = std::path::absolute(output.as_ref())?;
+    mxrs_materializers::materialize_frontend_sources(&output)?;
     Ok(output)
 }

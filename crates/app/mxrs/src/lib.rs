@@ -14,6 +14,11 @@ pub use mxrs_dsl::{
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
 pub use mxrs_macros::{MxEntity, MxEnumeration, application, project};
+pub use mxrs_materializers::{
+    MaterializeError, MaterializeReport, application_manifest, embedded_asset_hashes,
+    embedded_frontend_source_hash, materialize_frontend_sources, materialize_manifest,
+    materialize_mpr,
+};
 pub use mxrs_project::{
     ImportedDocumentRef, ImportedProjectManifest, ImportedUnit, PROJECT_ASSET_DIRECTORIES,
     ProjectError, capture_imported_project, capture_project_assets, materialize_project_assets,

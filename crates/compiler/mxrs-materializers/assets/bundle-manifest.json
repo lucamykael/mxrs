@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "name": "mxrs-react-shell",
+  "version": "0.1.0",
+  "source_sha256": "ffbc21a044f9a80aec66ce7d3f58b203ce1e6652b90f7a4e94d55d4123d756bd",
+  "toolchain": {
+    "node": "26.2.0",
+    "npm": "12.0.2",
+    "vite": "8.2.1",
+    "typescript": "6.0.3",
+    "react": "19.2.8"
+  },
+  "assets": {
+    ".vite/manifest.json": "f0be01d66cce18a5eae18f55e61f83274a189f72592cdfac4a7d25a512770f63",
+    "app-BbpcvhG2.css": "4588a89594a270c8b670605195129d72de79a2a1887be046584b76f8a93c6139",
+    "app-C3Of9HqT.js": "e972f793e3a56409bac200a5475077dfc6f0f29f20bfd52009a79c37d6dbdf8a",
+    "index.html": "851856e6e79f477997ef9c8ca99d295392944597e974fb5599c16459a96c3db1"
+  }
+}

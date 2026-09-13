@@ -14,6 +14,10 @@ fn main() -> ExitCode {
             args.remove(0);
             run_diff(args)
         }
+        Some("frontend-dev") => {
+            args.remove(0);
+            run_frontend_dev(args)
+        }
         _ => {
             usage();
             ExitCode::FAILURE
@@ -23,16 +27,18 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "Usage: cargo mxrs build --output <file.mpr> [--manifest-path <Cargo.toml>] [--release] [--offline]"
+        "Usage: cargo mxrs build --output <file.mpr> [--web-output <directory>] [--manifest-path <Cargo.toml>] [--release] [--offline]"
     );
     eprintln!(
         "       cargo mxrs diff [--manifest-path <Cargo.toml>] [--snapshot <model/imported>] [--json] [--release] [--offline]"
     );
+    eprintln!("       cargo mxrs frontend-dev [--output <directory>]");
 }
 
 fn run_build(mut args: Vec<String>) -> ExitCode {
     let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
     let manifest = take_value(&mut args, "--manifest-path").unwrap_or_else(|| "Cargo.toml".into());
+    let web_output = take_value(&mut args, "--web-output");
     let release = take_flag(&mut args, "--release");
     let offline = take_flag(&mut args, "--offline");
     let Some(output) = output else {
@@ -43,9 +49,36 @@ fn run_build(mut args: Vec<String>) -> ExitCode {
         eprintln!("[mxrs] error: unexpected arguments: {}", args.join(" "));
         return ExitCode::FAILURE;
     }
-    match mxrs_cli::cargo_project::build(manifest, output, release, offline) {
+    let result = match web_output {
+        Some(web) => {
+            mxrs_cli::cargo_project::build_with_web_output(manifest, output, web, release, offline)
+        }
+        None => mxrs_cli::cargo_project::build(manifest, output, release, offline),
+    };
+    match result {
         Ok(path) => {
             println!("[mxrs] built and validated {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_frontend_dev(mut args: Vec<String>) -> ExitCode {
+    let output = take_value(&mut args, "--output").unwrap_or_else(|| "frontend".into());
+    if !args.is_empty() {
+        eprintln!("[mxrs] error: unexpected arguments: {}", args.join(" "));
+        return ExitCode::FAILURE;
+    }
+    match mxrs_cli::cargo_project::frontend_sources(output) {
+        Ok(path) => {
+            println!(
+                "[mxrs] materialized pinned frontend sources at {}",
+                path.display()
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {

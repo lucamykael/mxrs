@@ -1,0 +1,26 @@
+{
+  "name": "mxrs-materialized-react-shell",
+  "authentication": false,
+  "viewport": {
+    "width": 1280,
+    "height": 800
+  },
+  "pages": [
+    {
+      "name": "embedded-shell-renders-mpr-contract",
+      "path": "/#Sales.OrderOverview",
+      "steps": [
+        { "wait_for_text": "with_page" },
+        { "wait_for_text": "Orders" },
+        { "wait_for_text": "Manage your orders" },
+        { "wait_for_selector": "main[data-page=\"Sales.OrderOverview\"]" },
+        { "wait_for_absence": "[role=\"alert\"]" }
+      ],
+      "selectors": [
+        "body",
+        ".mxrs-app",
+        "main[data-page=\"Sales.OrderOverview\"]"
+      ]
+    }
+  ]
+}

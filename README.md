@@ -53,9 +53,10 @@ artifact rebuilds) → `mxrs-exporter` (`.mpr` → Cargo project) → `mxrs`
 artifact plus Gallery/Data Grid 2/Combo Box/Image and generic pluggable bundles,
 shared modern list sources, and page/layout ES-module emission with native
 structural/text rendering) →
-`mxrs-javagen` (generated Java proxies). Materializers/packaging
-(`mxrs-materializers`, `mxrs-packager`) and the runtime/OQL/semantic/scaffold
-subsystems are not started yet.
+`mxrs-javagen` (generated Java proxies) → `mxrs-materializers` (a versioned,
+hash-verified React bundle plus stable `model.json`, embedded so normal builds
+need no Node). Packaging (`mxrs-packager`) and the runtime/OQL/semantic/scaffold
+subsystems remain separate follow-up layers.
 
 `mxrs-cli` (binary `mxrs`) exposes `import`, `validate`, `compare`, `inspect`,
 `units`, `dump-unit`, `sql`, `modules`, `export`, and `javagen` today. Typed
@@ -111,6 +112,12 @@ cargo check
 cargo test
 cargo mxrs diff
 cargo mxrs build --output build/ExistingApp.mpr
+# Also writes the self-contained React application to build/web.
+
+# Only when deliberately customizing/rebuilding the frontend:
+cargo mxrs frontend-dev --output frontend
+npm ci --prefix frontend
+npm run build --prefix frontend
 ```
 
 Installed/released builds omit `--mxrs-workspace` and generate the normal Git
@@ -125,6 +132,8 @@ cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 cargo run -p xtask -- oracle-diff xtask/fixtures/minimal
 cargo run -p xtask -- oracle-diff xtask/fixtures/with_page
+npm ci --prefix crates/compiler/mxrs-materializers/frontend
+npm run build --prefix crates/compiler/mxrs-materializers/frontend
 ```
 
 `oracle-diff` is the correctness ceiling for anything touching the

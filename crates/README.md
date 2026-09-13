@@ -7,7 +7,7 @@ unchanged; only their repository paths encode architectural ownership.
 - `model/`: Mendix schemas, codecs, settings, pluggable widgets, and the read model.
 - `authoring/`: storage-independent IR, typed expressions/DSL, macros, and type generation.
 - `writer/`: stable identities and `.mpr` synchronization/materialization.
-- `compiler/`: runtime-model and generated-code compilers.
+- `compiler/`: runtime-model/generated-code compilers and deterministic runtime materializers.
 - `app/`: project orchestration, Cargo export/import, CLI, and the public facade.
 
 Dependencies should point inward/downward. Cross-layer cycles are not allowed;

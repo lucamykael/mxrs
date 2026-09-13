@@ -1,0 +1,14 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# The dependency-free CDP harness remains shared with the read-only MXRB
+# behavioral oracle while MXRS owns its scenarios. Keep this wrapper tiny so
+# browser evidence exercises the same deterministic runner on both projects.
+root = ENV.fetch(
+  'MXRB_HOME',
+  File.expand_path('../../mxrb', __dir__)
+)
+runner = File.join(root, 'script', 'frontend_browser_acceptance')
+abort "MXRB browser runner not found at #{runner}" unless File.file?(runner)
+
+exec runner, *ARGV
