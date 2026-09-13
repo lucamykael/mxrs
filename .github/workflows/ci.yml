@@ -119,3 +119,4 @@ jobs:
       # Real perf tracking needs a dedicated/self-hosted runner, not yet
       # set up.
       - run: cargo bench -p mxrs-bson --bench codec -- --sample-count 10
+      - run: cargo bench -p mxrs-runtime --bench core -- --sample-count 10
