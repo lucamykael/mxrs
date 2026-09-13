@@ -588,6 +588,7 @@ dependencies = [
  "mxrs-model",
  "mxrs-mpr",
  "mxrs-project",
+ "mxrs-typegen",
  "mxrs-writer",
  "serde_json",
  "tempfile",

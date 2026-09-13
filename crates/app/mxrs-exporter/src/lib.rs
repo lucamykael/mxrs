@@ -48,7 +48,7 @@
 //!
 //! `import_cargo_project` additionally detects pages built entirely from
 //! `mxrs-dsl`'s native/structural widget vocabulary, emits them as real
-//! `pub fn` builders in `src/domain/pages.rs`, and wires each one into
+//! `pub fn` builders in `src/domain/pages/mod.rs`, and wires each one into
 //! `build()` — see `page_export`'s doc comment for the widget vocabulary
 //! detected and what still stays opaque.
 
@@ -82,6 +82,9 @@ pub enum ExportError {
     #[error(transparent)]
     Project(#[from] mxrs_project::ProjectError),
 
+    #[error(transparent)]
+    Typegen(#[from] mxrs_typegen::TypegenError),
+
     #[error("cannot write {path}: {source}")]
     Io {
         path: String,
@@ -104,6 +107,7 @@ impl ExportError {
             ExportError::Lossy(_, gaps) => gaps,
             ExportError::Model(_)
             | ExportError::Project(_)
+            | ExportError::Typegen(_)
             | ExportError::Io { .. }
             | ExportError::DestinationExists(_) => &[],
         }
@@ -120,7 +124,7 @@ pub struct CargoProjectImport {
     pub imported_assets: usize,
     pub typed_round_trip_gaps: Vec<RoundTripGap>,
     /// Pages detected as buildable from `mxrs-dsl`'s native/structural
-    /// widget vocabulary, emitted into `src/domain/pages.rs` and wired into
+    /// widget vocabulary, emitted into `src/domain/pages/mod.rs` and wired into
     /// `build()` — see `page_export`'s doc comment for what still stays
     /// opaque.
     pub page_export: PageExportReport,
@@ -193,7 +197,9 @@ fn import_cargo_project_inner(
     let identity_source = render_identity_table(&modules);
     let (converted_pages, page_export) = page_export::convert_pages(&modules);
     let pages_module_source = page_export::render_pages_module(&converted_pages);
-    let model_source = render(&mendix_version, &modules, &converted_pages);
+    let entities_source = render(&mendix_version, &modules, &[]);
+    let domain_source = render_domain_module(&converted_pages);
+    let markers_source = mxrs_typegen::generate(&marker_manifest(&modules))?;
     drop(project);
 
     let imported = destination.join("model/imported");
@@ -202,12 +208,15 @@ fn import_cargo_project_inner(
         mxrs_project::capture_project_assets(mpr_path, destination.join("assets"))?;
     let package_name = cargo_package_name(&manifest.project_name);
     let crate_name = package_name.replace('-', "_");
-    let generated_directory = destination.join("src/generated");
-    std::fs::create_dir_all(&generated_directory)
-        .map_err(|source| io_error(&generated_directory, source))?;
+    let infrastructure_directory = destination.join("src/infrastructure");
+    std::fs::create_dir_all(&infrastructure_directory)
+        .map_err(|source| io_error(&infrastructure_directory, source))?;
     let domain_directory = destination.join("src/domain");
     std::fs::create_dir_all(&domain_directory)
         .map_err(|source| io_error(&domain_directory, source))?;
+    let entities_directory = domain_directory.join("entities");
+    std::fs::create_dir_all(&entities_directory)
+        .map_err(|source| io_error(&entities_directory, source))?;
 
     write_text(
         &destination.join("Cargo.toml"),
@@ -224,14 +233,21 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "// Compatibility aliases used by generated macro expansions.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod domain;\npub mod generated;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
+            "// Compatibility aliases used by generated macro expansions.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod domain;\npub mod infrastructure;\n\n/// Compatibility facade for projects imported before `generated` became\n/// the explicit infrastructure layer. New code should use `infrastructure`.\n#[deprecated(note = \"use crate::infrastructure\")]\npub mod generated {{\n    pub use crate::infrastructure::ids;\n    pub use crate::infrastructure::imported;\n    pub use crate::infrastructure::markers;\n}}\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
             rust_string(&manifest.mendix_version),
         ),
     )?;
-    write_text(&destination.join("src/domain/mod.rs"), &model_source)?;
+    write_text(&destination.join("src/domain/mod.rs"), &domain_source)?;
+    write_text(
+        &destination.join("src/domain/entities/mod.rs"),
+        &entities_source,
+    )?;
     if let Some(pages_module_source) = &pages_module_source {
+        let pages_directory = domain_directory.join("pages");
+        std::fs::create_dir_all(&pages_directory)
+            .map_err(|source| io_error(&pages_directory, source))?;
         write_text(
-            &destination.join("src/domain/pages.rs"),
+            &destination.join("src/domain/pages/mod.rs"),
             pages_module_source,
         )?;
     }
@@ -240,19 +256,23 @@ fn import_cargo_project_inner(
         &build_binary_source(&crate_name, &manifest.project_name),
     )?;
     write_text(
-        &destination.join("src/generated/mod.rs"),
-        "pub mod ids;\npub mod imported;\n",
+        &destination.join("src/infrastructure/mod.rs"),
+        "//! Generated integration boundary for imported Mendix state.\n\npub mod ids;\npub mod imported;\npub mod markers;\n",
     )?;
     write_text(
-        &destination.join("src/generated/ids.rs"),
+        &destination.join("src/infrastructure/ids.rs"),
         &format!(
             "//! Stable identities retained from the imported project.\n\npub const PROJECT_ROOT: &str = {};\n\n{identity_source}",
             rust_string(&manifest.root_id),
         ),
     )?;
     write_text(
-        &destination.join("src/generated/imported.rs"),
+        &destination.join("src/infrastructure/imported.rs"),
         &render_imported_registry(&manifest),
+    )?;
+    write_text(
+        &destination.join("src/infrastructure/markers.rs"),
+        &markers_source,
     )?;
     write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
     write_text(
@@ -270,6 +290,134 @@ fn import_cargo_project_inner(
         typed_round_trip_gaps: gaps,
         page_export,
     })
+}
+
+/// Composes editable domain concepts without coupling the entity projection
+/// to page source files. New concept families (flows, security, navigation)
+/// can join this module as peers without flattening the generated project.
+fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
+    let mut source = String::from(
+        "//! Editable Cargo-native Mendix concepts, grouped by concept family.\n\n\
+         pub mod entities;\n",
+    );
+    if !pages.is_empty() {
+        source.push_str("pub mod pages;\n");
+    }
+    source.push_str(
+        "\npub fn build() -> ::mxrs_ir::ProjectDecl {\n    let mut project = entities::build();\n",
+    );
+    for page in pages {
+        let _ = writeln!(
+            source,
+            "    project.modules.iter_mut().find(|m| m.name == {:?}).expect(\"module {} exists\").pages.push(pages::{}());",
+            page.module_name, page.module_name, page.function_name,
+        );
+    }
+    source.push_str("    project\n}\n");
+    source
+}
+
+/// Builds the public marker surface directly from the imported model. Flow
+/// bodies may remain opaque while their names are still compile-time checked
+/// by pages and future Cargo-native flow authoring.
+fn marker_manifest(modules: &[Module]) -> mxrs_typegen::Manifest {
+    use mxrs_typegen::{AssociationManifest, EntityManifest, ModuleManifest};
+
+    let mut qualified_by_id = HashMap::<&str, String>::new();
+    for module in modules {
+        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        for entity in module.entities() {
+            if let (Some(id), Some(name)) = (entity.id.as_deref(), entity.name.as_deref()) {
+                qualified_by_id.insert(id, format!("{module_name}.{name}"));
+            }
+        }
+    }
+
+    let modules = modules
+        .iter()
+        .map(|module| {
+            let mut associations_by_entity = HashMap::<&str, Vec<AssociationManifest>>::new();
+            for association in module.associations() {
+                let (Some(from), Some(name), Some(target)) = (
+                    association.from_entity_id.as_deref(),
+                    association.name.as_deref(),
+                    association.to_entity_id.as_deref(),
+                ) else {
+                    continue;
+                };
+                let target = if target.contains('.') {
+                    Some(target.to_string())
+                } else {
+                    qualified_by_id.get(target).cloned()
+                };
+                let Some(target) = target else {
+                    continue;
+                };
+                associations_by_entity
+                    .entry(from)
+                    .or_default()
+                    .push(AssociationManifest {
+                        name: name.to_string(),
+                        target,
+                        association_type: match association.association_type {
+                            mxrs_model::association::AssociationType::Reference => {
+                                "Reference".to_string()
+                            }
+                            mxrs_model::association::AssociationType::ReferenceSet => {
+                                "ReferenceSet".to_string()
+                            }
+                        },
+                    });
+            }
+
+            let mut entities = module
+                .entities()
+                .iter()
+                .filter_map(|entity| {
+                    let name = entity.name.clone()?;
+                    let mut attributes = entity
+                        .attributes
+                        .iter()
+                        .filter_map(|attribute| attribute.name.clone())
+                        .collect::<Vec<_>>();
+                    attributes.sort();
+                    let mut associations = entity
+                        .id
+                        .as_deref()
+                        .and_then(|id| associations_by_entity.remove(id))
+                        .unwrap_or_default();
+                    associations.sort_by(|left, right| left.name.cmp(&right.name));
+                    Some(EntityManifest {
+                        name,
+                        attributes,
+                        associations,
+                    })
+                })
+                .collect::<Vec<_>>();
+            entities.sort_by(|left, right| left.name.cmp(&right.name));
+
+            let mut microflows = module
+                .microflows
+                .iter()
+                .filter_map(|flow| flow.name.clone())
+                .collect::<Vec<_>>();
+            microflows.sort();
+            let mut nanoflows = module
+                .nanoflows
+                .iter()
+                .filter_map(|flow| flow.name.clone())
+                .collect::<Vec<_>>();
+            nanoflows.sort();
+
+            ModuleManifest {
+                name: module.name.clone().unwrap_or_else(|| "Unnamed".to_string()),
+                entities,
+                microflows,
+                nanoflows,
+            }
+        })
+        .collect();
+    mxrs_typegen::Manifest { modules }
 }
 
 fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>) -> String {
@@ -296,7 +444,7 @@ fn build_binary_source(crate_name: &str, project_name: &str) -> String {
 fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportReport) -> String {
     let pages_note = if page_export.typed_candidates > 0 {
         format!(
-            "\n`src/domain/pages.rs` defines {} page(s) this import detected as buildable from\nmxrs-dsl's native/structural widget vocabulary (out of {} page(s) total) — wired into\n`build()` automatically by `src/domain/mod.rs`.\n",
+            "\n`src/domain/pages/mod.rs` defines {} page(s) this import detected as buildable from\nmxrs-dsl's native/structural widget vocabulary (out of {} page(s) total) — wired into\n`build()` automatically by `src/domain/mod.rs`.\n",
             page_export.typed_candidates,
             page_export.typed_candidates + page_export.opaque,
         )
@@ -304,7 +452,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Rust under `src/` is the editable source; `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated IDs, public marker types, and the lossless snapshot registry live under `src/infrastructure/`. `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n{pages_note}"
     )
 }
 
@@ -540,7 +688,7 @@ fn render(
         let _ = writeln!(out, "//!");
         let _ = writeln!(
             out,
-            "//! Also wires every page `src/domain/pages.rs` defines into its"
+            "//! Also wires every page `src/domain/pages/mod.rs` defines into its"
         );
         let _ = writeln!(out, "//! module — see `pages`' own header comment and");
         let _ = writeln!(out, "//! `mxrs-exporter::page_export`'s crate doc.");
@@ -1071,33 +1219,50 @@ mod tests {
         assert!(generated.join("mxrs.toml").is_file());
         assert!(generated.join("src/lib.rs").is_file());
         assert!(generated.join("src/domain/mod.rs").is_file());
+        assert!(generated.join("src/domain/entities/mod.rs").is_file());
+        assert!(generated.join("src/infrastructure/mod.rs").is_file());
+        assert!(!generated.join("src/generated").exists());
         assert!(generated.join("model/imported/manifest.json").is_file());
-        // `pages.rs` is now real, *compiled* Rust source, wired into
+        // The pages module is real, *compiled* Rust source, wired into
         // `build()` from `src/domain/mod.rs` (see `page_export`'s doc
         // comment) — the `cargo check`/`cargo run` calls below, plus the
         // rebuilt-project assertions further down, prove it actually
         // contributes to the output `.mpr`, not just that it parses.
-        let pages_source = std::fs::read_to_string(generated.join("src/domain/pages.rs")).unwrap();
+        let pages_source =
+            std::fs::read_to_string(generated.join("src/domain/pages/mod.rs")).unwrap();
         assert!(pages_source.contains("pub fn home"));
         assert!(pages_source.contains("w.text(\"Welcome\")"));
         assert!(pages_source.contains("b.close_page()"));
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
+        assert!(domain_source.contains("pub mod entities;"));
         assert!(domain_source.contains("pub mod pages;"));
         assert!(domain_source.contains("pages::home()"));
+        let entities_source =
+            std::fs::read_to_string(generated.join("src/domain/entities/mod.rs")).unwrap();
         assert!(
-            domain_source.contains("documentation \"External order number\";"),
-            "{domain_source}"
+            entities_source.contains("documentation \"External order number\";"),
+            "{entities_source}"
         );
-        assert!(domain_source.contains("length 80;"));
-        assert!(domain_source.contains("required true;"));
-        assert!(domain_source.contains("unique true;"));
-        assert!(domain_source.contains("localize_date false;"));
-        let identities = std::fs::read_to_string(generated.join("src/generated/ids.rs")).unwrap();
+        assert!(entities_source.contains("length 80;"));
+        assert!(entities_source.contains("required true;"));
+        assert!(entities_source.contains("unique true;"));
+        assert!(entities_source.contains("localize_date false;"));
+        let identities =
+            std::fs::read_to_string(generated.join("src/infrastructure/ids.rs")).unwrap();
         assert!(identities.contains("Sales.Order.Number"));
         assert!(identities.contains("Sales.microflow:ACT_Ping"));
-        let opaque = std::fs::read_to_string(generated.join("src/generated/imported.rs")).unwrap();
+        let opaque =
+            std::fs::read_to_string(generated.join("src/infrastructure/imported.rs")).unwrap();
         assert!(opaque.contains("Microflows$Microflow"));
         assert!(opaque.contains("Some(\"ACT_Ping\")"));
+        let markers =
+            std::fs::read_to_string(generated.join("src/infrastructure/markers.rs")).unwrap();
+        assert!(markers.contains("pub struct Order;"));
+        assert!(markers.contains("pub struct Order_Number;"));
+        assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_Ping"));
+        let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
+        assert!(crate_root.contains("pub mod infrastructure;"));
+        assert!(crate_root.contains("pub mod generated"));
 
         std::fs::remove_file(&source_path).unwrap();
         std::fs::remove_dir_all(mxrs_mpr::format::contents_dir(&source_path)).unwrap();

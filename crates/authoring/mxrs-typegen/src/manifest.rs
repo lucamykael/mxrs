@@ -7,7 +7,7 @@
 //! top-level doc comment for the alternatives this was weighed against).
 //!
 //! Narrow on purpose: only what's needed to generate a distinct marker type
-//! per module/entity/attribute/association/microflow (names, plus an
+//! per module/entity/attribute/association/microflow/nanoflow (names, plus an
 //! association's target and type) — no attribute types or microflow bodies
 //! yet (a microflow's manifest entry is just its name: `MicroflowMarker`
 //! only needs to prove a name exists, not describe what the microflow does).
@@ -36,6 +36,11 @@ pub struct ModuleManifest {
     /// entity in the same module is a [`crate::TypegenError::ModuleItemNameCollision`]).
     #[serde(default)]
     pub microflows: Vec<String>,
+    /// Nanoflow names owned by this module. These share the module item
+    /// namespace with entities and microflows and implement
+    /// `mxrs_ir::NanoflowMarker`.
+    #[serde(default)]
+    pub nanoflows: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

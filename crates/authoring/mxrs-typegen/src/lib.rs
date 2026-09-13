@@ -84,8 +84,11 @@ pub enum TypegenError {
     #[error("duplicate microflow name {0}.{1:?} in manifest")]
     DuplicateMicroflow(String, String),
 
+    #[error("duplicate nanoflow name {0}.{1:?} in manifest")]
+    DuplicateNanoflow(String, String),
+
     #[error(
-        "module {0} has both an entity and a microflow named {1:?} — the generated marker names would collide"
+        "module {0} has multiple entity/flow items named {1:?} — the generated marker names would collide"
     )]
     ModuleItemNameCollision(String, String),
 

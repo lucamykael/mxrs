@@ -23,7 +23,7 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
 ```
 
 An import writes typed domain source under `src/domain/`, stable identity
-bindings under `src/generated/ids.rs`, and a complete generated unit snapshot
+bindings and public marker types under `src/infrastructure/`, and a complete generated unit snapshot
 under `model/imported/`. Mendix filesystem resources are copied into the
 editable `assets/` tree and materialized next to each built `.mpr`. The
 snapshot makes concepts without a friendly Rust
@@ -85,7 +85,7 @@ DatePicker/DropDown widgets, and name/class authoring for Data Grid 2,
 Gallery, and ComboBox through `mxrs-pluggable`. All compile through
 `mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms codec.
 `mxrs import` detects the lossless structural subset, renders real builders
-into `src/domain/pages.rs`, and wires them into `build()` automatically.
+into `src/domain/pages/mod.rs`, and wires them into `build()` automatically.
 Data-bound widgets, flow-calling buttons, and pluggable widget identities
 remain opaque on import until generated markers and richer decode metadata
 land; they are preserved in the imported snapshot, never guessed or dropped.

@@ -67,7 +67,7 @@ use mxrs_model::page::{Page, Widget};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PageExportReport {
     /// Pages built entirely from the detected widget vocabulary — wired
-    /// directly into `build()` via `src/domain/pages.rs`.
+    /// directly into `build()` via `src/domain/pages/mod.rs`.
     pub typed_candidates: usize,
     /// Every other page (pluggable widgets, data binding, conditional
     /// visibility, security roles, unresolvable layout, ...) — stays
@@ -113,7 +113,7 @@ pub fn convert_pages(modules: &[Module]) -> (Vec<ConvertedPage>, PageExportRepor
     (pages, report)
 }
 
-/// Renders every converted page into one `src/domain/pages.rs` source file
+/// Renders every converted page into one `src/domain/pages/mod.rs` source file
 /// of real, compiled `pub fn` page-builders. Returns `None` when there is
 /// nothing to show (no point writing an empty file).
 pub fn render_pages_module(pages: &[ConvertedPage]) -> Option<String> {

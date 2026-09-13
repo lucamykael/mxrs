@@ -15,6 +15,7 @@ mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-project = { path = "../mxrs-project" }
+mxrs-typegen = { path = "../../authoring/mxrs-typegen" }
 serde_json.workspace = true
 thiserror.workspace = true
 

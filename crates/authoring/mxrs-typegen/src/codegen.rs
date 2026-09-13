@@ -5,7 +5,8 @@
 //! zero-sized `pub struct` per association implementing
 //! `mxrs_ir::AssociationMarker<From = Entity, To = Target>`, and one
 //! zero-sized `pub struct` per microflow implementing
-//! `mxrs_ir::MicroflowMarker`. Attribute and association markers are
+//! `mxrs_ir::MicroflowMarker`, and one per nanoflow implementing
+//! `mxrs_ir::NanoflowMarker`. Attribute and association markers are
 //! flat-named `Entity_Name` rather than nested in a same-named submodule (a
 //! type and a module can't share a name) — `Entity`'s own attribute names
 //! and association names share that flat namespace, so a manifest with e.g.
@@ -155,6 +156,38 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
             )
             .unwrap();
             writeln!(out, "        const NAME: &'static str = {microflow:?};").unwrap();
+            out.push_str("    }\n");
+        }
+
+        let mut seen_nanoflows: HashSet<&str> = HashSet::new();
+        for nanoflow in &module.nanoflows {
+            let nanoflow_ident = valid_ident(nanoflow, "nanoflow name")?;
+            if !seen_nanoflows.insert(nanoflow.as_str()) {
+                return Err(TypegenError::DuplicateNanoflow(
+                    module.name.clone(),
+                    nanoflow.clone(),
+                ));
+            }
+            if !seen_module_items.insert(nanoflow.as_str()) {
+                return Err(TypegenError::ModuleItemNameCollision(
+                    module.name.clone(),
+                    nanoflow.clone(),
+                ));
+            }
+
+            writeln!(out, "    pub struct {nanoflow_ident};").unwrap();
+            writeln!(
+                out,
+                "    impl mxrs_ir::NanoflowMarker for {nanoflow_ident} {{"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        const MODULE: &'static str = {:?};",
+                module.name
+            )
+            .unwrap();
+            writeln!(out, "        const NAME: &'static str = {nanoflow:?};").unwrap();
             out.push_str("    }\n");
         }
         out.push_str("}\n\n");
@@ -397,6 +430,36 @@ mod tests {
         assert!(
             matches!(err, TypegenError::ModuleItemNameCollision(module, name) if module == "Sales" && name == "Order")
         );
+    }
+
+    #[test]
+    fn generates_a_struct_and_nanoflow_marker_impl_per_nanoflow() {
+        let mut manifest = sample();
+        manifest.modules[0].nanoflows = vec!["NF_Validate".into()];
+        let out = generate(&manifest).unwrap();
+        assert!(out.contains("pub struct NF_Validate;"));
+        assert!(out.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
+        assert!(out.contains(r#"const NAME: &'static str = "NF_Validate";"#));
+    }
+
+    #[test]
+    fn rejects_duplicate_or_colliding_nanoflow_names() {
+        let mut duplicate = sample();
+        duplicate.modules[0].nanoflows = vec!["NF_Validate".into(), "NF_Validate".into()];
+        assert!(matches!(
+            generate(&duplicate).unwrap_err(),
+            TypegenError::DuplicateNanoflow(module, name)
+                if module == "Sales" && name == "NF_Validate"
+        ));
+
+        let mut colliding = sample();
+        colliding.modules[0].microflows = vec!["Run".into()];
+        colliding.modules[0].nanoflows = vec!["Run".into()];
+        assert!(matches!(
+            generate(&colliding).unwrap_err(),
+            TypegenError::ModuleItemNameCollision(module, name)
+                if module == "Sales" && name == "Run"
+        ));
     }
 
     #[test]
