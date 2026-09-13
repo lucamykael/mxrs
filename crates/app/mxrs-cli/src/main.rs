@@ -3,8 +3,8 @@
 //! `when "sql"`/... cases, narrowed the same way the library crate is (see
 //! `lib.rs`'s doc comment for exactly what each command covers and what's
 //! not ported yet — most of `bin/mxrb`'s ~45 subcommands depend on engines
-//! mxrs hasn't built yet, e.g. `db`/`run` need runtime orchestration and `oql`
-//! needs an OQL server, `refs`/`rename`/`move` need the semantic index).
+//! mxrs hasn't built yet, e.g. `db`/`run` need runtime orchestration and
+//! `refs`/`rename`/`move` need the semantic index).
 //! `inspect` has no `bin/mxrb` equivalent under that name — it's a new
 //! single-file front end onto `compare`'s existing snapshot machinery.
 
@@ -25,6 +25,8 @@ fn main() -> ExitCode {
         Some("javagen") => run_javagen(args.collect()),
         Some("package") => run_package(args.collect()),
         Some("verify-package") => run_verify_package(args.collect()),
+        Some("oql") => run_oql(args.collect()),
+        Some("translate-oql") => run_translate_oql(args.collect()),
         Some(other) => {
             eprintln!("[mxrs] error: unknown command {other:?}");
             usage();
@@ -50,6 +52,101 @@ fn usage() {
     eprintln!("       mxrs javagen <file.mpr> [--project-root <directory>]");
     eprintln!("       mxrs package <file.mpr> --web <directory> --output <archive.tar>");
     eprintln!("       mxrs verify-package <archive.tar>");
+    eprintln!("       mxrs oql <file.mpr> [--dialect postgresql|sql_server|ansi] [--json]");
+    eprintln!("       mxrs translate-oql <query> [--dialect postgresql|sql_server|ansi]");
+}
+
+fn run_oql(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let dialect = match take_value(&mut args, "--dialect")
+        .as_deref()
+        .map_or(Ok(mxrs_oql::Dialect::PostgreSql), mxrs_oql::Dialect::parse)
+    {
+        Ok(dialect) => dialect,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if args.len() != 1 {
+        eprintln!(
+            "[mxrs] error: usage: mxrs oql <file.mpr> [--dialect postgresql|sql_server|ansi] [--json]"
+        );
+        return ExitCode::FAILURE;
+    }
+    let project = match mxrs_model::Project::open(&args[0], true) {
+        Ok(project) => project,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let queries = match mxrs_oql::catalog(&project) {
+        Ok(queries) => queries,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let rows = queries
+        .iter()
+        .map(|query| (query, mxrs_oql::translate(&query.oql, dialect)))
+        .collect::<Vec<_>>();
+    if json {
+        let values = rows
+            .iter()
+            .map(|(query, projection)| {
+                serde_json::json!({
+                    "query": query,
+                    "projection": projection,
+                    "findings": mxrs_oql::analyze(&query.oql),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&values).expect("serializable OQL report")
+        );
+    } else if rows.is_empty() {
+        println!("[mxrs] no native OQL queries found");
+    } else {
+        for (query, projection) in rows {
+            println!("{}", query.qualified_name);
+            if let Some(sql) = projection.sql {
+                println!("{sql}");
+            } else {
+                println!("unsupported: {}", projection.warnings.join("; "));
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_translate_oql(mut args: Vec<String>) -> ExitCode {
+    let dialect = match take_value(&mut args, "--dialect")
+        .as_deref()
+        .map_or(Ok(mxrs_oql::Dialect::PostgreSql), mxrs_oql::Dialect::parse)
+    {
+        Ok(dialect) => dialect,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if args.len() != 1 {
+        eprintln!(
+            "[mxrs] error: usage: mxrs translate-oql <query> [--dialect postgresql|sql_server|ansi]"
+        );
+        return ExitCode::FAILURE;
+    }
+    let projection = mxrs_oql::translate(&args[0], dialect);
+    if let Some(sql) = projection.sql {
+        println!("{sql}");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("[mxrs] unsupported: {}", projection.warnings.join("; "));
+        ExitCode::FAILURE
+    }
 }
 
 fn run_package(mut args: Vec<String>) -> ExitCode {

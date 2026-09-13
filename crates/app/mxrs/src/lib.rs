@@ -19,6 +19,11 @@ pub use mxrs_materializers::{
     embedded_frontend_source_hash, materialize_frontend_sources, materialize_manifest,
     materialize_mpr,
 };
+pub use mxrs_oql::{
+    Dialect as OqlDialect, Finding as OqlFinding, OqlError, Projection as OqlProjection,
+    Query as OqlQuery, analyze as analyze_oql, catalog as oql_catalog,
+    parameters as oql_parameters, translate as translate_oql,
+};
 pub use mxrs_packager::{
     Entrypoints as PackageEntrypoints, PackageError, PackageFile, PackageManifest, PackageOptions,
     PackageReport, package, verify_package,

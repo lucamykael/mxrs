@@ -57,8 +57,10 @@ structural/text rendering) →
 hash-verified React bundle plus stable `model.json`, embedded so normal builds
 need no Node) → `mxrs-packager` (reproducible ustar deployment archives with
 per-file SHA-256 integrity) → `mxrs-runtime` (transactional unit-of-work store,
-fail-closed role/member authorization, and an action registry). HTTP/storage
-adapters, OQL, semantic tooling, and scaffold subsystems remain follow-up layers.
+fail-closed role/member authorization, and an action registry) → `mxrs-oql`
+(native OQL discovery, safe logical SQL projection, parameter extraction, and
+query-risk analysis). HTTP/storage adapters, semantic tooling, and scaffold
+subsystems remain follow-up layers.
 
 `mxrs-cli` (binary `mxrs`) exposes `import`, `validate`, `compare`, `inspect`,
 `units`, `dump-unit`, `sql`, `modules`, `export`, and `javagen` today. Typed
@@ -124,6 +126,10 @@ npm run build --prefix frontend
 # Produce and independently verify a deterministic deployment archive:
 mxrs package build/ExistingApp.mpr --web build/web --output build/ExistingApp.mxrs.tar
 mxrs verify-package build/ExistingApp.mxrs.tar
+
+# Inspect native OQL or project one safe query to logical SQL:
+mxrs oql build/ExistingApp.mpr --dialect postgresql
+mxrs translate-oql 'SELECT o/Number FROM Sales.Order o'
 ```
 
 Installed/released builds omit `--mxrs-workspace` and generate the normal Git

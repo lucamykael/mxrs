@@ -470,6 +470,7 @@ dependencies = [
  "mxrs-ir",
  "mxrs-macros",
  "mxrs-materializers",
+ "mxrs-oql",
  "mxrs-packager",
  "mxrs-project",
  "mxrs-runtime",
@@ -500,6 +501,7 @@ dependencies = [
  "mxrs-materializers",
  "mxrs-model",
  "mxrs-mpr",
+ "mxrs-oql",
  "mxrs-packager",
  "mxrs-project",
  "mxrs-writer",
@@ -724,6 +726,18 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "mxrs-oql"
+version = "0.1.0"
+dependencies = [
+ "mxrs-dsl",
+ "mxrs-model",
+ "mxrs-writer",
+ "serde",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
