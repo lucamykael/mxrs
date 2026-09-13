@@ -434,6 +434,11 @@ fn parse_data_view_source(source: Option<&Document>) -> Document {
         }
         "Pages$DataViewSource" | "Forms$DataViewSource" => {
             let mut d = mxrs_bson::doc! { "kind": "context" };
+            if let Some(variable) = get_doc_any(source, &["SourceVariable"])
+                && let Some(parameter) = get_str_any(&variable, &["PageParameter"])
+            {
+                d.insert("parameter", parameter);
+            }
             if let Some(p) = get_str_any(source, &["EntityPath"]) {
                 d.insert("entity_path", p);
             }
@@ -1317,6 +1322,28 @@ mod tests {
         assert_eq!(options.get_i32("body_widget_count").unwrap(), 1);
         assert_eq!(options.get_i32("footer_widget_count").unwrap(), 1);
         assert_eq!(page.widgets[0].children.len(), 2);
+    }
+
+    #[test]
+    fn context_data_view_keeps_its_page_parameter_name() {
+        let widget = doc! {
+            "$Type": "Forms$DataView",
+            "Name": "orderView",
+            "DataSource": {
+                "$Type": "Forms$DataViewSource",
+                "SourceVariable": { "PageParameter": "Order" },
+            },
+        };
+        let decoded = data_view_widget(&widget);
+        assert_eq!(
+            decoded
+                .options
+                .get_document("source")
+                .unwrap()
+                .get_str("parameter")
+                .unwrap(),
+            "Order"
+        );
     }
 
     #[test]

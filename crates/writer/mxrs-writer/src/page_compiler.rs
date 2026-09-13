@@ -90,6 +90,7 @@
 //! trackable follow-up, blocked on either a genuine widget-package schema
 //! source or a deliberate decision to accept an unverified shape.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use mxrs_bson::Document;
@@ -110,6 +111,7 @@ pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> 
     if decl.layout.is_none() && !decl.widgets.is_empty() {
         return Err(WriterError::PageWidgetsRequireLayout(decl.name.clone()));
     }
+    validate_page_parameters(decl)?;
 
     let mut page = Node::new("Page", catalog.clone())?;
     page.set("name", Value::String(decl.name.clone()))?;
@@ -145,6 +147,29 @@ pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> 
     {
         page.set("appearance", Value::Node(appearance))?;
     }
+    let parameters = decl
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let mut node = Node::new("PageParameter", catalog.clone())?;
+            node.set("name", Value::String(parameter.name.clone()))?;
+            node.set(
+                "parameterType",
+                Value::DataType(mxrs_forms::values::DataType::object(
+                    parameter.entity.clone(),
+                )),
+            )?;
+            node.set("isRequired", Value::Boolean(parameter.required))?;
+            if let Some(default_value) = &parameter.default_value {
+                node.set(
+                    "defaultValue",
+                    Value::Expression(mxrs_forms::values::Expression::new(default_value)),
+                )?;
+            }
+            Ok(Value::Node(node))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    page.set("parameters", Value::List(parameters))?;
 
     if let Some(layout) = &decl.layout {
         let mut layout_call = Node::new("LayoutCall", catalog.clone())?;
@@ -176,6 +201,68 @@ pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> 
 
     let codec = mxrs_forms::MprCodec::new(catalog.clone());
     Ok(codec.encode(&page)?)
+}
+
+fn validate_page_parameters(decl: &PageDecl) -> Result<()> {
+    let mut parameters = BTreeMap::new();
+    for parameter in &decl.parameters {
+        if parameters
+            .insert(parameter.name.as_str(), parameter.entity.as_str())
+            .is_some()
+        {
+            return Err(WriterError::DuplicatePageParameter {
+                page: decl.name.clone(),
+                parameter: parameter.name.clone(),
+            });
+        }
+    }
+    fn visit(page: &str, widget: &WidgetDecl, parameters: &BTreeMap<&str, &str>) -> Result<()> {
+        match widget {
+            WidgetDecl::DataView {
+                source: DataSourceDecl::Context { parameter, entity },
+                children,
+                ..
+            } => {
+                let Some(actual) = parameters.get(parameter.as_str()) else {
+                    return Err(WriterError::UnknownPageParameter {
+                        page: page.to_string(),
+                        parameter: parameter.clone(),
+                    });
+                };
+                if *actual != entity {
+                    return Err(WriterError::PageParameterEntityMismatch {
+                        page: page.to_string(),
+                        parameter: parameter.clone(),
+                        expected: entity.clone(),
+                        actual: (*actual).to_string(),
+                    });
+                }
+                for child in children {
+                    visit(page, child, parameters)?;
+                }
+            }
+            WidgetDecl::DataView { children, .. } | WidgetDecl::Container { children, .. } => {
+                for child in children {
+                    visit(page, child, parameters)?;
+                }
+            }
+            WidgetDecl::LayoutGrid { rows, .. } => {
+                for child in rows
+                    .iter()
+                    .flat_map(|row| &row.columns)
+                    .flat_map(|column| &column.children)
+                {
+                    visit(page, child, parameters)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    for widget in &decl.widgets {
+        visit(&decl.name, widget, &parameters)?;
+    }
+    Ok(())
 }
 
 fn compile_widget(catalog: &Rc<Catalog>, widget: &WidgetDecl, counter: &mut u32) -> Result<Value> {
@@ -481,6 +568,19 @@ fn data_source_node(catalog: &Rc<Catalog>, source: &DataSourceDecl) -> Result<No
             )?;
             Ok(node)
         }
+        DataSourceDecl::Context { parameter, .. } => {
+            let mut variable = Node::new("PageVariable", catalog.clone())?;
+            variable.set(
+                "pageParameter",
+                Value::Reference(Reference {
+                    target: parameter.clone(),
+                    kind: ReferenceKind::ByName,
+                }),
+            )?;
+            let mut node = Node::new("DataViewSource", catalog.clone())?;
+            node.set("sourceVariable", Value::Node(variable))?;
+            Ok(node)
+        }
     }
 }
 
@@ -753,6 +853,82 @@ mod tests {
         let re_encoded = codec.encode(&node).unwrap();
         let re_decoded = codec.decode(&re_encoded).unwrap();
         assert_eq!(node, re_decoded);
+    }
+
+    #[test]
+    fn object_page_parameter_and_context_data_view_round_trip() {
+        let catalog = catalog();
+        let mut decl = PageDecl::new("OrderEdit");
+        decl.layout = Some(LayoutRef::new("Atlas_Core.ApplicationLayout", "Main"));
+        decl.parameters.push(mxrs_ir::page::PageParameterDecl {
+            name: "Order".into(),
+            entity: "Sales.Order".into(),
+            required: true,
+            default_value: None,
+        });
+        decl.widgets.push(WidgetDecl::DataView {
+            name: Some("orderView".into()),
+            source: DataSourceDecl::Context {
+                parameter: "Order".into(),
+                entity: "Sales.Order".into(),
+            },
+            children: vec![WidgetDecl::TextBox {
+                name: Some("number".into()),
+                attribute: "Number".into(),
+                class: None,
+            }],
+        });
+
+        let document = compile_page(&catalog, &decl).unwrap();
+        let model = mxrs_model::page::Page::from_bson(&document);
+        assert_eq!(model.parameters[0].get_str("Name").unwrap(), "Order");
+        assert_eq!(
+            model.parameters[0]
+                .get_document("ParameterType")
+                .unwrap()
+                .get_str("Entity")
+                .unwrap(),
+            "Sales.Order"
+        );
+        assert_eq!(
+            model.widgets[0]
+                .options
+                .get_document("source")
+                .unwrap()
+                .get_str("parameter")
+                .unwrap(),
+            "Order"
+        );
+    }
+
+    #[test]
+    fn context_data_views_reject_unknown_and_mismatched_parameters() {
+        let mut decl = PageDecl::new("OrderEdit");
+        decl.layout = Some(LayoutRef::new("Atlas_Core.ApplicationLayout", "Main"));
+        decl.widgets.push(WidgetDecl::DataView {
+            name: None,
+            source: DataSourceDecl::Context {
+                parameter: "Order".into(),
+                entity: "Sales.Order".into(),
+            },
+            children: vec![],
+        });
+        assert!(matches!(
+            compile_page(&catalog(), &decl),
+            Err(WriterError::UnknownPageParameter { parameter, .. }) if parameter == "Order"
+        ));
+
+        decl.parameters.push(mxrs_ir::page::PageParameterDecl {
+            name: "Order".into(),
+            entity: "Sales.Customer".into(),
+            required: true,
+            default_value: None,
+        });
+        assert!(matches!(
+            compile_page(&catalog(), &decl),
+            Err(WriterError::PageParameterEntityMismatch { actual, expected, .. })
+                if actual == "Sales.Customer" && expected == "Sales.Order"
+        ));
     }
 
     #[test]

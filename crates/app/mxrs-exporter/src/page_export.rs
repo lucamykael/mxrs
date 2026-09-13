@@ -46,7 +46,7 @@ use std::fmt::Write as _;
 use mxrs_bson::Document;
 use mxrs_ir::page::{
     ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
-    WidgetDecl,
+    PageParameterDecl, WidgetDecl,
 };
 use mxrs_model::Module;
 use mxrs_model::page::{Page, Widget};
@@ -229,13 +229,15 @@ fn try_convert_page(
     current_module: &str,
 ) -> Option<PageDecl> {
     let name = page.name.clone()?;
-    if !page.parameters.is_empty() {
-        return None;
-    }
+    let parameters = convert_page_parameters(&page.parameters)?;
+    let page_parameters = parameters
+        .iter()
+        .map(|parameter| (parameter.name.clone(), parameter.entity.clone()))
+        .collect::<HashMap<_, _>>();
     let widgets = page
         .widgets
         .iter()
-        .map(|widget| try_convert_widget(widget, context, current_module, None))
+        .map(|widget| try_convert_widget(widget, context, current_module, &page_parameters, None))
         .collect::<Option<Vec<_>>>()?;
 
     let layout = match (&page.layout_id, &page.layout_parameter) {
@@ -268,6 +270,7 @@ fn try_convert_page(
     decl.popup_resizable = page.popup_resizable;
     decl.excluded = page.excluded;
     decl.export_level = page.export_level.clone();
+    decl.parameters = parameters;
     decl.layout = layout;
     decl.widgets = widgets;
     Some(decl)
@@ -277,6 +280,7 @@ fn try_convert_widget(
     widget: &Widget,
     context: &ConversionContext,
     current_module: &str,
+    page_parameters: &HashMap<String, String>,
     data_view_entity: Option<&str>,
 ) -> Option<WidgetDecl> {
     match widget.widget_type.as_str() {
@@ -287,7 +291,15 @@ fn try_convert_widget(
             let children = widget
                 .children
                 .iter()
-                .map(|child| try_convert_widget(child, context, current_module, data_view_entity))
+                .map(|child| {
+                    try_convert_widget(
+                        child,
+                        context,
+                        current_module,
+                        page_parameters,
+                        data_view_entity,
+                    )
+                })
                 .collect::<Option<Vec<_>>>()?;
             Some(WidgetDecl::Container {
                 name: widget.name.clone(),
@@ -350,8 +362,14 @@ fn try_convert_widget(
                 action,
             })
         }
-        "layout_grid" => try_convert_layout_grid(widget, context, current_module, data_view_entity),
-        "data_view" => try_convert_data_view(widget, context, current_module),
+        "layout_grid" => try_convert_layout_grid(
+            widget,
+            context,
+            current_module,
+            page_parameters,
+            data_view_entity,
+        ),
+        "data_view" => try_convert_data_view(widget, context, current_module, page_parameters),
         "text_box" | "check_box" | "date_picker" | "drop_down" => {
             try_convert_attribute_widget(widget, context, data_view_entity)
         }
@@ -364,6 +382,7 @@ fn try_convert_data_view(
     widget: &Widget,
     context: &ConversionContext,
     current_module: &str,
+    page_parameters: &HashMap<String, String>,
 ) -> Option<WidgetDecl> {
     if !widget.events.is_empty()
         || !only_keys(
@@ -382,34 +401,100 @@ fn try_convert_data_view(
         return None;
     }
     let source = widget.options.get_document("source").ok()?;
-    if !only_keys(source, &["kind", "name"]) {
-        return None;
-    }
-    let (kind, expected) = match source.get_str("kind").ok()? {
-        "microflow" => (FlowKind::Microflow, FlowKind::Microflow),
-        "nanoflow" => (FlowKind::Nanoflow, FlowKind::Nanoflow),
+    let (source_decl, entity) = match source.get_str("kind").ok()? {
+        "microflow" | "nanoflow" => {
+            if !only_keys(source, &["kind", "name"]) {
+                return None;
+            }
+            let kind = if source.get_str("kind").ok()? == "microflow" {
+                FlowKind::Microflow
+            } else {
+                FlowKind::Nanoflow
+            };
+            let (qualified, flow) =
+                context.resolve_flow(current_module, source.get_str("name").ok()?, kind)?;
+            let entity = flow.return_entity.as_deref()?;
+            let source = match kind {
+                FlowKind::Microflow => DataSourceDecl::Microflow(qualified),
+                FlowKind::Nanoflow => DataSourceDecl::Nanoflow(qualified),
+            };
+            (source, entity)
+        }
+        "context" => {
+            if !only_keys(source, &["kind", "parameter"]) {
+                return None;
+            }
+            let parameter = source.get_str("parameter").ok()?;
+            let entity = page_parameters.get(parameter)?;
+            (
+                DataSourceDecl::Context {
+                    parameter: parameter.to_string(),
+                    entity: entity.clone(),
+                },
+                entity.as_str(),
+            )
+        }
         _ => return None,
     };
-    let (qualified, flow) =
-        context.resolve_flow(current_module, source.get_str("name").ok()?, expected)?;
-    let entity = flow.return_entity.as_deref()?;
     if !context.entity_attributes.contains_key(entity) {
         return None;
     }
     let children = widget
         .children
         .iter()
-        .map(|child| try_convert_widget(child, context, current_module, Some(entity)))
+        .map(|child| {
+            try_convert_widget(
+                child,
+                context,
+                current_module,
+                page_parameters,
+                Some(entity),
+            )
+        })
         .collect::<Option<Vec<_>>>()?;
-    let source = match kind {
-        FlowKind::Microflow => DataSourceDecl::Microflow(qualified),
-        FlowKind::Nanoflow => DataSourceDecl::Nanoflow(qualified),
-    };
     Some(WidgetDecl::DataView {
         name: widget.name.clone(),
-        source,
+        source: source_decl,
         children,
     })
+}
+
+fn convert_page_parameters(parameters: &[Document]) -> Option<Vec<PageParameterDecl>> {
+    parameters
+        .iter()
+        .map(|parameter| {
+            if !only_keys(
+                parameter,
+                &[
+                    "$ID",
+                    "$Type",
+                    "Name",
+                    "ParameterType",
+                    "IsRequired",
+                    "DefaultValue",
+                ],
+            ) {
+                return None;
+            }
+            let parameter_type = parameter.get_document("ParameterType").ok()?;
+            if !only_keys(parameter_type, &["$ID", "$Type", "Entity"])
+                || parameter_type.get_str("$Type").ok()? != "DataTypes$ObjectType"
+            {
+                return None;
+            }
+            let default_value = match parameter.get("DefaultValue") {
+                None => None,
+                Some(mxrs_bson::Bson::String(value)) => Some(value.clone()),
+                _ => return None,
+            };
+            Some(PageParameterDecl {
+                name: parameter.get_str("Name").ok()?.to_string(),
+                entity: parameter_type.get_str("Entity").ok()?.to_string(),
+                required: parameter.get_bool("IsRequired").unwrap_or(true),
+                default_value,
+            })
+        })
+        .collect()
 }
 
 fn try_convert_attribute_widget(
@@ -502,6 +587,7 @@ fn try_convert_layout_grid(
     widget: &Widget,
     context: &ConversionContext,
     current_module: &str,
+    page_parameters: &HashMap<String, String>,
     data_view_entity: Option<&str>,
 ) -> Option<WidgetDecl> {
     if !widget.events.is_empty() || !only_keys(&widget.options, &[]) {
@@ -510,7 +596,15 @@ fn try_convert_layout_grid(
     let rows = widget
         .children
         .iter()
-        .map(|row| try_convert_layout_grid_row(row, context, current_module, data_view_entity))
+        .map(|row| {
+            try_convert_layout_grid_row(
+                row,
+                context,
+                current_module,
+                page_parameters,
+                data_view_entity,
+            )
+        })
         .collect::<Option<Vec<_>>>()?;
     Some(WidgetDecl::LayoutGrid {
         name: widget.name.clone(),
@@ -522,6 +616,7 @@ fn try_convert_layout_grid_row(
     row: &Widget,
     context: &ConversionContext,
     current_module: &str,
+    page_parameters: &HashMap<String, String>,
     data_view_entity: Option<&str>,
 ) -> Option<LayoutGridRowDecl> {
     if row.widget_type != "layout_grid_row" || !row.events.is_empty() {
@@ -531,7 +626,13 @@ fn try_convert_layout_grid_row(
         .children
         .iter()
         .map(|column| {
-            try_convert_layout_grid_column(column, context, current_module, data_view_entity)
+            try_convert_layout_grid_column(
+                column,
+                context,
+                current_module,
+                page_parameters,
+                data_view_entity,
+            )
         })
         .collect::<Option<Vec<_>>>()?;
     Some(LayoutGridRowDecl { columns })
@@ -541,6 +642,7 @@ fn try_convert_layout_grid_column(
     column: &Widget,
     context: &ConversionContext,
     current_module: &str,
+    page_parameters: &HashMap<String, String>,
     data_view_entity: Option<&str>,
 ) -> Option<LayoutGridColumnDecl> {
     if column.widget_type != "layout_grid_column" || !column.events.is_empty() {
@@ -560,7 +662,15 @@ fn try_convert_layout_grid_column(
     let children = column
         .children
         .iter()
-        .map(|child| try_convert_widget(child, context, current_module, data_view_entity))
+        .map(|child| {
+            try_convert_widget(
+                child,
+                context,
+                current_module,
+                page_parameters,
+                data_view_entity,
+            )
+        })
         .collect::<Option<Vec<_>>>()?;
     Some(LayoutGridColumnDecl { weight, children })
 }
@@ -617,6 +727,22 @@ fn render_page_function(page: &ConvertedPage) -> String {
     }
     if decl.export_level != "Hidden" {
         let _ = writeln!(out, "    p.export_level({:?});", decl.export_level);
+    }
+    for parameter in &decl.parameters {
+        let marker = entity_marker_path(&parameter.entity);
+        if let Some(default_value) = &parameter.default_value {
+            let _ = writeln!(
+                out,
+                "    p.object_parameter_with_default::<{marker}>({:?}, {}, {default_value:?});",
+                parameter.name, parameter.required
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "    p.object_parameter::<{marker}>({:?}, {});",
+                parameter.name, parameter.required
+            );
+        }
     }
     if let Some(layout) = &decl.layout {
         let _ = writeln!(
@@ -755,6 +881,27 @@ fn render_widget(
                 DataSourceDecl::Nanoflow(target) => {
                     ("data_view_from_nanoflow", "NanoflowRef", target.as_str())
                 }
+                DataSourceDecl::Context { parameter, entity } => {
+                    let marker = entity_marker_path(entity);
+                    let _ = writeln!(
+                        out,
+                        "{pad}{receiver}.data_view_from_context::<{marker}>({parameter:?}, |w| {{"
+                    );
+                    if let Some(name) = name {
+                        let _ = writeln!(out, "{pad}    w.name({name:?});");
+                    }
+                    for child in children {
+                        out.push_str(&render_widget(
+                            child,
+                            indent + 1,
+                            "w",
+                            Some(entity),
+                            flow_return_entities,
+                        ));
+                    }
+                    let _ = writeln!(out, "{pad}}});");
+                    return out;
+                }
             };
             let marker = flow_marker_path(target);
             let entity = flow_return_entities
@@ -858,6 +1005,13 @@ fn attribute_marker_path(entity: &str, attribute: &str) -> String {
         .split_once('.')
         .expect("converted entity reference is qualified");
     format!("crate::infrastructure::markers::{module}::{entity}_{attribute}")
+}
+
+fn entity_marker_path(entity: &str) -> String {
+    let (module, entity) = entity
+        .split_once('.')
+        .expect("converted entity reference is qualified");
+    format!("crate::infrastructure::markers::{module}::{entity}")
 }
 
 /// `OrderOverview` -> `order_overview`. A defensive, not exhaustive, name
@@ -1283,6 +1437,56 @@ mod tests {
             source.contains("text_box_with::<crate::infrastructure::markers::Sales::Order_Number>")
         );
         assert!(source.contains("w.name(\"numberInput\")"));
+    }
+
+    #[test]
+    fn object_parameter_and_context_data_view_convert_with_entity_markers() {
+        let page = Page::from_bson(&mxrs_bson::doc! {
+            "$Type": "Forms$Page",
+            "Name": "OrderEdit",
+            "Parameters": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                "$Type": "Forms$PageParameter",
+                "Name": "Order",
+                "ParameterType": { "$Type": "DataTypes$ObjectType", "Entity": "Sales.Order" },
+                "IsRequired": true,
+            })], 3),
+            "FormCall": {
+                "Form": "Atlas_Core.ApplicationLayout",
+                "Arguments": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                    "Parameter": "Main",
+                    "Widgets": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                        "$Type": "Forms$DataView",
+                        "Name": "orderView",
+                        "DataSource": {
+                            "$Type": "Forms$DataViewSource",
+                            "SourceVariable": { "PageParameter": "Order" },
+                        },
+                        "Widgets": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                            "$Type": "Forms$TextBox",
+                            "Name": "numberInput",
+                            "AttributeRef": { "Attribute": "Number" },
+                        })], 3),
+                    })], 3),
+                })], 3),
+            },
+        });
+        let decl = try_convert_page(&page, &bound_context(), "Sales")
+            .expect("typed object parameter should make context resolvable");
+        let source = render_page_function(&ConvertedPage {
+            module_name: "Sales".into(),
+            function_name: "order_edit".into(),
+            flow_return_entities: HashMap::new(),
+            decl,
+        });
+        assert!(source.contains(
+            "p.object_parameter::<crate::infrastructure::markers::Sales::Order>(\"Order\", true)"
+        ));
+        assert!(source.contains(
+            "p.data_view_from_context::<crate::infrastructure::markers::Sales::Order>(\"Order\""
+        ));
+        assert!(
+            source.contains("text_box_with::<crate::infrastructure::markers::Sales::Order_Number>")
+        );
     }
 
     #[test]

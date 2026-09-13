@@ -25,7 +25,8 @@
 //! mappings on microflow/nanoflow actions).
 //!
 //! **`DataViewBuilder`'s entry point takes the data source up front**
-//! (`data_view_from_microflow`/`data_view_from_nanoflow`), not as a call
+//! (`data_view_from_microflow`/`data_view_from_nanoflow`/
+//! `data_view_from_context`), not as a call
 //! inside the configure closure the way `PageBuilder::layout` is a separate
 //! statement from `.container(...)`. `WidgetDecl::DataView.source` is a
 //! required field with no sensible default (there's no such thing as a
@@ -35,11 +36,11 @@
 //! whole crate follows for association/microflow targets.
 
 use mxrs_ir::markers::{
-    AttributeMarker, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef,
+    AttributeMarker, EntityMarker, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef,
 };
 use mxrs_ir::page::{
     ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
-    WidgetDecl,
+    PageParameterDecl, WidgetDecl,
 };
 
 pub struct PageBuilder {
@@ -101,6 +102,35 @@ impl PageBuilder {
 
     pub fn export_level(&mut self, level: impl Into<String>) -> &mut Self {
         self.decl.export_level = level.into();
+        self
+    }
+
+    pub fn object_parameter<E: EntityMarker>(
+        &mut self,
+        name: impl Into<String>,
+        required: bool,
+    ) -> &mut Self {
+        self.decl.parameters.push(PageParameterDecl {
+            name: name.into(),
+            entity: E::qualified_name(),
+            required,
+            default_value: None,
+        });
+        self
+    }
+
+    pub fn object_parameter_with_default<E: EntityMarker>(
+        &mut self,
+        name: impl Into<String>,
+        required: bool,
+        default_value: impl Into<String>,
+    ) -> &mut Self {
+        self.decl.parameters.push(PageParameterDecl {
+            name: name.into(),
+            entity: E::qualified_name(),
+            required,
+            default_value: Some(default_value.into()),
+        });
         self
     }
 
@@ -171,6 +201,22 @@ impl PageBuilder {
         push_data_view(
             &mut self.decl.widgets,
             DataSourceDecl::Nanoflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
+
+    pub fn data_view_from_context<E: EntityMarker>(
+        &mut self,
+        parameter: impl Into<String>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.decl.widgets,
+            DataSourceDecl::Context {
+                parameter: parameter.into(),
+                entity: E::qualified_name(),
+            },
             configure,
         );
         self
@@ -293,6 +339,22 @@ impl ContainerBuilder {
         push_data_view(
             &mut self.children,
             DataSourceDecl::Nanoflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
+
+    pub fn data_view_from_context<E: EntityMarker>(
+        &mut self,
+        parameter: impl Into<String>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.children,
+            DataSourceDecl::Context {
+                parameter: parameter.into(),
+                entity: E::qualified_name(),
+            },
             configure,
         );
         self
@@ -508,6 +570,22 @@ impl LayoutGridColumnBuilder {
         push_data_view(
             &mut self.children,
             DataSourceDecl::Nanoflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
+
+    pub fn data_view_from_context<E: EntityMarker>(
+        &mut self,
+        parameter: impl Into<String>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.children,
+            DataSourceDecl::Context {
+                parameter: parameter.into(),
+                entity: E::qualified_name(),
+            },
             configure,
         );
         self
@@ -916,6 +994,7 @@ mod tests {
             .popup(720, 480, true)
             .excluded(true)
             .export_level("API");
+        page.object_parameter::<Order>("Order", true);
         let decl = page.into_decl();
 
         assert_eq!(decl.class.as_deref(), Some("page-order"));
@@ -925,6 +1004,9 @@ mod tests {
         assert!(decl.popup_resizable);
         assert!(decl.excluded);
         assert_eq!(decl.export_level, "API");
+        assert_eq!(decl.parameters[0].name, "Order");
+        assert_eq!(decl.parameters[0].entity, "Sales.Order");
+        assert!(decl.parameters[0].required);
     }
 
     #[test]
@@ -1029,6 +1111,23 @@ mod tests {
             &children[2],
             WidgetDecl::Button { action: ButtonAction::CallMicroflow(name), .. }
                 if name == "Sales.ACT_SubmitOrder"
+        ));
+    }
+
+    #[test]
+    fn builds_a_context_data_view_from_a_typed_page_parameter() {
+        let mut page = PageBuilder::new("OrderEdit");
+        page.object_parameter::<Order>("Order", true);
+        page.data_view_from_context::<Order>("Order", |view| {
+            view.text_box::<OrderNumber>();
+        });
+        let decl = page.into_decl();
+        assert!(matches!(
+            &decl.widgets[0],
+            WidgetDecl::DataView {
+                source: DataSourceDecl::Context { parameter, entity },
+                ..
+            } if parameter == "Order" && entity == "Sales.Order"
         ));
     }
 

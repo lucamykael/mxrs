@@ -64,6 +64,22 @@ pub enum WriterError {
     )]
     PageWidgetsRequireLayout(String),
 
+    #[error("page {page:?} declares duplicate parameter {parameter:?}")]
+    DuplicatePageParameter { page: String, parameter: String },
+
+    #[error("page {page:?} data view references unknown parameter {parameter:?}")]
+    UnknownPageParameter { page: String, parameter: String },
+
+    #[error(
+        "page {page:?} data view expects parameter {parameter:?} to have entity {expected:?}, but it declares {actual:?}"
+    )]
+    PageParameterEntityMismatch {
+        page: String,
+        parameter: String,
+        expected: String,
+        actual: String,
+    },
+
     #[error("Forms metamodel error: {0}")]
     Forms(#[from] mxrs_forms::FormsError),
 

@@ -82,16 +82,26 @@ pub enum ButtonAction {
 /// stays marker-free while `mxrs-dsl::DataViewBuilder` requires
 /// `MicroflowMarker`/`NanoflowMarker`.
 ///
-/// **No page-parameter/context-inherited source yet** (`Forms$DataViewSource`,
-/// mxrb's `"context"` decode kind) — that needs `PageDecl` to have a typed
-/// parameter list to inherit an object *from*, which doesn't exist yet (see
-/// this module's own doc comment on `layout` for the same "no Cargo-native
-/// front end yet" boundary). A microflow/nanoflow-sourced `DataView` needs
-/// no such parameter, so it's unblocked without that.
+/// Object page parameters can be inherited through [`DataSourceDecl::Context`].
+/// Other parameter data types remain fail-closed until their authoring types
+/// are represented here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataSourceDecl {
     Microflow(String),
     Nanoflow(String),
+    /// The named object parameter inherited by this page.
+    Context {
+        parameter: String,
+        entity: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageParameterDecl {
+    pub name: String,
+    pub entity: String,
+    pub required: bool,
+    pub default_value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +226,7 @@ pub struct PageDecl {
     pub excluded: bool,
     /// Mendix document export level (`Hidden` or `API`).
     pub export_level: String,
+    pub parameters: Vec<PageParameterDecl>,
     pub layout: Option<LayoutRef>,
     pub widgets: Vec<WidgetDecl>,
 }
@@ -235,6 +246,7 @@ impl PageDecl {
             popup_resizable: false,
             excluded: false,
             export_level: "Hidden".to_string(),
+            parameters: vec![],
             layout: None,
             widgets: vec![],
         }

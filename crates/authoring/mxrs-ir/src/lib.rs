@@ -29,5 +29,5 @@ pub use markers::{
 };
 pub use page::{
     ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
-    WidgetDecl,
+    PageParameterDecl, WidgetDecl,
 };
