@@ -5,13 +5,10 @@
 //! "Custom Widget" wrapper — which in Mendix 11 backs not just marketplace
 //! widgets but several of Studio Pro's own modern built-ins like Data Grid 2,
 //! Gallery and ComboBox) decodes to a shallow [`Widget`] (type "pluggable" +
-//! name + `native_type`, nested widgets still recursed into `children`)
-//! rather than mxrb's fully typed per-widget option shape. This crate's own
-//! `Page` model still has no typed representation for a pluggable widget's
-//! `Object`/`Type` custom properties — `mxrs-pluggable` now decodes those
-//! (see its crate doc for exactly which value kinds), but nothing here
-//! consumes that yet. See `decisions/mxrs-rust-rewrite-plan.md` in this
-//! project's ai-memory for the fuller history.
+//! name + `widget_id` + appearance). `configuration_empty` tells consumers
+//! whether the inline schema/object is the deliberately empty shell emitted
+//! by `mxrs-writer`; configured real-world instances remain distinguishable
+//! and must not be projected onto the name/class-only authoring IR.
 //! Every native (non-pluggable) widget kind mxrb supports — including
 //! composite ones like DataGrid, TabControl, Table and LayoutGrid — is fully
 //! ported.
@@ -344,10 +341,33 @@ fn parse_widgets(items: &[Document], target: &mut Vec<Widget>) {
 fn pluggable_widget(widget: &Document) -> Widget {
     let mut children = Vec::new();
     parse_widgets(&child_widgets(widget), &mut children);
+    let widget_type = get_doc_any(widget, &["Type"]).unwrap_or_default();
+    let object_type = get_doc_any(&widget_type, &["ObjectType"]).unwrap_or_default();
+    let object = get_doc_any(widget, &["Object"]).unwrap_or_default();
+    let mut options = appearance_options(widget);
+    options.insert(
+        "native_type",
+        get_str_any(widget, &["$Type"]).unwrap_or_default(),
+    );
+    options.insert(
+        "widget_id",
+        get_str_any(&widget_type, &["WidgetId"]).unwrap_or_default(),
+    );
+    options.insert(
+        "configuration_empty",
+        docs_any(&object_type, &["PropertyTypes"]).is_empty()
+            && docs_any(&object, &["Properties"]).is_empty()
+            && widget.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "$ID" | "$Type" | "Name" | "Appearance" | "Type" | "Object"
+                )
+            }),
+    );
     Widget {
         widget_type: "pluggable".into(),
         name: Some(get_str_any(widget, &["Name"]).unwrap_or_else(|| "widget".into())),
-        options: mxrs_bson::doc! { "native_type": get_str_any(widget, &["$Type"]).unwrap_or_default() },
+        options,
         events: vec![],
         children,
     }
@@ -435,6 +455,8 @@ fn data_view_widget(widget: &Document) -> Widget {
     parse_widgets(&docs_any(widget, &["Widgets"]), &mut body);
     let mut footer = Vec::new();
     parse_widgets(&docs_any(widget, &["FooterWidgets"]), &mut footer);
+    let body_widget_count = body.len() as i32;
+    let footer_widget_count = footer.len() as i32;
     let mut children = body;
     children.extend(footer);
 
@@ -452,6 +474,8 @@ fn data_view_widget(widget: &Document) -> Widget {
         "show_footer",
         get_bool_any(widget, &["ShowFooter"]).unwrap_or(true),
     );
+    options.insert("body_widget_count", body_widget_count);
+    options.insert("footer_widget_count", footer_widget_count);
 
     Widget {
         widget_type: "data_view".into(),
@@ -1108,7 +1132,7 @@ fn parse_action(action: Option<&Document>) -> Option<Document> {
                 get_doc_any(action, &["NanoflowSettings"]).unwrap_or_else(|| action.clone());
             let handler = get_str_any(action, &["Nanoflow"])
                 .or_else(|| get_str_any(&settings, &["Nanoflow"]))
-                .map(|n| local_name(&n).to_string());
+                .map(|n| n.to_string());
             let handler = handler.filter(|h| !h.is_empty())?;
             Some(
                 mxrs_bson::doc! { "kind": "nanoflow", "handler": handler, "arguments": action_arguments(&settings) },
@@ -1119,7 +1143,7 @@ fn parse_action(action: Option<&Document>) -> Option<Document> {
                 get_doc_any(action, &["MicroflowSettings"]).unwrap_or_else(|| action.clone());
             let handler = get_str_any(action, &["Microflow"])
                 .or_else(|| get_str_any(&settings, &["Microflow"]))
-                .map(|n| local_name(&n).to_string());
+                .map(|n| n.to_string());
             let handler = handler.filter(|h| !h.is_empty())?;
             Some(
                 mxrs_bson::doc! { "kind": "microflow", "handler": handler, "arguments": action_arguments(&settings) },
@@ -1247,6 +1271,76 @@ mod tests {
         assert_eq!(page.widgets.len(), 2);
         assert_eq!(page.widgets[0].widget_type, "button");
         assert_eq!(page.widgets[1].widget_type, "text");
+    }
+
+    #[test]
+    fn flow_actions_keep_their_qualified_target() {
+        let button = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Forms$ActionButton",
+            "Name": "submit",
+            "Caption": "Submit",
+            "Action": {
+                "$Type": "Forms$MicroflowAction",
+                "MicroflowSettings": {
+                    "Microflow": "Sales.ACT_Submit",
+                    "ParameterMappings": mxrs_bson::build_array(vec![], 3),
+                },
+            },
+        };
+        let page = Page::from_bson(&doc! {
+            "$Type": "Forms$Page",
+            "Widgets": mxrs_bson::build_array(vec![Bson::Document(button)], 3),
+        });
+        assert_eq!(
+            page.widgets[0].events[0].get_str("handler").unwrap(),
+            "Sales.ACT_Submit"
+        );
+    }
+
+    #[test]
+    fn data_view_keeps_body_and_footer_boundaries() {
+        let body = doc! { "$Type": "Forms$DynamicText", "Name": "body", "Content": "Body" };
+        let footer = doc! { "$Type": "Forms$DynamicText", "Name": "footer", "Content": "Footer" };
+        let data_view = doc! {
+            "$Type": "Forms$DataView",
+            "Name": "dataView1",
+            "DataSource": { "$Type": "Forms$MicroflowSource", "Microflow": "Sales.ACT_GetOrder" },
+            "Widgets": mxrs_bson::build_array(vec![Bson::Document(body)], 3),
+            "FooterWidgets": mxrs_bson::build_array(vec![Bson::Document(footer)], 3),
+        };
+        let page = Page::from_bson(&doc! {
+            "$Type": "Forms$Page",
+            "Widgets": mxrs_bson::build_array(vec![Bson::Document(data_view)], 3),
+        });
+        let options = &page.widgets[0].options;
+        assert_eq!(options.get_i32("body_widget_count").unwrap(), 1);
+        assert_eq!(options.get_i32("footer_widget_count").unwrap(), 1);
+        assert_eq!(page.widgets[0].children.len(), 2);
+    }
+
+    #[test]
+    fn pluggable_widget_keeps_identity_and_empty_configuration_boundary() {
+        let widget = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "CustomWidgets$CustomWidget",
+            "Name": "ordersGrid",
+            "Type": {
+                "WidgetId": "com.mendix.widget.web.datagrid.Datagrid",
+                "ObjectType": { "PropertyTypes": mxrs_bson::build_array(vec![], 3) },
+            },
+            "Object": { "Properties": mxrs_bson::build_array(vec![], 3) },
+        };
+        let page = Page::from_bson(&doc! {
+            "$Type": "Forms$Page",
+            "Widgets": mxrs_bson::build_array(vec![Bson::Document(widget)], 3),
+        });
+        let options = &page.widgets[0].options;
+        assert_eq!(
+            options.get_str("widget_id").unwrap(),
+            "com.mendix.widget.web.datagrid.Datagrid"
+        );
+        assert!(options.get_bool("configuration_empty").unwrap());
     }
 
     #[test]

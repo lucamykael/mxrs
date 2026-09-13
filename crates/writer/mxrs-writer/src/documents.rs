@@ -164,7 +164,9 @@ fn synchronize_flows_with_identity(
             export_level: "Hidden".into(),
             allowed_module_roles: vec![],
             parameters: vec![],
-            return_type_document: None,
+            return_type_document: crate::flow_compiler::return_type_document(
+                decl.return_type.as_ref(),
+            ),
             return_type: None,
             objects,
             flows,

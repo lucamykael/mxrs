@@ -218,6 +218,15 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
     assert_eq!(sales.microflows.len(), 1);
     let mf = &sales.microflows[0];
     assert_eq!(mf.name.as_deref(), Some("ACT_CreateOrder"));
+    let return_type = mf
+        .return_type_document
+        .as_ref()
+        .expect("object return type is persisted");
+    assert_eq!(
+        return_type.get_str("$Type").unwrap(),
+        "DataTypes$ObjectType"
+    );
+    assert_eq!(return_type.get_str("Entity").unwrap(), "Sales.Order");
     // StartEvent, CreateObject activity, ChangeObject activity,
     // ExclusiveSplit, Commit activity (true branch), ExclusiveMerge,
     // CallMicroflow activity, EndEvent.

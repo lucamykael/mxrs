@@ -46,6 +46,23 @@ pub struct MicroflowCallMapping {
     pub value: String,
 }
 
+/// Explicit Mendix return type paired with a flow's return expression.
+/// Keeping this in the semantic IR prevents a non-void end event from being
+/// persisted with `DataTypes$VoidType`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowReturnType {
+    String,
+    Integer,
+    Long,
+    Float,
+    Decimal,
+    Boolean,
+    DateTime,
+    Binary,
+    Object(String),
+    List(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum Activity {
     CreateObject {
@@ -105,6 +122,7 @@ pub struct MicroflowDecl {
     /// The microflow's `return` expression (e.g. `"$order"`), or `None` for
     /// a void return.
     pub return_expression: Option<String>,
+    pub return_type: Option<FlowReturnType>,
 }
 
 impl MicroflowDecl {
@@ -115,6 +133,7 @@ impl MicroflowDecl {
             activities: vec![],
             rescue_activities: vec![],
             return_expression: None,
+            return_type: None,
         }
     }
 }

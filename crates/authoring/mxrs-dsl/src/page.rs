@@ -95,6 +95,15 @@ impl PageBuilder {
         self
     }
 
+    pub fn text_with(
+        &mut self,
+        caption: impl Into<String>,
+        configure: impl FnOnce(&mut TextBuilder),
+    ) -> &mut Self {
+        push_text_with(&mut self.decl.widgets, caption, configure);
+        self
+    }
+
     pub fn button(
         &mut self,
         caption: impl Into<String>,
@@ -205,6 +214,15 @@ impl ContainerBuilder {
 
     pub fn text(&mut self, caption: impl Into<String>) -> &mut Self {
         push_text(&mut self.children, caption);
+        self
+    }
+
+    pub fn text_with(
+        &mut self,
+        caption: impl Into<String>,
+        configure: impl FnOnce(&mut TextBuilder),
+    ) -> &mut Self {
+        push_text_with(&mut self.children, caption, configure);
         self
     }
 
@@ -414,6 +432,15 @@ impl LayoutGridColumnBuilder {
         self
     }
 
+    pub fn text_with(
+        &mut self,
+        caption: impl Into<String>,
+        configure: impl FnOnce(&mut TextBuilder),
+    ) -> &mut Self {
+        push_text_with(&mut self.children, caption, configure);
+        self
+    }
+
     pub fn button(
         &mut self,
         caption: impl Into<String>,
@@ -507,6 +534,15 @@ impl DataViewBuilder {
         self
     }
 
+    pub fn text_with(
+        &mut self,
+        caption: impl Into<String>,
+        configure: impl FnOnce(&mut TextBuilder),
+    ) -> &mut Self {
+        push_text_with(&mut self.children, caption, configure);
+        self
+    }
+
     pub fn button(
         &mut self,
         caption: impl Into<String>,
@@ -527,39 +563,87 @@ impl DataViewBuilder {
     /// doc comment for why nothing here cross-checks it against the
     /// microflow/nanoflow this data view was constructed from.
     pub fn text_box<A: AttributeMarker>(&mut self) -> &mut Self {
-        self.children.push(WidgetDecl::TextBox {
-            name: None,
-            attribute: A::NAME.to_string(),
-            class: None,
-        });
+        self.text_box_with::<A>(|_| {});
+        self
+    }
+
+    pub fn text_box_with<A: AttributeMarker>(
+        &mut self,
+        configure: impl FnOnce(&mut AttributeWidgetBuilder),
+    ) -> &mut Self {
+        self.push_attribute_widget::<A>(AttributeWidgetKind::TextBox, configure);
         self
     }
 
     pub fn check_box<A: AttributeMarker>(&mut self) -> &mut Self {
-        self.children.push(WidgetDecl::CheckBox {
-            name: None,
-            attribute: A::NAME.to_string(),
-            class: None,
-        });
+        self.check_box_with::<A>(|_| {});
+        self
+    }
+
+    pub fn check_box_with<A: AttributeMarker>(
+        &mut self,
+        configure: impl FnOnce(&mut AttributeWidgetBuilder),
+    ) -> &mut Self {
+        self.push_attribute_widget::<A>(AttributeWidgetKind::CheckBox, configure);
         self
     }
 
     pub fn date_picker<A: AttributeMarker>(&mut self) -> &mut Self {
-        self.children.push(WidgetDecl::DatePicker {
-            name: None,
-            attribute: A::NAME.to_string(),
-            class: None,
-        });
+        self.date_picker_with::<A>(|_| {});
+        self
+    }
+
+    pub fn date_picker_with<A: AttributeMarker>(
+        &mut self,
+        configure: impl FnOnce(&mut AttributeWidgetBuilder),
+    ) -> &mut Self {
+        self.push_attribute_widget::<A>(AttributeWidgetKind::DatePicker, configure);
         self
     }
 
     pub fn drop_down<A: AttributeMarker>(&mut self) -> &mut Self {
-        self.children.push(WidgetDecl::DropDown {
-            name: None,
-            attribute: A::NAME.to_string(),
-            class: None,
-        });
+        self.drop_down_with::<A>(|_| {});
         self
+    }
+
+    pub fn drop_down_with<A: AttributeMarker>(
+        &mut self,
+        configure: impl FnOnce(&mut AttributeWidgetBuilder),
+    ) -> &mut Self {
+        self.push_attribute_widget::<A>(AttributeWidgetKind::DropDown, configure);
+        self
+    }
+
+    fn push_attribute_widget<A: AttributeMarker>(
+        &mut self,
+        kind: AttributeWidgetKind,
+        configure: impl FnOnce(&mut AttributeWidgetBuilder),
+    ) {
+        let mut builder = AttributeWidgetBuilder::new();
+        configure(&mut builder);
+        let fields = (builder.name, A::NAME.to_string(), builder.class);
+        self.children.push(match kind {
+            AttributeWidgetKind::TextBox => WidgetDecl::TextBox {
+                name: fields.0,
+                attribute: fields.1,
+                class: fields.2,
+            },
+            AttributeWidgetKind::CheckBox => WidgetDecl::CheckBox {
+                name: fields.0,
+                attribute: fields.1,
+                class: fields.2,
+            },
+            AttributeWidgetKind::DatePicker => WidgetDecl::DatePicker {
+                name: fields.0,
+                attribute: fields.1,
+                class: fields.2,
+            },
+            AttributeWidgetKind::DropDown => WidgetDecl::DropDown {
+                name: fields.0,
+                attribute: fields.1,
+                class: fields.2,
+            },
+        });
     }
 
     fn into_decl(self) -> WidgetDecl {
@@ -571,6 +655,61 @@ impl DataViewBuilder {
     }
 }
 
+pub struct TextBuilder {
+    name: Option<String>,
+    class: Option<String>,
+}
+
+impl TextBuilder {
+    fn new() -> Self {
+        Self {
+            name: None,
+            class: None,
+        }
+    }
+
+    pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn class(&mut self, class: impl Into<String>) -> &mut Self {
+        self.class = Some(class.into());
+        self
+    }
+}
+
+enum AttributeWidgetKind {
+    TextBox,
+    CheckBox,
+    DatePicker,
+    DropDown,
+}
+
+pub struct AttributeWidgetBuilder {
+    name: Option<String>,
+    class: Option<String>,
+}
+
+impl AttributeWidgetBuilder {
+    fn new() -> Self {
+        Self {
+            name: None,
+            class: None,
+        }
+    }
+
+    pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn class(&mut self, class: impl Into<String>) -> &mut Self {
+        self.class = Some(class.into());
+        self
+    }
+}
+
 fn push_container(widgets: &mut Vec<WidgetDecl>, configure: impl FnOnce(&mut ContainerBuilder)) {
     let mut builder = ContainerBuilder::new();
     configure(&mut builder);
@@ -578,10 +717,20 @@ fn push_container(widgets: &mut Vec<WidgetDecl>, configure: impl FnOnce(&mut Con
 }
 
 fn push_text(widgets: &mut Vec<WidgetDecl>, caption: impl Into<String>) {
+    push_text_with(widgets, caption, |_| {});
+}
+
+fn push_text_with(
+    widgets: &mut Vec<WidgetDecl>,
+    caption: impl Into<String>,
+    configure: impl FnOnce(&mut TextBuilder),
+) {
+    let mut builder = TextBuilder::new();
+    configure(&mut builder);
     widgets.push(WidgetDecl::Text {
-        name: None,
+        name: builder.name,
         caption: caption.into(),
-        class: None,
+        class: builder.class,
     });
 }
 
@@ -687,7 +836,10 @@ mod tests {
         page.layout("Atlas_Core.ApplicationLayout", "Main");
         page.container(|c| {
             c.class("row");
-            c.text("Manage your orders");
+            c.text_with("Manage your orders", |text| {
+                text.name("helpText");
+                text.class("text-muted");
+            });
             c.button("Close", |b| {
                 b.close_page();
             });
@@ -709,9 +861,13 @@ mod tests {
         };
         assert_eq!(class.as_deref(), Some("row"));
         assert_eq!(children.len(), 2);
-        assert!(
-            matches!(&children[0], WidgetDecl::Text { caption, .. } if caption == "Manage your orders")
-        );
+        assert!(matches!(
+            &children[0],
+            WidgetDecl::Text { name, caption, class }
+                if name.as_deref() == Some("helpText")
+                    && caption == "Manage your orders"
+                    && class.as_deref() == Some("text-muted")
+        ));
         assert!(matches!(
             &children[1],
             WidgetDecl::Button { action: ButtonAction::ClosePage, caption, .. } if caption == "Close"
@@ -783,7 +939,10 @@ mod tests {
         let mut page = PageBuilder::new("OrderDetail");
         page.layout("Atlas_Core.ApplicationLayout", "Main");
         page.data_view_from_microflow(MicroflowRef::<ActGetOrder>::new(), |dv| {
-            dv.text_box::<OrderNumber>();
+            dv.text_box_with::<OrderNumber>(|widget| {
+                widget.name("numberInput");
+                widget.class("form-control");
+            });
             dv.check_box::<OrderIsPaid>();
             dv.button("Submit", |b| {
                 b.call_microflow(MicroflowRef::<ActSubmitOrder>::new());
@@ -804,7 +963,10 @@ mod tests {
         assert_eq!(children.len(), 3);
         assert!(matches!(
             &children[0],
-            WidgetDecl::TextBox { attribute, .. } if attribute == "Number"
+            WidgetDecl::TextBox { name, attribute, class }
+                if name.as_deref() == Some("numberInput")
+                    && attribute == "Number"
+                    && class.as_deref() == Some("form-control")
         ));
         assert!(matches!(
             &children[1],

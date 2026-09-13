@@ -1,4 +1,4 @@
-use mxrs_expr::{Expr, ListVar, MemberAssignment, MxBool, RenderExpr, Var};
+use mxrs_expr::{Expr, ListVar, MemberAssignment, MxBool, RenderExpr, TypedRenderExpr, Var};
 use mxrs_ir::flow::{Activity, MicroflowCallMapping, MicroflowDecl};
 use mxrs_ir::{EntityMarker, MicroflowMarker, MicroflowRef, Ref};
 
@@ -192,8 +192,9 @@ impl FlowBuilder {
         self
     }
 
-    pub fn return_value(&mut self, expression: impl RenderExpr) -> &mut Self {
+    pub fn return_value(&mut self, expression: impl TypedRenderExpr) -> &mut Self {
         self.decl.return_expression = Some(expression.render());
+        self.decl.return_type = Some(expression.flow_return_type());
         self
     }
 }

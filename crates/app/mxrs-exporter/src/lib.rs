@@ -1515,6 +1515,16 @@ mod tests {
                 entity.datetime("SubmittedAt").localize_date = Some(false);
             });
             module.microflow("ACT_Ping", |_flow| {});
+            module.microflow("ACT_GetOrder", |flow| {
+                let order = flow.create_object(
+                    "order",
+                    mxrs_ir::Ref::<sales_markers::Order>::new(),
+                    vec![],
+                    false,
+                );
+                flow.return_value(order);
+            });
+            module.nanoflow("NF_Validate", |_flow| {});
             module.page("Home", |p| {
                 p.layout("Atlas_Core.ApplicationLayout", "Main");
                 p.container(|c| {
@@ -1524,13 +1534,41 @@ mod tests {
                     });
                 });
             });
+            module.page("OrderDetail", |p| {
+                p.layout("Atlas_Core.ApplicationLayout", "Main");
+                p.data_view_from_microflow(
+                    mxrs_ir::MicroflowRef::<sales_markers::ACT_GetOrder>::new(),
+                    |view| {
+                        view.name("orderView");
+                        view.text_box_with::<sales_markers::Order_Number>(|input| {
+                            input.name("numberInput");
+                            input.class("form-control");
+                        });
+                        view.button("Validate", |button| {
+                            button.name("validateButton");
+                            button.call_nanoflow(
+                                mxrs_ir::NanoflowRef::<sales_markers::NF_Validate>::new(),
+                            );
+                        });
+                    },
+                );
+                p.data_grid_2(|widget| {
+                    widget.name("ordersGrid");
+                });
+                p.gallery(|widget| {
+                    widget.name("ordersGallery");
+                });
+                p.combo_box(|widget| {
+                    widget.name("orderPicker");
+                });
+            });
         });
         mxrs_writer::write_project(&source_path, &builder.build()).unwrap();
 
         let imported = import_cargo_project(&source_path, &generated, Some(workspace)).unwrap();
         assert!(imported.imported_units > 1);
         assert_eq!(imported.imported_assets, 1);
-        assert_eq!(imported.page_export.typed_candidates, 1);
+        assert_eq!(imported.page_export.typed_candidates, 2);
         assert!(generated.join("Cargo.toml").is_file());
         assert!(generated.join("mxrs.toml").is_file());
         assert!(generated.join("src/lib.rs").is_file());
@@ -1550,8 +1588,16 @@ mod tests {
         let pages_source =
             std::fs::read_to_string(generated.join("src/domain/pages/mod.rs")).unwrap();
         assert!(pages_source.contains("pub fn home"));
-        assert!(pages_source.contains("w.text(\"Welcome\")"));
+        assert!(pages_source.contains("w.text_with(\"Welcome\""));
+        assert!(pages_source.contains("w.name("));
         assert!(pages_source.contains("b.close_page()"));
+        assert!(pages_source.contains("pub fn order_detail"));
+        assert!(pages_source.contains("data_view_from_microflow"));
+        assert!(pages_source.contains("Order_Number"));
+        assert!(pages_source.contains("b.call_nanoflow"));
+        assert!(pages_source.contains("p.data_grid_2"));
+        assert!(pages_source.contains("p.gallery"));
+        assert!(pages_source.contains("p.combo_box"));
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(domain_source.contains("pub mod entities;"));
         assert!(domain_source.contains("pub mod flows;"));
@@ -1585,6 +1631,8 @@ mod tests {
         assert!(markers.contains("pub struct Order;"));
         assert!(markers.contains("pub struct Order_Number;"));
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_Ping"));
+        assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_GetOrder"));
+        assert!(markers.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
         let flows = std::fs::read_to_string(generated.join("src/domain/flows/mod.rs")).unwrap();
         assert!(flows.contains("snapshot-backed microflow: Sales.ACT_Ping"));
         assert!(flows.contains("target.nanoflows.extend(declared.nanoflows)"));
@@ -1658,6 +1706,20 @@ mod tests {
         assert_eq!(container.children.len(), 2);
         assert_eq!(container.children[0].widget_type, "text");
         assert_eq!(container.children[1].widget_type, "button");
+        let detail = modules[0]
+            .pages
+            .iter()
+            .find(|page| page.name.as_deref() == Some("OrderDetail"))
+            .expect("the advanced page round-trips through generated Rust");
+        assert_eq!(detail.widgets.len(), 4);
+        assert_eq!(detail.widgets[0].widget_type, "data_view");
+        assert_eq!(detail.widgets[0].children[0].widget_type, "text_box");
+        assert_eq!(detail.widgets[0].children[1].widget_type, "button");
+        assert_eq!(detail.widgets[1].widget_type, "pluggable");
+        assert_eq!(
+            detail.widgets[1].options.get_str("widget_id").unwrap(),
+            "com.mendix.widget.web.datagrid.Datagrid"
+        );
         assert_eq!(
             std::fs::read(build_directory.path().join("theme/web/main.css")).unwrap(),
             b"body { color: rebeccapurple; }"
@@ -1675,6 +1737,21 @@ mod tests {
         impl mxrs_ir::EntityMarker for Order {
             const MODULE: &'static str = "Sales";
             const NAME: &'static str = "Order";
+        }
+        pub struct Order_Number;
+        impl mxrs_ir::AttributeMarker for Order_Number {
+            type Entity = Order;
+            const NAME: &'static str = "Number";
+        }
+        pub struct ACT_GetOrder;
+        impl mxrs_ir::MicroflowMarker for ACT_GetOrder {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "ACT_GetOrder";
+        }
+        pub struct NF_Validate;
+        impl mxrs_ir::NanoflowMarker for NF_Validate {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "NF_Validate";
         }
         pub struct Order_Order_Customer;
         impl mxrs_ir::AssociationMarker for Order_Order_Customer {

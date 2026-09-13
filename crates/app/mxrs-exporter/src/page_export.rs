@@ -29,37 +29,23 @@
 //! opaque as before — served from the generated snapshot, contributing
 //! nothing to `build()`.
 //!
-//! **`WidgetDecl::DataView`/attribute-bound widgets
-//! (`TextBox`/`CheckBox`/`DatePicker`/`DropDown`), pluggable widgets
-//! (`DataGrid2`/`Gallery`/`ComboBox`), and flow-calling button actions
-//! (`ButtonAction::CallMicroflow`/`CallNanoflow`) are authoring-only — not
-//! detected on import**, even though `mxrs-writer::page_compiler` fully
-//! supports writing them (see that module's tests). Reason, concretely:
-//! `mxrs_model::page::parse_action` and `data_view_widget` decode a *local*
-//! (module-unqualified) handler name and a merged body+footer widget list
-//! respectively — neither is enough to reconstruct what this IR needs (a
-//! fully qualified `"Module.Name"` flow reference; a body list provably
-//! free of footer widgets, which the decoded shape can't distinguish); and
-//! `mxrs_model::page::pluggable_widget` never decodes a `CustomWidget`'s
-//! `Type.WidgetId` at all, so there's no way to even tell a Data Grid 2
-//! instance apart from any other pluggable widget from the decoded shape
-//! this module consumes. Detecting these on import risks either emitting a
-//! `PageDecl` with an unresolvable target, silently misplacing a footer
-//! widget into the body, or misclassifying an arbitrary third-party widget
-//! as one of these three — a real correctness risk, not just unfinished
-//! breadth, so `try_convert_page`/`try_convert_widget` leave any page
-//! containing them exactly as opaque as before rather than guess.
-//! `render_widget` still matches every `WidgetDecl` variant exhaustively (a
-//! `TODO` comment for these, mirroring the precedent `WidgetDecl::LayoutGrid`'s
-//! own comment set before *its* import detection existed) so adding a new
-//! variant here can't silently forget to update
-//! the renderer.
+//! Data views, attribute-bound widgets, flow-calling buttons and the three
+//! built-in pluggable shells are also detected, but only at a strict
+//! lossless boundary. Flow targets must resolve to generated markers;
+//! data-view flows must return a known entity; attributes must exist on that
+//! entity; call arguments and data-view footers remain opaque because their
+//! authoring IR has no representation yet; and a pluggable widget converts
+//! only when its schema/object configuration is the empty shell emitted by
+//! `mxrs-writer`. A configured Studio Pro/marketplace widget therefore stays
+//! snapshot-backed instead of being flattened to name/class.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use mxrs_bson::Document;
 use mxrs_ir::page::{
-    ButtonAction, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl, WidgetDecl,
+    ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
+    WidgetDecl,
 };
 use mxrs_model::Module;
 use mxrs_model::page::{Page, Widget};
@@ -85,6 +71,85 @@ pub struct ConvertedPage {
     pub module_name: String,
     pub function_name: String,
     pub decl: PageDecl,
+    flow_return_entities: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowKind {
+    Microflow,
+    Nanoflow,
+}
+
+#[derive(Debug, Clone)]
+struct FlowInfo {
+    kind: FlowKind,
+    return_entity: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ConversionContext {
+    flows: HashMap<String, FlowInfo>,
+    entity_attributes: HashMap<String, HashSet<String>>,
+}
+
+impl ConversionContext {
+    fn from_modules(modules: &[Module]) -> Self {
+        let mut context = Self::default();
+        for module in modules {
+            let module_name = module.name.as_deref().unwrap_or("Unnamed");
+            for entity in module.entities() {
+                let Some(entity_name) = entity.name.as_deref() else {
+                    continue;
+                };
+                context.entity_attributes.insert(
+                    format!("{module_name}.{entity_name}"),
+                    entity
+                        .attributes
+                        .iter()
+                        .filter_map(|attribute| attribute.name.clone())
+                        .collect(),
+                );
+            }
+            for (kind, flows) in [
+                (FlowKind::Microflow, module.microflows.as_slice()),
+                (FlowKind::Nanoflow, module.nanoflows.as_slice()),
+            ] {
+                for flow in flows {
+                    let Some(name) = flow.name.as_deref() else {
+                        continue;
+                    };
+                    let return_entity = flow
+                        .return_type_document
+                        .as_ref()
+                        .and_then(|document| document.get_str("Entity").ok())
+                        .map(str::to_string);
+                    context.flows.insert(
+                        format!("{module_name}.{name}"),
+                        FlowInfo {
+                            kind,
+                            return_entity,
+                        },
+                    );
+                }
+            }
+        }
+        context
+    }
+
+    fn resolve_flow<'a>(
+        &'a self,
+        current_module: &str,
+        name: &str,
+        expected: FlowKind,
+    ) -> Option<(String, &'a FlowInfo)> {
+        let qualified = if name.contains('.') {
+            name.to_string()
+        } else {
+            format!("{current_module}.{name}")
+        };
+        let info = self.flows.get(&qualified)?;
+        (info.kind == expected).then_some((qualified, info))
+    }
 }
 
 /// Detects every convertible page across every module. Pure detection, no
@@ -92,17 +157,27 @@ pub struct ConvertedPage {
 /// `lib.rs::render` (the `build()` wiring), so the two can never drift
 /// apart on which pages qualify.
 pub fn convert_pages(modules: &[Module]) -> (Vec<ConvertedPage>, PageExportReport) {
+    let context = ConversionContext::from_modules(modules);
     let mut report = PageExportReport::default();
     let mut pages = Vec::new();
     for module in modules {
         let module_name = module.name.clone().unwrap_or_else(|| "Unnamed".into());
         for page in &module.pages {
-            match try_convert_page(page) {
+            match try_convert_page(page, &context, &module_name) {
                 Some(decl) => {
                     report.typed_candidates += 1;
                     pages.push(ConvertedPage {
                         module_name: module_name.clone(),
                         function_name: to_snake_case(&decl.name),
+                        flow_return_entities: context
+                            .flows
+                            .iter()
+                            .filter_map(|(name, info)| {
+                                info.return_entity
+                                    .as_ref()
+                                    .map(|entity| (name.clone(), entity.clone()))
+                            })
+                            .collect(),
                         decl,
                     });
                 }
@@ -147,12 +222,22 @@ pub fn render_pages_module(pages: &[ConvertedPage]) -> Option<String> {
     Some(out)
 }
 
-fn try_convert_page(page: &Page) -> Option<PageDecl> {
+fn try_convert_page(
+    page: &Page,
+    context: &ConversionContext,
+    current_module: &str,
+) -> Option<PageDecl> {
     let name = page.name.clone()?;
-    if page.data_source.is_some() {
+    if !page.allowed_module_roles.is_empty() {
         return None;
     }
-    if !page.allowed_module_roles.is_empty() {
+    if !page.parameters.is_empty()
+        || page.popup_width != 0
+        || page.popup_height != 0
+        || page.popup_resizable
+        || page.excluded
+        || page.export_level != "Hidden"
+    {
         return None;
     }
     if !page.appearance_class.is_empty() || !page.appearance_style.is_empty() {
@@ -161,7 +246,7 @@ fn try_convert_page(page: &Page) -> Option<PageDecl> {
     let widgets = page
         .widgets
         .iter()
-        .map(try_convert_widget)
+        .map(|widget| try_convert_widget(widget, context, current_module, None))
         .collect::<Option<Vec<_>>>()?;
 
     let layout = match (&page.layout_id, &page.layout_parameter) {
@@ -182,15 +267,21 @@ fn try_convert_page(page: &Page) -> Option<PageDecl> {
     let mut decl = PageDecl::new(name);
     decl.documentation = page.documentation.clone();
     decl.url = page.url.clone();
-    if !page.title.is_empty() {
-        decl.title = Some(page.title.clone());
-    }
+    // Imported pages always make the decoded title explicit. `None` means
+    // "default to page name" on the authoring side, which is not equivalent
+    // to an explicitly empty title in an existing model.
+    decl.title = Some(page.title.clone());
     decl.layout = layout;
     decl.widgets = widgets;
     Some(decl)
 }
 
-fn try_convert_widget(widget: &Widget) -> Option<WidgetDecl> {
+fn try_convert_widget(
+    widget: &Widget,
+    context: &ConversionContext,
+    current_module: &str,
+    data_view_entity: Option<&str>,
+) -> Option<WidgetDecl> {
     match widget.widget_type.as_str() {
         "container" => {
             if !widget.events.is_empty() || !only_keys(&widget.options, &["class", "style"]) {
@@ -199,7 +290,7 @@ fn try_convert_widget(widget: &Widget) -> Option<WidgetDecl> {
             let children = widget
                 .children
                 .iter()
-                .map(try_convert_widget)
+                .map(|child| try_convert_widget(child, context, current_module, data_view_entity))
                 .collect::<Option<Vec<_>>>()?;
             Some(WidgetDecl::Container {
                 name: widget.name.clone(),
@@ -209,9 +300,7 @@ fn try_convert_widget(widget: &Widget) -> Option<WidgetDecl> {
             })
         }
         "text" => {
-            if !widget.events.is_empty()
-                || !only_keys(&widget.options, &["class", "style", "caption"])
-            {
+            if !widget.events.is_empty() || !only_keys(&widget.options, &["class", "caption"]) {
                 return None;
             }
             let caption = string_option(&widget.options, "caption")?;
@@ -222,7 +311,7 @@ fn try_convert_widget(widget: &Widget) -> Option<WidgetDecl> {
             })
         }
         "button" => {
-            if !only_keys(&widget.options, &["class", "style", "caption"]) {
+            if !only_keys(&widget.options, &["class", "caption"]) {
                 return None;
             }
             let action = match widget.events.as_slice() {
@@ -230,9 +319,30 @@ fn try_convert_widget(widget: &Widget) -> Option<WidgetDecl> {
                 [event]
                     if event.get_str("kind").ok() == Some("action")
                         && event.get_str("handler").ok() == Some("close_page")
-                        && event.get_str("event").ok() == Some("on_click") =>
+                        && event.get_str("event").ok() == Some("on_click")
+                        && only_keys(event, &["kind", "handler", "event"]) =>
                 {
                     ButtonAction::ClosePage
+                }
+                [event]
+                    if event.get_str("event").ok() == Some("on_click")
+                        && event
+                            .get_document("arguments")
+                            .is_ok_and(Document::is_empty)
+                        && matches!(event.get_str("kind").ok(), Some("microflow" | "nanoflow"))
+                        && only_keys(event, &["kind", "handler", "arguments", "event"]) =>
+                {
+                    let kind = match event.get_str("kind").ok()? {
+                        "microflow" => FlowKind::Microflow,
+                        "nanoflow" => FlowKind::Nanoflow,
+                        _ => return None,
+                    };
+                    let handler = event.get_str("handler").ok()?;
+                    let (qualified, _) = context.resolve_flow(current_module, handler, kind)?;
+                    match kind {
+                        FlowKind::Microflow => ButtonAction::CallMicroflow(qualified),
+                        FlowKind::Nanoflow => ButtonAction::CallNanoflow(qualified),
+                    }
                 }
                 _ => return None,
             };
@@ -243,9 +353,145 @@ fn try_convert_widget(widget: &Widget) -> Option<WidgetDecl> {
                 action,
             })
         }
-        "layout_grid" => try_convert_layout_grid(widget),
+        "layout_grid" => try_convert_layout_grid(widget, context, current_module, data_view_entity),
+        "data_view" => try_convert_data_view(widget, context, current_module),
+        "text_box" | "check_box" | "date_picker" | "drop_down" => {
+            try_convert_attribute_widget(widget, context, data_view_entity)
+        }
+        "pluggable" => try_convert_pluggable_widget(widget),
         _ => None,
     }
+}
+
+fn try_convert_data_view(
+    widget: &Widget,
+    context: &ConversionContext,
+    current_module: &str,
+) -> Option<WidgetDecl> {
+    if !widget.events.is_empty()
+        || !only_keys(
+            &widget.options,
+            &[
+                "source",
+                "show_footer",
+                "body_widget_count",
+                "footer_widget_count",
+            ],
+        )
+        || widget.options.get_bool("show_footer").ok() != Some(true)
+        || widget.options.get_i32("footer_widget_count").ok() != Some(0)
+        || widget.options.get_i32("body_widget_count").ok()? as usize != widget.children.len()
+    {
+        return None;
+    }
+    let source = widget.options.get_document("source").ok()?;
+    if !only_keys(source, &["kind", "name"]) {
+        return None;
+    }
+    let (kind, expected) = match source.get_str("kind").ok()? {
+        "microflow" => (FlowKind::Microflow, FlowKind::Microflow),
+        "nanoflow" => (FlowKind::Nanoflow, FlowKind::Nanoflow),
+        _ => return None,
+    };
+    let (qualified, flow) =
+        context.resolve_flow(current_module, source.get_str("name").ok()?, expected)?;
+    let entity = flow.return_entity.as_deref()?;
+    if !context.entity_attributes.contains_key(entity) {
+        return None;
+    }
+    let children = widget
+        .children
+        .iter()
+        .map(|child| try_convert_widget(child, context, current_module, Some(entity)))
+        .collect::<Option<Vec<_>>>()?;
+    let source = match kind {
+        FlowKind::Microflow => DataSourceDecl::Microflow(qualified),
+        FlowKind::Nanoflow => DataSourceDecl::Nanoflow(qualified),
+    };
+    Some(WidgetDecl::DataView {
+        name: widget.name.clone(),
+        source,
+        children,
+    })
+}
+
+fn try_convert_attribute_widget(
+    widget: &Widget,
+    context: &ConversionContext,
+    data_view_entity: Option<&str>,
+) -> Option<WidgetDecl> {
+    if !widget.events.is_empty()
+        || !widget.children.is_empty()
+        || !only_keys(&widget.options, &["attribute", "class"])
+    {
+        return None;
+    }
+    let entity = data_view_entity?;
+    let raw_attribute = widget.options.get_str("attribute").ok()?;
+    let attribute = validated_attribute_name(raw_attribute, entity)?;
+    if !context.entity_attributes.get(entity)?.contains(attribute) {
+        return None;
+    }
+    let fields = (
+        widget.name.clone(),
+        attribute.to_string(),
+        string_option(&widget.options, "class"),
+    );
+    Some(match widget.widget_type.as_str() {
+        "text_box" => WidgetDecl::TextBox {
+            name: fields.0,
+            attribute: fields.1,
+            class: fields.2,
+        },
+        "check_box" => WidgetDecl::CheckBox {
+            name: fields.0,
+            attribute: fields.1,
+            class: fields.2,
+        },
+        "date_picker" => WidgetDecl::DatePicker {
+            name: fields.0,
+            attribute: fields.1,
+            class: fields.2,
+        },
+        "drop_down" => WidgetDecl::DropDown {
+            name: fields.0,
+            attribute: fields.1,
+            class: fields.2,
+        },
+        _ => return None,
+    })
+}
+
+fn validated_attribute_name<'a>(raw: &'a str, entity: &str) -> Option<&'a str> {
+    let Some((prefix, attribute)) = raw.rsplit_once(['/', '.']) else {
+        return (!raw.is_empty()).then_some(raw);
+    };
+    let entity_name = entity.rsplit('.').next()?;
+    (prefix == entity || prefix == entity_name)
+        .then_some(attribute)
+        .filter(|name| !name.is_empty())
+}
+
+fn try_convert_pluggable_widget(widget: &Widget) -> Option<WidgetDecl> {
+    if !widget.events.is_empty()
+        || !widget.children.is_empty()
+        || !only_keys(
+            &widget.options,
+            &["native_type", "widget_id", "configuration_empty", "class"],
+        )
+        || widget.options.get_str("native_type").ok() != Some("CustomWidgets$CustomWidget")
+        || widget.options.get_bool("configuration_empty").ok() != Some(true)
+    {
+        return None;
+    }
+    let name = widget.name.clone();
+    let class = string_option(&widget.options, "class");
+    Some(match widget.options.get_str("widget_id").ok()? {
+        "com.mendix.widget.web.datagrid.Datagrid" => WidgetDecl::DataGrid2 { name, class },
+        "com.mendix.widget.web.gallery.Gallery" => WidgetDecl::Gallery { name, class },
+        "com.mendix.widget.web.combobox.Combobox" => WidgetDecl::ComboBox { name, class },
+        _ => return None,
+    })
 }
 
 /// Walks the `"layout_grid_row"`/`"layout_grid_column"` wrapper tree
@@ -255,14 +501,19 @@ fn try_convert_widget(widget: &Widget) -> Option<WidgetDecl> {
 /// `WidgetDecl::LayoutGrid` has no per-breakpoint weight concept yet (see
 /// `mxrs_ir::page`), so a column that actually uses one stays opaque rather
 /// than silently dropping it.
-fn try_convert_layout_grid(widget: &Widget) -> Option<WidgetDecl> {
+fn try_convert_layout_grid(
+    widget: &Widget,
+    context: &ConversionContext,
+    current_module: &str,
+    data_view_entity: Option<&str>,
+) -> Option<WidgetDecl> {
     if !widget.events.is_empty() || !only_keys(&widget.options, &[]) {
         return None;
     }
     let rows = widget
         .children
         .iter()
-        .map(try_convert_layout_grid_row)
+        .map(|row| try_convert_layout_grid_row(row, context, current_module, data_view_entity))
         .collect::<Option<Vec<_>>>()?;
     Some(WidgetDecl::LayoutGrid {
         name: widget.name.clone(),
@@ -270,19 +521,31 @@ fn try_convert_layout_grid(widget: &Widget) -> Option<WidgetDecl> {
     })
 }
 
-fn try_convert_layout_grid_row(row: &Widget) -> Option<LayoutGridRowDecl> {
+fn try_convert_layout_grid_row(
+    row: &Widget,
+    context: &ConversionContext,
+    current_module: &str,
+    data_view_entity: Option<&str>,
+) -> Option<LayoutGridRowDecl> {
     if row.widget_type != "layout_grid_row" || !row.events.is_empty() {
         return None;
     }
     let columns = row
         .children
         .iter()
-        .map(try_convert_layout_grid_column)
+        .map(|column| {
+            try_convert_layout_grid_column(column, context, current_module, data_view_entity)
+        })
         .collect::<Option<Vec<_>>>()?;
     Some(LayoutGridRowDecl { columns })
 }
 
-fn try_convert_layout_grid_column(column: &Widget) -> Option<LayoutGridColumnDecl> {
+fn try_convert_layout_grid_column(
+    column: &Widget,
+    context: &ConversionContext,
+    current_module: &str,
+    data_view_entity: Option<&str>,
+) -> Option<LayoutGridColumnDecl> {
     if column.widget_type != "layout_grid_column" || !column.events.is_empty() {
         return None;
     }
@@ -300,7 +563,7 @@ fn try_convert_layout_grid_column(column: &Widget) -> Option<LayoutGridColumnDec
     let children = column
         .children
         .iter()
-        .map(try_convert_widget)
+        .map(|child| try_convert_widget(child, context, current_module, data_view_entity))
         .collect::<Option<Vec<_>>>()?;
     Some(LayoutGridColumnDecl { weight, children })
 }
@@ -344,14 +607,26 @@ fn render_page_function(page: &ConvertedPage) -> String {
         );
     }
     for widget in &decl.widgets {
-        out.push_str(&render_widget(widget, 1, "p"));
+        out.push_str(&render_widget(
+            widget,
+            1,
+            "p",
+            None,
+            &page.flow_return_entities,
+        ));
     }
     let _ = writeln!(out, "    p.into_decl()");
     let _ = writeln!(out, "}}");
     out
 }
 
-fn render_widget(widget: &WidgetDecl, indent: usize, receiver: &str) -> String {
+fn render_widget(
+    widget: &WidgetDecl,
+    indent: usize,
+    receiver: &str,
+    data_view_entity: Option<&str>,
+    flow_return_entities: &HashMap<String, String>,
+) -> String {
     let pad = "    ".repeat(indent);
     let mut out = String::new();
     match widget {
@@ -372,7 +647,13 @@ fn render_widget(widget: &WidgetDecl, indent: usize, receiver: &str) -> String {
                 let _ = writeln!(out, "{pad}    w.style({style:?});");
             }
             for child in children {
-                out.push_str(&render_widget(child, indent + 1, "w"));
+                out.push_str(&render_widget(
+                    child,
+                    indent + 1,
+                    "w",
+                    data_view_entity,
+                    flow_return_entities,
+                ));
             }
             let _ = writeln!(out, "{pad}}});");
         }
@@ -386,7 +667,13 @@ fn render_widget(widget: &WidgetDecl, indent: usize, receiver: &str) -> String {
                 for column in &row.columns {
                     let _ = writeln!(out, "{pad}        row.column({}, |col| {{", column.weight);
                     for child in &column.children {
-                        out.push_str(&render_widget(child, indent + 3, "col"));
+                        out.push_str(&render_widget(
+                            child,
+                            indent + 3,
+                            "col",
+                            data_view_entity,
+                            flow_return_entities,
+                        ));
                     }
                     let _ = writeln!(out, "{pad}        }});");
                 }
@@ -394,66 +681,164 @@ fn render_widget(widget: &WidgetDecl, indent: usize, receiver: &str) -> String {
             }
             let _ = writeln!(out, "{pad}}});");
         }
-        WidgetDecl::Text { caption, .. } => {
-            let _ = writeln!(out, "{pad}{receiver}.text({caption:?});");
+        WidgetDecl::Text {
+            name,
+            caption,
+            class,
+        } => {
+            if name.is_none() && class.is_none() {
+                let _ = writeln!(out, "{pad}{receiver}.text({caption:?});");
+            } else {
+                let _ = writeln!(out, "{pad}{receiver}.text_with({caption:?}, |w| {{");
+                render_name_and_class(&mut out, indent + 1, "w", name, class);
+                let _ = writeln!(out, "{pad}}});");
+            }
         }
         WidgetDecl::Button {
-            caption, action, ..
+            name,
+            caption,
+            class,
+            action,
         } => {
             let _ = writeln!(out, "{pad}{receiver}.button({caption:?}, |b| {{");
+            render_name_and_class(&mut out, indent + 1, "b", name, class);
             match action {
                 ButtonAction::ClosePage => {
                     let _ = writeln!(out, "{pad}    b.close_page();");
                 }
                 ButtonAction::None => {}
-                ButtonAction::CallMicroflow(_) | ButtonAction::CallNanoflow(_) => {
-                    // Unreachable from `try_convert_widget` today (see this
-                    // module's doc comment: flow-calling buttons are
-                    // authoring-only, not detected on import) — kept
-                    // exhaustive rather than `unreachable!()`, same
-                    // precedent `WidgetDecl::LayoutGrid`'s own comment set
-                    // before its import detection existed.
+                ButtonAction::CallMicroflow(target) => {
+                    let marker = flow_marker_path(target);
                     let _ = writeln!(
                         out,
-                        "{pad}    // TODO: flow-calling button import detection isn't supported yet"
+                        "{pad}    b.call_microflow(::mxrs_ir::markers::MicroflowRef::<{marker}>::new());"
+                    );
+                }
+                ButtonAction::CallNanoflow(target) => {
+                    let marker = flow_marker_path(target);
+                    let _ = writeln!(
+                        out,
+                        "{pad}    b.call_nanoflow(::mxrs_ir::markers::NanoflowRef::<{marker}>::new());"
                     );
                 }
             }
             let _ = writeln!(out, "{pad}}});");
         }
-        WidgetDecl::DataView { .. } => {
-            // Unreachable from `try_convert_widget` today — see this
-            // module's doc comment for why data-bound widgets are
-            // authoring-only, not detected on import.
+        WidgetDecl::DataView {
+            name,
+            source,
+            children,
+        } => {
+            let (method, reference, target) = match source {
+                DataSourceDecl::Microflow(target) => {
+                    ("data_view_from_microflow", "MicroflowRef", target.as_str())
+                }
+                DataSourceDecl::Nanoflow(target) => {
+                    ("data_view_from_nanoflow", "NanoflowRef", target.as_str())
+                }
+            };
+            let marker = flow_marker_path(target);
+            let entity = flow_return_entities
+                .get(target)
+                .expect("converted data-view flow has a validated return entity");
             let _ = writeln!(
                 out,
-                "{pad}// TODO: data view import detection isn't supported yet"
+                "{pad}{receiver}.{method}(::mxrs_ir::markers::{reference}::<{marker}>::new(), |w| {{"
             );
+            if let Some(name) = name {
+                let _ = writeln!(out, "{pad}    w.name({name:?});");
+            }
+            for child in children {
+                out.push_str(&render_widget(
+                    child,
+                    indent + 1,
+                    "w",
+                    Some(entity),
+                    flow_return_entities,
+                ));
+            }
+            let _ = writeln!(out, "{pad}}});");
         }
-        WidgetDecl::TextBox { .. }
-        | WidgetDecl::CheckBox { .. }
-        | WidgetDecl::DatePicker { .. }
-        | WidgetDecl::DropDown { .. } => {
-            let _ = writeln!(
-                out,
-                "{pad}// TODO: attribute-bound widget import detection isn't supported yet"
-            );
+        WidgetDecl::TextBox {
+            name,
+            attribute,
+            class,
         }
-        WidgetDecl::DataGrid2 { .. } | WidgetDecl::Gallery { .. } | WidgetDecl::ComboBox { .. } => {
-            // Unreachable from `try_convert_widget` today: `mxrs_model::page::pluggable_widget`
-            // only decodes a `CustomWidgets$CustomWidget`'s outer `Name`, not
-            // its `Type.WidgetId` — there's no way to tell a Data Grid 2
-            // instance apart from a Gallery, ComboBox, or arbitrary
-            // third-party widget from the decoded shape this module
-            // consumes (a real, separately trackable `mxrs-model` gap, not
-            // fixed here).
-            let _ = writeln!(
-                out,
-                "{pad}// TODO: pluggable widget import detection isn't supported yet"
+        | WidgetDecl::CheckBox {
+            name,
+            attribute,
+            class,
+        }
+        | WidgetDecl::DatePicker {
+            name,
+            attribute,
+            class,
+        }
+        | WidgetDecl::DropDown {
+            name,
+            attribute,
+            class,
+        } => {
+            let method = match widget {
+                WidgetDecl::TextBox { .. } => "text_box_with",
+                WidgetDecl::CheckBox { .. } => "check_box_with",
+                WidgetDecl::DatePicker { .. } => "date_picker_with",
+                WidgetDecl::DropDown { .. } => "drop_down_with",
+                _ => unreachable!(),
+            };
+            let marker = attribute_marker_path(
+                data_view_entity.expect("converted attribute widget is inside a data view"),
+                attribute,
             );
+            let _ = writeln!(out, "{pad}{receiver}.{method}::<{marker}>(|w| {{");
+            render_name_and_class(&mut out, indent + 1, "w", name, class);
+            let _ = writeln!(out, "{pad}}});");
+        }
+        WidgetDecl::DataGrid2 { name, class }
+        | WidgetDecl::Gallery { name, class }
+        | WidgetDecl::ComboBox { name, class } => {
+            let method = match widget {
+                WidgetDecl::DataGrid2 { .. } => "data_grid_2",
+                WidgetDecl::Gallery { .. } => "gallery",
+                WidgetDecl::ComboBox { .. } => "combo_box",
+                _ => unreachable!(),
+            };
+            let _ = writeln!(out, "{pad}{receiver}.{method}(|w| {{");
+            render_name_and_class(&mut out, indent + 1, "w", name, class);
+            let _ = writeln!(out, "{pad}}});");
         }
     }
     out
+}
+
+fn render_name_and_class(
+    out: &mut String,
+    indent: usize,
+    receiver: &str,
+    name: &Option<String>,
+    class: &Option<String>,
+) {
+    let pad = "    ".repeat(indent);
+    if let Some(name) = name {
+        let _ = writeln!(out, "{pad}{receiver}.name({name:?});");
+    }
+    if let Some(class) = class {
+        let _ = writeln!(out, "{pad}{receiver}.class({class:?});");
+    }
+}
+
+fn flow_marker_path(qualified_name: &str) -> String {
+    let (module, name) = qualified_name
+        .split_once('.')
+        .expect("converted flow reference is qualified");
+    format!("crate::infrastructure::markers::{module}::{name}")
+}
+
+fn attribute_marker_path(entity: &str, attribute: &str) -> String {
+    let (module, entity) = entity
+        .split_once('.')
+        .expect("converted entity reference is qualified");
+    format!("crate::infrastructure::markers::{module}::{entity}_{attribute}")
 }
 
 /// `OrderOverview` -> `order_overview`. A defensive, not exhaustive, name
@@ -482,6 +867,7 @@ fn to_snake_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mxrs_bson::Bson;
 
     fn container(children: Vec<Widget>) -> Widget {
         Widget {
@@ -553,6 +939,10 @@ mod tests {
         )
     }
 
+    fn convert(page: &Page) -> Option<PageDecl> {
+        try_convert_page(page, &ConversionContext::default(), "Sales")
+    }
+
     fn page_with_layout(name: &str, widgets: Vec<Widget>, layout: Option<(&str, &str)>) -> Page {
         let mut doc = mxrs_bson::doc! {
             "$ID": uuid::Uuid::new_v4().to_string(),
@@ -583,6 +973,48 @@ mod tests {
             );
         }
         Page::from_bson(&doc)
+    }
+
+    fn page_from_documents(name: &str, widgets: Vec<Document>) -> Page {
+        Page::from_bson(&mxrs_bson::doc! {
+            "$Type": "Forms$Page",
+            "Name": name,
+            "FormCall": {
+                "Form": "Atlas_Core.ApplicationLayout",
+                "Arguments": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                    "Parameter": "Main",
+                    "Widgets": mxrs_bson::build_array(
+                        widgets.into_iter().map(Bson::Document).collect(),
+                        3,
+                    ),
+                })], 3),
+            },
+        })
+    }
+
+    fn bound_context() -> ConversionContext {
+        ConversionContext {
+            flows: HashMap::from([
+                (
+                    "Sales.ACT_GetOrder".into(),
+                    FlowInfo {
+                        kind: FlowKind::Microflow,
+                        return_entity: Some("Sales.Order".into()),
+                    },
+                ),
+                (
+                    "Sales.NF_Validate".into(),
+                    FlowInfo {
+                        kind: FlowKind::Nanoflow,
+                        return_entity: None,
+                    },
+                ),
+            ]),
+            entity_attributes: HashMap::from([(
+                "Sales.Order".into(),
+                HashSet::from(["Number".into()]),
+            )]),
+        }
     }
 
     fn widget_to_bson(widget: Widget) -> mxrs_bson::Bson {
@@ -666,7 +1098,7 @@ mod tests {
                 close_button("Close"),
             ])],
         );
-        let decl = try_convert_page(&page).expect("should convert");
+        let decl = convert(&page).expect("should convert");
         assert_eq!(decl.name, "OrderOverview");
         assert_eq!(decl.widgets.len(), 1);
         let layout = decl.layout.expect("layout recovered from FormCall");
@@ -677,7 +1109,7 @@ mod tests {
     #[test]
     fn a_page_with_widgets_but_no_resolvable_layout_is_left_opaque() {
         let page = page_with_layout("Broken", vec![text("hi")], None);
-        assert!(try_convert_page(&page).is_none());
+        assert!(convert(&page).is_none());
     }
 
     #[test]
@@ -689,7 +1121,7 @@ mod tests {
                 layout_grid_column(2, vec![text("Right")]),
             ])])],
         );
-        let decl = try_convert_page(&page).expect("should convert");
+        let decl = convert(&page).expect("should convert");
         let WidgetDecl::LayoutGrid { rows, .. } = &decl.widgets[0] else {
             panic!("expected a layout grid");
         };
@@ -711,7 +1143,7 @@ mod tests {
             "Dashboard",
             vec![layout_grid(vec![layout_grid_row(vec![column])])],
         );
-        assert!(try_convert_page(&page).is_none());
+        assert!(convert(&page).is_none());
     }
 
     #[test]
@@ -769,6 +1201,88 @@ mod tests {
                 children: vec![],
             }],
         );
-        assert!(try_convert_page(&page).is_none());
+        assert!(convert(&page).is_none());
+    }
+
+    #[test]
+    fn data_view_and_attribute_widget_convert_with_validated_markers() {
+        let page = page_from_documents(
+            "OrderDetail",
+            vec![mxrs_bson::doc! {
+                "$Type": "Forms$DataView",
+                "Name": "orderView",
+                "DataSource": { "$Type": "Forms$MicroflowSource", "Microflow": "Sales.ACT_GetOrder" },
+                "Widgets": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                    "$Type": "Forms$TextBox",
+                    "Name": "numberInput",
+                    "AttributeRef": { "Attribute": "Number" },
+                })], 3),
+            }],
+        );
+        let context = bound_context();
+        let decl = try_convert_page(&page, &context, "Sales").expect("validated page converts");
+        let converted = ConvertedPage {
+            module_name: "Sales".into(),
+            function_name: "order_detail".into(),
+            flow_return_entities: HashMap::from([(
+                "Sales.ACT_GetOrder".into(),
+                "Sales.Order".into(),
+            )]),
+            decl,
+        };
+        let source = render_page_function(&converted);
+        assert!(source.contains("data_view_from_microflow"));
+        assert!(source.contains("markers::Sales::ACT_GetOrder"));
+        assert!(
+            source.contains("text_box_with::<crate::infrastructure::markers::Sales::Order_Number>")
+        );
+        assert!(source.contains("w.name(\"numberInput\")"));
+    }
+
+    #[test]
+    fn flow_button_converts_only_without_argument_mappings() {
+        let page = page_from_documents(
+            "Actions",
+            vec![mxrs_bson::doc! {
+                "$Type": "Forms$ActionButton",
+                "Name": "validate",
+                "Caption": "Validate",
+                "Action": {
+                    "$Type": "Forms$CallNanoflowClientAction",
+                    "Nanoflow": "Sales.NF_Validate",
+                    "NanoflowSettings": {
+                        "ParameterMappings": mxrs_bson::build_array(vec![], 3),
+                    },
+                },
+            }],
+        );
+        let decl = try_convert_page(&page, &bound_context(), "Sales").expect("button converts");
+        assert!(matches!(
+            &decl.widgets[0],
+            WidgetDecl::Button { action: ButtonAction::CallNanoflow(name), .. }
+                if name == "Sales.NF_Validate"
+        ));
+    }
+
+    #[test]
+    fn empty_official_pluggable_shell_converts_but_configured_one_does_not() {
+        let shell = || {
+            mxrs_bson::doc! {
+                "$Type": "CustomWidgets$CustomWidget",
+                "Name": "ordersGrid",
+                "Type": {
+                    "WidgetId": "com.mendix.widget.web.datagrid.Datagrid",
+                    "ObjectType": { "PropertyTypes": mxrs_bson::build_array(vec![], 3) },
+                },
+                "Object": { "Properties": mxrs_bson::build_array(vec![], 3) },
+            }
+        };
+        let page = page_from_documents("Grid", vec![shell()]);
+        assert!(try_convert_page(&page, &bound_context(), "Sales").is_some());
+
+        let mut configured = shell();
+        configured.insert("Columns", mxrs_bson::build_array(vec![], 3));
+        let page = page_from_documents("ConfiguredGrid", vec![configured]);
+        assert!(try_convert_page(&page, &bound_context(), "Sales").is_none());
     }
 }

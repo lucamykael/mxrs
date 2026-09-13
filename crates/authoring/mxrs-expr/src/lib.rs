@@ -7,6 +7,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 
+use mxrs_ir::flow::FlowReturnType;
 use mxrs_ir::{AssociationMarker, AttributeMarker, EntityMarker, Member};
 
 pub trait MendixType: 'static {}
@@ -146,9 +147,61 @@ pub trait RenderExpr {
     fn render(&self) -> String;
 }
 
+/// An expression whose Mendix persistence return type is known. Flow end
+/// events need both source text and this metadata; source text alone cannot
+/// distinguish e.g. Integer from Long or an object from a list.
+pub trait TypedRenderExpr: RenderExpr {
+    fn flow_return_type(&self) -> FlowReturnType;
+}
+
+pub trait MendixReturnType: MendixType {
+    fn flow_return_type() -> FlowReturnType;
+}
+
+macro_rules! primitive_return_types {
+    ($($ty:ty => $variant:ident),+ $(,)?) => {
+        $(
+            impl MendixReturnType for $ty {
+                fn flow_return_type() -> FlowReturnType {
+                    FlowReturnType::$variant
+                }
+            }
+        )+
+    };
+}
+
+primitive_return_types!(
+    MxString => String,
+    MxInteger => Integer,
+    MxLong => Long,
+    MxFloat => Float,
+    MxDecimal => Decimal,
+    MxBool => Boolean,
+    MxDateTime => DateTime,
+    MxBinary => Binary,
+);
+
+impl<M: EntityMarker> MendixReturnType for MxObject<M> {
+    fn flow_return_type() -> FlowReturnType {
+        FlowReturnType::Object(M::qualified_name())
+    }
+}
+
+impl<M: EntityMarker> MendixReturnType for MxList<M> {
+    fn flow_return_type() -> FlowReturnType {
+        FlowReturnType::List(M::qualified_name())
+    }
+}
+
 impl<T: MendixType> RenderExpr for Expr<T> {
     fn render(&self) -> String {
         self.source.clone()
+    }
+}
+
+impl<T: MendixReturnType> TypedRenderExpr for Expr<T> {
+    fn flow_return_type(&self) -> FlowReturnType {
+        T::flow_return_type()
     }
 }
 
@@ -282,6 +335,12 @@ impl<M: EntityMarker> RenderExpr for Var<M> {
     }
 }
 
+impl<M: EntityMarker> TypedRenderExpr for Var<M> {
+    fn flow_return_type(&self) -> FlowReturnType {
+        FlowReturnType::Object(M::qualified_name())
+    }
+}
+
 impl<M: EntityMarker> IntoExpr<MxObject<M>> for Var<M> {
     fn into_expr(self) -> Expr<MxObject<M>> {
         self.expression()
@@ -310,6 +369,18 @@ impl<M: EntityMarker> ListVar<M> {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+impl<M: EntityMarker> RenderExpr for ListVar<M> {
+    fn render(&self) -> String {
+        format!("${}", self.name)
+    }
+}
+
+impl<M: EntityMarker> TypedRenderExpr for ListVar<M> {
+    fn flow_return_type(&self) -> FlowReturnType {
+        FlowReturnType::List(M::qualified_name())
     }
 }
 

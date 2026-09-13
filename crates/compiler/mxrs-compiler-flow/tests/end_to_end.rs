@@ -82,7 +82,7 @@ fn compiles_a_real_microflow_with_create_commit_decision_and_return() {
         compiled.get_str("QualifiedName").unwrap(),
         "Sales.ACT_CreateOrder"
     );
-    assert_eq!(compiled.get_str("ReturnType").unwrap(), "Void");
+    assert_eq!(compiled.get_str("ReturnType").unwrap(), "Sales.Order");
 
     let flows = compiled.get_array("SequenceFlows").unwrap();
     assert!(

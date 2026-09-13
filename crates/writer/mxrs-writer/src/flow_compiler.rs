@@ -11,7 +11,28 @@
 //! dropped rather than ported.
 
 use mxrs_bson::{Bson, Document, doc};
-use mxrs_ir::flow::{Activity, Member};
+use mxrs_ir::flow::{Activity, FlowReturnType, Member};
+
+pub fn return_type_document(return_type: Option<&FlowReturnType>) -> Option<Document> {
+    let return_type = return_type?;
+    let document = match return_type {
+        FlowReturnType::String => doc! { "$Type": "DataTypes$StringType" },
+        FlowReturnType::Integer => doc! { "$Type": "DataTypes$IntegerType" },
+        FlowReturnType::Long => doc! { "$Type": "DataTypes$LongType" },
+        FlowReturnType::Float => doc! { "$Type": "DataTypes$FloatType" },
+        FlowReturnType::Decimal => doc! { "$Type": "DataTypes$DecimalType" },
+        FlowReturnType::Boolean => doc! { "$Type": "DataTypes$BooleanType" },
+        FlowReturnType::DateTime => doc! { "$Type": "DataTypes$DateTimeType" },
+        FlowReturnType::Binary => doc! { "$Type": "DataTypes$BinaryType" },
+        FlowReturnType::Object(entity) => {
+            doc! { "$Type": "DataTypes$ObjectType", "Entity": entity.clone() }
+        }
+        FlowReturnType::List(entity) => {
+            doc! { "$Type": "DataTypes$ListType", "Entity": entity.clone() }
+        }
+    };
+    Some(document)
+}
 
 pub fn build_microflow_graph(
     activities: &[Activity],
