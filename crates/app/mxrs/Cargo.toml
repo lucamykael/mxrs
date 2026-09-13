@@ -18,3 +18,4 @@ mxrs-macros = { path = "../../authoring/mxrs-macros" }
 mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
 mxrs-packager = { path = "../mxrs-packager" }
 mxrs-project = { path = "../mxrs-project" }
+mxrs-runtime = { path = "../mxrs-runtime" }

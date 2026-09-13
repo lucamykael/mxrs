@@ -29,6 +29,10 @@ pub use mxrs_project::{
     read_imported_manifest, rebuild_imported_project, replace_imported_project,
     restore_imported_project,
 };
+pub use mxrs_runtime::{
+    Action, EntityAction, EntityRule, MemberRight, ObjectValue, Runtime, RuntimeError,
+    SecurityContext, SecurityPolicy, Store, StoreSchema,
+};
 
 /// Implemented by `#[mxrs::application]` for the root application type.
 pub trait ApplicationDefinition {

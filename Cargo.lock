@@ -472,6 +472,7 @@ dependencies = [
  "mxrs-materializers",
  "mxrs-packager",
  "mxrs-project",
+ "mxrs-runtime",
 ]
 
 [[package]]
@@ -767,6 +768,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "mxrs-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

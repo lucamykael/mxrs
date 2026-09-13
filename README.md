@@ -56,8 +56,9 @@ structural/text rendering) →
 `mxrs-javagen` (generated Java proxies) → `mxrs-materializers` (a versioned,
 hash-verified React bundle plus stable `model.json`, embedded so normal builds
 need no Node) → `mxrs-packager` (reproducible ustar deployment archives with
-per-file SHA-256 integrity). Runtime/OQL/semantic/scaffold subsystems remain
-separate follow-up layers.
+per-file SHA-256 integrity) → `mxrs-runtime` (transactional unit-of-work store,
+fail-closed role/member authorization, and an action registry). HTTP/storage
+adapters, OQL, semantic tooling, and scaffold subsystems remain follow-up layers.
 
 `mxrs-cli` (binary `mxrs`) exposes `import`, `validate`, `compare`, `inspect`,
 `units`, `dump-unit`, `sql`, `modules`, `export`, and `javagen` today. Typed
