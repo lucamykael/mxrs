@@ -688,6 +688,7 @@ dependencies = [
  "mxrs-project",
  "mxrs-runtime",
  "mxrs-runtime-http",
+ "mxrs-runtime-sqlite",
  "mxrs-scaffold",
  "mxrs-semantic",
  "mxrs-writer",
@@ -1027,6 +1028,17 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+]
+
+[[package]]
+name = "mxrs-runtime-sqlite"
+version = "0.1.0"
+dependencies = [
+ "mxrs-runtime",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

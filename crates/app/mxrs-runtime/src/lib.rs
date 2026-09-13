@@ -22,6 +22,8 @@ pub enum RuntimeError {
     UnknownAction(String),
     #[error("runtime transaction failed: {0}")]
     Transaction(String),
+    #[error("invalid persistent runtime state: {0}")]
+    InvalidPersistence(String),
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -194,6 +196,48 @@ impl Store {
         related.sort_by(|left, right| left.id.cmp(&right.id));
         related.dedup_by(|left, right| left.id == right.id);
         related
+    }
+
+    /// Returns only committed, non-transient records in deterministic order.
+    pub fn persistent_objects(&self) -> Vec<ObjectValue> {
+        self.committed
+            .iter()
+            .map(|((entity, id), members)| ObjectValue {
+                entity: entity.clone(),
+                id: id.clone(),
+                members: members.clone(),
+            })
+            .collect()
+    }
+
+    /// Atomically replaces committed state loaded by a persistence adapter.
+    /// Existing transient records remain session-local and are never loaded.
+    pub fn restore_persistent(
+        &mut self,
+        objects: impl IntoIterator<Item = ObjectValue>,
+    ) -> Result<()> {
+        let mut replacement = BTreeMap::new();
+        for object in objects {
+            let definition = self.schema.entities.get(&object.entity).ok_or_else(|| {
+                RuntimeError::InvalidPersistence(format!("unknown entity {}", object.entity))
+            })?;
+            if definition.transient {
+                return Err(RuntimeError::InvalidPersistence(format!(
+                    "transient entity {} cannot be persisted",
+                    object.entity
+                )));
+            }
+            let key = (object.entity, object.id);
+            if replacement.insert(key.clone(), object.members).is_some() {
+                return Err(RuntimeError::InvalidPersistence(format!(
+                    "duplicate object {}/{}",
+                    key.0, key.1
+                )));
+            }
+        }
+        self.committed = replacement;
+        self.discard_uncommitted();
+        Ok(())
     }
 
     pub fn transaction<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {

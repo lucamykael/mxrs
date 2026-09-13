@@ -134,6 +134,7 @@ fn runtime_error_response(error: RuntimeError) -> Response {
         | RuntimeError::UnknownEntity(_)
         | RuntimeError::UnknownObject { .. } => StatusCode::NOT_FOUND,
         RuntimeError::Transaction(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        RuntimeError::InvalidPersistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     let code = match error {
         RuntimeError::NotAuthorized { .. } => "not_authorized",
@@ -141,6 +142,7 @@ fn runtime_error_response(error: RuntimeError) -> Response {
         RuntimeError::UnknownEntity(_) => "unknown_entity",
         RuntimeError::UnknownObject { .. } => "unknown_object",
         RuntimeError::Transaction(_) => "transaction_failed",
+        RuntimeError::InvalidPersistence(_) => "invalid_persistence",
     };
     error_response(status, code, &error.to_string())
 }

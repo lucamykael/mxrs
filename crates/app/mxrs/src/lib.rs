@@ -39,6 +39,7 @@ pub use mxrs_runtime::{
     SecurityContext, SecurityPolicy, Store, StoreSchema,
 };
 pub use mxrs_runtime_http::{HttpError as RuntimeHttpError, RuntimeHttp};
+pub use mxrs_runtime_sqlite::{SqliteRuntimeError, SqliteRuntimeStore};
 pub use mxrs_scaffold::{
     MxrsDependency, ProjectScaffold, ScaffoldError, ScaffoldReport, generate_project,
 };
