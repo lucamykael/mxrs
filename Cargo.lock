@@ -470,6 +470,7 @@ dependencies = [
  "mxrs-ir",
  "mxrs-macros",
  "mxrs-materializers",
+ "mxrs-packager",
  "mxrs-project",
 ]
 
@@ -498,6 +499,7 @@ dependencies = [
  "mxrs-materializers",
  "mxrs-model",
  "mxrs-mpr",
+ "mxrs-packager",
  "mxrs-project",
  "mxrs-writer",
  "serde_json",
@@ -721,6 +723,23 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "mxrs-packager"
+version = "0.1.0"
+dependencies = [
+ "mxrs-dsl",
+ "mxrs-materializers",
+ "mxrs-model",
+ "mxrs-mpr",
+ "mxrs-project",
+ "mxrs-writer",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

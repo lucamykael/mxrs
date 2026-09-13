@@ -55,8 +55,9 @@ shared modern list sources, and page/layout ES-module emission with native
 structural/text rendering) →
 `mxrs-javagen` (generated Java proxies) → `mxrs-materializers` (a versioned,
 hash-verified React bundle plus stable `model.json`, embedded so normal builds
-need no Node). Packaging (`mxrs-packager`) and the runtime/OQL/semantic/scaffold
-subsystems remain separate follow-up layers.
+need no Node) → `mxrs-packager` (reproducible ustar deployment archives with
+per-file SHA-256 integrity). Runtime/OQL/semantic/scaffold subsystems remain
+separate follow-up layers.
 
 `mxrs-cli` (binary `mxrs`) exposes `import`, `validate`, `compare`, `inspect`,
 `units`, `dump-unit`, `sql`, `modules`, `export`, and `javagen` today. Typed
@@ -118,6 +119,10 @@ cargo mxrs build --output build/ExistingApp.mpr
 cargo mxrs frontend-dev --output frontend
 npm ci --prefix frontend
 npm run build --prefix frontend
+
+# Produce and independently verify a deterministic deployment archive:
+mxrs package build/ExistingApp.mpr --web build/web --output build/ExistingApp.mxrs.tar
+mxrs verify-package build/ExistingApp.mxrs.tar
 ```
 
 Installed/released builds omit `--mxrs-workspace` and generate the normal Git

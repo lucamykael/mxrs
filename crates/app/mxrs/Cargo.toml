@@ -16,4 +16,5 @@ mxrs-expr = { path = "../../authoring/mxrs-expr" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-macros = { path = "../../authoring/mxrs-macros" }
 mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
+mxrs-packager = { path = "../mxrs-packager" }
 mxrs-project = { path = "../mxrs-project" }

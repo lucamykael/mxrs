@@ -19,6 +19,10 @@ pub use mxrs_materializers::{
     embedded_frontend_source_hash, materialize_frontend_sources, materialize_manifest,
     materialize_mpr,
 };
+pub use mxrs_packager::{
+    Entrypoints as PackageEntrypoints, PackageError, PackageFile, PackageManifest, PackageOptions,
+    PackageReport, package, verify_package,
+};
 pub use mxrs_project::{
     ImportedDocumentRef, ImportedProjectManifest, ImportedUnit, PROJECT_ASSET_DIRECTORIES,
     ProjectError, capture_imported_project, capture_project_assets, materialize_project_assets,

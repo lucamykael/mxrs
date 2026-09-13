@@ -3,8 +3,7 @@
 //! `when "sql"`/... cases, narrowed the same way the library crate is (see
 //! `lib.rs`'s doc comment for exactly what each command covers and what's
 //! not ported yet — most of `bin/mxrb`'s ~45 subcommands depend on engines
-//! mxrs hasn't built yet, e.g. `preflight`/`pack`/`portable`/`mda` need
-//! Phase 5 packaging, `db`/`run` need Docker/Java orchestration, `oql`
+//! mxrs hasn't built yet, e.g. `db`/`run` need runtime orchestration and `oql`
 //! needs an OQL server, `refs`/`rename`/`move` need the semantic index).
 //! `inspect` has no `bin/mxrb` equivalent under that name — it's a new
 //! single-file front end onto `compare`'s existing snapshot machinery.
@@ -24,6 +23,8 @@ fn main() -> ExitCode {
         Some("import") => run_import(args.collect()),
         Some("export") => run_export(args.collect()),
         Some("javagen") => run_javagen(args.collect()),
+        Some("package") => run_package(args.collect()),
+        Some("verify-package") => run_verify_package(args.collect()),
         Some(other) => {
             eprintln!("[mxrs] error: unknown command {other:?}");
             usage();
@@ -47,6 +48,62 @@ fn usage() {
     eprintln!("       mxrs import <file.mpr> --output <directory> [--mxrs-workspace <path>]");
     eprintln!("       mxrs export <file.mpr> [-o <out.rs>] [--allow-lossy]");
     eprintln!("       mxrs javagen <file.mpr> [--project-root <directory>]");
+    eprintln!("       mxrs package <file.mpr> --web <directory> --output <archive.tar>");
+    eprintln!("       mxrs verify-package <archive.tar>");
+}
+
+fn run_package(mut args: Vec<String>) -> ExitCode {
+    let web = take_value(&mut args, "--web");
+    let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
+    if args.len() != 1 || web.is_none() || output.is_none() {
+        eprintln!(
+            "[mxrs] error: usage: mxrs package <file.mpr> --web <directory> --output <archive.tar>"
+        );
+        return ExitCode::FAILURE;
+    }
+    let options = mxrs_packager::PackageOptions::new(
+        &args[0],
+        web.expect("validated above"),
+        output.expect("validated above"),
+    );
+    match mxrs_packager::package(&options) {
+        Ok(report) => {
+            println!(
+                "[mxrs] packaged {} file(s) into {} ({} bytes, sha256 {})",
+                report.payload_files,
+                report.output.display(),
+                report.archive_bytes,
+                report.archive_sha256
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_verify_package(args: Vec<String>) -> ExitCode {
+    if args.len() != 1 {
+        eprintln!("[mxrs] error: usage: mxrs verify-package <archive.tar>");
+        return ExitCode::FAILURE;
+    }
+    match mxrs_packager::verify_package(&args[0]) {
+        Ok(manifest) => {
+            println!(
+                "[mxrs] OK: {} {} ({} payload files)",
+                manifest.application,
+                manifest.mendix_version,
+                manifest.files.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_validate(mut args: Vec<String>) -> ExitCode {

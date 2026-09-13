@@ -18,6 +18,10 @@ fn main() -> ExitCode {
             args.remove(0);
             run_frontend_dev(args)
         }
+        Some("package") => {
+            args.remove(0);
+            run_package(args)
+        }
         _ => {
             usage();
             ExitCode::FAILURE
@@ -33,6 +37,41 @@ fn usage() {
         "       cargo mxrs diff [--manifest-path <Cargo.toml>] [--snapshot <model/imported>] [--json] [--release] [--offline]"
     );
     eprintln!("       cargo mxrs frontend-dev [--output <directory>]");
+    eprintln!(
+        "       cargo mxrs package --mpr <file.mpr> --web <directory> --output <archive.tar>"
+    );
+}
+
+fn run_package(mut args: Vec<String>) -> ExitCode {
+    let mpr = take_value(&mut args, "--mpr");
+    let web = take_value(&mut args, "--web");
+    let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
+    if !args.is_empty() || mpr.is_none() || web.is_none() || output.is_none() {
+        eprintln!(
+            "[mxrs] error: usage: cargo mxrs package --mpr <file.mpr> --web <directory> --output <archive.tar>"
+        );
+        return ExitCode::FAILURE;
+    }
+    let options = mxrs_packager::PackageOptions::new(
+        mpr.expect("validated above"),
+        web.expect("validated above"),
+        output.expect("validated above"),
+    );
+    match mxrs_packager::package(&options) {
+        Ok(report) => {
+            println!(
+                "[mxrs] packaged {} file(s) into {} (sha256 {})",
+                report.payload_files,
+                report.output.display(),
+                report.archive_sha256
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_build(mut args: Vec<String>) -> ExitCode {
