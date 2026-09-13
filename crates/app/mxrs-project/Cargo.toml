@@ -1,0 +1,24 @@
+[package]
+name = "mxrs-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Cargo-native mxrs project snapshots: import opaque Mendix units and rebuild .mpr artifacts from Rust declarations."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+tempfile = "3"

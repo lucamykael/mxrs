@@ -1,0 +1,27 @@
+[package]
+name = "mxrs-exporter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Reads an existing .mpr and emits Rust project! {} source text an mxrs-dsl user can read, edit, and write back via mxrs-writer::synchronize_project - the forward half of the Mendix<->Rust round trip. Domain model only for the live build (entities/attributes/associations); microflow source reconstruction is a documented gap. Also detects native/structural pages and renders them for review, not yet wired into the live build."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-project = { path = "../mxrs-project" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-macros = { path = "../../authoring/mxrs-macros" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
+tempfile = "3.27.0"
+uuid = { version = "1", features = ["v4"] }

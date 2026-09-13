@@ -1,0 +1,27 @@
+[package]
+name = "mxrs-compiler-widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Compiles page metadata, web operations, modern widget bundles, navigation, settings, and artifacts into Mendix Runtime shape."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-compiler-support = { path = "../mxrs-compiler-support" }
+mxrs-compiler-flow = { path = "../mxrs-compiler-flow" }
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-schema = { path = "../../model/mxrs-schema" }
+thiserror.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
+tempfile = "3.27.0"

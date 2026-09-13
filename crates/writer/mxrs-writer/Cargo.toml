@@ -1,0 +1,28 @@
+[package]
+name = "mxrs-writer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Persists an mxrs-ir::ProjectDecl into a fresh .mpr, and incrementally re-syncs an existing one's domain model, microflows, enumerations, and native/structural pages."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-forms = { path = "../../model/mxrs-forms" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
+mxrs-identity = { path = "../mxrs-identity" }
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
+mxrs-pluggable = { path = "../../model/mxrs-pluggable" }
+mxrs-schema = { path = "../../model/mxrs-schema" }
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-expr = { path = "../../authoring/mxrs-expr" }
+tempfile = "3.27.0"

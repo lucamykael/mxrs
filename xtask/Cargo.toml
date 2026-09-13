@@ -12,8 +12,8 @@ description = "Dev-only differential-testing/fixture-generation harness against 
 workspace = true
 
 [dependencies]
-mxrs-bson = { path = "../crates/mxrs-bson" }
-mxrs-exporter = { path = "../crates/mxrs-exporter" }
-mxrs-mpr = { path = "../crates/mxrs-mpr" }
-mxrs-schema = { path = "../crates/mxrs-schema" }
+mxrs-bson = { path = "../crates/io/mxrs-bson" }
+mxrs-exporter = { path = "../crates/app/mxrs-exporter" }
+mxrs-mpr = { path = "../crates/io/mxrs-mpr" }
+mxrs-schema = { path = "../crates/model/mxrs-schema" }
 sha2 = "0.10"

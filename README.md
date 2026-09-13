@@ -13,7 +13,7 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-25 crates + a dev-only `xtask` harness, ~50k lines of Rust, 490 tests
+25 crates + a dev-only `xtask` harness, ~50k lines of Rust, 504 tests
 passing. The primary direction is now Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 
@@ -30,6 +30,10 @@ snapshot makes concepts without a friendly Rust
 representation lossless; rebuilding does not read or patch the original
 `.mpr`. Typed coverage can therefore replace opaque snapshot content
 incrementally without blocking a correct build.
+
+The crates are grouped by dependency layer under `crates/{io,model,authoring,
+writer,compiler,app}/`; package names and public APIs are unchanged. See
+[`crates/README.md`](crates/README.md) for the ownership boundary.
 
 Two lower-level compiler pipelines share only the compiled model as input:
 
@@ -71,22 +75,21 @@ Associations use `Reference<T>` or `ReferenceSet<T>` fields; their target and
 cardinality are checked by Rust, while names and storage metadata can be
 overridden with `#[mxrs(...)]`.
 
-Pages have a first, narrow Cargo-native front end: `ModuleBuilder::page`
+Pages have a growing Cargo-native front end: `ModuleBuilder::page`
 (`mxrs-dsl`) takes a nested-closure builder — the same "locked shape"
 decision as microflows/entities, not a `#[derive(MxPage)]` struct, since a
-widget tree has no natural 1:1 struct-field mapping. Only native/structural
-widgets are covered — layout containers (`DivContainer`, `LayoutGrid`),
-static text, and buttons (no-op or close-page only) — compiled by
-`mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms
-metamodel codec. Pluggable widgets (Data Grid 2/Gallery/ComboBox/generic
-bundle), native data-bound widgets (attribute-bound TextBox/CheckBox/...),
-button actions that call a microflow/nanoflow, and flows/security/navigation
-on pages are all explicitly deferred — see `mxrs_ir::page`'s doc comment.
-`mxrs import` detects pages built entirely from this vocabulary and renders
-them for review into `src/domain/pages.rs`; that file is intentionally *not*
-wired into the live build (see `mxrs-exporter::page_export`'s doc comment
-for why) — adopting a page means copying its generated body into your own
-`module.page(...)` call.
+widget tree has no natural 1:1 struct-field mapping. It covers layout
+containers (`DivContainer`, lossless `LayoutGrid`), static text, buttons,
+microflow/nanoflow-sourced DataViews, attribute-bound TextBox/CheckBox/
+DatePicker/DropDown widgets, and name/class authoring for Data Grid 2,
+Gallery, and ComboBox through `mxrs-pluggable`. All compile through
+`mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms codec.
+`mxrs import` detects the lossless structural subset, renders real builders
+into `src/domain/pages.rs`, and wires them into `build()` automatically.
+Data-bound widgets, flow-calling buttons, and pluggable widget identities
+remain opaque on import until generated markers and richer decode metadata
+land; they are preserved in the imported snapshot, never guessed or dropped.
+See `mxrs_ir::page` and `mxrs-exporter::page_export` for the explicit boundary.
 
 ## Cargo-native import
 
@@ -97,7 +100,7 @@ workspace:
 cargo run -p mxrs-cli -- import ExistingApp.mpr \
   --output existing-app \
   --mxrs-workspace "$PWD"
-cargo install --path crates/mxrs-cli --bin cargo-mxrs
+cargo install --path crates/app/mxrs-cli --bin cargo-mxrs
 cd existing-app
 cargo check
 cargo test

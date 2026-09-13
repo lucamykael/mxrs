@@ -10,8 +10,8 @@
 //!
 //! Two independent checks, both required to be clean:
 //!
-//! 1. **API surface** — `crates/mxrs-dsl`, `crates/mxrs-ir`,
-//!    `crates/mxrs-macros` source is grepped for [`BANNED_IDENTIFIERS`].
+//! 1. **API surface** — `crates/authoring/mxrs-dsl`, `crates/authoring/mxrs-ir`,
+//!    `crates/authoring/mxrs-macros` source is grepped for [`BANNED_IDENTIFIERS`].
 //!    These are exactly mxrb's own opaque-API/unit-identity name lists
 //!    (`OPAQUE_API_NAMES`/`UNIT_IDENTITY_NAMES` in `public_source_audit.rb`)
 //!    minus the names that don't apply to mxrs's shape (`TypePointer`,
@@ -100,7 +100,10 @@ pub fn noise_audit(workspace_root: &Path) -> Result<(), String> {
 fn audit_api_surface(workspace_root: &Path) -> Result<Vec<Finding>, String> {
     let mut findings = Vec::new();
     for crate_name in AUTHORING_CRATES {
-        let src_dir = workspace_root.join("crates").join(crate_name).join("src");
+        let src_dir = workspace_root
+            .join("crates/authoring")
+            .join(crate_name)
+            .join("src");
         if !src_dir.is_dir() {
             continue;
         }

@@ -1,0 +1,24 @@
+[package]
+name = "mxrs-javagen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Generates the Mendix Java proxies required by project Java sources from MPR model documents."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
+mxrs-schema = { path = "../../model/mxrs-schema" }
+thiserror.workspace = true
+
+[dev-dependencies]
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
+tempfile = "3.27.0"

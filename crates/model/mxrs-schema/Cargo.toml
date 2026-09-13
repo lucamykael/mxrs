@@ -1,0 +1,22 @@
+[package]
+name = "mxrs-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Mendix version/schema registry, scoped to 11.x per the locked MVP decision: compatibility projections, embedded Runtime/system-model schemas, and model.mdp reading."
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+flate2 = "1"
+mxrs-bson = { path = "../../io/mxrs-bson" }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid = { version = "1.26.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
