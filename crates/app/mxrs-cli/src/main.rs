@@ -30,6 +30,7 @@ fn main() -> ExitCode {
         Some("refs") => run_refs(args.collect()),
         Some("impact") => run_impact(args.collect()),
         Some("search") => run_semantic_search(args.collect()),
+        Some("new") => run_new(args.collect()),
         Some(other) => {
             eprintln!("[mxrs] error: unknown command {other:?}");
             usage();
@@ -60,6 +61,43 @@ fn usage() {
     eprintln!("       mxrs refs <file.mpr> <artifact> [--json]");
     eprintln!("       mxrs impact <file.mpr> <artifact> [--json]");
     eprintln!("       mxrs search <file.mpr> <query> [--limit N] [--json]");
+    eprintln!(
+        "       mxrs new <name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]"
+    );
+}
+
+fn run_new(mut args: Vec<String>) -> ExitCode {
+    let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
+    let version = take_value(&mut args, "--version").unwrap_or_else(|| "11.12.1".to_string());
+    let workspace = take_value(&mut args, "--mxrs-workspace");
+    if args.len() != 1 || output.is_none() {
+        eprintln!(
+            "[mxrs] error: usage: mxrs new <name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]"
+        );
+        return ExitCode::FAILURE;
+    }
+    let mut scaffold =
+        mxrs_scaffold::ProjectScaffold::new(&args[0], version, output.expect("validated above"));
+    if let Some(workspace) = workspace {
+        scaffold = scaffold.dependency(mxrs_scaffold::MxrsDependency::Path(
+            std::path::Path::new(&workspace).join("crates/app/mxrs"),
+        ));
+    }
+    match mxrs_scaffold::generate_project(&scaffold) {
+        Ok(report) => {
+            println!(
+                "[mxrs] created {} at {} ({} files)",
+                report.package_name,
+                report.destination.display(),
+                report.files
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn semantic_index(path: &str) -> Result<mxrs_semantic::SemanticIndex, String> {

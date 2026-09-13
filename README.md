@@ -13,7 +13,7 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-25 crates + a dev-only `xtask` harness, ~50k lines of Rust, 504 tests
+31 crates + a dev-only `xtask` harness, ~50k lines of Rust, over 500 tests
 passing. The primary direction is now Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 
@@ -60,8 +60,9 @@ per-file SHA-256 integrity) → `mxrs-runtime` (transactional unit-of-work store
 fail-closed role/member authorization, and an action registry) → `mxrs-oql`
 (native OQL discovery, safe logical SQL projection, parameter extraction, and
 query-risk analysis) → `mxrs-semantic` (deterministic artifact/reference index,
-search, reverse references, and transitive impact). HTTP/storage adapters,
-semantic mutation plans, and scaffold subsystems remain follow-up layers.
+search, reverse references, and transitive impact) → `mxrs-scaffold`
+(transactional new-project generation). HTTP/storage adapters and semantic
+mutation plans remain follow-up layers.
 
 `mxrs-cli` (binary `mxrs`) exposes `import`, `validate`, `compare`, `inspect`,
 `units`, `dump-unit`, `sql`, `modules`, `export`, and `javagen` today. Typed
@@ -103,6 +104,14 @@ land; they are preserved in the imported snapshot, never guessed or dropped.
 See `mxrs_ir::page` and `mxrs-exporter::page_export` for the explicit boundary.
 
 ## Cargo-native import
+
+For a new application instead of an import:
+
+```sh
+mxrs new "Order Portal" --output order-portal --mxrs-workspace "$PWD"
+cd order-portal
+cargo run
+```
 
 During development of mxrs itself, point generated dependencies at this
 workspace:

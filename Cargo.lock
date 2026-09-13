@@ -474,7 +474,9 @@ dependencies = [
  "mxrs-packager",
  "mxrs-project",
  "mxrs-runtime",
+ "mxrs-scaffold",
  "mxrs-semantic",
+ "mxrs-writer",
 ]
 
 [[package]]
@@ -505,6 +507,7 @@ dependencies = [
  "mxrs-oql",
  "mxrs-packager",
  "mxrs-project",
+ "mxrs-scaffold",
  "mxrs-semantic",
  "mxrs-writer",
  "serde_json",
@@ -794,6 +797,15 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "mxrs-scaffold"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

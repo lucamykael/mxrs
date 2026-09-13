@@ -38,11 +38,15 @@ pub use mxrs_runtime::{
     Action, EntityAction, EntityRule, MemberRight, ObjectValue, Runtime, RuntimeError,
     SecurityContext, SecurityPolicy, Store, StoreSchema,
 };
+pub use mxrs_scaffold::{
+    MxrsDependency, ProjectScaffold, ScaffoldError, ScaffoldReport, generate_project,
+};
 pub use mxrs_semantic::{
     Artifact as SemanticArtifact, ArtifactKind as SemanticArtifactKind,
     Diagnostic as SemanticDiagnostic, Reference as SemanticReference,
     SearchHit as SemanticSearchHit, SemanticError, SemanticIndex,
 };
+pub use mxrs_writer::{synchronize_project, write_project};
 
 /// Implemented by `#[mxrs::application]` for the root application type.
 pub trait ApplicationDefinition {

@@ -21,3 +21,5 @@ mxrs-packager = { path = "../mxrs-packager" }
 mxrs-project = { path = "../mxrs-project" }
 mxrs-runtime = { path = "../mxrs-runtime" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
+mxrs-scaffold = { path = "../mxrs-scaffold" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
