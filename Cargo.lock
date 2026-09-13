@@ -1892,6 +1892,8 @@ dependencies = [
  "mxrs-exporter",
  "mxrs-mpr",
  "mxrs-schema",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 

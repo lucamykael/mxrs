@@ -9,7 +9,9 @@
 //!   cargo run -p xtask -- oracle-diff <fixture_dir>
 //!   cargo run -p xtask -- noise-audit
 //!   cargo run -p xtask -- mxbuild-oracle <app_dir>
+//!   cargo run -p xtask -- capability-matrix [--json] [--require-complete]
 
+mod capability_matrix;
 mod mxbuild_oracle;
 mod noise_audit;
 
@@ -55,9 +57,24 @@ fn main() {
             let app_dir = args.next().expect("usage: mxbuild-oracle <app_dir>");
             mxbuild_oracle::mxbuild_oracle(Path::new(&app_dir))
         }
+        Some("capability-matrix") => {
+            let arguments = args.collect::<Vec<_>>();
+            let json = arguments.iter().any(|argument| argument == "--json");
+            let require_complete = arguments
+                .iter()
+                .any(|argument| argument == "--require-complete");
+            if arguments
+                .iter()
+                .any(|argument| !matches!(argument.as_str(), "--json" | "--require-complete"))
+            {
+                Err("usage: capability-matrix [--json] [--require-complete]".into())
+            } else {
+                capability_matrix(json, require_complete)
+            }
+        }
         _ => {
             eprintln!(
-                "usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir> | noise-audit | mxbuild-oracle <app_dir>>"
+                "usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir> | noise-audit | mxbuild-oracle <app_dir> | capability-matrix [--json] [--require-complete]>"
             );
             std::process::exit(2);
         }
@@ -67,6 +84,29 @@ fn main() {
         eprintln!("[xtask] error: {e}");
         std::process::exit(1);
     }
+}
+
+fn capability_matrix(json: bool, require_complete: bool) -> Result<(), String> {
+    let output = run_bundle_capture(&["exec", "mxrb", "--commands"])?;
+    if !output.success {
+        return Err(format!("mxrb --commands failed:\n{}", output.stdout));
+    }
+    let report = capability_matrix::build(&output.stdout)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        capability_matrix::print_table(&report);
+    }
+    if require_complete && !report.complete() {
+        return Err(format!(
+            "capability matrix is incomplete: {} partial, {} missing",
+            report.partial, report.missing
+        ));
+    }
+    Ok(())
 }
 
 /// Runs mxrb's `generate` then forces v2 storage, producing a real

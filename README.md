@@ -165,6 +165,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all -- --check
 cargo run -p xtask -- oracle-diff xtask/fixtures/minimal
 cargo run -p xtask -- oracle-diff xtask/fixtures/with_page
+cargo run -p xtask -- capability-matrix
 npm ci --prefix crates/compiler/mxrs-materializers/frontend
 npm run build --prefix crates/compiler/mxrs-materializers/frontend
 ```
@@ -174,3 +175,9 @@ BSON/writer/model path: it runs the real `mxrb` (Ruby) install as a
 behavioral oracle and requires a byte-identical round trip on both fixtures.
 `MXRB_HOME` overrides the default oracle location
 (`/home/mykael/Personal_Projects/mxrb`).
+
+`capability-matrix` reads MXRB's own command inventory and classifies every
+row as verified, partial, or missing. Its CI ratchet currently records 76
+commands: 4 verified, 23 partial, and 49 missing. "Partial" never means
+command parity; each row stays incomplete until its full observable contract
+has an executable oracle.

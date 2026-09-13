@@ -16,4 +16,6 @@ mxrs-bson = { path = "../crates/io/mxrs-bson" }
 mxrs-exporter = { path = "../crates/app/mxrs-exporter" }
 mxrs-mpr = { path = "../crates/io/mxrs-mpr" }
 mxrs-schema = { path = "../crates/model/mxrs-schema" }
+serde.workspace = true
+serde_json.workspace = true
 sha2 = "0.10"

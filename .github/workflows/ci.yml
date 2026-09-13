@@ -85,6 +85,13 @@ jobs:
       - name: noise-audit
         working-directory: mxrs
         run: cargo run -p xtask -- noise-audit
+      - name: MXRB command capability matrix ratchet
+        working-directory: mxrs
+        env:
+          MXRB_HOME: ${{ github.workspace }}/mxrb
+        run: |
+          cargo run -q -p xtask -- capability-matrix --json > target/capability-matrix.json
+          jq -e '(.rows | length) >= 76 and .verified >= 4 and (.partial + .missing) <= 72' target/capability-matrix.json
 
   coverage:
     name: coverage ratchet (lines + branches)
