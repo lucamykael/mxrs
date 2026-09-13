@@ -87,19 +87,19 @@ jobs:
         run: cargo run -p xtask -- noise-audit
 
   coverage:
-    name: coverage (report only, no threshold yet)
+    name: coverage ratchet (lines + branches)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
-      # No --fail-under yet: this is the first coverage instrumentation
-      # this workspace has ever had (see the Wave 0 plan notes). Establish
-      # a real baseline from a few runs before turning this into a gate —
-      # an arbitrary threshold picked without data would either be trivially
-      # passable or spuriously fail the first honest PR.
-      - run: cargo llvm-cov --workspace --summary-only
+      # 2026-09-13 measured baseline: 71.41% lines / 57.73% branches.
+      # These floors are a ratchet, not the destination; raise them whenever
+      # tests land until both reach the project target of 100%.
+      - run: cargo llvm-cov --workspace --branch --summary-only --fail-under-lines 71 --fail-under-branches 57
 
   benches-build:
     name: benches (build + smoke run, not a perf gate)
@@ -113,4 +113,4 @@ jobs:
       # buildable and runnable, not that performance hasn't regressed.
       # Real perf tracking needs a dedicated/self-hosted runner, not yet
       # set up.
-      - run: cargo bench -p mxrs-bson -- --sample-count 10
+      - run: cargo bench -p mxrs-bson --bench codec -- --sample-count 10
