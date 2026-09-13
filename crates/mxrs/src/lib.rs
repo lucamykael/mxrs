@@ -5,9 +5,9 @@
 //! normal application-facing dependency surface.
 
 pub use mxrs_dsl::{
-    ButtonBuilder, CallArgument, ContainerBuilder, EntityBuilder, EnumerationBuilder, FlowBuilder,
-    LayoutGridBuilder, LayoutGridColumnBuilder, LayoutGridRowBuilder, ModuleBuilder, PageBuilder,
-    ProjectBuilder,
+    ButtonBuilder, CallArgument, ContainerBuilder, DataViewBuilder, EntityBuilder,
+    EnumerationBuilder, FlowBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
+    LayoutGridRowBuilder, ModuleBuilder, PageBuilder, ProjectBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
@@ -30,10 +30,11 @@ pub trait ApplicationDefinition {
 pub mod prelude {
     pub use crate::{
         ApplicationDefinition, AssociationMarker, AttributeMarker, ButtonBuilder, CallArgument,
-        ContainerBuilder, EntityMarker, EnumerationBuilder, EnumerationMarker, Expr, FlowBuilder,
-        LayoutGridBuilder, MendixType, MicroflowMarker, MicroflowRef, ModuleBuilder, MxBool,
-        MxDecimal, MxEntity, MxEnumeration, MxFloat, MxInteger, MxLong, MxString, PageBuilder,
-        ProjectBuilder, Ref, Reference, ReferenceSet, RenderExpr, TypedAttributeMarker, Var,
-        application, boolean, decimal, float, integer, long, project, string,
+        ContainerBuilder, DataViewBuilder, EntityMarker, EnumerationBuilder, EnumerationMarker,
+        Expr, FlowBuilder, LayoutGridBuilder, MendixType, MicroflowMarker, MicroflowRef,
+        ModuleBuilder, MxBool, MxDecimal, MxEntity, MxEnumeration, MxFloat, MxInteger, MxLong,
+        MxString, NanoflowMarker, NanoflowRef, PageBuilder, ProjectBuilder, Ref, Reference,
+        ReferenceSet, RenderExpr, TypedAttributeMarker, Var, application, boolean, decimal, float,
+        integer, long, project, string,
     };
 }

@@ -24,11 +24,31 @@
 //!    `Widget`s) instead of a `"widget_count"` summary, so this module can
 //!    walk back to `WidgetDecl::LayoutGrid`.
 //!
-//! **Still narrower than a full page**: no pluggable widgets, no native
-//! data-bound widgets outside what `WidgetDecl` already covers, no
+//! **Still narrower than a full page**: no pluggable widgets, no
 //! conditional visibility/dynamic classes, no security roles. A page using
 //! any of those stays exactly as opaque as before — served from the
 //! generated snapshot, contributing nothing to `build()`.
+//!
+//! **`WidgetDecl::DataView`/attribute-bound widgets
+//! (`TextBox`/`CheckBox`/`DatePicker`/`DropDown`) and flow-calling button
+//! actions (`ButtonAction::CallMicroflow`/`CallNanoflow`) are
+//! authoring-only — not detected on import**, even though
+//! `mxrs-writer::page_compiler` fully supports writing them (see that
+//! module's tests). Reason, concretely: `mxrs_model::page::parse_action`
+//! and `data_view_widget` decode a *local* (module-unqualified) handler
+//! name and a merged body+footer widget list respectively — neither is
+//! enough to reconstruct what this IR needs (a fully qualified
+//! `"Module.Name"` flow reference; a body list provably free of footer
+//! widgets, which the decoded shape can't distinguish). Detecting these on
+//! import risks either emitting a `PageDecl` with an unresolvable target or
+//! silently misplacing a footer widget into the body — a real correctness
+//! risk, not just unfinished breadth, so `try_convert_page`/`try_convert_widget`
+//! leave any page containing them exactly as opaque as before rather than
+//! guess. `render_widget` still matches every `WidgetDecl` variant
+//! exhaustively (a `TODO` comment for these, mirroring the precedent
+//! `WidgetDecl::LayoutGrid`'s own comment set before *its* import detection
+//! existed) so adding a new variant here can't silently forget to update
+//! the renderer.
 
 use std::fmt::Write as _;
 
@@ -376,10 +396,43 @@ fn render_widget(widget: &WidgetDecl, indent: usize, receiver: &str) -> String {
             caption, action, ..
         } => {
             let _ = writeln!(out, "{pad}{receiver}.button({caption:?}, |b| {{");
-            if *action == ButtonAction::ClosePage {
-                let _ = writeln!(out, "{pad}    b.close_page();");
+            match action {
+                ButtonAction::ClosePage => {
+                    let _ = writeln!(out, "{pad}    b.close_page();");
+                }
+                ButtonAction::None => {}
+                ButtonAction::CallMicroflow(_) | ButtonAction::CallNanoflow(_) => {
+                    // Unreachable from `try_convert_widget` today (see this
+                    // module's doc comment: flow-calling buttons are
+                    // authoring-only, not detected on import) — kept
+                    // exhaustive rather than `unreachable!()`, same
+                    // precedent `WidgetDecl::LayoutGrid`'s own comment set
+                    // before its import detection existed.
+                    let _ = writeln!(
+                        out,
+                        "{pad}    // TODO: flow-calling button import detection isn't supported yet"
+                    );
+                }
             }
             let _ = writeln!(out, "{pad}}});");
+        }
+        WidgetDecl::DataView { .. } => {
+            // Unreachable from `try_convert_widget` today — see this
+            // module's doc comment for why data-bound widgets are
+            // authoring-only, not detected on import.
+            let _ = writeln!(
+                out,
+                "{pad}// TODO: data view import detection isn't supported yet"
+            );
+        }
+        WidgetDecl::TextBox { .. }
+        | WidgetDecl::CheckBox { .. }
+        | WidgetDecl::DatePicker { .. }
+        | WidgetDecl::DropDown { .. } => {
+            let _ = writeln!(
+                out,
+                "{pad}// TODO: attribute-bound widget import detection isn't supported yet"
+            );
         }
     }
     out

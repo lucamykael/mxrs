@@ -20,8 +20,9 @@ pub use declaration::{
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{
     AssociationMarker, AttributeMarker, EntityMarker, EnumerationMarker, MicroflowMarker,
-    MicroflowRef, Ref, Reference, ReferenceSet,
+    MicroflowRef, NanoflowMarker, NanoflowRef, Ref, Reference, ReferenceSet,
 };
 pub use page::{
-    ButtonAction, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl, WidgetDecl,
+    ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
+    WidgetDecl,
 };

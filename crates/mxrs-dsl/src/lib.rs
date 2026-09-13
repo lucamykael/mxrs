@@ -65,7 +65,7 @@ pub use mxrs_expr::{
     float, integer, long, string,
 };
 pub use page::{
-    ButtonBuilder, ContainerBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
+    ButtonBuilder, ContainerBuilder, DataViewBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
     LayoutGridRowBuilder, PageBuilder,
 };
 pub use project::ProjectBuilder;

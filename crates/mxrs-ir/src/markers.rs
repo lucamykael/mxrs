@@ -196,6 +196,67 @@ impl<M: MicroflowMarker> Clone for MicroflowRef<M> {
 
 impl<M: MicroflowMarker> Copy for MicroflowRef<M> {}
 
+/// Implemented by a generated marker type for one nanoflow (mirrors
+/// [`MicroflowMarker`] exactly — same module-scoped, name-only contract).
+/// Unlike [`MicroflowMarker`], `mxrs-typegen` does not generate these from a
+/// manifest yet (nanoflows have no Cargo-native authoring builder at all —
+/// `mxrs-dsl::ModuleBuilder` only has `microflow`, not `nanoflow`; see that
+/// crate's own gap), so today every `NanoflowMarker` impl is hand-written,
+/// same as this trait's own `#[diagnostic::on_unimplemented]` note already
+/// allows for any marker trait. Exists so a page widget that calls or
+/// sources data from an existing nanoflow (e.g.
+/// `WidgetDecl::DataView`'s nanoflow data source, or a button's
+/// nanoflow-calling action) can be marker-checked instead of taking a raw
+/// `impl Into<String>`, the same guarantee `MicroflowRef<M>` already gives
+/// microflow-calling activities.
+#[cfg_attr(
+    not(doctest),
+    diagnostic::on_unimplemented(
+        message = "`{Self}` is not a Mendix nanoflow marker",
+        label = "expected a type implementing `NanoflowMarker`, hand-implemented (no mxrs-typegen support yet)",
+        note = "nanoflows have no Cargo-native authoring builder yet — this marker only names an *existing* nanoflow so it can be referenced by name"
+    )
+)]
+pub trait NanoflowMarker: 'static {
+    /// The owning module's name, exactly as declared in the manifest.
+    const MODULE: &'static str;
+    /// The nanoflow's own name, exactly as declared in the manifest.
+    const NAME: &'static str;
+
+    fn qualified_name() -> String {
+        format!("{}.{}", Self::MODULE, Self::NAME)
+    }
+}
+
+/// A typed reference to a nanoflow, mirroring [`MicroflowRef`] — see
+/// [`NanoflowMarker`]'s doc comment for why this is a separate type.
+#[derive(Debug)]
+pub struct NanoflowRef<N: NanoflowMarker>(PhantomData<N>);
+
+impl<N: NanoflowMarker> NanoflowRef<N> {
+    pub fn new() -> Self {
+        NanoflowRef(PhantomData)
+    }
+
+    pub fn qualified_name(&self) -> String {
+        N::qualified_name()
+    }
+}
+
+impl<N: NanoflowMarker> Default for NanoflowRef<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<N: NanoflowMarker> Clone for NanoflowRef<N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<N: NanoflowMarker> Copy for NanoflowRef<N> {}
+
 /// A typed reference to an entity, carrying no runtime state beyond what's
 /// needed to resolve back to the qualified name `mxrs-writer` already
 /// expects (`"Module.Entity"`) — so once `mxrs-dsl` is wired to accept
@@ -294,6 +355,23 @@ mod tests {
     fn microflow_ref_resolves_to_its_marker_qualified_name() {
         let r: MicroflowRef<ActNotify> = MicroflowRef::new();
         assert_eq!(r.qualified_name(), "Sales.ACT_Notify");
+    }
+
+    struct ActFetchOrder;
+    impl NanoflowMarker for ActFetchOrder {
+        const MODULE: &'static str = "Sales";
+        const NAME: &'static str = "NF_FetchOrder";
+    }
+
+    #[test]
+    fn nanoflow_marker_qualified_name_joins_module_and_name() {
+        assert_eq!(ActFetchOrder::qualified_name(), "Sales.NF_FetchOrder");
+    }
+
+    #[test]
+    fn nanoflow_ref_resolves_to_its_marker_qualified_name() {
+        let r: NanoflowRef<ActFetchOrder> = NanoflowRef::new();
+        assert_eq!(r.qualified_name(), "Sales.NF_FetchOrder");
     }
 
     #[test]

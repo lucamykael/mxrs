@@ -19,12 +19,26 @@
 //! additional `mxrs-macros` surface (see that crate's doc for its own
 //! locked-scope precedent); pages are authored by calling this builder API
 //! from ordinary Rust, not through macro sugar, until a later pass decides
-//! that's worth it. See `mxrs_ir::page` for the first-slice widget
-//! vocabulary and every other deferred gap (pluggable widgets, data-bound
-//! widgets, button actions beyond close-page).
+//! that's worth it. See `mxrs_ir::page` for the current widget vocabulary
+//! and every remaining deferred gap (pluggable widgets, `ReferenceSelector`,
+//! call-argument mappings on microflow/nanoflow actions).
+//!
+//! **`DataViewBuilder`'s entry point takes the data source up front**
+//! (`data_view_from_microflow`/`data_view_from_nanoflow`), not as a call
+//! inside the configure closure the way `PageBuilder::layout` is a separate
+//! statement from `.container(...)`. `WidgetDecl::DataView.source` is a
+//! required field with no sensible default (there's no such thing as a
+//! `Forms$DataView` without a `dataSource`) — requiring it as a parameter
+//! makes "configured a data view with no source" a compile error instead of
+//! a runtime one, the same "push bugs into `cargo build`" preference this
+//! whole crate follows for association/microflow targets.
 
+use mxrs_ir::markers::{
+    AttributeMarker, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef,
+};
 use mxrs_ir::page::{
-    ButtonAction, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl, WidgetDecl,
+    ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
+    WidgetDecl,
 };
 
 pub struct PageBuilder {
@@ -93,6 +107,32 @@ impl PageBuilder {
         push_layout_grid(&mut self.decl.widgets, configure);
         self
     }
+
+    pub fn data_view_from_microflow<M: MicroflowMarker>(
+        &mut self,
+        target: MicroflowRef<M>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.decl.widgets,
+            DataSourceDecl::Microflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
+
+    pub fn data_view_from_nanoflow<N: NanoflowMarker>(
+        &mut self,
+        target: NanoflowRef<N>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.decl.widgets,
+            DataSourceDecl::Nanoflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
 }
 
 pub struct ContainerBuilder {
@@ -151,6 +191,32 @@ impl ContainerBuilder {
         self
     }
 
+    pub fn data_view_from_microflow<M: MicroflowMarker>(
+        &mut self,
+        target: MicroflowRef<M>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.children,
+            DataSourceDecl::Microflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
+
+    pub fn data_view_from_nanoflow<N: NanoflowMarker>(
+        &mut self,
+        target: NanoflowRef<N>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.children,
+            DataSourceDecl::Nanoflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
+
     fn into_decl(self) -> WidgetDecl {
         WidgetDecl::Container {
             name: self.name,
@@ -188,11 +254,25 @@ impl ButtonBuilder {
         self
     }
 
-    /// The only built-in action this first slice supports besides doing
-    /// nothing on click — see `mxrs_ir::page`'s doc comment for why calling
-    /// a microflow/nanoflow isn't covered yet.
     pub fn close_page(&mut self) -> &mut Self {
         self.action = ButtonAction::ClosePage;
+        self
+    }
+
+    /// Marker-checked, mirroring `FlowBuilder::call_microflow`'s
+    /// `MicroflowRef<M>` target — see `mxrs_ir::page`'s doc comment for why
+    /// there's no call-argument mapping yet (a page-widget analog of a gap
+    /// `FlowBuilder`'s own call activities already have a typed-`Expr`
+    /// fix for, not ported here).
+    pub fn call_microflow<M: MicroflowMarker>(&mut self, target: MicroflowRef<M>) -> &mut Self {
+        self.action = ButtonAction::CallMicroflow(target.qualified_name());
+        self
+    }
+
+    /// See [`ButtonBuilder::call_microflow`]'s doc comment; the nanoflow
+    /// equivalent, via `NanoflowRef`.
+    pub fn call_nanoflow<N: NanoflowMarker>(&mut self, target: NanoflowRef<N>) -> &mut Self {
+        self.action = ButtonAction::CallNanoflow(target.qualified_name());
         self
     }
 
@@ -294,6 +374,126 @@ impl LayoutGridColumnBuilder {
         push_layout_grid(&mut self.children, configure);
         self
     }
+
+    pub fn data_view_from_microflow<M: MicroflowMarker>(
+        &mut self,
+        target: MicroflowRef<M>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.children,
+            DataSourceDecl::Microflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
+
+    pub fn data_view_from_nanoflow<N: NanoflowMarker>(
+        &mut self,
+        target: NanoflowRef<N>,
+        configure: impl FnOnce(&mut DataViewBuilder),
+    ) -> &mut Self {
+        push_data_view(
+            &mut self.children,
+            DataSourceDecl::Nanoflow(target.qualified_name()),
+            configure,
+        );
+        self
+    }
+}
+
+pub struct DataViewBuilder {
+    name: Option<String>,
+    source: DataSourceDecl,
+    children: Vec<WidgetDecl>,
+}
+
+impl DataViewBuilder {
+    fn new(source: DataSourceDecl) -> Self {
+        DataViewBuilder {
+            name: None,
+            source,
+            children: vec![],
+        }
+    }
+
+    pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn container(&mut self, configure: impl FnOnce(&mut ContainerBuilder)) -> &mut Self {
+        push_container(&mut self.children, configure);
+        self
+    }
+
+    pub fn text(&mut self, caption: impl Into<String>) -> &mut Self {
+        push_text(&mut self.children, caption);
+        self
+    }
+
+    pub fn button(
+        &mut self,
+        caption: impl Into<String>,
+        configure: impl FnOnce(&mut ButtonBuilder),
+    ) -> &mut Self {
+        push_button(&mut self.children, caption, configure);
+        self
+    }
+
+    pub fn layout_grid(&mut self, configure: impl FnOnce(&mut LayoutGridBuilder)) -> &mut Self {
+        push_layout_grid(&mut self.children, configure);
+        self
+    }
+
+    /// Renders the bound attribute's raw value as editable text — Mendix's
+    /// `Forms$TextBox`. `attribute` is relative to this data view's own
+    /// entity (`WidgetDecl::TextBox`'s doc comment) — see this module's
+    /// doc comment for why nothing here cross-checks it against the
+    /// microflow/nanoflow this data view was constructed from.
+    pub fn text_box<A: AttributeMarker>(&mut self) -> &mut Self {
+        self.children.push(WidgetDecl::TextBox {
+            name: None,
+            attribute: A::NAME.to_string(),
+            class: None,
+        });
+        self
+    }
+
+    pub fn check_box<A: AttributeMarker>(&mut self) -> &mut Self {
+        self.children.push(WidgetDecl::CheckBox {
+            name: None,
+            attribute: A::NAME.to_string(),
+            class: None,
+        });
+        self
+    }
+
+    pub fn date_picker<A: AttributeMarker>(&mut self) -> &mut Self {
+        self.children.push(WidgetDecl::DatePicker {
+            name: None,
+            attribute: A::NAME.to_string(),
+            class: None,
+        });
+        self
+    }
+
+    pub fn drop_down<A: AttributeMarker>(&mut self) -> &mut Self {
+        self.children.push(WidgetDecl::DropDown {
+            name: None,
+            attribute: A::NAME.to_string(),
+            class: None,
+        });
+        self
+    }
+
+    fn into_decl(self) -> WidgetDecl {
+        WidgetDecl::DataView {
+            name: self.name,
+            source: self.source,
+            children: self.children,
+        }
+    }
 }
 
 fn push_container(widgets: &mut Vec<WidgetDecl>, configure: impl FnOnce(&mut ContainerBuilder)) {
@@ -327,6 +527,16 @@ fn push_layout_grid(widgets: &mut Vec<WidgetDecl>, configure: impl FnOnce(&mut L
         name: builder.name,
         rows: builder.rows,
     });
+}
+
+fn push_data_view(
+    widgets: &mut Vec<WidgetDecl>,
+    source: DataSourceDecl,
+    configure: impl FnOnce(&mut DataViewBuilder),
+) {
+    let mut builder = DataViewBuilder::new(source);
+    configure(&mut builder);
+    widgets.push(builder.into_decl());
 }
 
 #[cfg(test)]
@@ -394,5 +604,92 @@ mod tests {
         assert_eq!(rows[0].columns.len(), 2);
         assert_eq!(rows[0].columns[0].weight, 1);
         assert_eq!(rows[0].columns[1].weight, 2);
+    }
+
+    struct Order;
+    impl mxrs_ir::markers::EntityMarker for Order {
+        const MODULE: &'static str = "Sales";
+        const NAME: &'static str = "Order";
+    }
+
+    struct OrderNumber;
+    impl AttributeMarker for OrderNumber {
+        type Entity = Order;
+        const NAME: &'static str = "Number";
+    }
+
+    struct OrderIsPaid;
+    impl AttributeMarker for OrderIsPaid {
+        type Entity = Order;
+        const NAME: &'static str = "IsPaid";
+    }
+
+    struct ActGetOrder;
+    impl MicroflowMarker for ActGetOrder {
+        const MODULE: &'static str = "Sales";
+        const NAME: &'static str = "ACT_GetOrder";
+    }
+
+    struct ActSubmitOrder;
+    impl MicroflowMarker for ActSubmitOrder {
+        const MODULE: &'static str = "Sales";
+        const NAME: &'static str = "ACT_SubmitOrder";
+    }
+
+    struct NfValidateOrder;
+    impl NanoflowMarker for NfValidateOrder {
+        const MODULE: &'static str = "Sales";
+        const NAME: &'static str = "NF_ValidateOrder";
+    }
+
+    #[test]
+    fn builds_a_data_view_with_attribute_bound_widgets_and_a_microflow_calling_button() {
+        let mut page = PageBuilder::new("OrderDetail");
+        page.layout("Atlas_Core.ApplicationLayout", "Main");
+        page.data_view_from_microflow(MicroflowRef::<ActGetOrder>::new(), |dv| {
+            dv.text_box::<OrderNumber>();
+            dv.check_box::<OrderIsPaid>();
+            dv.button("Submit", |b| {
+                b.call_microflow(MicroflowRef::<ActSubmitOrder>::new());
+            });
+        });
+        let decl = page.into_decl();
+
+        let WidgetDecl::DataView {
+            source, children, ..
+        } = &decl.widgets[0]
+        else {
+            panic!("expected a data view");
+        };
+        assert_eq!(
+            *source,
+            DataSourceDecl::Microflow("Sales.ACT_GetOrder".to_string())
+        );
+        assert_eq!(children.len(), 3);
+        assert!(matches!(
+            &children[0],
+            WidgetDecl::TextBox { attribute, .. } if attribute == "Number"
+        ));
+        assert!(matches!(
+            &children[1],
+            WidgetDecl::CheckBox { attribute, .. } if attribute == "IsPaid"
+        ));
+        assert!(matches!(
+            &children[2],
+            WidgetDecl::Button { action: ButtonAction::CallMicroflow(name), .. }
+                if name == "Sales.ACT_SubmitOrder"
+        ));
+    }
+
+    #[test]
+    fn a_button_can_call_a_nanoflow() {
+        let mut button = ButtonBuilder::new("Validate");
+        button.call_nanoflow(NanoflowRef::<NfValidateOrder>::new());
+        let decl = button.into_decl();
+        assert!(matches!(
+            decl,
+            WidgetDecl::Button { action: ButtonAction::CallNanoflow(name), .. }
+                if name == "Sales.NF_ValidateOrder"
+        ));
     }
 }

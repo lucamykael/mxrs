@@ -51,8 +51,10 @@ use std::rc::Rc;
 use mxrs_bson::Document;
 use mxrs_forms::catalog::{Catalog, ReferenceKind};
 use mxrs_forms::node::{Node, Value};
-use mxrs_forms::values::{Reference, Text};
-use mxrs_ir::page::{ButtonAction, LayoutGridColumnDecl, LayoutGridRowDecl, PageDecl, WidgetDecl};
+use mxrs_forms::values::{AttributeReference, Reference, Text};
+use mxrs_ir::page::{
+    ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, PageDecl, WidgetDecl,
+};
 
 use crate::error::{Result, WriterError};
 
@@ -166,11 +168,132 @@ fn compile_widget(catalog: &Rc<Catalog>, widget: &WidgetDecl, counter: &mut u32)
             let mut node = Node::new("ActionButton", catalog.clone())?;
             node.set("name", Value::String(widget_name(name, "button", counter)))?;
             node.set("caption", Value::Node(client_template(catalog, caption)?))?;
-            node.set("action", Value::Node(button_action_node(catalog, *action)?))?;
+            node.set("action", Value::Node(button_action_node(catalog, action)?))?;
             if let Some(appearance) = appearance_node(catalog, class.as_deref(), None)? {
                 node.set("appearance", Value::Node(appearance))?;
             }
             Ok(Value::Node(node))
+        }
+        WidgetDecl::DataView {
+            name,
+            source,
+            children,
+        } => {
+            let mut node = Node::new("DataView", catalog.clone())?;
+            node.set(
+                "name",
+                Value::String(widget_name(name, "dataView", counter)),
+            )?;
+            node.set(
+                "dataSource",
+                Value::Node(data_source_node(catalog, source)?),
+            )?;
+            let compiled = children
+                .iter()
+                .map(|child| compile_widget(catalog, child, counter))
+                .collect::<Result<Vec<_>>>()?;
+            node.set("widgets", Value::List(compiled))?;
+            Ok(Value::Node(node))
+        }
+        WidgetDecl::TextBox {
+            name,
+            attribute,
+            class,
+        } => attribute_widget_node(
+            catalog, "TextBox", "textBox", name, attribute, class, counter,
+        ),
+        WidgetDecl::CheckBox {
+            name,
+            attribute,
+            class,
+        } => attribute_widget_node(
+            catalog, "CheckBox", "checkBox", name, attribute, class, counter,
+        ),
+        WidgetDecl::DatePicker {
+            name,
+            attribute,
+            class,
+        } => attribute_widget_node(
+            catalog,
+            "DatePicker",
+            "datePicker",
+            name,
+            attribute,
+            class,
+            counter,
+        ),
+        WidgetDecl::DropDown {
+            name,
+            attribute,
+            class,
+        } => attribute_widget_node(
+            catalog, "DropDown", "dropDown", name, attribute, class, counter,
+        ),
+    }
+}
+
+/// Shared shape behind `TextBox`/`CheckBox`/`DatePicker`/`DropDown`: all
+/// four extend Mendix's `MemberWidget` (directly, or via `AttributeWidget`)
+/// and expose exactly one property this compiler needs beyond
+/// name/appearance — `attributeRef` — so one function builds all of them,
+/// keyed by schema type name. Not folded into `compile_widget`'s own
+/// `match` to keep that `match` one arm per `WidgetDecl` variant, matching
+/// this file's existing style for `Container`/`Text`/`Button`.
+fn attribute_widget_node(
+    catalog: &Rc<Catalog>,
+    schema_type: &str,
+    default_prefix: &str,
+    name: &Option<String>,
+    attribute: &str,
+    class: &Option<String>,
+    counter: &mut u32,
+) -> Result<Value> {
+    let mut node = Node::new(schema_type, catalog.clone())?;
+    node.set(
+        "name",
+        Value::String(widget_name(name, default_prefix, counter)),
+    )?;
+    node.set(
+        "attributeRef",
+        Value::AttributeReference(AttributeReference {
+            attribute: attribute.to_string(),
+            entity_reference: None,
+        }),
+    )?;
+    if let Some(appearance) = appearance_node(catalog, class.as_deref(), None)? {
+        node.set("appearance", Value::Node(appearance))?;
+    }
+    Ok(Value::Node(node))
+}
+
+/// Builds the `MicroflowSource`/`NanoflowSource` node behind a
+/// [`WidgetDecl::DataView`] — see `DataSourceDecl`'s doc comment for why
+/// only these two variants exist yet.
+fn data_source_node(catalog: &Rc<Catalog>, source: &DataSourceDecl) -> Result<Node> {
+    match source {
+        DataSourceDecl::Microflow(qualified_name) => {
+            let mut settings = Node::new("MicroflowSettings", catalog.clone())?;
+            settings.set(
+                "microflow",
+                Value::Reference(Reference {
+                    target: qualified_name.clone(),
+                    kind: ReferenceKind::ByName,
+                }),
+            )?;
+            let mut node = Node::new("MicroflowSource", catalog.clone())?;
+            node.set("microflowSettings", Value::Node(settings))?;
+            Ok(node)
+        }
+        DataSourceDecl::Nanoflow(qualified_name) => {
+            let mut node = Node::new("NanoflowSource", catalog.clone())?;
+            node.set(
+                "nanoflow",
+                Value::Reference(Reference {
+                    target: qualified_name.clone(),
+                    kind: ReferenceKind::ByName,
+                }),
+            )?;
+            Ok(node)
         }
     }
 }
@@ -212,12 +335,35 @@ fn client_template(catalog: &Rc<Catalog>, text: &str) -> Result<Node> {
     Ok(node)
 }
 
-fn button_action_node(catalog: &Rc<Catalog>, action: ButtonAction) -> Result<Node> {
-    let type_name = match action {
-        ButtonAction::None => "NoClientAction",
-        ButtonAction::ClosePage => "ClosePageClientAction",
-    };
-    Ok(Node::new(type_name, catalog.clone())?)
+fn button_action_node(catalog: &Rc<Catalog>, action: &ButtonAction) -> Result<Node> {
+    match action {
+        ButtonAction::None => Ok(Node::new("NoClientAction", catalog.clone())?),
+        ButtonAction::ClosePage => Ok(Node::new("ClosePageClientAction", catalog.clone())?),
+        ButtonAction::CallMicroflow(qualified_name) => {
+            let mut settings = Node::new("MicroflowSettings", catalog.clone())?;
+            settings.set(
+                "microflow",
+                Value::Reference(Reference {
+                    target: qualified_name.clone(),
+                    kind: ReferenceKind::ByName,
+                }),
+            )?;
+            let mut node = Node::new("MicroflowClientAction", catalog.clone())?;
+            node.set("microflowSettings", Value::Node(settings))?;
+            Ok(node)
+        }
+        ButtonAction::CallNanoflow(qualified_name) => {
+            let mut node = Node::new("CallNanoflowClientAction", catalog.clone())?;
+            node.set(
+                "nanoflow",
+                Value::Reference(Reference {
+                    target: qualified_name.clone(),
+                    kind: ReferenceKind::ByName,
+                }),
+            )?;
+            Ok(node)
+        }
+    }
 }
 
 fn appearance_node(
@@ -322,6 +468,77 @@ mod tests {
         let document = compile_page(&catalog, &decl).unwrap();
         assert_eq!(document.get_str("$Type").unwrap(), "Forms$Page");
 
+        let codec = mxrs_forms::MprCodec::new(catalog);
+        let node = codec.decode(&document).unwrap();
+        let re_encoded = codec.encode(&node).unwrap();
+        let re_decoded = codec.decode(&re_encoded).unwrap();
+        assert_eq!(node, re_decoded);
+    }
+
+    #[test]
+    fn a_data_view_with_attribute_bound_widgets_and_flow_calling_buttons_round_trips() {
+        let catalog = catalog();
+        let mut decl = PageDecl::new("OrderDetail");
+        decl.layout = Some(LayoutRef::new("Atlas_Core.ApplicationLayout", "Main"));
+        decl.widgets.push(WidgetDecl::DataView {
+            name: Some("orderView".into()),
+            source: DataSourceDecl::Microflow("Sales.ACT_GetOrder".into()),
+            children: vec![
+                WidgetDecl::TextBox {
+                    name: None,
+                    attribute: "Number".into(),
+                    class: None,
+                },
+                WidgetDecl::CheckBox {
+                    name: None,
+                    attribute: "IsPaid".into(),
+                    class: None,
+                },
+                WidgetDecl::DatePicker {
+                    name: None,
+                    attribute: "SubmittedAt".into(),
+                    class: None,
+                },
+                WidgetDecl::DropDown {
+                    name: None,
+                    attribute: "Status".into(),
+                    class: None,
+                },
+                WidgetDecl::Button {
+                    name: None,
+                    caption: "Submit".into(),
+                    class: None,
+                    action: ButtonAction::CallMicroflow("Sales.ACT_SubmitOrder".into()),
+                },
+                WidgetDecl::Button {
+                    name: None,
+                    caption: "Validate".into(),
+                    class: None,
+                    action: ButtonAction::CallNanoflow("Sales.NF_ValidateOrder".into()),
+                },
+            ],
+        });
+
+        let document = compile_page(&catalog, &decl).unwrap();
+        let codec = mxrs_forms::MprCodec::new(catalog);
+        let node = codec.decode(&document).unwrap();
+        let re_encoded = codec.encode(&node).unwrap();
+        let re_decoded = codec.decode(&re_encoded).unwrap();
+        assert_eq!(node, re_decoded);
+    }
+
+    #[test]
+    fn a_data_view_sourced_from_a_nanoflow_round_trips() {
+        let catalog = catalog();
+        let mut decl = PageDecl::new("OrderDetail");
+        decl.layout = Some(LayoutRef::new("Atlas_Core.ApplicationLayout", "Main"));
+        decl.widgets.push(WidgetDecl::DataView {
+            name: None,
+            source: DataSourceDecl::Nanoflow("Sales.NF_GetOrder".into()),
+            children: vec![],
+        });
+
+        let document = compile_page(&catalog, &decl).unwrap();
         let codec = mxrs_forms::MprCodec::new(catalog);
         let node = codec.decode(&document).unwrap();
         let re_encoded = codec.encode(&node).unwrap();
