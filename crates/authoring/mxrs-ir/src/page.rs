@@ -203,6 +203,19 @@ pub struct PageDecl {
     pub url: String,
     /// Displayed page title. Defaults to `name` when `None`.
     pub title: Option<String>,
+    /// Static page-level appearance. Dynamic widget appearance remains a
+    /// separate expression-bearing concern.
+    pub class: Option<String>,
+    pub style: Option<String>,
+    /// Qualified module-role names allowed to open the page. An empty list
+    /// follows Mendix's unrestricted/default page behavior.
+    pub allowed_module_roles: Vec<String>,
+    pub popup_width: i32,
+    pub popup_height: i32,
+    pub popup_resizable: bool,
+    pub excluded: bool,
+    /// Mendix document export level (`Hidden` or `API`).
+    pub export_level: String,
     pub layout: Option<LayoutRef>,
     pub widgets: Vec<WidgetDecl>,
 }
@@ -214,6 +227,14 @@ impl PageDecl {
             documentation: String::new(),
             url: String::new(),
             title: None,
+            class: None,
+            style: None,
+            allowed_module_roles: vec![],
+            popup_width: 0,
+            popup_height: 0,
+            popup_resizable: false,
+            excluded: false,
+            export_level: "Hidden".to_string(),
             layout: None,
             widgets: vec![],
         }

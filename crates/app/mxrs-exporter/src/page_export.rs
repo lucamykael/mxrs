@@ -25,9 +25,10 @@
 //!    walk back to `WidgetDecl::LayoutGrid`.
 //!
 //! **Still narrower than a full page**: no conditional visibility/dynamic
-//! classes, no security roles. A page using any of those stays exactly as
-//! opaque as before — served from the generated snapshot, contributing
-//! nothing to `build()`.
+//! classes or typed page parameters. A page using any of those stays exactly
+//! as opaque as before — served from the generated snapshot, contributing
+//! nothing to `build()`. Static page appearance, security roles, popup
+//! dimensions, exclusion, and export level are preserved by the typed path.
 //!
 //! Data views, attribute-bound widgets, flow-calling buttons and the three
 //! built-in pluggable shells are also detected, but only at a strict
@@ -228,19 +229,7 @@ fn try_convert_page(
     current_module: &str,
 ) -> Option<PageDecl> {
     let name = page.name.clone()?;
-    if !page.allowed_module_roles.is_empty() {
-        return None;
-    }
-    if !page.parameters.is_empty()
-        || page.popup_width != 0
-        || page.popup_height != 0
-        || page.popup_resizable
-        || page.excluded
-        || page.export_level != "Hidden"
-    {
-        return None;
-    }
-    if !page.appearance_class.is_empty() || !page.appearance_style.is_empty() {
+    if !page.parameters.is_empty() {
         return None;
     }
     let widgets = page
@@ -271,6 +260,14 @@ fn try_convert_page(
     // "default to page name" on the authoring side, which is not equivalent
     // to an explicitly empty title in an existing model.
     decl.title = Some(page.title.clone());
+    decl.class = (!page.appearance_class.is_empty()).then(|| page.appearance_class.clone());
+    decl.style = (!page.appearance_style.is_empty()).then(|| page.appearance_style.clone());
+    decl.allowed_module_roles = page.allowed_module_roles.clone();
+    decl.popup_width = page.popup_width;
+    decl.popup_height = page.popup_height;
+    decl.popup_resizable = page.popup_resizable;
+    decl.excluded = page.excluded;
+    decl.export_level = page.export_level.clone();
     decl.layout = layout;
     decl.widgets = widgets;
     Some(decl)
@@ -598,6 +595,28 @@ fn render_page_function(page: &ConvertedPage) -> String {
     }
     if let Some(title) = &decl.title {
         let _ = writeln!(out, "    p.title({title:?});");
+    }
+    if let Some(class) = &decl.class {
+        let _ = writeln!(out, "    p.class({class:?});");
+    }
+    if let Some(style) = &decl.style {
+        let _ = writeln!(out, "    p.style({style:?});");
+    }
+    for role in &decl.allowed_module_roles {
+        let _ = writeln!(out, "    p.allow_role({role:?});");
+    }
+    if decl.popup_width != 0 || decl.popup_height != 0 || decl.popup_resizable {
+        let _ = writeln!(
+            out,
+            "    p.popup({}, {}, {});",
+            decl.popup_width, decl.popup_height, decl.popup_resizable
+        );
+    }
+    if decl.excluded {
+        let _ = writeln!(out, "    p.excluded(true);");
+    }
+    if decl.export_level != "Hidden" {
+        let _ = writeln!(out, "    p.export_level({:?});", decl.export_level);
     }
     if let Some(layout) = &decl.layout {
         let _ = writeln!(
@@ -1144,6 +1163,33 @@ mod tests {
             vec![layout_grid(vec![layout_grid_row(vec![column])])],
         );
         assert!(convert(&page).is_none());
+    }
+
+    #[test]
+    fn page_metadata_converts_and_renders_instead_of_forcing_opaque_fallback() {
+        let mut page = bare_page("OrderEdit", vec![text("Edit")]);
+        page.appearance_class = "page-order".into();
+        page.appearance_style = "max-width: 80rem".into();
+        page.allowed_module_roles = vec!["Sales.Editor".into()];
+        page.popup_width = 720;
+        page.popup_height = 480;
+        page.popup_resizable = true;
+        page.excluded = true;
+        page.export_level = "API".into();
+
+        let decl = convert(&page).expect("page metadata is typed");
+        let source = render_page_function(&ConvertedPage {
+            module_name: "Sales".into(),
+            function_name: "order_edit".into(),
+            decl,
+            flow_return_entities: HashMap::new(),
+        });
+        assert!(source.contains("p.class(\"page-order\")"));
+        assert!(source.contains("p.style(\"max-width: 80rem\")"));
+        assert!(source.contains("p.allow_role(\"Sales.Editor\")"));
+        assert!(source.contains("p.popup(720, 480, true)"));
+        assert!(source.contains("p.excluded(true)"));
+        assert!(source.contains("p.export_level(\"API\")"));
     }
 
     #[test]

@@ -72,6 +72,38 @@ impl PageBuilder {
         self
     }
 
+    pub fn class(&mut self, class: impl Into<String>) -> &mut Self {
+        self.decl.class = Some(class.into());
+        self
+    }
+
+    pub fn style(&mut self, style: impl Into<String>) -> &mut Self {
+        self.decl.style = Some(style.into());
+        self
+    }
+
+    pub fn allow_role(&mut self, qualified_name: impl Into<String>) -> &mut Self {
+        self.decl.allowed_module_roles.push(qualified_name.into());
+        self
+    }
+
+    pub fn popup(&mut self, width: i32, height: i32, resizable: bool) -> &mut Self {
+        self.decl.popup_width = width;
+        self.decl.popup_height = height;
+        self.decl.popup_resizable = resizable;
+        self
+    }
+
+    pub fn excluded(&mut self, excluded: bool) -> &mut Self {
+        self.decl.excluded = excluded;
+        self
+    }
+
+    pub fn export_level(&mut self, level: impl Into<String>) -> &mut Self {
+        self.decl.export_level = level.into();
+        self
+    }
+
     /// `qualified_name` is the existing Layout document's `"Module.Name"`;
     /// `parameter` is the name of the placeholder on that layout widgets
     /// attach to (e.g. `"Main"`). See `mxrs_ir::page`'s doc comment for why
@@ -872,6 +904,27 @@ mod tests {
             &children[1],
             WidgetDecl::Button { action: ButtonAction::ClosePage, caption, .. } if caption == "Close"
         ));
+    }
+
+    #[test]
+    fn builds_page_level_appearance_security_and_popup_metadata() {
+        let mut page = PageBuilder::new("OrderEdit");
+        page.class("page-order")
+            .style("max-width: 80rem")
+            .allow_role("Sales.Editor")
+            .allow_role("Sales.Manager")
+            .popup(720, 480, true)
+            .excluded(true)
+            .export_level("API");
+        let decl = page.into_decl();
+
+        assert_eq!(decl.class.as_deref(), Some("page-order"));
+        assert_eq!(decl.style.as_deref(), Some("max-width: 80rem"));
+        assert_eq!(decl.allowed_module_roles, ["Sales.Editor", "Sales.Manager"]);
+        assert_eq!((decl.popup_width, decl.popup_height), (720, 480));
+        assert!(decl.popup_resizable);
+        assert!(decl.excluded);
+        assert_eq!(decl.export_level, "API");
     }
 
     #[test]

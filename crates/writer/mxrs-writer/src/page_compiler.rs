@@ -121,6 +121,30 @@ pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> 
     if !decl.url.is_empty() {
         page.set("url", Value::String(decl.url.clone()))?;
     }
+    page.set("excluded", Value::Boolean(decl.excluded))?;
+    page.set("exportLevel", Value::String(decl.export_level.clone()))?;
+    page.set("popupWidth", Value::Integer(i64::from(decl.popup_width)))?;
+    page.set("popupHeight", Value::Integer(i64::from(decl.popup_height)))?;
+    page.set("popupResizable", Value::Boolean(decl.popup_resizable))?;
+    page.set(
+        "allowedRoles",
+        Value::List(
+            decl.allowed_module_roles
+                .iter()
+                .map(|role| {
+                    Value::Reference(Reference {
+                        target: role.clone(),
+                        kind: ReferenceKind::ByName,
+                    })
+                })
+                .collect(),
+        ),
+    )?;
+    if let Some(appearance) =
+        appearance_node(catalog, decl.class.as_deref(), decl.style.as_deref())?
+    {
+        page.set("appearance", Value::Node(appearance))?;
+    }
 
     if let Some(layout) = &decl.layout {
         let mut layout_call = Node::new("LayoutCall", catalog.clone())?;
@@ -635,6 +659,29 @@ mod tests {
         let re_encoded = codec.encode(&node).unwrap();
         let re_decoded = codec.decode(&re_encoded).unwrap();
         assert_eq!(node, re_decoded);
+    }
+
+    #[test]
+    fn page_level_metadata_is_written_with_schema_checked_types() {
+        let mut decl = PageDecl::new("OrderEdit");
+        decl.class = Some("page-order".into());
+        decl.style = Some("max-width: 80rem".into());
+        decl.allowed_module_roles = vec!["Sales.Editor".into(), "Sales.Manager".into()];
+        decl.popup_width = 720;
+        decl.popup_height = 480;
+        decl.popup_resizable = true;
+        decl.excluded = true;
+        decl.export_level = "API".into();
+
+        let document = compile_page(&catalog(), &decl).unwrap();
+        let page = mxrs_model::page::Page::from_bson(&document);
+        assert_eq!(page.appearance_class, "page-order");
+        assert_eq!(page.appearance_style, "max-width: 80rem");
+        assert_eq!(page.allowed_module_roles, ["Sales.Editor", "Sales.Manager"]);
+        assert_eq!((page.popup_width, page.popup_height), (720, 480));
+        assert!(page.popup_resizable);
+        assert!(page.excluded);
+        assert_eq!(page.export_level, "API");
     }
 
     #[test]
