@@ -19,6 +19,7 @@ pub fn write_module(
     decl: &ModuleDecl,
     known_entities: &HashSet<String>,
     identity: ProjectIdentity,
+    mendix_version: &str,
 ) -> Result<()> {
     let module_id = insert_bare_module(mpr, project_root_id, &decl.name, identity)?;
 
@@ -72,6 +73,15 @@ pub fn write_module(
         &module_id,
         &decl.name,
         &decl.enumerations,
+        identity,
+    )?;
+
+    documents::synchronize_pages_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        mendix_version,
+        &decl.pages,
         identity,
     )?;
 

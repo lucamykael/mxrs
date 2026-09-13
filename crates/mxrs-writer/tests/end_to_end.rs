@@ -1036,3 +1036,127 @@ fn synchronize_microflows_does_not_delete_an_undeclared_existing_microflow() {
     assert!(names.contains(&Some("ACT_Keep")));
     assert!(names.contains(&Some("ACT_New")));
 }
+
+#[test]
+fn writes_a_page_with_native_widgets_that_reads_back_correctly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("WrittenPage.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.page("OrderOverview", |p| {
+            p.title("Orders");
+            p.url("orderoverview");
+            p.layout("Atlas_Core.ApplicationLayout", "Main");
+            p.container(|c| {
+                c.class("row");
+                c.text("Manage your orders");
+                c.button("Close", |b| {
+                    b.close_page();
+                });
+            });
+        });
+    });
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let sales = read
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert_eq!(sales.pages.len(), 1);
+    let page = &sales.pages[0];
+    assert_eq!(page.name.as_deref(), Some("OrderOverview"));
+    assert_eq!(page.url, "orderoverview");
+    assert_eq!(page.widgets.len(), 1);
+    let container = &page.widgets[0];
+    assert_eq!(container.widget_type, "container");
+    assert_eq!(container.children.len(), 2);
+    assert_eq!(container.children[0].widget_type, "text");
+    assert_eq!(container.children[1].widget_type, "button");
+}
+
+#[test]
+fn synchronize_pages_preserves_id_on_a_name_match_and_upserts_new_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("SyncPages.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.page("Home", |p| {
+            p.layout("Atlas_Core.ApplicationLayout", "Main");
+            p.text("v1");
+        });
+    });
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let before = Project::open(&path, true).unwrap();
+    let sales = before
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    let module_id = sales.id.clone();
+    let original_id = sales.pages[0].id.clone().unwrap();
+
+    let mut redeclare = ProjectBuilder::new("11.12.1");
+    redeclare.module("Sales", |m| {
+        m.page("Home", |p| {
+            p.layout("Atlas_Core.ApplicationLayout", "Main");
+            p.text("v2");
+        });
+        m.page("About", |p| {
+            p.layout("Atlas_Core.ApplicationLayout", "Main");
+            p.text("about");
+        });
+    });
+    let pages = redeclare.build().modules.remove(0).pages;
+
+    let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+    mxrs_writer::documents::synchronize_pages(&mut mpr, &module_id, "11.12.1", &pages).unwrap();
+    drop(mpr);
+
+    let after = Project::open(&path, true).unwrap();
+    let sales = after
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert_eq!(sales.pages.len(), 2);
+    let home = sales
+        .pages
+        .iter()
+        .find(|p| p.name.as_deref() == Some("Home"))
+        .unwrap();
+    assert_eq!(home.id.as_deref(), Some(original_id.as_str()));
+    assert_eq!(home.widgets[0].options.get_str("caption").unwrap(), "v2");
+    let about = sales
+        .pages
+        .iter()
+        .find(|p| p.name.as_deref() == Some("About"))
+        .unwrap();
+    assert_ne!(about.id.as_deref(), Some(original_id.as_str()));
+}
+
+#[test]
+fn a_page_declaring_widgets_without_a_layout_fails_loudly_at_write_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("NoLayout.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.page("Broken", |p| {
+            p.text("orphaned widget, no layout declared");
+        });
+    });
+
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::PageWidgetsRequireLayout(name) if name == "Broken"
+    ));
+}

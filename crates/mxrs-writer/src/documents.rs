@@ -1,10 +1,11 @@
-//! Incremental re-sync for microflow and enumeration `Documents` units —
-//! mirrors the corresponding slices of `Writer#write_documents`/
+//! Incremental re-sync for microflow, page, and enumeration `Documents`
+//! units — mirrors the corresponding slices of `Writer#write_documents`/
 //! `#upsert_document` (mxrb's
 //! own method upserts pages/microflows/nanoflows/rules/menus/enumerations/
 //! constants/scheduled_events; this crate now has DSL/model surface for
-//! microflows and enumerations, widened incrementally like the rest of the
-//! codebase).
+//! microflows, native/structural pages, and enumerations, widened
+//! incrementally like the rest of the codebase — see `mxrs_ir::page`'s doc
+//! comment for exactly which pages/widgets are and aren't covered yet).
 //!
 //! Unlike domain-model entity/association sync, this is **upsert-only**:
 //! `microflows` is not treated as the module's complete authoritative
@@ -26,16 +27,18 @@
 //! direct child of the module.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use mxrs_bson::{Bson, Document, build_array, doc, extract_id, parse_array};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::EnumerationDecl;
 use mxrs_ir::flow::MicroflowDecl;
+use mxrs_ir::page::PageDecl;
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
 
 use crate::error::Result;
-use crate::flow_compiler;
+use crate::{flow_compiler, page_compiler};
 
 pub fn synchronize_microflows(
     mpr: &mut MprFile,
@@ -115,6 +118,94 @@ pub(crate) fn synchronize_microflows_with_identity(
             }
             None => {
                 mpr.insert_unit(module_id, "Documents", doc, Some(&id))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Standalone entry point mirroring `synchronize_microflows`: resolves the
+/// project identity and module name from `mpr`/`module_id` itself, for
+/// callers that don't already have a `ProjectIdentity` in hand (tests,
+/// mostly — `project::synchronize_project` calls
+/// `synchronize_pages_with_identity` directly since it already has both).
+pub fn synchronize_pages(
+    mpr: &mut MprFile,
+    module_id: &str,
+    mendix_version: &str,
+    pages: &[PageDecl],
+) -> Result<()> {
+    let root_id = mpr
+        .root_unit()?
+        .ok_or(crate::WriterError::MissingRootUnit)?
+        .unit_id;
+    let identity = ProjectIdentity::from_project_root(&root_id)?;
+    let module_unit = mpr
+        .unit(module_id)?
+        .ok_or_else(|| crate::WriterError::MissingModuleUnit(module_id.to_string()))?;
+    let module_doc = mpr.parse_contents(&module_unit)?;
+    let module_name = module_doc
+        .get_str("Name")
+        .map_err(|_| crate::WriterError::MissingModuleName(module_id.to_string()))?;
+    synchronize_pages_with_identity(mpr, module_id, module_name, mendix_version, pages, identity)
+}
+
+/// Upserts pages by name, same upsert-only policy as
+/// `synchronize_microflows_with_identity`: a page absent from `pages` isn't
+/// deleted (it stays whatever it was — typically an opaque unit restored
+/// verbatim from an imported snapshot, see `mxrs-project`'s
+/// `rebuild_imported_project`). A page's own `$ID` is preserved when its
+/// name matches an existing `Forms$Page`/`Pages$Page` `Documents` unit,
+/// exactly like a microflow's; everything else about the document is fully
+/// re-derived from `PageDecl` via `page_compiler::compile_page` (no
+/// partial-field-preserve case, same reasoning `documents.rs`'s own module
+/// doc gives for microflows).
+///
+/// Building a `mxrs-forms::Catalog` parses the embedded schema JSON fresh
+/// each call (no caching upstream) — skipped entirely when `pages` is
+/// empty so a page-less module (still the common case for most existing
+/// projects) pays nothing for this.
+pub(crate) fn synchronize_pages_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    mendix_version: &str,
+    pages: &[PageDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    if pages.is_empty() {
+        return Ok(());
+    }
+    let catalog = Rc::new(mxrs_forms::Catalog::for_version(mendix_version)?);
+
+    let existing_by_name: HashMap<String, String> = mpr
+        .children_of(module_id)?
+        .into_iter()
+        .filter(|u| u.containment_name == "Documents")
+        .filter_map(|u| {
+            let doc = mpr.parse_contents(&u).ok()?;
+            let type_name = doc.get_str("$Type").ok()?;
+            if type_name != "Forms$Page" && type_name != "Pages$Page" {
+                return None;
+            }
+            let name = doc.get_str("Name").ok()?.to_string();
+            Some((name, u.unit_id))
+        })
+        .collect();
+
+    for decl in pages {
+        let existing_id = existing_by_name.get(&decl.name).cloned();
+        let id = existing_id.clone().unwrap_or_else(|| {
+            identity.artifact_id(ArtifactKind::Page, &format!("{module_name}.{}", decl.name))
+        });
+        let mut document = page_compiler::compile_page(&catalog, decl)?;
+        document.insert("$ID", id.clone());
+        match existing_id {
+            Some(id) => {
+                mpr.update_unit(&id, document)?;
+            }
+            None => {
+                mpr.insert_unit(module_id, "Documents", document, Some(&id))?;
             }
         }
     }

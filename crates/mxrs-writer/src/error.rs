@@ -37,6 +37,14 @@ pub enum WriterError {
     #[error("duplicate entity {module_name}.{name:?} declared while synchronizing")]
     DuplicateEntity { module_name: String, name: String },
 
+    #[error(
+        "page {0:?} declares widgets but no layout — a Forms$Page has no widgets of its own; every widget attaches to a LayoutCallArgument inside LayoutCall.arguments, so a layout (via PageBuilder::layout) is required whenever a page has widgets"
+    )]
+    PageWidgetsRequireLayout(String),
+
+    #[error("Forms metamodel error: {0}")]
+    Forms(#[from] mxrs_forms::FormsError),
+
     #[error("BSON codec error: {0}")]
     Bson(#[from] mxrs_bson::BsonCodecError),
 

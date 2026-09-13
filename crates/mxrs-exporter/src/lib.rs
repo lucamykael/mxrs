@@ -45,6 +45,12 @@
 //! Marker types are emitted by `project!` from these same entity
 //! declarations, so exported source is self-contained without a second
 //! schema manifest or a generated marker module.
+//!
+//! `import_cargo_project` additionally detects pages built entirely from
+//! `mxrs-dsl`'s native/structural widget vocabulary and renders them for
+//! review into `src/domain/pages.rs` — see `page_export`'s doc comment for
+//! the widget vocabulary detected and why that file is deliberately not
+//! wired into the live `build()`/`.mpr` output the way domain entities are.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -55,6 +61,9 @@ use mxrs_model::Attribute;
 use mxrs_model::attribute::AttributeType;
 use mxrs_model::entity::Entity;
 use mxrs_model::{Association, Module, Project};
+
+mod page_export;
+pub use page_export::PageExportReport;
 
 /// One model feature the generated `project! {}` source cannot faithfully
 /// represent yet. Paths use Mendix qualified names so the user can resolve
@@ -110,6 +119,11 @@ pub struct CargoProjectImport {
     pub imported_units: usize,
     pub imported_assets: usize,
     pub typed_round_trip_gaps: Vec<RoundTripGap>,
+    /// Pages detected as buildable from `mxrs-dsl`'s native/structural
+    /// widget vocabulary, rendered for review into `src/domain/pages.rs`
+    /// (not wired into the live build — see `page_export`'s doc comment
+    /// for why).
+    pub page_export: PageExportReport,
 }
 
 pub type Result<T> = std::result::Result<T, ExportError>;
@@ -178,6 +192,7 @@ fn import_cargo_project_inner(
     let gaps = round_trip_gaps(&modules);
     let model_source = render(&mendix_version, &modules);
     let identity_source = render_identity_table(&modules);
+    let (pages_review_source, page_export) = page_export::render_pages_review(&modules);
     drop(project);
 
     let imported = destination.join("model/imported");
@@ -213,6 +228,12 @@ fn import_cargo_project_inner(
         ),
     )?;
     write_text(&destination.join("src/domain/mod.rs"), &model_source)?;
+    if let Some(pages_review_source) = &pages_review_source {
+        write_text(
+            &destination.join("src/domain/pages.rs"),
+            pages_review_source,
+        )?;
+    }
     write_text(
         &destination.join("src/main.rs"),
         &build_binary_source(&crate_name, &manifest.project_name),
@@ -235,7 +256,7 @@ fn import_cargo_project_inner(
     write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
     write_text(
         &destination.join("README.md"),
-        &generated_readme(&manifest.project_name, gaps.len()),
+        &generated_readme(&manifest.project_name, gaps.len(), &page_export),
     )?;
 
     Ok(CargoProjectImport {
@@ -246,6 +267,7 @@ fn import_cargo_project_inner(
         imported_units: manifest.units.len(),
         imported_assets,
         typed_round_trip_gaps: gaps,
+        page_export,
     })
 }
 
@@ -270,9 +292,18 @@ fn build_binary_source(crate_name: &str, project_name: &str) -> String {
     )
 }
 
-fn generated_readme(project_name: &str, gaps: usize) -> String {
+fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportReport) -> String {
+    let pages_note = if page_export.typed_candidates > 0 {
+        format!(
+            "\n`src/domain/pages.rs` reviews {} page(s) this import detected as buildable from\nmxrs-dsl's native/structural widget vocabulary (out of {} page(s) total). That file is\nNOT wired into the build — see its header comment for how to adopt a page from it.\n",
+            page_export.typed_candidates,
+            page_export.typed_candidates + page_export.opaque,
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Rust under `src/` is the editable source; `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Rust under `src/` is the editable source; `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n{pages_note}"
     )
 }
 
@@ -984,17 +1015,40 @@ mod tests {
                 entity.datetime("SubmittedAt").localize_date = Some(false);
             });
             module.microflow("ACT_Ping", |_flow| {});
+            module.page("Home", |p| {
+                p.layout("Atlas_Core.ApplicationLayout", "Main");
+                p.container(|c| {
+                    c.text("Welcome");
+                    c.button("Close", |b| {
+                        b.close_page();
+                    });
+                });
+            });
         });
         mxrs_writer::write_project(&source_path, &builder.build()).unwrap();
 
         let imported = import_cargo_project(&source_path, &generated, Some(workspace)).unwrap();
         assert!(imported.imported_units > 1);
         assert_eq!(imported.imported_assets, 1);
+        assert_eq!(imported.page_export.typed_candidates, 1);
         assert!(generated.join("Cargo.toml").is_file());
         assert!(generated.join("mxrs.toml").is_file());
         assert!(generated.join("src/lib.rs").is_file());
         assert!(generated.join("src/domain/mod.rs").is_file());
         assert!(generated.join("model/imported/manifest.json").is_file());
+        // `pages.rs` is real, reviewable Rust source (see `page_export`'s
+        // doc comment) but deliberately isn't wired into `src/domain/mod.rs`
+        // or `src/lib.rs` — the `cargo check`/`cargo run` calls below prove
+        // its presence doesn't affect whether the generated project builds.
+        let pages_source = std::fs::read_to_string(generated.join("src/domain/pages.rs")).unwrap();
+        assert!(pages_source.contains("pub fn home"));
+        assert!(pages_source.contains("w.text(\"Welcome\")"));
+        assert!(pages_source.contains("b.close_page()"));
+        let lib_source = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
+        assert!(!lib_source.contains("pages"));
+        let domain_mod_source =
+            std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
+        assert!(!domain_mod_source.contains("mod pages"));
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(
             domain_source.contains("documentation \"External order number\";"),

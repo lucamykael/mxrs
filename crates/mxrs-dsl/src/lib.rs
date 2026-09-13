@@ -53,6 +53,7 @@ mod entity;
 mod enumeration;
 mod flow;
 mod module;
+pub mod page;
 mod project;
 
 pub use entity::EntityBuilder;
@@ -62,5 +63,9 @@ pub use module::ModuleBuilder;
 pub use mxrs_expr::{
     Expr, ListVar, MxBool, MxDecimal, MxFloat, MxInteger, MxLong, MxString, Var, boolean, decimal,
     float, integer, long, string,
+};
+pub use page::{
+    ButtonBuilder, ContainerBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
+    LayoutGridRowBuilder, PageBuilder,
 };
 pub use project::ProjectBuilder;

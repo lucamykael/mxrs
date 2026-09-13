@@ -552,6 +552,88 @@ mod tests {
         assert!(!format::contents_dir(&output).exists());
     }
 
+    /// Pages participate in the same "restore the opaque snapshot, then
+    /// overlay the typed `ProjectDecl`" pipeline domain entities and
+    /// microflows already use — nothing in this crate is page-specific,
+    /// which is the point: `mxrs_writer::synchronize_project` (called by
+    /// `rebuild_imported_project` below) now knows how to upsert a
+    /// `ModuleDecl.pages` entry by name, so a page absent from the
+    /// declaration passed to a given rebuild stays exactly what the
+    /// snapshot restored (opaque, untouched) while a page present in both
+    /// gets its typed content written on top.
+    #[test]
+    fn typed_pages_upsert_by_name_while_snapshot_only_pages_stay_opaque() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("Source.mpr");
+        let snapshot = directory.path().join("model/imported");
+
+        let mut project = ProjectBuilder::new("11.12.1");
+        project.module("Sales", |module| {
+            module.page("Legacy", |p| {
+                p.layout("Atlas_Core.ApplicationLayout", "Main");
+                p.text("hand-authored in Studio Pro, never re-declared in Rust");
+            });
+            module.page("Typed", |p| {
+                p.layout("Atlas_Core.ApplicationLayout", "Main");
+                p.text("v1");
+            });
+        });
+        let declaration = project.build();
+        mxrs_writer::write_project(&source_path, &declaration).unwrap();
+        let manifest = capture_imported_project(&source_path, &snapshot).unwrap();
+
+        // Rebuild with only "Typed" re-declared (different content) — mirrors
+        // a Cargo project where the developer took over authoring one page
+        // in Rust but left another entirely alone.
+        let mut redeclare = ProjectBuilder::new("11.12.1");
+        redeclare.module("Sales", |module| {
+            module.page("Typed", |p| {
+                p.layout("Atlas_Core.ApplicationLayout", "Main");
+                p.text("v2");
+            });
+        });
+        let redeclared = redeclare.build();
+
+        let output_directory = tempfile::tempdir().unwrap();
+        let output = output_directory.path().join("Built.mpr");
+        rebuild_imported_project(&snapshot, &output, &redeclared).unwrap();
+
+        let original_legacy_unit = manifest
+            .units
+            .iter()
+            .find(|u| u.name.as_deref() == Some("Legacy"))
+            .unwrap();
+        let original_legacy_doc =
+            mxrs_bson::parse(&std::fs::read(snapshot.join(&original_legacy_unit.file)).unwrap())
+                .unwrap();
+
+        let rebuilt = MprFile::open(&output, true).unwrap();
+        let pages: Vec<mxrs_bson::Document> = rebuilt
+            .all_units()
+            .unwrap()
+            .into_iter()
+            .filter_map(|unit| {
+                let document = rebuilt.parse_contents(&unit).ok()?;
+                (document.get_str("$Type").ok() == Some("Forms$Page")).then_some(document)
+            })
+            .collect();
+        assert_eq!(pages.len(), 2, "the untouched Legacy page must survive");
+        let legacy = pages
+            .iter()
+            .find(|d| d.get_str("Name").ok() == Some("Legacy"))
+            .expect("Legacy page restored from the opaque snapshot");
+        assert_eq!(
+            legacy, &original_legacy_doc,
+            "a page absent from the redeclared ProjectDecl must round-trip byte-identical"
+        );
+        assert!(
+            pages
+                .iter()
+                .any(|d| d.get_str("Name").ok() == Some("Typed")),
+            "Typed page rewritten from the redeclared ProjectDecl must still exist"
+        );
+    }
+
     #[test]
     fn replace_build_supports_repeatable_artifact_builds() {
         let directory = tempfile::tempdir().unwrap();

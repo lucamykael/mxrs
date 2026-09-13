@@ -339,6 +339,12 @@ fn run_import(mut args: Vec<String>) -> ExitCode {
             imported.typed_round_trip_gaps.len()
         );
     }
+    if imported.page_export.typed_candidates > 0 {
+        println!(
+            "[mxrs] {} page(s) detected as buildable from mxrs-dsl's native widget vocabulary; see src/domain/pages.rs (not wired into the build — review before adopting)",
+            imported.page_export.typed_candidates
+        );
+    }
     println!("[mxrs] next: cd {output} && cargo check");
     ExitCode::SUCCESS
 }

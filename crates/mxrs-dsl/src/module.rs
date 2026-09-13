@@ -3,6 +3,7 @@ use mxrs_ir::declaration::ModuleDecl;
 use crate::entity::EntityBuilder;
 use crate::enumeration::EnumerationBuilder;
 use crate::flow::FlowBuilder;
+use crate::page::PageBuilder;
 
 pub struct ModuleBuilder {
     decl: ModuleDecl,
@@ -16,6 +17,7 @@ impl ModuleBuilder {
                 entities: vec![],
                 enumerations: vec![],
                 microflows: vec![],
+                pages: vec![],
             },
         }
     }
@@ -54,6 +56,19 @@ impl ModuleBuilder {
         let mut builder = EnumerationBuilder::new(name);
         configure(&mut builder);
         self.decl.enumerations.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a page — see `mxrs-dsl::page`'s crate-level doc comment for
+    /// the first-slice widget vocabulary and what's deliberately deferred.
+    pub fn page(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut PageBuilder),
+    ) -> &mut Self {
+        let mut builder = PageBuilder::new(name);
+        configure(&mut builder);
+        self.decl.pages.push(builder.into_decl());
         self
     }
 }

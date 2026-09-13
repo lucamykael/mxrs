@@ -40,7 +40,14 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
     let known_entities = known_entities(project);
 
     for decl in &project.modules {
-        module::write_module(&mut mpr, &root_id, decl, &known_entities, identity)?;
+        module::write_module(
+            &mut mpr,
+            &root_id,
+            decl,
+            &known_entities,
+            identity,
+            &project.mendix_version,
+        )?;
     }
     Ok(())
 }
@@ -118,6 +125,14 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &module_id,
             &decl.name,
             &decl.enumerations,
+            identity,
+        )?;
+        documents::synchronize_pages_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &project.mendix_version,
+            &decl.pages,
             identity,
         )?;
     }

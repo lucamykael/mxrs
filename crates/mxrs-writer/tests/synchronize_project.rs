@@ -298,3 +298,62 @@ fn validation_rules_are_authoritative_and_keep_stable_ids() {
     assert!(!order.attributes[0].unique);
     assert!(order.validation_rules.is_empty());
 }
+
+/// `synchronize_project` is the path `mxrs-project::rebuild_imported_project`
+/// uses to overlay a Rust-authored `ProjectDecl` on top of a restored
+/// imported snapshot — this is the same upsert-by-name identity-preserving
+/// behavior `synchronize_project_upserts_a_microflow_by_name` proves for
+/// microflows, now proven for pages too.
+#[test]
+fn synchronize_project_upserts_a_page_by_name_and_preserves_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Project.mpr");
+
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |m| {
+        m.page("Home", |p| {
+            p.layout("Atlas_Core.ApplicationLayout", "Main");
+            p.text("v1");
+        });
+    });
+    mxrs_writer::write_project(&path, &initial.build()).unwrap();
+
+    let first = Project::open(&path, true).unwrap();
+    let original_id = first
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap()
+        .pages[0]
+        .id
+        .clone()
+        .unwrap();
+    drop(first);
+
+    let mut updated = ProjectBuilder::new("11.12.1");
+    updated.module("Sales", |m| {
+        m.page("Home", |p| {
+            p.layout("Atlas_Core.ApplicationLayout", "Main");
+            p.text("v2");
+        });
+    });
+    mxrs_writer::synchronize_project(&path, &updated.build()).unwrap();
+
+    let project = Project::open(&path, true).unwrap();
+    let sales = project
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert_eq!(sales.pages.len(), 1, "upsert, not a duplicate insert");
+    assert_eq!(sales.pages[0].id.as_deref(), Some(original_id.as_str()));
+    assert_eq!(
+        sales.pages[0].widgets[0]
+            .options
+            .get_str("caption")
+            .unwrap(),
+        "v2"
+    );
+}

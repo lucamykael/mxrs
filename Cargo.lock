@@ -775,6 +775,7 @@ dependencies = [
  "mxrs-bson",
  "mxrs-dsl",
  "mxrs-expr",
+ "mxrs-forms",
  "mxrs-identity",
  "mxrs-ir",
  "mxrs-model",

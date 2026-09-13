@@ -5,13 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Persists an mxrs-ir::ProjectDecl into a fresh .mpr, and incrementally re-syncs an existing one's domain model (Phase 3 scope)."
+description = "Persists an mxrs-ir::ProjectDecl into a fresh .mpr, and incrementally re-syncs an existing one's domain model, microflows, enumerations, and native/structural pages."
 
 [lints]
 workspace = true
 
 [dependencies]
 mxrs-bson = { path = "../mxrs-bson" }
+mxrs-forms = { path = "../mxrs-forms" }
 mxrs-ir = { path = "../mxrs-ir" }
 mxrs-identity = { path = "../mxrs-identity" }
 mxrs-model = { path = "../mxrs-model" }

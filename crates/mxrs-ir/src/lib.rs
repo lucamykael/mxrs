@@ -11,6 +11,7 @@
 pub mod declaration;
 pub mod flow;
 pub mod markers;
+pub mod page;
 
 pub use declaration::{
     AssociationDecl, AssociationOwner, AssociationStorage, AssociationType, AttributeDecl,
@@ -20,4 +21,7 @@ pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{
     AssociationMarker, AttributeMarker, EntityMarker, EnumerationMarker, MicroflowMarker,
     MicroflowRef, Ref, Reference, ReferenceSet,
+};
+pub use page::{
+    ButtonAction, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl, WidgetDecl,
 };

@@ -21,10 +21,14 @@
 //! model: a microflow absent from a given call isn't deleted, matching
 //! mxrb's own `write_documents`). Cargo-native enumerations are also written
 //! and incrementally synchronized, including values, localized captions, and
-//! stable identity preservation. **Not ported at all**: pages/widgets, menus,
-//! constants, and every
-//! other document type `Module` supports beyond microflows; DSL-level
-//! customization of security/navigation content (`scaffold` writes sane,
+//! stable identity preservation. Native/structural pages are written and
+//! incrementally synchronized too, via `page_compiler` — see `mxrs_ir::page`'s
+//! doc comment for exactly which pages/widgets that covers (containers/text/
+//! buttons only; pluggable widgets, data-bound widgets, and non-close-page
+//! button actions are deferred). **Not ported at all**: menus,
+//! constants, flows/security/navigation content, and every
+//! other document type `Module` supports beyond microflows and pages;
+//! DSL-level customization of security/navigation content (`scaffold` writes sane,
 //! empty defaults for both, matching what `mxrb generate` produces for a
 //! brand-new project, but there's no DSL surface yet to configure user
 //! roles, guest access, or navigation profiles). Cross-module associations
@@ -37,6 +41,7 @@ pub mod domain;
 pub mod error;
 pub mod flow_compiler;
 pub mod module;
+pub mod page_compiler;
 pub mod project;
 pub mod scaffold;
 

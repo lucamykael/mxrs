@@ -4,6 +4,7 @@
 //! into `mxrs-model` only at the persistence boundary.
 
 use crate::flow::MicroflowDecl;
+use crate::page::PageDecl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// An author-level attribute kind.
@@ -158,6 +159,7 @@ pub struct ModuleDecl {
     pub entities: Vec<EntityDecl>,
     pub enumerations: Vec<EnumerationDecl>,
     pub microflows: Vec<MicroflowDecl>,
+    pub pages: Vec<PageDecl>,
 }
 
 #[derive(Debug, Clone)]

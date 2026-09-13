@@ -13,7 +13,7 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-25 crates + a dev-only `xtask` harness, ~49k lines of Rust, 482 tests
+25 crates + a dev-only `xtask` harness, ~50k lines of Rust, 490 tests
 passing. The primary direction is now Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 
@@ -57,8 +57,9 @@ subsystems are not started yet.
 `units`, `dump-unit`, `sql`, `modules`, `export`, and `javagen` today. Typed
 domain import covers all attribute kinds plus documentation, length, date
 localization, required/unique validation, and association owner/storage/docs.
-Pages, flows, security, navigation, and unknown documents remain complete in
-the generated snapshot while their ergonomic Rust front ends are built.
+Flows, security, navigation, and unknown documents remain complete in the
+generated snapshot while their ergonomic Rust front ends are built. Pages
+now have a first typed front end too — see below.
 
 Cargo-native domain code can use `#[derive(MxEntity)]` on structs and
 `#[derive(MxEnumeration)]` on enums. Scalar field kinds are inferred from
@@ -69,6 +70,23 @@ documents and localized captions retain stable identities across rebuilds.
 Associations use `Reference<T>` or `ReferenceSet<T>` fields; their target and
 cardinality are checked by Rust, while names and storage metadata can be
 overridden with `#[mxrs(...)]`.
+
+Pages have a first, narrow Cargo-native front end: `ModuleBuilder::page`
+(`mxrs-dsl`) takes a nested-closure builder — the same "locked shape"
+decision as microflows/entities, not a `#[derive(MxPage)]` struct, since a
+widget tree has no natural 1:1 struct-field mapping. Only native/structural
+widgets are covered — layout containers (`DivContainer`, `LayoutGrid`),
+static text, and buttons (no-op or close-page only) — compiled by
+`mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms
+metamodel codec. Pluggable widgets (Data Grid 2/Gallery/ComboBox/generic
+bundle), native data-bound widgets (attribute-bound TextBox/CheckBox/...),
+button actions that call a microflow/nanoflow, and flows/security/navigation
+on pages are all explicitly deferred — see `mxrs_ir::page`'s doc comment.
+`mxrs import` detects pages built entirely from this vocabulary and renders
+them for review into `src/domain/pages.rs`; that file is intentionally *not*
+wired into the live build (see `mxrs-exporter::page_export`'s doc comment
+for why) — adopting a page means copying its generated body into your own
+`module.page(...)` call.
 
 ## Cargo-native import
 
