@@ -99,7 +99,11 @@ jobs:
       # 2026-09-13 measured baseline: 71.41% lines / 57.73% branches.
       # These floors are a ratchet, not the destination; raise them whenever
       # tests land until both reach the project target of 100%.
-      - run: cargo llvm-cov --workspace --branch --summary-only --fail-under-lines 71 --fail-under-branches 57
+      # cargo-llvm-cov has no native --fail-under-branches option, so keep its
+      # native gates for the other metrics and assert the JSON branch total.
+      - run: cargo llvm-cov --workspace --branch --json --output-path target/coverage.json --fail-under-lines 71 --fail-under-functions 75 --fail-under-regions 50
+      - name: enforce branch floor
+        run: jq -e '.data[0].totals.branches.percent >= 57' target/coverage.json
 
   benches-build:
     name: benches (build + smoke run, not a perf gate)
