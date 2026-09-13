@@ -4,7 +4,7 @@
 //! `lib.rs`'s doc comment for exactly what each command covers and what's
 //! not ported yet — most of `bin/mxrb`'s ~45 subcommands depend on engines
 //! mxrs hasn't built yet, e.g. `db`/`run` need runtime orchestration and
-//! `refs`/`rename`/`move` need the semantic index).
+//! `rename`/`move` need semantic mutation planning).
 //! `inspect` has no `bin/mxrb` equivalent under that name — it's a new
 //! single-file front end onto `compare`'s existing snapshot machinery.
 
@@ -27,6 +27,9 @@ fn main() -> ExitCode {
         Some("verify-package") => run_verify_package(args.collect()),
         Some("oql") => run_oql(args.collect()),
         Some("translate-oql") => run_translate_oql(args.collect()),
+        Some("refs") => run_refs(args.collect()),
+        Some("impact") => run_impact(args.collect()),
+        Some("search") => run_semantic_search(args.collect()),
         Some(other) => {
             eprintln!("[mxrs] error: unknown command {other:?}");
             usage();
@@ -54,6 +57,125 @@ fn usage() {
     eprintln!("       mxrs verify-package <archive.tar>");
     eprintln!("       mxrs oql <file.mpr> [--dialect postgresql|sql_server|ansi] [--json]");
     eprintln!("       mxrs translate-oql <query> [--dialect postgresql|sql_server|ansi]");
+    eprintln!("       mxrs refs <file.mpr> <artifact> [--json]");
+    eprintln!("       mxrs impact <file.mpr> <artifact> [--json]");
+    eprintln!("       mxrs search <file.mpr> <query> [--limit N] [--json]");
+}
+
+fn semantic_index(path: &str) -> Result<mxrs_semantic::SemanticIndex, String> {
+    let project = mxrs_model::Project::open(path, true).map_err(|error| error.to_string())?;
+    mxrs_semantic::SemanticIndex::build(&project).map_err(|error| error.to_string())
+}
+
+fn run_refs(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.len() != 2 {
+        eprintln!("[mxrs] error: usage: mxrs refs <file.mpr> <artifact> [--json]");
+        return ExitCode::FAILURE;
+    }
+    let index = match semantic_index(&args[0]) {
+        Ok(index) => index,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let incoming = match index.incoming(&args[1]) {
+        Ok(references) => references,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let outgoing = index
+        .outgoing(&args[1])
+        .expect("resolution already validated");
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "artifact": args[1], "incoming": incoming, "outgoing": outgoing,
+                "fingerprint": index.fingerprint(),
+            }))
+            .expect("serializable reference report")
+        );
+    } else {
+        for reference in incoming {
+            println!("<- {} ({})", reference.from, reference.relation);
+        }
+        for reference in outgoing {
+            println!("-> {} ({})", reference.to, reference.relation);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_impact(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.len() != 2 {
+        eprintln!("[mxrs] error: usage: mxrs impact <file.mpr> <artifact> [--json]");
+        return ExitCode::FAILURE;
+    }
+    let index = match semantic_index(&args[0]) {
+        Ok(index) => index,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let impact = match index.impact(&args[1]) {
+        Ok(impact) => impact,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&impact).expect("serializable impact report")
+        );
+    } else {
+        for artifact in impact {
+            println!("{:?} {}", artifact.kind, artifact.qualified_name);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_semantic_search(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let limit = take_value(&mut args, "--limit")
+        .as_deref()
+        .unwrap_or("20")
+        .parse::<usize>()
+        .unwrap_or(20);
+    if args.len() != 2 {
+        eprintln!("[mxrs] error: usage: mxrs search <file.mpr> <query> [--limit N] [--json]");
+        return ExitCode::FAILURE;
+    }
+    let index = match semantic_index(&args[0]) {
+        Ok(index) => index,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let hits = index.search(&args[1], limit);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&hits).expect("serializable search report")
+        );
+    } else {
+        for hit in hits {
+            println!(
+                "{}\t{:?}\t{}",
+                hit.score, hit.artifact.kind, hit.artifact.qualified_name
+            );
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_oql(mut args: Vec<String>) -> ExitCode {

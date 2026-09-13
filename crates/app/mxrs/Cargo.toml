@@ -20,3 +20,4 @@ mxrs-oql = { path = "../../compiler/mxrs-oql" }
 mxrs-packager = { path = "../mxrs-packager" }
 mxrs-project = { path = "../mxrs-project" }
 mxrs-runtime = { path = "../mxrs-runtime" }
+mxrs-semantic = { path = "../../compiler/mxrs-semantic" }

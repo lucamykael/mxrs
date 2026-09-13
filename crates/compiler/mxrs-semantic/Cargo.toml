@@ -1,0 +1,24 @@
+[package]
+name = "mxrs-semantic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Deterministic semantic index, reference graph, search, and impact analysis for MXRS."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-model = { path = "../../model/mxrs-model" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+
+[dev-dependencies]
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
+tempfile = "3.27.0"

@@ -38,6 +38,11 @@ pub use mxrs_runtime::{
     Action, EntityAction, EntityRule, MemberRight, ObjectValue, Runtime, RuntimeError,
     SecurityContext, SecurityPolicy, Store, StoreSchema,
 };
+pub use mxrs_semantic::{
+    Artifact as SemanticArtifact, ArtifactKind as SemanticArtifactKind,
+    Diagnostic as SemanticDiagnostic, Reference as SemanticReference,
+    SearchHit as SemanticSearchHit, SemanticError, SemanticIndex,
+};
 
 /// Implemented by `#[mxrs::application]` for the root application type.
 pub trait ApplicationDefinition {
