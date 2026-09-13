@@ -58,10 +58,34 @@ fn expand_marker_module(module: &ModuleInput) -> TokenStream {
         .entities
         .iter()
         .map(|entity| expand_entity_markers(entity, &module_name));
+    let microflows = module.microflows.iter().map(|flow| {
+        let ident = &flow.name;
+        let name = flow.name.to_string();
+        quote! {
+            pub struct #ident;
+            impl ::mxrs_ir::MicroflowMarker for #ident {
+                const MODULE: &'static str = #module_name;
+                const NAME: &'static str = #name;
+            }
+        }
+    });
+    let nanoflows = module.nanoflows.iter().map(|flow| {
+        let ident = &flow.name;
+        let name = flow.name.to_string();
+        quote! {
+            pub struct #ident;
+            impl ::mxrs_ir::NanoflowMarker for #ident {
+                const MODULE: &'static str = #module_name;
+                const NAME: &'static str = #name;
+            }
+        }
+    });
     quote! {
         #[allow(non_snake_case, non_camel_case_types, dead_code)]
         pub mod #module_ident {
             #(#entities)*
+            #(#microflows)*
+            #(#nanoflows)*
         }
     }
 }
@@ -160,10 +184,16 @@ fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
         .iter()
         .map(expand_microflow)
         .collect::<Result<_>>()?;
+    let nanoflow_stmts: Vec<TokenStream> = module
+        .nanoflows
+        .iter()
+        .map(expand_microflow)
+        .collect::<Result<_>>()?;
     Ok(quote! {
         __mxrs_project.module(#name, |m| {
             #(#entity_stmts)*
             #(#microflow_stmts)*
+            #(#nanoflow_stmts)*
         });
     })
 }
@@ -205,8 +235,13 @@ fn expand_microflow(microflow: &MicroflowInput) -> Result<TokenStream> {
         .return_expression
         .as_ref()
         .map(|expr| quote! { f.return_value(#expr); });
+    let method = if microflow.is_nanoflow {
+        format_ident!("nanoflow")
+    } else {
+        format_ident!("microflow")
+    };
     Ok(quote! {
-        m.microflow(#name, |f| {
+        m.#method(#name, |f| {
             #(#activity_stmts)*
             #rescue_stmt
             #return_stmt

@@ -73,13 +73,20 @@ impl Microflow {
     }
 
     pub fn to_bson(&self) -> Document {
+        self.to_bson_as("Microflows$Microflow")
+    }
+
+    /// Serializes the shared flow document shape using the requested native
+    /// document kind. Mendix microflows and nanoflows share this outer model
+    /// shape; their `$Type` is the persistence-level discriminator.
+    pub fn to_bson_as(&self, native_type: &str) -> Document {
         let id = self
             .id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         mxrs_bson::doc! {
             "$ID": id,
-            "$Type": "Microflows$Microflow",
+            "$Type": native_type,
             "Name": self.name.clone(),
             "Documentation": self.documentation.clone(),
             "ReturnVariableName": self.return_variable_name.clone(),

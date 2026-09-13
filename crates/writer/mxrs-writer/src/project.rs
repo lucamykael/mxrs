@@ -120,6 +120,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.microflows,
             identity,
         )?;
+        documents::synchronize_nanoflows_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.nanoflows,
+            identity,
+        )?;
         documents::synchronize_enumerations_with_identity(
             &mut mpr,
             &module_id,

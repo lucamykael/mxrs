@@ -4,7 +4,7 @@
 //! ```text
 //! project!   := <string-lit> "," <module-item>*
 //! module     := "module" <ident> "{" <module-item>* "}"
-//! module-item:= <entity> | <microflow>
+//! module-item:= <entity> | <microflow> | <nanoflow>
 //! entity     := "entity" <ident> "{" <entity-item>* "}"
 //! entity-item:= <attribute> | <association>
 //!             | "documentation" <string-lit> ";"
@@ -22,6 +22,7 @@
 //!               | "storage" ("Column" | "Table") ";"
 //!               | "documentation" <string-lit> ";"
 //! microflow  := "microflow" <ident> "{" <flow-item>* <rescue>? ("return" <expr> ";")? "}"
+//! nanoflow   := "nanoflow" <ident> "{" <flow-item>* <rescue>? ("return" <expr> ";")? "}"
 //! flow-item  := <create> | <create-list> | <change> | <delete> | <commit> | <call> | <if>
 //!             | <for> | <while> | "break" ";" | "continue" ";"
 //! create     := "create" <ident> "=" <rust-path> "{" <member>* "}" "commit"? ";"
@@ -88,6 +89,7 @@ pub struct ModuleInput {
     pub name: Ident,
     pub entities: Vec<EntityInput>,
     pub microflows: Vec<MicroflowInput>,
+    pub nanoflows: Vec<MicroflowInput>,
 }
 
 pub struct EntityInput {
@@ -100,6 +102,7 @@ pub struct EntityInput {
 
 pub struct MicroflowInput {
     pub name: Ident,
+    pub is_nanoflow: bool,
     pub activities: Vec<FlowItem>,
     pub rescue_activities: Vec<FlowItem>,
     pub return_expression: Option<Expr>,
@@ -267,10 +270,13 @@ impl Parse for ModuleInput {
         braced!(content in input);
         let mut entities = Vec::new();
         let mut microflows = Vec::new();
+        let mut nanoflows = Vec::new();
         while !content.is_empty() {
             let peeked: Ident = content.fork().parse()?;
             if peeked == "microflow" {
                 microflows.push(content.parse()?);
+            } else if peeked == "nanoflow" {
+                nanoflows.push(content.parse()?);
             } else {
                 entities.push(content.parse()?);
             }
@@ -279,6 +285,7 @@ impl Parse for ModuleInput {
             name,
             entities,
             microflows,
+            nanoflows,
         })
     }
 }
@@ -329,7 +336,17 @@ impl Parse for EntityInput {
 
 impl Parse for MicroflowInput {
     fn parse(input: ParseStream) -> Result<Self> {
-        expect_keyword(input, "microflow")?;
+        let keyword: Ident = input.parse()?;
+        let is_nanoflow = match keyword.to_string().as_str() {
+            "microflow" => false,
+            "nanoflow" => true,
+            _ => {
+                return Err(syn::Error::new(
+                    keyword.span(),
+                    "expected `microflow` or `nanoflow`",
+                ));
+            }
+        };
         let name: Ident = input.parse()?;
         let content;
         braced!(content in input);
@@ -371,6 +388,7 @@ impl Parse for MicroflowInput {
         validate_loop_control(&rescue_activities, false)?;
         Ok(MicroflowInput {
             name,
+            is_nanoflow,
             activities,
             rescue_activities,
             return_expression,

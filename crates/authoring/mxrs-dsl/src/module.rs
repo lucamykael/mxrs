@@ -17,6 +17,7 @@ impl ModuleBuilder {
                 entities: vec![],
                 enumerations: vec![],
                 microflows: vec![],
+                nanoflows: vec![],
                 pages: vec![],
             },
         }
@@ -45,6 +46,20 @@ impl ModuleBuilder {
         let mut builder = FlowBuilder::new(name);
         configure(&mut builder);
         self.decl.microflows.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a client-side nanoflow using the same typed semantic flow
+    /// builder as microflows. The writer persists it under the nanoflow
+    /// document kind and a separate stable identity namespace.
+    pub fn nanoflow(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        let mut builder = FlowBuilder::new(name);
+        configure(&mut builder);
+        self.decl.nanoflows.push(builder.into_decl());
         self
     }
 

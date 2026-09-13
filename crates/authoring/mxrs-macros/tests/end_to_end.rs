@@ -247,6 +247,51 @@ fn supports_a_module_level_microflow_with_a_return_statement() {
 }
 
 #[test]
+fn supports_a_module_level_nanoflow_with_a_stable_native_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Nanoflow.mpr");
+
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            nanoflow NF_GetConstant {
+                return mxrs_expr::integer(42);
+            }
+        }
+    };
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let sales = read
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert!(sales.microflows.is_empty());
+    assert_eq!(sales.nanoflows.len(), 1);
+    assert_eq!(sales.nanoflows[0].name.as_deref(), Some("NF_GetConstant"));
+}
+
+#[test]
+fn a_declared_microflow_is_available_as_a_self_hosted_call_marker() {
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            microflow ACT_Target {
+                return mxrs_expr::integer(1);
+            }
+            microflow ACT_Caller {
+                call Sales::ACT_Target;
+            }
+        }
+    };
+
+    assert_eq!(definition.modules[0].microflows.len(), 2);
+}
+
+#[test]
 fn supports_the_full_widened_microflow_grammar() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Microflow.mpr");

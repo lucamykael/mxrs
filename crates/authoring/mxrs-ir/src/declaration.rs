@@ -159,6 +159,10 @@ pub struct ModuleDecl {
     pub entities: Vec<EntityDecl>,
     pub enumerations: Vec<EnumerationDecl>,
     pub microflows: Vec<MicroflowDecl>,
+    /// Client-side flows. They share the semantic flow IR with microflows,
+    /// but persist as `Microflows$Nanoflow` documents and have an independent
+    /// identity namespace.
+    pub nanoflows: Vec<MicroflowDecl>,
     pub pages: Vec<PageDecl>,
 }
 

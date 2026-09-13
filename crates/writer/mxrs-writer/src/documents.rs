@@ -67,13 +67,74 @@ pub(crate) fn synchronize_microflows_with_identity(
     microflows: &[MicroflowDecl],
     identity: ProjectIdentity,
 ) -> Result<()> {
+    synchronize_flows_with_identity(
+        mpr,
+        module_id,
+        module_name,
+        microflows,
+        identity,
+        "Microflows$Microflow",
+        ArtifactKind::Microflow,
+    )
+}
+
+/// Upserts Cargo-native nanoflows by name while preserving imported IDs and
+/// leaving undeclared/opaque nanoflows untouched.
+pub fn synchronize_nanoflows(
+    mpr: &mut MprFile,
+    module_id: &str,
+    nanoflows: &[MicroflowDecl],
+) -> Result<()> {
+    let root_id = mpr
+        .root_unit()?
+        .ok_or(crate::WriterError::MissingRootUnit)?
+        .unit_id;
+    let identity = ProjectIdentity::from_project_root(&root_id)?;
+    let module_unit = mpr
+        .unit(module_id)?
+        .ok_or_else(|| crate::WriterError::MissingModuleUnit(module_id.to_string()))?;
+    let module_doc = mpr.parse_contents(&module_unit)?;
+    let module_name = module_doc
+        .get_str("Name")
+        .map_err(|_| crate::WriterError::MissingModuleName(module_id.to_string()))?;
+    synchronize_nanoflows_with_identity(mpr, module_id, module_name, nanoflows, identity)
+}
+
+pub(crate) fn synchronize_nanoflows_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    nanoflows: &[MicroflowDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    synchronize_flows_with_identity(
+        mpr,
+        module_id,
+        module_name,
+        nanoflows,
+        identity,
+        "Microflows$Nanoflow",
+        ArtifactKind::Nanoflow,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn synchronize_flows_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    declarations: &[MicroflowDecl],
+    identity: ProjectIdentity,
+    native_type: &str,
+    artifact_kind: ArtifactKind,
+) -> Result<()> {
     let existing_by_name: HashMap<String, String> = mpr
         .children_of(module_id)?
         .into_iter()
         .filter(|u| u.containment_name == "Documents")
         .filter_map(|u| {
             let doc = mpr.parse_contents(&u).ok()?;
-            if doc.get_str("$Type").ok()? != "Microflows$Microflow" {
+            if doc.get_str("$Type").ok()? != native_type {
                 return None;
             }
             let name = doc.get_str("Name").ok()?.to_string();
@@ -81,7 +142,7 @@ pub(crate) fn synchronize_microflows_with_identity(
         })
         .collect();
 
-    for decl in microflows {
+    for decl in declarations {
         let (objects, flows) = flow_compiler::build_microflow_graph(
             &decl.activities,
             &decl.rescue_activities,
@@ -89,10 +150,7 @@ pub(crate) fn synchronize_microflows_with_identity(
         );
         let existing_id = existing_by_name.get(&decl.name).cloned();
         let id = existing_id.clone().unwrap_or_else(|| {
-            identity.artifact_id(
-                ArtifactKind::Microflow,
-                &format!("{module_name}.{}", decl.name),
-            )
+            identity.artifact_id(artifact_kind, &format!("{module_name}.{}", decl.name))
         });
         let microflow = Microflow {
             id: Some(id.clone()),
@@ -111,7 +169,7 @@ pub(crate) fn synchronize_microflows_with_identity(
             objects,
             flows,
         };
-        let doc = microflow.to_bson();
+        let doc = microflow.to_bson_as(native_type);
         match existing_id {
             Some(id) => {
                 mpr.update_unit(&id, doc)?;

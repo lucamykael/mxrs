@@ -197,6 +197,36 @@ fn synchronize_project_upserts_a_microflow_by_name() {
 }
 
 #[test]
+fn synchronize_project_upserts_a_nanoflow_by_name_and_preserves_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Project.mpr");
+
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |m| {
+        m.nanoflow("NF_GetConstant", |f| {
+            f.return_value(mxrs_dsl::integer(1));
+        });
+    });
+    mxrs_writer::write_project(&path, &initial.build()).unwrap();
+    let original_id = Project::open(&path, true).unwrap().modules().unwrap()[0].nanoflows[0]
+        .id
+        .clone();
+
+    let mut updated = ProjectBuilder::new("11.12.1");
+    updated.module("Sales", |m| {
+        m.nanoflow("NF_GetConstant", |f| {
+            f.return_value(mxrs_dsl::integer(2));
+        });
+    });
+    mxrs_writer::synchronize_project(&path, &updated.build()).unwrap();
+
+    let project = Project::open(&path, true).unwrap();
+    let sales = &project.modules().unwrap()[0];
+    assert_eq!(sales.nanoflows.len(), 1, "upsert, not a duplicate insert");
+    assert_eq!(sales.nanoflows[0].id, original_id);
+}
+
+#[test]
 fn synchronize_project_preserves_enumeration_and_value_identities() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Project.mpr");

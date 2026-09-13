@@ -199,6 +199,7 @@ fn import_cargo_project_inner(
     let pages_module_source = page_export::render_pages_module(&converted_pages);
     let entities_source = render(&mendix_version, &modules, &[]);
     let domain_source = render_domain_module(&converted_pages);
+    let flows_source = render_flows_module(&mendix_version, &modules);
     let markers_source = mxrs_typegen::generate(&marker_manifest(&modules))?;
     drop(project);
 
@@ -217,6 +218,9 @@ fn import_cargo_project_inner(
     let entities_directory = domain_directory.join("entities");
     std::fs::create_dir_all(&entities_directory)
         .map_err(|source| io_error(&entities_directory, source))?;
+    let flows_directory = domain_directory.join("flows");
+    std::fs::create_dir_all(&flows_directory)
+        .map_err(|source| io_error(&flows_directory, source))?;
 
     write_text(
         &destination.join("Cargo.toml"),
@@ -242,6 +246,7 @@ fn import_cargo_project_inner(
         &destination.join("src/domain/entities/mod.rs"),
         &entities_source,
     )?;
+    write_text(&destination.join("src/domain/flows/mod.rs"), &flows_source)?;
     if let Some(pages_module_source) = &pages_module_source {
         let pages_directory = domain_directory.join("pages");
         std::fs::create_dir_all(&pages_directory)
@@ -298,7 +303,8 @@ fn import_cargo_project_inner(
 fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
     let mut source = String::from(
         "//! Editable Cargo-native Mendix concepts, grouped by concept family.\n\n\
-         pub mod entities;\n",
+         pub mod entities;\n\
+         pub mod flows;\n",
     );
     if !pages.is_empty() {
         source.push_str("pub mod pages;\n");
@@ -313,7 +319,57 @@ fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
             page.module_name, page.module_name, page.function_name,
         );
     }
-    source.push_str("    project\n}\n");
+    source.push_str("    flows::apply(&mut project);\n    project\n}\n");
+    source
+}
+
+/// Creates the editable flow composition layer. Imported flow graphs remain
+/// losslessly snapshot-backed until the user deliberately redeclares them;
+/// new typed declarations merge by module and are then upserted by the writer.
+fn render_flows_module(mendix_version: &str, modules: &[Module]) -> String {
+    let mut source = String::from(
+        "//! Cargo-native flow declarations.\n\
+         //!\n\
+         //! Imported flow graphs listed below remain losslessly backed by\n\
+         //! `model/imported` until deliberately redeclared here. This avoids\n\
+         //! pretending an incomplete graph decompiler is lossless.\n\n",
+    );
+    for module in modules {
+        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        for flow in &module.microflows {
+            if let Some(name) = &flow.name {
+                let _ = writeln!(source, "// snapshot-backed microflow: {module_name}.{name}");
+            }
+        }
+        for flow in &module.nanoflows {
+            if let Some(name) = &flow.name {
+                let _ = writeln!(source, "// snapshot-backed nanoflow: {module_name}.{name}");
+            }
+        }
+    }
+    source.push_str(
+        "\nfn declarations() -> ::mxrs_ir::ProjectDecl {\n\
+             #[allow(unused_mut)]\n\
+             let mut project = ::mxrs_dsl::ProjectBuilder::new(",
+    );
+    source.push_str(&rust_string(mendix_version));
+    source.push_str(
+        ");\n\
+             // Add `project.module(..., |module| module.microflow(...))` or\n\
+             // `module.nanoflow(...)` declarations here.\n\
+             project.build()\n\
+         }\n\n\
+         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+             for declared in declarations().modules {\n\
+                 if let Some(target) = project.modules.iter_mut().find(|module| module.name == declared.name) {\n\
+                     target.microflows.extend(declared.microflows);\n\
+                     target.nanoflows.extend(declared.nanoflows);\n\
+                 } else {\n\
+                     project.modules.push(declared);\n\
+                 }\n\
+             }\n\
+         }\n",
+    );
     source
 }
 
@@ -452,7 +508,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated IDs, public marker types, and the lossless snapshot registry live under `src/infrastructure/`. `model/imported/` retains model concepts that are not typed yet.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated IDs, public marker types, and the lossless snapshot registry live under `src/infrastructure/`. `model/imported/` retains model concepts that are not typed yet.\n\n`src/domain/flows/mod.rs` is the opt-in source of truth for Cargo-native microflows and nanoflows. Imported graphs stay snapshot-backed until deliberately redeclared, so unsupported graph shapes are never silently approximated.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n{pages_note}"
     )
 }
 
@@ -1220,6 +1276,7 @@ mod tests {
         assert!(generated.join("src/lib.rs").is_file());
         assert!(generated.join("src/domain/mod.rs").is_file());
         assert!(generated.join("src/domain/entities/mod.rs").is_file());
+        assert!(generated.join("src/domain/flows/mod.rs").is_file());
         assert!(generated.join("src/infrastructure/mod.rs").is_file());
         assert!(!generated.join("src/generated").exists());
         assert!(generated.join("model/imported/manifest.json").is_file());
@@ -1235,6 +1292,8 @@ mod tests {
         assert!(pages_source.contains("b.close_page()"));
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(domain_source.contains("pub mod entities;"));
+        assert!(domain_source.contains("pub mod flows;"));
+        assert!(domain_source.contains("flows::apply(&mut project);"));
         assert!(domain_source.contains("pub mod pages;"));
         assert!(domain_source.contains("pages::home()"));
         let entities_source =
@@ -1260,6 +1319,9 @@ mod tests {
         assert!(markers.contains("pub struct Order;"));
         assert!(markers.contains("pub struct Order_Number;"));
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_Ping"));
+        let flows = std::fs::read_to_string(generated.join("src/domain/flows/mod.rs")).unwrap();
+        assert!(flows.contains("snapshot-backed microflow: Sales.ACT_Ping"));
+        assert!(flows.contains("target.nanoflows.extend(declared.nanoflows)"));
         let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
         assert!(crate_root.contains("pub mod infrastructure;"));
         assert!(crate_root.contains("pub mod generated"));
