@@ -7,11 +7,9 @@
 //! flagged known gap. Ports the fresh-project slice of `Writer#apply`'s
 //! `apply_default_project_units`/`ensure_project_documents`/
 //! `sanitize_project_settings!`/`project_security_doc`/`user_role_doc`/
-//! `modern_navigation_doc`, narrowed the same way as the rest of this crate:
-//! no `previous`/merge handling (that's the incremental re-sync path, out of
-//! scope here), and no DSL surface yet for customizing security/navigation
-//! content — the DSL only asks for these units to *exist* with sane
-//! defaults, matching what `mxrb generate` produces for a brand-new project.
+//! `modern_navigation_doc`. Typed customization and loss-preserving merge
+//! live in the sibling `security` and `navigation` modules; this module owns
+//! only the valid fresh-project defaults they update.
 
 use mxrs_bson::{Bson, Document, doc};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
@@ -200,9 +198,8 @@ fn access_container_doc(bson_type: &str) -> Document {
 }
 
 /// Ports `Writer#modern_navigation_doc({}, profiles: [])`: no profiles
-/// declared yet — the DSL has no navigation surface in this pass, so this
-/// is deliberately the empty baseline `Writer#ensure_project_documents`
-/// falls back to for the same case.
+/// declared yet — this is the empty baseline the typed navigation writer
+/// replaces when a declaration is present.
 fn default_navigation_doc() -> Document {
     doc! {
         "$Type": "Navigation$NavigationDocument",

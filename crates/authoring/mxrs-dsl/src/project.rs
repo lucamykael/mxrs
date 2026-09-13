@@ -1,10 +1,14 @@
 use mxrs_ir::declaration::ProjectDecl;
 
 use crate::module::ModuleBuilder;
+use crate::navigation::NavigationBuilder;
+use crate::security::SecurityBuilder;
 
 pub struct ProjectBuilder {
     version: String,
     modules: Vec<mxrs_ir::declaration::ModuleDecl>,
+    security: Option<mxrs_ir::ProjectSecurityDecl>,
+    navigation: Option<mxrs_ir::NavigationDecl>,
 }
 
 impl ProjectBuilder {
@@ -12,6 +16,8 @@ impl ProjectBuilder {
         ProjectBuilder {
             version: mendix_version.into(),
             modules: vec![],
+            security: None,
+            navigation: None,
         }
     }
 
@@ -30,6 +36,22 @@ impl ProjectBuilder {
         ProjectDecl {
             mendix_version: self.version,
             modules: self.modules,
+            security: self.security,
+            navigation: self.navigation,
         }
+    }
+
+    pub fn security(&mut self, configure: impl FnOnce(&mut SecurityBuilder)) -> &mut Self {
+        let mut builder = SecurityBuilder::new();
+        configure(&mut builder);
+        self.security = Some(builder.into_decl());
+        self
+    }
+
+    pub fn navigation(&mut self, configure: impl FnOnce(&mut NavigationBuilder)) -> &mut Self {
+        let mut builder = NavigationBuilder::new();
+        configure(&mut builder);
+        self.navigation = Some(builder.into_decl());
+        self
     }
 }

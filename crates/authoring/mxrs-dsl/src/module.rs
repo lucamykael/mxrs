@@ -19,6 +19,7 @@ impl ModuleBuilder {
                 microflows: vec![],
                 nanoflows: vec![],
                 pages: vec![],
+                roles: None,
             },
         }
     }
@@ -71,6 +72,18 @@ impl ModuleBuilder {
         let mut builder = EnumerationBuilder::new(name);
         configure(&mut builder);
         self.decl.enumerations.push(builder.into_decl());
+        self
+    }
+
+    pub fn role(&mut self, name: impl Into<String>, description: impl Into<String>) -> &mut Self {
+        let mut role = mxrs_ir::ModuleRoleDecl::new(name);
+        role.description = description.into();
+        self.decl.roles.get_or_insert_with(Vec::new).push(role);
+        self
+    }
+
+    pub fn clear_roles(&mut self) -> &mut Self {
+        self.decl.roles = Some(vec![]);
         self
     }
 

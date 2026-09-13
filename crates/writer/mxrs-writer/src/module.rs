@@ -11,7 +11,7 @@ use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
 
 use crate::error::Result;
-use crate::{documents, domain, flow_compiler};
+use crate::{documents, domain, flow_compiler, security};
 
 pub fn write_module(
     mpr: &mut MprFile,
@@ -31,6 +31,14 @@ pub fn write_module(
         "DomainModel",
         domain_model.to_bson(&domain_model_id),
         Some(&domain_model_id),
+    )?;
+
+    security::synchronize_module_security(
+        mpr,
+        &module_id,
+        &decl.name,
+        decl.roles.as_deref().unwrap_or_default(),
+        identity,
     )?;
 
     for mf in &decl.microflows {

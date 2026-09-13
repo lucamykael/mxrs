@@ -11,6 +11,18 @@ use mxrs_dsl::ProjectBuilder;
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_model::Project;
 
+fn document_by_type(path: &std::path::Path, native_type: &str) -> mxrs_bson::Document {
+    let mpr = mxrs_mpr::MprFile::open(path, true).unwrap();
+    mpr.all_units()
+        .unwrap()
+        .into_iter()
+        .find_map(|unit| {
+            let document = mpr.parse_contents(&unit).ok()?;
+            (document.get_str("$Type").ok() == Some(native_type)).then_some(document)
+        })
+        .unwrap()
+}
+
 fn enumeration_document(path: &std::path::Path, name: &str) -> mxrs_bson::Document {
     let mpr = mxrs_mpr::MprFile::open(path, true).unwrap();
     mpr.all_units()
@@ -224,6 +236,161 @@ fn synchronize_project_upserts_a_nanoflow_by_name_and_preserves_identity() {
     let sales = &project.modules().unwrap()[0];
     assert_eq!(sales.nanoflows.len(), 1, "upsert, not a duplicate insert");
     assert_eq!(sales.nanoflows[0].id, original_id);
+}
+
+#[test]
+fn typed_security_and_module_roles_are_authoritative_and_keep_identities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Secure.mpr");
+
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |module| {
+        module.role("User", "Initial");
+    });
+    initial.security(|security| {
+        security
+            .level(mxrs_dsl::SecurityLevel::CheckEverything)
+            .clear_roles()
+            .role("Administrator", |role| {
+                role.administrator(true).module_role("Sales.User");
+            });
+    });
+    mxrs_writer::write_project(&path, &initial.build()).unwrap();
+
+    let before_security = document_by_type(&path, "Security$ProjectSecurity");
+    let before_module = document_by_type(&path, "Security$ModuleSecurity");
+    let before_security_id = mxrs_bson::extract_id(before_security.get("$ID").unwrap()).unwrap();
+    let before_module_id = mxrs_bson::extract_id(before_module.get("$ID").unwrap()).unwrap();
+    assert_eq!(
+        before_security.get_str("SecurityLevel").unwrap(),
+        "CheckEverything"
+    );
+
+    let mut updated = ProjectBuilder::new("11.12.1");
+    updated.module("Sales", |module| {
+        module.role("User", "Updated");
+    });
+    updated.security(|security| {
+        security.clear_roles().role("Administrator", |role| {
+            role.administrator(true).module_role("Sales.User");
+        });
+    });
+    mxrs_writer::synchronize_project(&path, &updated.build()).unwrap();
+
+    let after_security = document_by_type(&path, "Security$ProjectSecurity");
+    let after_module = document_by_type(&path, "Security$ModuleSecurity");
+    assert_eq!(
+        mxrs_bson::extract_id(after_security.get("$ID").unwrap()).as_deref(),
+        Some(before_security_id.as_str())
+    );
+    assert_eq!(
+        mxrs_bson::extract_id(after_module.get("$ID").unwrap()).as_deref(),
+        Some(before_module_id.as_str())
+    );
+    let Some(mxrs_bson::Bson::Array(roles)) = after_module.get("ModuleRoles") else {
+        panic!("module roles array missing")
+    };
+    let role = mxrs_bson::parse_array(Some(roles)).items.remove(0);
+    let mxrs_bson::Bson::Document(role) = role else {
+        panic!("module role document missing")
+    };
+    assert_eq!(role.get_str("Description").unwrap(), "Updated");
+}
+
+#[test]
+fn typed_security_rejects_an_unknown_module_role() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Secure.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |_module| {});
+    project.security(|security| {
+        security.clear_roles().role("Administrator", |role| {
+            role.administrator(true).module_role("Sales.Missing");
+        });
+    });
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(
+        matches!(error, mxrs_writer::WriterError::UnknownModuleRole(name) if name == "Sales.Missing")
+    );
+}
+
+#[test]
+fn typed_navigation_round_trips_nested_items_and_preserves_document_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Navigation.mpr");
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |module| {
+        module.page("Home", |_page| {});
+        module.microflow("ACT_Refresh", |_flow| {});
+    });
+    initial.security(|_security| {});
+    initial.navigation(|navigation| {
+        navigation.profile("Responsive", |profile| {
+            profile
+                .title("en_US", "Orders")
+                .home_page("Sales.Home")
+                .home_for_page("Administrator", "Sales.Home")
+                .item("Orders", |item| {
+                    item.page("Sales.Home").item("Refresh", |child| {
+                        child.microflow("Sales.ACT_Refresh");
+                    });
+                });
+        });
+    });
+    mxrs_writer::write_project(&path, &initial.build()).unwrap();
+    let before = document_by_type(&path, "Navigation$NavigationDocument");
+    let before_id = mxrs_bson::extract_id(before.get("$ID").unwrap()).unwrap();
+
+    let navigation = Project::open(&path, true).unwrap().navigation().unwrap();
+    assert_eq!(navigation.profiles.len(), 1);
+    let profile = &navigation.profiles[0];
+    assert_eq!(profile.home_page.as_deref(), Some("Sales.Home"));
+    assert_eq!(
+        profile.app_title.get("en_US").map(String::as_str),
+        Some("Orders")
+    );
+    assert_eq!(profile.menu_items.len(), 1);
+    assert_eq!(profile.menu_items[0].items.len(), 1);
+
+    let mut updated = ProjectBuilder::new("11.12.1");
+    updated.security(|_security| {});
+    updated.navigation(|navigation| {
+        navigation.profile("Responsive", |profile| {
+            profile.title("en_US", "Orders 2").home_page("Sales.Home");
+        });
+    });
+    mxrs_writer::synchronize_project(&path, &updated.build()).unwrap();
+    let after = document_by_type(&path, "Navigation$NavigationDocument");
+    assert_eq!(
+        mxrs_bson::extract_id(after.get("$ID").unwrap()).as_deref(),
+        Some(before_id.as_str())
+    );
+    let navigation = Project::open(&path, true).unwrap().navigation().unwrap();
+    assert_eq!(
+        navigation.profiles[0]
+            .app_title
+            .get("en_US")
+            .map(String::as_str),
+        Some("Orders 2")
+    );
+}
+
+#[test]
+fn typed_navigation_rejects_an_unknown_page_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Navigation.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.navigation(|navigation| {
+        navigation.profile("Responsive", |profile| {
+            profile.home_page("Sales.Missing");
+        });
+    });
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::UnknownNavigationTarget { kind, reference, .. }
+            if kind == "page" && reference == "Sales.Missing"
+    ));
 }
 
 #[test]

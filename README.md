@@ -61,9 +61,14 @@ subsystems are not started yet.
 `units`, `dump-unit`, `sql`, `modules`, `export`, and `javagen` today. Typed
 domain import covers all attribute kinds plus documentation, length, date
 localization, required/unique validation, and association owner/storage/docs.
-Flows, security, navigation, and unknown documents remain complete in the
-generated snapshot while their ergonomic Rust front ends are built. Pages
-now have a first typed front end too — see below.
+Microflows and nanoflows can be authored and incrementally synchronized with
+stable identities; imported graph shapes not yet decompiled remain complete
+in the snapshot and are listed in `src/domain/flows/mod.rs`. Project/module
+security and modern navigation profiles are imported into typed
+`src/domain/{security,navigation}/` modules. Their writers validate role and
+target invariants, preserve native fields outside the typed surface, and keep
+existing identities. Unknown documents remain complete in the snapshot.
+Pages have a typed front end too — see below.
 
 Cargo-native domain code can use `#[derive(MxEntity)]` on structs and
 `#[derive(MxEnumeration)]` on enums. Scalar field kinds are inferred from

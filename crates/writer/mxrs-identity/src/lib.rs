@@ -38,6 +38,10 @@ pub enum ArtifactKind {
     ProjectConversion,
     SystemTexts,
     ProjectSecurity,
+    ModuleSecurity,
+    ModuleRole,
+    UserRole,
+    PasswordPolicy,
     Navigation,
     DataStorage,
 }
@@ -62,6 +66,10 @@ impl fmt::Display for ArtifactKind {
             Self::ProjectConversion => "project-conversion",
             Self::SystemTexts => "system-texts",
             Self::ProjectSecurity => "project-security",
+            Self::ModuleSecurity => "module-security",
+            Self::ModuleRole => "module-role",
+            Self::UserRole => "user-role",
+            Self::PasswordPolicy => "password-policy",
             Self::Navigation => "navigation",
             Self::DataStorage => "data-storage",
         })

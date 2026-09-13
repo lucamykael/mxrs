@@ -8,11 +8,16 @@
 //! author can name. `mxrs-writer` owns the one-way lowering into the
 //! storage-oriented model structs and assigns identities to new artifacts.
 
+pub mod application;
 pub mod declaration;
 pub mod flow;
 pub mod markers;
 pub mod page;
 
+pub use application::{
+    ModuleRoleDecl, NavigationDecl, NavigationItemDecl, NavigationProfileDecl, PasswordPolicyDecl,
+    ProjectSecurityDecl, RoleHomeDecl, SecurityLevel, UserRoleDecl,
+};
 pub use declaration::{
     AssociationDecl, AssociationOwner, AssociationStorage, AssociationType, AttributeDecl,
     AttributeType, EntityDecl, EnumerationDecl, EnumerationValueDecl, ModuleDecl, ProjectDecl,

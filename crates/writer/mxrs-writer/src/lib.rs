@@ -17,21 +17,20 @@
 //! reconciled (see `domain`'s module doc). The microflow slice of
 //! `synchronize_ruby_documents!` — upserting a `Documents` unit by name
 //! instead of always inserting a new one — is ported too, in
-//! `documents::synchronize_microflows` (upsert-only, unlike the domain
-//! model: a microflow absent from a given call isn't deleted, matching
+//! `documents::synchronize_microflows` and `synchronize_nanoflows`
+//! (upsert-only, unlike the domain model: a flow absent from a given call isn't deleted, matching
 //! mxrb's own `write_documents`). Cargo-native enumerations are also written
 //! and incrementally synchronized, including values, localized captions, and
 //! stable identity preservation. Native/structural pages are written and
 //! incrementally synchronized too, via `page_compiler` — see `mxrs_ir::page`'s
 //! doc comment for exactly which pages/widgets that covers (containers/text/
-//! buttons only; pluggable widgets, data-bound widgets, and non-close-page
-//! button actions are deferred). **Not ported at all**: menus,
-//! constants, flows/security/navigation content, and every
-//! other document type `Module` supports beyond microflows and pages;
-//! DSL-level customization of security/navigation content (`scaffold` writes sane,
-//! empty defaults for both, matching what `mxrb generate` produces for a
-//! brand-new project, but there's no DSL surface yet to configure user
-//! roles, guest access, or navigation profiles). Cross-module associations
+//! buttons, data-bound native widgets, flow actions, and selected pluggable
+//! widgets). Project/module security and modern navigation profiles now have
+//! typed DSL/IR surfaces and loss-preserving incremental writers, including
+//! reference validation and stable nested identities. **Not ported at all**:
+//! menus as standalone module documents, constants, demo-user authoring, and
+//! every other document type `Module` supports beyond flows and pages.
+//! Cross-module associations
 //! and the default `ProjectSettings`/`Security$ProjectSecurity`/
 //! `Navigation$NavigationDocument` scaffold *are* ported (see `domain` and
 //! `scaffold` module docs).
@@ -41,9 +40,11 @@ pub mod domain;
 pub mod error;
 pub mod flow_compiler;
 pub mod module;
+mod navigation;
 pub mod page_compiler;
 pub mod project;
 pub mod scaffold;
+mod security;
 
 pub use error::{Result, WriterError};
 pub use project::{synchronize_project, write_project};

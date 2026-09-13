@@ -37,6 +37,28 @@ pub enum WriterError {
     #[error("duplicate entity {module_name}.{name:?} declared while synchronizing")]
     DuplicateEntity { module_name: String, name: String },
 
+    #[error("duplicate {kind} {name:?} declared while synchronizing security")]
+    DuplicateSecurityName { kind: String, name: String },
+
+    #[error("security references undeclared user role {0:?}")]
+    UnknownUserRole(String),
+
+    #[error("security references unknown module role {0:?}")]
+    UnknownModuleRole(String),
+
+    #[error("duplicate navigation profile {0:?}")]
+    DuplicateNavigationProfile(String),
+
+    #[error("navigation target at {0} declares conflicting or missing page/microflow choices")]
+    ConflictingNavigationTargets(String),
+
+    #[error("navigation references unknown {kind} target {reference:?} at {path}")]
+    UnknownNavigationTarget {
+        kind: String,
+        reference: String,
+        path: String,
+    },
+
     #[error(
         "page {0:?} declares widgets but no layout — a Forms$Page has no widgets of its own; every widget attaches to a LayoutCallArgument inside LayoutCall.arguments, so a layout (via PageBuilder::layout) is required whenever a page has widgets"
     )]

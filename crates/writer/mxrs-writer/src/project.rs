@@ -15,7 +15,7 @@ use mxrs_ir::declaration::ProjectDecl;
 use mxrs_mpr::MprFile;
 
 use crate::error::{Result, WriterError};
-use crate::{documents, domain, module, scaffold};
+use crate::{documents, domain, module, navigation, scaffold, security};
 
 pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()> {
     let path = path.as_ref();
@@ -48,6 +48,12 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
             identity,
             &project.mendix_version,
         )?;
+    }
+    if let Some(declaration) = &project.security {
+        security::synchronize_project_security(&mut mpr, &root_id, declaration, identity)?;
+    }
+    if let Some(declaration) = &project.navigation {
+        navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
     }
     Ok(())
 }
@@ -113,6 +119,11 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.entities,
             &known_entities,
         )?;
+        if let Some(roles) = &decl.roles {
+            security::synchronize_module_security(
+                &mut mpr, &module_id, &decl.name, roles, identity,
+            )?;
+        }
         documents::synchronize_microflows_with_identity(
             &mut mpr,
             &module_id,
@@ -142,6 +153,12 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.pages,
             identity,
         )?;
+    }
+    if let Some(declaration) = &project.security {
+        security::synchronize_project_security(&mut mpr, &root_id, declaration, identity)?;
+    }
+    if let Some(declaration) = &project.navigation {
+        navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
     }
     Ok(())
 }

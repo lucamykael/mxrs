@@ -5,6 +5,7 @@
 
 use crate::flow::MicroflowDecl;
 use crate::page::PageDecl;
+use crate::{ModuleRoleDecl, NavigationDecl, ProjectSecurityDecl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// An author-level attribute kind.
@@ -164,10 +165,19 @@ pub struct ModuleDecl {
     /// identity namespace.
     pub nanoflows: Vec<MicroflowDecl>,
     pub pages: Vec<PageDecl>,
+    /// `None` preserves imported module security. `Some` is authoritative,
+    /// including an explicitly empty role set.
+    pub roles: Option<Vec<ModuleRoleDecl>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProjectDecl {
     pub mendix_version: String,
     pub modules: Vec<ModuleDecl>,
+    /// `None` preserves imported project security verbatim. `Some` makes the
+    /// typed declaration authoritative for its modeled fields.
+    pub security: Option<ProjectSecurityDecl>,
+    /// `None` preserves imported navigation verbatim. `Some` makes the
+    /// declared profile collection authoritative.
+    pub navigation: Option<NavigationDecl>,
 }

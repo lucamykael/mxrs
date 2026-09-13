@@ -53,8 +53,10 @@ mod entity;
 mod enumeration;
 mod flow;
 mod module;
+mod navigation;
 pub mod page;
 mod project;
+mod security;
 
 pub use entity::EntityBuilder;
 pub use enumeration::EnumerationBuilder;
@@ -64,8 +66,11 @@ pub use mxrs_expr::{
     Expr, ListVar, MxBool, MxDecimal, MxFloat, MxInteger, MxLong, MxString, Var, boolean, decimal,
     float, integer, long, string,
 };
+pub use mxrs_ir::SecurityLevel;
+pub use navigation::{NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder};
 pub use page::{
     ButtonBuilder, ContainerBuilder, DataViewBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
     LayoutGridRowBuilder, PageBuilder, PluggableWidgetBuilder,
 };
 pub use project::ProjectBuilder;
+pub use security::{SecurityBuilder, UserRoleBuilder};

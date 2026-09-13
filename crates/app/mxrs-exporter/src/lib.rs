@@ -200,6 +200,12 @@ fn import_cargo_project_inner(
     let entities_source = render(&mendix_version, &modules, &[]);
     let domain_source = render_domain_module(&converted_pages);
     let flows_source = render_flows_module(&mendix_version, &modules);
+    let security_document = project.all_units()?.into_iter().find_map(|unit| {
+        let document = project.mpr().parse_contents(&unit).ok()?;
+        (document.get_str("$Type").ok() == Some("Security$ProjectSecurity")).then_some(document)
+    });
+    let security_source = render_security_module(&modules, security_document.as_ref());
+    let navigation_source = render_navigation_module(&project.navigation()?);
     let markers_source = mxrs_typegen::generate(&marker_manifest(&modules))?;
     drop(project);
 
@@ -221,6 +227,12 @@ fn import_cargo_project_inner(
     let flows_directory = domain_directory.join("flows");
     std::fs::create_dir_all(&flows_directory)
         .map_err(|source| io_error(&flows_directory, source))?;
+    let security_directory = domain_directory.join("security");
+    std::fs::create_dir_all(&security_directory)
+        .map_err(|source| io_error(&security_directory, source))?;
+    let navigation_directory = domain_directory.join("navigation");
+    std::fs::create_dir_all(&navigation_directory)
+        .map_err(|source| io_error(&navigation_directory, source))?;
 
     write_text(
         &destination.join("Cargo.toml"),
@@ -247,6 +259,14 @@ fn import_cargo_project_inner(
         &entities_source,
     )?;
     write_text(&destination.join("src/domain/flows/mod.rs"), &flows_source)?;
+    write_text(
+        &destination.join("src/domain/security/mod.rs"),
+        &security_source,
+    )?;
+    write_text(
+        &destination.join("src/domain/navigation/mod.rs"),
+        &navigation_source,
+    )?;
     if let Some(pages_module_source) = &pages_module_source {
         let pages_directory = domain_directory.join("pages");
         std::fs::create_dir_all(&pages_directory)
@@ -304,7 +324,9 @@ fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
     let mut source = String::from(
         "//! Editable Cargo-native Mendix concepts, grouped by concept family.\n\n\
          pub mod entities;\n\
-         pub mod flows;\n",
+         pub mod flows;\n\
+         pub mod navigation;\n\
+         pub mod security;\n",
     );
     if !pages.is_empty() {
         source.push_str("pub mod pages;\n");
@@ -319,7 +341,9 @@ fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
             page.module_name, page.module_name, page.function_name,
         );
     }
-    source.push_str("    flows::apply(&mut project);\n    project\n}\n");
+    source.push_str(
+        "    flows::apply(&mut project);\n    security::apply(&mut project);\n    navigation::apply(&mut project);\n    project\n}\n",
+    );
     source
 }
 
@@ -371,6 +395,242 @@ fn render_flows_module(mendix_version: &str, modules: &[Module]) -> String {
          }\n",
     );
     source
+}
+
+fn render_security_module(modules: &[Module], document: Option<&mxrs_bson::Document>) -> String {
+    let mut source = String::from(
+        "//! Cargo-native project and module security. Unknown native fields\n\
+         //! remain preserved by the imported snapshot and writer merge.\n\n\
+         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n",
+    );
+    for module in modules {
+        if module.module_roles.is_empty() {
+            continue;
+        }
+        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        let _ = writeln!(
+            source,
+            "    if let Some(module) = project.modules.iter_mut().find(|module| module.name == {}) {{",
+            rust_string(module_name)
+        );
+        source.push_str("        module.roles = Some(vec![\n");
+        let mut roles = module.module_roles.iter().collect::<Vec<_>>();
+        roles.sort_by(|left, right| left.name.cmp(&right.name));
+        for role in roles {
+            let name = role.name.as_deref().unwrap_or("Unnamed");
+            let _ = writeln!(
+                source,
+                "            ::mxrs_ir::ModuleRoleDecl {{ name: {}.to_string(), description: {}.to_string() }},",
+                rust_string(name),
+                rust_string(&role.description)
+            );
+        }
+        source.push_str("        ]);\n    }\n");
+    }
+
+    if let Some(document) = document
+        && let Some(level) = render_security_level(document.get_str("SecurityLevel").ok())
+    {
+        let admin_role = document.get_str("AdminUserRole").unwrap_or("Administrator");
+        let guest_role = document
+            .get_bool("EnableGuestAccess")
+            .unwrap_or(false)
+            .then(|| document.get_str("GuestUserRole").unwrap_or_default())
+            .filter(|name| !name.is_empty());
+        let sign_in = document
+            .get_str("SignInMicroflow")
+            .ok()
+            .filter(|name| !name.is_empty());
+        source.push_str("    let mut security = ::mxrs_ir::ProjectSecurityDecl::default();\n");
+        let _ = writeln!(
+            source,
+            "    security.level = ::mxrs_ir::SecurityLevel::{level};"
+        );
+        let _ = writeln!(
+            source,
+            "    security.admin_user_role = {}.to_string();",
+            rust_string(admin_role)
+        );
+        let _ = writeln!(
+            source,
+            "    security.guest_user_role = {};",
+            rust_option_string(guest_role)
+        );
+        let _ = writeln!(
+            source,
+            "    security.sign_in_microflow = {};",
+            rust_option_string(sign_in)
+        );
+        source.push_str("    security.user_roles = vec![\n");
+        let mut roles = bson_documents(document, "UserRoles");
+        roles.sort_by(|left, right| {
+            left.get_str("Name")
+                .unwrap_or_default()
+                .cmp(right.get_str("Name").unwrap_or_default())
+        });
+        for role in roles {
+            let name = role.get_str("Name").unwrap_or("Unnamed");
+            let description = role.get_str("Description").unwrap_or_default();
+            let manageable = bson_strings(&role, "ManageableRoles");
+            let module_roles = bson_strings(&role, "ModuleRoles");
+            let _ = writeln!(
+                source,
+                "        ::mxrs_ir::UserRoleDecl {{ name: {}.to_string(), description: {}.to_string(), administrator: {}, check_security: {}, manage_users_without_roles: {}, manageable_roles: {}, module_roles: {} }},",
+                rust_string(name),
+                rust_string(description),
+                role.get_bool("ManageAllRoles").unwrap_or(false),
+                role.get_bool("CheckSecurity").unwrap_or(true),
+                role.get_bool("ManageUsersWithoutRoles").unwrap_or(false),
+                rust_string_vec(&manageable),
+                rust_string_vec(&module_roles),
+            );
+        }
+        source.push_str("    ];\n");
+        if let Ok(policy) = document.get_document("PasswordPolicySettings") {
+            let _ = writeln!(
+                source,
+                "    security.password_policy = ::mxrs_ir::PasswordPolicyDecl {{ minimum_length: {}, require_digit: {}, require_mixed_case: {}, require_symbol: {} }};",
+                policy.get_i32("MinimumLength").unwrap_or(6),
+                policy.get_bool("RequireDigit").unwrap_or(true),
+                policy.get_bool("RequireMixedCase").unwrap_or(true),
+                policy.get_bool("RequireSymbol").unwrap_or(false),
+            );
+        }
+        source.push_str("    project.security = Some(security);\n");
+    } else {
+        source.push_str("    // Project security remains snapshot-backed (unrecognized or absent security level).\n");
+    }
+    source.push_str("}\n");
+    source
+}
+
+fn render_navigation_module(navigation: &mxrs_model::Navigation) -> String {
+    let mut source = String::from(
+        "//! Cargo-native navigation profiles. Unknown profile fields remain\n\
+         //! preserved by the imported snapshot and writer merge.\n\n\
+         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+         project.navigation = Some(::mxrs_ir::NavigationDecl { profiles: vec![\n",
+    );
+    let mut profiles = navigation.profiles.iter().collect::<Vec<_>>();
+    profiles.sort_by(|left, right| left.name.cmp(&right.name));
+    for profile in profiles {
+        let _ = writeln!(
+            source,
+            "        ::mxrs_ir::NavigationProfileDecl {{ name: {}.to_string(), kind: {}.to_string(), app_title: {}, home_page: {}, home_microflow: {}, sign_in_page: {}, role_homes: vec![",
+            rust_string(&profile.name),
+            rust_string(&profile.kind),
+            rust_btree_map(&profile.app_title),
+            rust_option_string(profile.home_page.as_deref()),
+            rust_option_string(profile.home_microflow.as_deref()),
+            rust_option_string(profile.sign_in_page.as_deref()),
+        );
+        for home in &profile.role_homes {
+            let _ = writeln!(
+                source,
+                "            ::mxrs_ir::RoleHomeDecl {{ user_role: {}.to_string(), page: {}, microflow: {} }},",
+                rust_string(home.role.as_deref().unwrap_or_default()),
+                rust_option_string(home.page.as_deref()),
+                rust_option_string(home.microflow.as_deref()),
+            );
+        }
+        source.push_str("        ], items: vec![\n");
+        for item in &profile.menu_items {
+            render_navigation_item(&mut source, item, 3);
+        }
+        source.push_str("        ] },\n");
+    }
+    source.push_str("    ] });\n}\n");
+    source
+}
+
+fn render_navigation_item(
+    source: &mut String,
+    item: &mxrs_model::navigation::NavigationItem,
+    depth: usize,
+) {
+    let indent = "    ".repeat(depth);
+    let _ = writeln!(
+        source,
+        "{indent}::mxrs_ir::NavigationItemDecl {{ caption: {}, page: {}, microflow: {}, icon: {}, items: vec![",
+        rust_btree_map(&item.caption),
+        rust_option_string(item.page.as_deref()),
+        rust_option_string(item.microflow.as_deref()),
+        rust_option_string(item.icon.as_deref()),
+    );
+    for child in &item.items {
+        render_navigation_item(source, child, depth + 1);
+    }
+    let _ = writeln!(source, "{indent}] }},");
+}
+
+fn rust_btree_map(values: &std::collections::BTreeMap<String, String>) -> String {
+    if values.is_empty() {
+        return "::std::collections::BTreeMap::new()".to_string();
+    }
+    let entries = values
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "({}.to_string(), {}.to_string())",
+                rust_string(key),
+                rust_string(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("::std::collections::BTreeMap::from([{entries}])")
+}
+
+fn render_security_level(value: Option<&str>) -> Option<&'static str> {
+    match value? {
+        "CheckNothing" => Some("CheckNothing"),
+        "CheckFormsAndMicroflows" => Some("CheckFormsAndMicroflows"),
+        "CheckEverything" => Some("CheckEverything"),
+        _ => None,
+    }
+}
+
+fn bson_documents(document: &mxrs_bson::Document, field: &str) -> Vec<mxrs_bson::Document> {
+    let Some(mxrs_bson::Bson::Array(values)) = document.get(field) else {
+        return vec![];
+    };
+    mxrs_bson::parse_array(Some(values))
+        .items
+        .into_iter()
+        .filter_map(|value| match value {
+            mxrs_bson::Bson::Document(document) => Some(document),
+            _ => None,
+        })
+        .collect()
+}
+
+fn bson_strings(document: &mxrs_bson::Document, field: &str) -> Vec<String> {
+    let Some(mxrs_bson::Bson::Array(values)) = document.get(field) else {
+        return vec![];
+    };
+    mxrs_bson::parse_array(Some(values))
+        .items
+        .into_iter()
+        .filter_map(|value| match value {
+            mxrs_bson::Bson::String(value) => Some(value),
+            _ => None,
+        })
+        .collect()
+}
+
+fn rust_option_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("Some({}.to_string())", rust_string(value)))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn rust_string_vec(values: &[String]) -> String {
+    let values = values
+        .iter()
+        .map(|value| format!("{}.to_string()", rust_string(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("vec![{values}]")
 }
 
 /// Builds the public marker surface directly from the imported model. Flow
@@ -1277,6 +1537,8 @@ mod tests {
         assert!(generated.join("src/domain/mod.rs").is_file());
         assert!(generated.join("src/domain/entities/mod.rs").is_file());
         assert!(generated.join("src/domain/flows/mod.rs").is_file());
+        assert!(generated.join("src/domain/security/mod.rs").is_file());
+        assert!(generated.join("src/domain/navigation/mod.rs").is_file());
         assert!(generated.join("src/infrastructure/mod.rs").is_file());
         assert!(!generated.join("src/generated").exists());
         assert!(generated.join("model/imported/manifest.json").is_file());
@@ -1293,7 +1555,11 @@ mod tests {
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(domain_source.contains("pub mod entities;"));
         assert!(domain_source.contains("pub mod flows;"));
+        assert!(domain_source.contains("pub mod security;"));
+        assert!(domain_source.contains("pub mod navigation;"));
         assert!(domain_source.contains("flows::apply(&mut project);"));
+        assert!(domain_source.contains("security::apply(&mut project);"));
+        assert!(domain_source.contains("navigation::apply(&mut project);"));
         assert!(domain_source.contains("pub mod pages;"));
         assert!(domain_source.contains("pages::home()"));
         let entities_source =
@@ -1322,6 +1588,13 @@ mod tests {
         let flows = std::fs::read_to_string(generated.join("src/domain/flows/mod.rs")).unwrap();
         assert!(flows.contains("snapshot-backed microflow: Sales.ACT_Ping"));
         assert!(flows.contains("target.nanoflows.extend(declared.nanoflows)"));
+        let security =
+            std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
+        assert!(security.contains("ProjectSecurityDecl::default()"));
+        assert!(security.contains("security.user_roles = vec!"));
+        let navigation =
+            std::fs::read_to_string(generated.join("src/domain/navigation/mod.rs")).unwrap();
+        assert!(navigation.contains("project.navigation = Some"));
         let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
         assert!(crate_root.contains("pub mod infrastructure;"));
         assert!(crate_root.contains("pub mod generated"));
