@@ -192,8 +192,8 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
     Ok(())
 }
 
-/// Applies only enumeration, constant, and regular-expression declarations
-/// to an imported model.
+/// Applies only enumeration, constant, regular-expression, and scheduled-event
+/// declarations to an imported model.
 ///
 /// This narrow entry point is used by the portability verifier: it proves
 /// document-family round trips without rewriting unrelated domain, security,
@@ -212,6 +212,7 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
         if declaration.enumerations.is_empty()
             && declaration.constants.is_empty()
             && declaration.regular_expressions.is_empty()
+            && declaration.scheduled_events.is_empty()
         {
             continue;
         }
@@ -237,6 +238,13 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
             module_id,
             &declaration.name,
             &declaration.regular_expressions,
+            identity,
+        )?;
+        documents::synchronize_scheduled_events_with_identity(
+            &mut mpr,
+            module_id,
+            &declaration.name,
+            &declaration.scheduled_events,
             identity,
         )?;
     }

@@ -73,7 +73,8 @@ pub use mxrs_expr::{
     float, integer, long, string,
 };
 pub use mxrs_ir::{
-    ConstantType, ExportLevel, MemberRights, OnOverlap, ScheduleUnit, SecurityLevel,
+    ConstantType, ExportLevel, MemberRights, OnOverlap, ScheduleUnit, ScheduledEventSchedule,
+    SecurityLevel,
 };
 pub use navigation::{NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder};
 pub use page::{

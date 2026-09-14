@@ -20,8 +20,9 @@
 //! - **Domain model** — entities, attributes, associations.
 //! - **Documents** — enumerations (values, localized captions and
 //!   documentation), constants (type, value, documentation and client
-//!   exposure), and regular expressions (pattern, visibility and exclusion)
-//!   are emitted into `src/domain/documents/mod.rs`. Imported
+//!   exposure), regular expressions (pattern, visibility and exclusion), and
+//!   scheduled events (legacy cadence, modern schedule, start instant and
+//!   execution policy) are emitted into `src/domain/documents/mod.rs`. Imported
 //!   fields outside that IR are retained by the writer. `portability
 //!   --verify-round-trip` checks these documents by identity, containment
 //!   and raw BSON bytes.
@@ -400,6 +401,10 @@ enum EditableDocument {
         excluded: bool,
         export_level: &'static str,
     },
+    ScheduledEvent {
+        module: String,
+        declaration: mxrs_ir::ScheduledEventDecl,
+    },
 }
 
 fn render_documents_module(
@@ -415,12 +420,13 @@ fn render_documents_module(
             EditableDocument::Enumeration { .. } => "Enumerations$Enumeration",
             EditableDocument::Constant { .. } => "Constants$Constant",
             EditableDocument::RegularExpression { .. } => "RegularExpressions$RegularExpression",
+            EditableDocument::ScheduledEvent { .. } => "ScheduledEvents$ScheduledEvent",
         };
         *editable_counts.entry(native_type).or_default() += 1;
     }
 
     let mut source = String::from(
-        "//! Editable Cargo-native enumerations, constants, and regular expressions.\n\n\
+        "//! Editable Cargo-native enumerations, constants, regular expressions, and scheduled events.\n\n\
          fn declarations() -> ::mxrs_ir::ProjectDecl {\n\
              let mut project = ::mxrs_dsl::ProjectBuilder::new(",
     );
@@ -453,6 +459,7 @@ fn render_documents_module(
                      target.enumerations.extend(declared.enumerations);\n\
                      target.constants.extend(declared.constants);\n\
                      target.regular_expressions.extend(declared.regular_expressions);\n\
+                     target.scheduled_events.extend(declared.scheduled_events);\n\
                  } else {\n\
                      project.modules.push(declared);\n\
                  }\n\
@@ -591,6 +598,15 @@ fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>
                     export_level,
                 });
             }
+            Some("ScheduledEvents$ScheduledEvent") => {
+                let Some(declaration) = parse_complete_scheduled_event(&document) else {
+                    continue;
+                };
+                declarations.push(EditableDocument::ScheduledEvent {
+                    module,
+                    declaration,
+                });
+            }
             _ => {}
         }
     }
@@ -625,6 +641,168 @@ fn is_complete_regular_expression_document(document: &mxrs_bson::Document) -> bo
         && document.get_str("ExportLevel").is_ok()
         && document.get_str("Expression").is_ok()
         && document.get_str("Name").is_ok()
+}
+
+fn parse_complete_scheduled_event(
+    document: &mxrs_bson::Document,
+) -> Option<mxrs_ir::ScheduledEventDecl> {
+    const FIELDS: [&str; 14] = [
+        "$ID",
+        "$Type",
+        "Documentation",
+        "Enabled",
+        "Excluded",
+        "ExportLevel",
+        "Interval",
+        "IntervalType",
+        "Microflow",
+        "Name",
+        "OnOverlap",
+        "Schedule",
+        "StartDateTime",
+        "TimeZone",
+    ];
+    if document.len() != FIELDS.len()
+        || !document
+            .keys()
+            .all(|field| FIELDS.contains(&field.as_str()))
+        || document
+            .get("$ID")
+            .and_then(mxrs_bson::extract_id)
+            .is_none()
+        || document.get_str("$Type").ok() != Some("ScheduledEvents$ScheduledEvent")
+    {
+        return None;
+    }
+    let unit = match document.get_str("IntervalType").ok()? {
+        "Millisecond" => mxrs_ir::ScheduleUnit::Milliseconds,
+        "Second" => mxrs_ir::ScheduleUnit::Seconds,
+        "Minute" => mxrs_ir::ScheduleUnit::Minutes,
+        "Hour" => mxrs_ir::ScheduleUnit::Hours,
+        "Day" => mxrs_ir::ScheduleUnit::Days,
+        "Week" => mxrs_ir::ScheduleUnit::Weeks,
+        "Month" => mxrs_ir::ScheduleUnit::Months,
+        "Year" => mxrs_ir::ScheduleUnit::Years,
+        _ => return None,
+    };
+    let export_level = match document.get_str("ExportLevel").ok()? {
+        "Hidden" => mxrs_ir::ExportLevel::Hidden,
+        "Published" => mxrs_ir::ExportLevel::Published,
+        _ => return None,
+    };
+    let on_overlap = match document.get_str("OnOverlap").ok()? {
+        "SkipNext" => mxrs_ir::OnOverlap::SkipNext,
+        "DelayNext" => mxrs_ir::OnOverlap::DelayNext,
+        _ => return None,
+    };
+    let schedule = parse_complete_event_schedule(document.get("Schedule")?)?;
+    let declaration = mxrs_ir::ScheduledEventDecl {
+        name: document.get_str("Name").ok()?.to_string(),
+        documentation: document.get_str("Documentation").ok()?.to_string(),
+        excluded: document.get_bool("Excluded").ok()?,
+        export_level,
+        microflow: document.get_str("Microflow").ok()?.to_string(),
+        unit,
+        interval: document.get_i64("Interval").ok()?,
+        start_at: document
+            .get_datetime("StartDateTime")
+            .ok()?
+            .try_to_rfc3339_string()
+            .ok()?,
+        time_zone: document.get_str("TimeZone").ok()?.to_string(),
+        schedule,
+        on_overlap,
+        enabled: document.get_bool("Enabled").ok()?,
+    };
+    scheduled_event_semantics_supported(&declaration).then_some(declaration)
+}
+
+fn scheduled_event_semantics_supported(event: &mxrs_ir::ScheduledEventDecl) -> bool {
+    if event.interval < 0 || (event.enabled && event.microflow.trim().is_empty()) {
+        return false;
+    }
+    match &event.schedule {
+        mxrs_ir::ScheduledEventSchedule::None => true,
+        mxrs_ir::ScheduledEventSchedule::Minute { multiplier } => *multiplier > 0,
+        mxrs_ir::ScheduledEventSchedule::Hour {
+            multiplier,
+            minute_offset,
+        } => *multiplier > 0 && (0..=59).contains(minute_offset),
+        mxrs_ir::ScheduledEventSchedule::Day {
+            hour_of_day,
+            minute_of_hour,
+        }
+        | mxrs_ir::ScheduledEventSchedule::Week {
+            hour_of_day,
+            minute_of_hour,
+            ..
+        } => (0..=23).contains(hour_of_day) && (0..=59).contains(minute_of_hour),
+    }
+}
+
+fn parse_complete_event_schedule(
+    value: &mxrs_bson::Bson,
+) -> Option<mxrs_ir::ScheduledEventSchedule> {
+    let mxrs_bson::Bson::Document(schedule) = value else {
+        return matches!(value, mxrs_bson::Bson::Null)
+            .then_some(mxrs_ir::ScheduledEventSchedule::None);
+    };
+    schedule.get("$ID").and_then(mxrs_bson::extract_id)?;
+    let exact = |fields: &[&str]| {
+        schedule.len() == fields.len()
+            && schedule
+                .keys()
+                .all(|field| fields.contains(&field.as_str()))
+    };
+    match schedule.get_str("$Type").ok()? {
+        "ScheduledEvents$MinuteSchedule" if exact(&["$ID", "$Type", "Multiplier"]) => {
+            Some(mxrs_ir::ScheduledEventSchedule::Minute {
+                multiplier: schedule.get_i64("Multiplier").ok()?,
+            })
+        }
+        "ScheduledEvents$HourSchedule"
+            if exact(&["$ID", "$Type", "Multiplier", "MinuteOffset"]) =>
+        {
+            Some(mxrs_ir::ScheduledEventSchedule::Hour {
+                multiplier: schedule.get_i64("Multiplier").ok()?,
+                minute_offset: schedule.get_i64("MinuteOffset").ok()?,
+            })
+        }
+        "ScheduledEvents$DaySchedule" if exact(&["$ID", "$Type", "HourOfDay", "MinuteOfHour"]) => {
+            Some(mxrs_ir::ScheduledEventSchedule::Day {
+                hour_of_day: schedule.get_i64("HourOfDay").ok()?,
+                minute_of_hour: schedule.get_i64("MinuteOfHour").ok()?,
+            })
+        }
+        "ScheduledEvents$WeekSchedule"
+            if exact(&[
+                "$ID",
+                "$Type",
+                "HourOfDay",
+                "MinuteOfHour",
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+                "Sunday",
+            ]) =>
+        {
+            Some(mxrs_ir::ScheduledEventSchedule::Week {
+                hour_of_day: schedule.get_i64("HourOfDay").ok()?,
+                minute_of_hour: schedule.get_i64("MinuteOfHour").ok()?,
+                monday: schedule.get_bool("Monday").ok()?,
+                tuesday: schedule.get_bool("Tuesday").ok()?,
+                wednesday: schedule.get_bool("Wednesday").ok()?,
+                thursday: schedule.get_bool("Thursday").ok()?,
+                friday: schedule.get_bool("Friday").ok()?,
+                saturday: schedule.get_bool("Saturday").ok()?,
+                sunday: schedule.get_bool("Sunday").ok()?,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn render_editable_document_body(source: &mut String, declaration: EditableDocument) {
@@ -749,6 +927,95 @@ fn render_editable_document_body(source: &mut String, declaration: EditableDocum
             }
             source.push_str("        });\n");
         }
+        EditableDocument::ScheduledEvent {
+            module: _,
+            declaration,
+        } => render_scheduled_event_body(source, &declaration),
+    }
+}
+
+fn render_scheduled_event_body(source: &mut String, event: &mxrs_ir::ScheduledEventDecl) {
+    let _ = writeln!(
+        source,
+        "        module.scheduled_event({}, {}, ::mxrs_ir::ScheduleUnit::{:?}, |event| {{",
+        rust_string(&event.name),
+        rust_string(&event.microflow),
+        event.unit,
+    );
+    if !event.documentation.is_empty() {
+        let _ = writeln!(
+            source,
+            "            event.documentation({});",
+            rust_string(&event.documentation)
+        );
+    }
+    let _ = writeln!(source, "            event.every({});", event.interval);
+    let _ = writeln!(
+        source,
+        "            event.start_at({});",
+        rust_string(&event.start_at)
+    );
+    let _ = writeln!(
+        source,
+        "            event.time_zone({});",
+        rust_string(&event.time_zone)
+    );
+    let _ = writeln!(
+        source,
+        "            event.on_overlap(::mxrs_ir::OnOverlap::{:?});",
+        event.on_overlap
+    );
+    if !event.enabled {
+        source.push_str("            event.enabled(false);\n");
+    }
+    if event.excluded {
+        source.push_str("            event.excluded(true);\n");
+    }
+    if event.export_level != mxrs_ir::ExportLevel::Hidden {
+        let _ = writeln!(
+            source,
+            "            event.export_level(::mxrs_ir::ExportLevel::{:?});",
+            event.export_level
+        );
+    }
+    let schedule = render_event_schedule(&event.schedule);
+    let _ = writeln!(source, "            event.schedule({schedule});");
+    source.push_str("        });\n");
+}
+
+fn render_event_schedule(schedule: &mxrs_ir::ScheduledEventSchedule) -> String {
+    match schedule {
+        mxrs_ir::ScheduledEventSchedule::None => {
+            "::mxrs_ir::ScheduledEventSchedule::None".to_string()
+        }
+        mxrs_ir::ScheduledEventSchedule::Minute { multiplier } => {
+            format!("::mxrs_ir::ScheduledEventSchedule::Minute {{ multiplier: {multiplier} }}")
+        }
+        mxrs_ir::ScheduledEventSchedule::Hour {
+            multiplier,
+            minute_offset,
+        } => format!(
+            "::mxrs_ir::ScheduledEventSchedule::Hour {{ multiplier: {multiplier}, minute_offset: {minute_offset} }}"
+        ),
+        mxrs_ir::ScheduledEventSchedule::Day {
+            hour_of_day,
+            minute_of_hour,
+        } => format!(
+            "::mxrs_ir::ScheduledEventSchedule::Day {{ hour_of_day: {hour_of_day}, minute_of_hour: {minute_of_hour} }}"
+        ),
+        mxrs_ir::ScheduledEventSchedule::Week {
+            hour_of_day,
+            minute_of_hour,
+            monday,
+            tuesday,
+            wednesday,
+            thursday,
+            friday,
+            saturday,
+            sunday,
+        } => format!(
+            "::mxrs_ir::ScheduledEventSchedule::Week {{ hour_of_day: {hour_of_day}, minute_of_hour: {minute_of_hour}, monday: {monday}, tuesday: {tuesday}, wednesday: {wednesday}, thursday: {thursday}, friday: {friday}, saturday: {saturday}, sunday: {sunday} }}"
+        ),
     }
 }
 
@@ -756,7 +1023,8 @@ fn editable_document_module(document: &EditableDocument) -> &str {
     match document {
         EditableDocument::Enumeration { module, .. }
         | EditableDocument::Constant { module, .. }
-        | EditableDocument::RegularExpression { module, .. } => module,
+        | EditableDocument::RegularExpression { module, .. }
+        | EditableDocument::ScheduledEvent { module, .. } => module,
     }
 }
 
@@ -765,6 +1033,10 @@ fn editable_document_key(document: &EditableDocument) -> (&str, u8, &str) {
         EditableDocument::Enumeration { module, name, .. } => (module, 0, name),
         EditableDocument::Constant { module, name, .. } => (module, 1, name),
         EditableDocument::RegularExpression { module, name, .. } => (module, 2, name),
+        EditableDocument::ScheduledEvent {
+            module,
+            declaration,
+        } => (module, 3, &declaration.name),
     }
 }
 
@@ -774,7 +1046,8 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
         let module_name = match &document {
             EditableDocument::Enumeration { module, .. }
             | EditableDocument::Constant { module, .. }
-            | EditableDocument::RegularExpression { module, .. } => module.clone(),
+            | EditableDocument::RegularExpression { module, .. }
+            | EditableDocument::ScheduledEvent { module, .. } => module.clone(),
         };
         let module = modules
             .entry(module_name.clone())
@@ -837,6 +1110,9 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
                         _ => unreachable!("export_level_variant returns a closed set"),
                     },
                 }),
+            EditableDocument::ScheduledEvent { declaration, .. } => {
+                module.scheduled_events.push(declaration)
+            }
         }
     }
     Ok(mxrs_ir::ProjectDecl {
@@ -1356,7 +1632,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, and regular expressions. `src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, and scheduled events. `src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 

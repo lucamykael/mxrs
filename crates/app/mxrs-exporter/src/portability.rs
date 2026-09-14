@@ -126,7 +126,10 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
             .copied()
             .unwrap_or(0);
         let typed = typed_pages_by_type.get(&native_type).copied().unwrap_or(0)
-            + if native_type == "RegularExpressions$RegularExpression" {
+            + if matches!(
+                native_type.as_str(),
+                "RegularExpressions$RegularExpression" | "ScheduledEvents$ScheduledEvent"
+            ) {
                 editable
             } else {
                 0
@@ -135,7 +138,10 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
             (
                 0,
                 total.saturating_sub(typed),
-                if native_type == "RegularExpressions$RegularExpression" {
+                if matches!(
+                    native_type.as_str(),
+                    "RegularExpressions$RegularExpression" | "ScheduledEvents$ScheduledEvent"
+                ) {
                     "the complete semantic document is emitted as typed Rust and byte-exactly round-tripped"
                         .to_string()
                 } else {
@@ -303,6 +309,13 @@ fn editable_unit_snapshots(
                         document.name.clone(),
                     )
                 }))
+                .chain(module.scheduled_events.iter().map(|document| {
+                    (
+                        module.name.clone(),
+                        "ScheduledEvents$ScheduledEvent",
+                        document.name.clone(),
+                    )
+                }))
         })
         .collect::<std::collections::HashSet<_>>();
     let units = project.all_units()?;
@@ -329,6 +342,7 @@ fn editable_unit_snapshots(
             "Enumerations$Enumeration"
                 | "Constants$Constant"
                 | "RegularExpressions$RegularExpression"
+                | "ScheduledEvents$ScheduledEvent"
         ) {
             continue;
         }
@@ -520,6 +534,7 @@ mod tests {
                 regular_expression.documentation("Uppercase code");
             });
             module.microflow("Save", |_| {});
+            module.scheduled_event("Nightly", "Save", mxrs_ir::ScheduleUnit::Days, |_| {});
         });
         mxrs_writer::write_project(&path, &project.build()).unwrap();
         (directory, path)
@@ -546,6 +561,10 @@ mod tests {
         );
         assert_eq!(
             family("RegularExpressions$RegularExpression").status,
+            PortabilityStatus::Typed
+        );
+        assert_eq!(
+            family("ScheduledEvents$ScheduledEvent").status,
             PortabilityStatus::Typed
         );
         assert!(report.model_lossless);
@@ -575,7 +594,7 @@ mod tests {
         let report = verify_editable_document_round_trip(path).unwrap();
         assert!(report.passed, "{:?}", report.failures);
         assert_eq!(report.source_units, report.rebuilt_units);
-        assert_eq!(report.candidate_units, 3);
-        assert_eq!(report.byte_identical_units, 3);
+        assert_eq!(report.candidate_units, 4);
+        assert_eq!(report.byte_identical_units, 4);
     }
 }

@@ -335,7 +335,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "scheduled-event" => (
             Status::Partial,
             "mxrs scheduled-event new",
-            "scheduled event and handler scaffold persisting ScheduledEvents$ScheduledEvent with minute/hour/day schedules; MXRB's other five IntervalType values have no surface",
+            "scheduled event and handler scaffold plus a complete typed event/schedule IR covering all eight IntervalType values and four modern schedule shapes; command-contract oracle still missing",
         ),
         "diff" => (Status::Partial, "cargo mxrs diff", "typed project diff"),
         "export" => (Status::Partial, "mxrs export", "typed Rust export"),

@@ -1,4 +1,4 @@
-use mxrs_ir::{OnOverlap, ScheduleUnit, ScheduledEventDecl};
+use mxrs_ir::{ExportLevel, OnOverlap, ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule};
 
 /// Builder for one editable `ScheduledEvents$ScheduledEvent` document.
 ///
@@ -30,10 +30,20 @@ impl ScheduledEventBuilder {
     }
 
     /// Multiplier for the unit passed to [`crate::ModuleBuilder::scheduled_event`].
-    /// The writer rejects a non-positive interval, and any interval other than
-    /// `1` for [`ScheduleUnit::Days`].
-    pub fn every(&mut self, interval: i32) -> &mut Self {
+    /// The writer rejects negative legacy intervals. For minute/hour modern
+    /// schedules, this convenience method updates the multiplier too.
+    pub fn every(&mut self, interval: i64) -> &mut Self {
         self.decl.interval = interval;
+        match &mut self.decl.schedule {
+            ScheduledEventSchedule::Minute { multiplier }
+            | ScheduledEventSchedule::Hour { multiplier, .. } => *multiplier = interval,
+            _ => {}
+        }
+        self
+    }
+
+    pub fn start_at(&mut self, instant: impl Into<String>) -> &mut Self {
+        self.decl.start_at = instant.into();
         self
     }
 
@@ -49,6 +59,21 @@ impl ScheduledEventBuilder {
 
     pub fn enabled(&mut self, enabled: bool) -> &mut Self {
         self.decl.enabled = enabled;
+        self
+    }
+
+    pub fn excluded(&mut self, excluded: bool) -> &mut Self {
+        self.decl.excluded = excluded;
+        self
+    }
+
+    pub fn export_level(&mut self, level: ExportLevel) -> &mut Self {
+        self.decl.export_level = level;
+        self
+    }
+
+    pub fn schedule(&mut self, schedule: ScheduledEventSchedule) -> &mut Self {
+        self.decl.schedule = schedule;
         self
     }
 }

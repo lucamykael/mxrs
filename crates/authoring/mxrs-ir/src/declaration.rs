@@ -295,20 +295,49 @@ impl RegularExpressionDecl {
     }
 }
 
-/// How often a [`ScheduledEventDecl`] runs.
-///
-/// Deliberately narrower than mxrb's `SCHEDULED_EVENT_INTERVAL_MAP`, which
-/// names eight `IntervalType` values. Only these three are actually reachable
-/// through mxrb's declaration path: `scheduled_event_schedule_doc` raises
-/// `ArgumentError` ("modern schedules support minutes, hours, or days") for
-/// the other five, so a declaration surface offering them would emit documents
-/// the oracle refuses to build. Widening this needs oracle evidence first,
-/// not just a larger enum.
+/// Legacy interval unit retained by Mendix alongside the modern schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleUnit {
+    Milliseconds,
+    Seconds,
     Minutes,
     Hours,
     Days,
+    Weeks,
+    Months,
+    Years,
+}
+
+/// The four closed modern schedule shapes in the Mendix 11 metamodel.
+///
+/// This is deliberately independent of [`ScheduleUnit`]: real projects may
+/// retain a legacy `IntervalType`/`Interval` pair while using a different
+/// modern schedule shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduledEventSchedule {
+    None,
+    Minute {
+        multiplier: i64,
+    },
+    Hour {
+        multiplier: i64,
+        minute_offset: i64,
+    },
+    Day {
+        hour_of_day: i64,
+        minute_of_hour: i64,
+    },
+    Week {
+        hour_of_day: i64,
+        minute_of_hour: i64,
+        monday: bool,
+        tuesday: bool,
+        wednesday: bool,
+        thursday: bool,
+        friday: bool,
+        saturday: bool,
+        sunday: bool,
+    },
 }
 
 /// What the runtime does when a run is still in progress at the next trigger.
@@ -328,15 +357,18 @@ pub enum OnOverlap {
 pub struct ScheduledEventDecl {
     pub name: String,
     pub documentation: String,
+    pub excluded: bool,
+    pub export_level: ExportLevel,
     /// Qualified name of the microflow to run, as `"Microflow"` (same module)
     /// or `"Module.Microflow"`.
     pub microflow: String,
     pub unit: ScheduleUnit,
-    /// Multiplier for `unit`. [`ScheduleUnit::Days`] accepts only `1`, which
-    /// the writer enforces — mirroring mxrb's "day schedules support
-    /// interval: 1".
-    pub interval: i32,
+    pub interval: i64,
+    /// RFC 3339 UTC instant. Kept human-readable in generated Rust and parsed
+    /// strictly at the persistence boundary.
+    pub start_at: String,
     pub time_zone: String,
+    pub schedule: ScheduledEventSchedule,
     pub on_overlap: OnOverlap,
     pub enabled: bool,
 }
@@ -348,10 +380,29 @@ impl ScheduledEventDecl {
         Self {
             name: name.into(),
             documentation: String::new(),
+            excluded: false,
+            export_level: ExportLevel::Hidden,
             microflow: microflow.into(),
             unit,
             interval: 1,
+            start_at: "2000-01-01T00:00:00.000Z".into(),
             time_zone: "UTC".into(),
+            schedule: match unit {
+                ScheduleUnit::Minutes => ScheduledEventSchedule::Minute { multiplier: 1 },
+                ScheduleUnit::Hours => ScheduledEventSchedule::Hour {
+                    multiplier: 1,
+                    minute_offset: 0,
+                },
+                ScheduleUnit::Days => ScheduledEventSchedule::Day {
+                    hour_of_day: 0,
+                    minute_of_hour: 0,
+                },
+                ScheduleUnit::Milliseconds
+                | ScheduleUnit::Seconds
+                | ScheduleUnit::Weeks
+                | ScheduleUnit::Months
+                | ScheduleUnit::Years => ScheduledEventSchedule::None,
+            },
             on_overlap: OnOverlap::default(),
             enabled: true,
         }

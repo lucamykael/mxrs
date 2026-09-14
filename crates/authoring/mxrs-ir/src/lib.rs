@@ -23,6 +23,7 @@ pub use declaration::{
     AssociationType, AttributeDecl, AttributeType, ConstantDecl, ConstantType, EntityDecl,
     EnumerationDecl, EnumerationValueDecl, ExportLevel, MemberAccessDecl, MemberRights, ModuleDecl,
     OnOverlap, ProjectDecl, RegularExpressionDecl, ScheduleUnit, ScheduledEventDecl,
+    ScheduledEventSchedule,
 };
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{

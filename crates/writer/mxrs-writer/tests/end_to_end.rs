@@ -10,7 +10,7 @@ use mxrs_expr::attribute;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
 use mxrs_ir::{
     AssociationOwner, AssociationStorage, AssociationType, AttributeType, ConstantType,
-    ExportLevel, MemberRights, MicroflowRef, OnOverlap, Ref, ScheduleUnit,
+    ExportLevel, MemberRights, MicroflowRef, OnOverlap, Ref, ScheduleUnit, ScheduledEventSchedule,
 };
 use mxrs_model::Project;
 use mxrs_model::association::{AssociationType as ModelAssociationType, Owner as ModelOwner};
@@ -1326,7 +1326,7 @@ fn scheduled_events_persist_with_a_schedule_matching_their_interval_type() {
 }
 
 #[test]
-fn a_day_schedule_with_an_interval_other_than_one_fails_at_write_time() {
+fn legacy_interval_is_independent_from_the_modern_day_schedule() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("BadSchedule.mpr");
 
@@ -1338,16 +1338,22 @@ fn a_day_schedule_with_an_interval_other_than_one_fails_at_write_time() {
         });
     });
 
-    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
-    assert!(matches!(
-        error,
-        mxrs_writer::WriterError::UnsupportedDayInterval { name, interval }
-            if name == "SE_Nightly" && interval == 3
-    ));
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+    let read = Project::open(&path, true).unwrap();
+    let event = document_by_name(&read, "ScheduledEvents$ScheduledEvent", "SE_Nightly");
+    assert_eq!(event.get_i64("Interval").unwrap(), 3);
+    assert_eq!(
+        event
+            .get_document("Schedule")
+            .unwrap()
+            .get_str("$Type")
+            .unwrap(),
+        "ScheduledEvents$DaySchedule"
+    );
 }
 
 #[test]
-fn a_non_positive_interval_fails_instead_of_producing_a_schedule_that_never_advances() {
+fn a_negative_interval_fails_instead_of_producing_an_invalid_legacy_schedule() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ZeroInterval.mpr");
 
@@ -1355,7 +1361,7 @@ fn a_non_positive_interval_fails_instead_of_producing_a_schedule_that_never_adva
     project.module("Sales", |m| {
         m.microflow("ACT_Poll", |_f| {});
         m.scheduled_event("SE_Poll", "ACT_Poll", ScheduleUnit::Minutes, |e| {
-            e.every(0);
+            e.every(-1);
         });
     });
 
@@ -1363,7 +1369,7 @@ fn a_non_positive_interval_fails_instead_of_producing_a_schedule_that_never_adva
     assert!(matches!(
         error,
         mxrs_writer::WriterError::InvalidScheduleInterval { name, interval }
-            if name == "SE_Poll" && interval == 0
+            if name == "SE_Poll" && interval == -1
     ));
 }
 
@@ -1381,6 +1387,98 @@ fn a_scheduled_event_without_a_microflow_fails_rather_than_writing_a_job_that_ru
     assert!(matches!(
         error,
         mxrs_writer::WriterError::ScheduledEventWithoutMicroflow(name) if name == "SE_Orphan"
+    ));
+}
+
+#[test]
+fn a_disabled_unbound_event_and_a_week_schedule_keep_their_typed_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("CompleteSchedules.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |module| {
+        module.microflow("ACT_Weekly", |_| {});
+        module.scheduled_event("Disabled", "", ScheduleUnit::Minutes, |event| {
+            event
+                .every(0)
+                .enabled(false)
+                .excluded(true)
+                .schedule(ScheduledEventSchedule::None);
+        });
+        module.scheduled_event("Weekly", "ACT_Weekly", ScheduleUnit::Weeks, |event| {
+            event.schedule(ScheduledEventSchedule::Week {
+                hour_of_day: 23,
+                minute_of_hour: 59,
+                monday: true,
+                tuesday: false,
+                wednesday: false,
+                thursday: false,
+                friday: true,
+                saturday: false,
+                sunday: false,
+            });
+        });
+    });
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let disabled = document_by_name(&read, "ScheduledEvents$ScheduledEvent", "Disabled");
+    assert_eq!(disabled.get_str("Microflow").unwrap(), "");
+    assert_eq!(disabled.get("Schedule"), Some(&mxrs_bson::Bson::Null));
+    assert_eq!(disabled.get_i64("Interval").unwrap(), 0);
+    assert!(!disabled.get_bool("Enabled").unwrap());
+    assert!(disabled.get_bool("Excluded").unwrap());
+
+    let weekly = document_by_name(&read, "ScheduledEvents$ScheduledEvent", "Weekly");
+    assert_eq!(weekly.get_str("IntervalType").unwrap(), "Week");
+    let schedule = weekly.get_document("Schedule").unwrap();
+    assert_eq!(
+        schedule.get_str("$Type").unwrap(),
+        "ScheduledEvents$WeekSchedule"
+    );
+    assert_eq!(schedule.get_i64("HourOfDay").unwrap(), 23);
+    assert_eq!(schedule.get_i64("MinuteOfHour").unwrap(), 59);
+    assert!(schedule.get_bool("Monday").unwrap());
+    assert!(schedule.get_bool("Friday").unwrap());
+    assert!(!schedule.get_bool("Sunday").unwrap());
+}
+
+#[test]
+fn scheduled_event_start_and_schedule_ranges_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let invalid_start = dir.path().join("InvalidStart.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |module| {
+        module.microflow("ACT_Run", |_| {});
+        module.scheduled_event("Run", "ACT_Run", ScheduleUnit::Hours, |event| {
+            event.start_at("tomorrow morning");
+        });
+    });
+    let error = mxrs_writer::write_project(&invalid_start, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::InvalidScheduledEventStart { name, value }
+            if name == "Run" && value == "tomorrow morning"
+    ));
+
+    let invalid_schedule = dir.path().join("InvalidSchedule.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |module| {
+        module.microflow("ACT_Run", |_| {});
+        module.scheduled_event("Run", "ACT_Run", ScheduleUnit::Hours, |event| {
+            event.schedule(ScheduledEventSchedule::Hour {
+                multiplier: 1,
+                minute_offset: 60,
+            });
+        });
+    });
+    let error = mxrs_writer::write_project(&invalid_schedule, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::InvalidScheduledEventScheduleValue {
+            name,
+            field: "minute offset",
+            value: 60,
+        } if name == "Run"
     ));
 }
 

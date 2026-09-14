@@ -35,7 +35,7 @@ use mxrs_ir::flow::MicroflowDecl;
 use mxrs_ir::page::PageDecl;
 use mxrs_ir::{
     ConstantDecl, ConstantType, EnumerationDecl, ExportLevel, OnOverlap, RegularExpressionDecl,
-    ScheduleUnit, ScheduledEventDecl,
+    ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule,
 };
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
@@ -658,7 +658,7 @@ pub(crate) fn synchronize_scheduled_events_with_identity(
             &event_id,
             existing.map(|(_, document)| document),
             identity,
-        );
+        )?;
         if existing.is_some() {
             mpr.update_unit(&event_id, document)?;
         } else {
@@ -669,29 +669,78 @@ pub(crate) fn synchronize_scheduled_events_with_identity(
 }
 
 fn validate_scheduled_event(declaration: &ScheduledEventDecl) -> Result<()> {
-    if declaration.microflow.trim().is_empty() {
+    if declaration.microflow.trim().is_empty() && declaration.enabled {
         return Err(crate::WriterError::ScheduledEventWithoutMicroflow(
             declaration.name.clone(),
         ));
     }
-    if declaration.interval <= 0 {
+    if declaration.interval < 0 {
         return Err(crate::WriterError::InvalidScheduleInterval {
             name: declaration.name.clone(),
             interval: declaration.interval,
         });
     }
-    if declaration.unit == ScheduleUnit::Days && declaration.interval != 1 {
-        return Err(crate::WriterError::UnsupportedDayInterval {
-            name: declaration.name.clone(),
-            interval: declaration.interval,
-        });
-    }
+    validate_schedule_value(
+        declaration,
+        "multiplier",
+        |schedule| match schedule {
+            ScheduledEventSchedule::Minute { multiplier }
+            | ScheduledEventSchedule::Hour { multiplier, .. } => Some(*multiplier),
+            _ => None,
+        },
+        1..=i64::MAX,
+    )?;
+    validate_schedule_value(
+        declaration,
+        "minute offset",
+        |schedule| match schedule {
+            ScheduledEventSchedule::Hour { minute_offset, .. } => Some(*minute_offset),
+            _ => None,
+        },
+        0..=59,
+    )?;
+    validate_schedule_value(
+        declaration,
+        "hour of day",
+        |schedule| match schedule {
+            ScheduledEventSchedule::Day { hour_of_day, .. }
+            | ScheduledEventSchedule::Week { hour_of_day, .. } => Some(*hour_of_day),
+            _ => None,
+        },
+        0..=23,
+    )?;
+    validate_schedule_value(
+        declaration,
+        "minute of hour",
+        |schedule| match schedule {
+            ScheduledEventSchedule::Day { minute_of_hour, .. }
+            | ScheduledEventSchedule::Week { minute_of_hour, .. } => Some(*minute_of_hour),
+            _ => None,
+        },
+        0..=59,
+    )?;
     Ok(())
 }
 
-/// mxrb defaults `StartDateTime` to `Time.utc(2000, 1, 1)` rather than to the
-/// current time, so repeated writes of the same declaration stay byte-stable.
-const DEFAULT_START_DATE_TIME_MILLIS: i64 = 946_684_800_000;
+fn validate_schedule_value(
+    declaration: &ScheduledEventDecl,
+    field: &'static str,
+    value: impl FnOnce(&ScheduledEventSchedule) -> Option<i64>,
+    range: std::ops::RangeInclusive<i64>,
+) -> Result<()> {
+    let Some(value) = value(&declaration.schedule) else {
+        return Ok(());
+    };
+    if range.contains(&value) {
+        Ok(())
+    } else {
+        Err(crate::WriterError::InvalidScheduledEventScheduleValue {
+            name: declaration.name.clone(),
+            field,
+            value,
+        })
+    }
+}
 
 fn scheduled_event_document(
     declaration: &ScheduledEventDecl,
@@ -700,7 +749,7 @@ fn scheduled_event_document(
     event_id: &str,
     existing: Option<&Document>,
     identity: ProjectIdentity,
-) -> Document {
+) -> Result<Document> {
     let schedule_id = existing
         .and_then(|document| document.get_document("Schedule").ok())
         .and_then(|document| document.get("$ID"))
@@ -708,24 +757,25 @@ fn scheduled_event_document(
         .unwrap_or_else(|| {
             identity.artifact_id(ArtifactKind::ScheduledEventSchedule, qualified_name)
         });
-    // A start date already in the model is the author's, not ours: only a
-    // document we are creating gets the default epoch.
-    let start_date_time = existing
-        .and_then(|document| document.get_datetime("StartDateTime").ok().copied())
-        .unwrap_or_else(|| DateTime::from_millis(DEFAULT_START_DATE_TIME_MILLIS));
+    let start_date_time = DateTime::parse_rfc3339_str(&declaration.start_at).map_err(|_| {
+        crate::WriterError::InvalidScheduledEventStart {
+            name: declaration.name.clone(),
+            value: declaration.start_at.clone(),
+        }
+    })?;
 
     let mut document = existing.cloned().unwrap_or_default();
     document.insert("$ID", event_id);
     document.insert("$Type", "ScheduledEvents$ScheduledEvent");
     document.insert("Name", declaration.name.clone());
     document.insert("Documentation", declaration.documentation.clone());
-    document.insert("Excluded", document.get_bool("Excluded").unwrap_or(false));
+    document.insert("Excluded", declaration.excluded);
     document.insert(
         "ExportLevel",
-        document
-            .get_str("ExportLevel")
-            .unwrap_or("Hidden")
-            .to_string(),
+        match declaration.export_level {
+            ExportLevel::Hidden => "Hidden",
+            ExportLevel::Published => "Published",
+        },
     );
     document.insert(
         "Microflow",
@@ -738,7 +788,7 @@ fn scheduled_event_document(
     document.insert("Enabled", declaration.enabled);
     document.insert("IntervalType", interval_type_name(declaration.unit));
     document.insert("Interval", declaration.interval);
-    document
+    Ok(document)
 }
 
 /// Stores the microflow reference qualified. mxrb's scheduler qualifies an
@@ -746,44 +796,80 @@ fn scheduled_event_document(
 /// spellings resolve — writing the qualified form means the document is
 /// unambiguous on its own.
 fn qualify_microflow(module_name: &str, microflow: &str) -> String {
-    if microflow.contains('.') {
+    if microflow.trim().is_empty() {
+        String::new()
+    } else if microflow.contains('.') {
         microflow.to_string()
     } else {
         format!("{module_name}.{microflow}")
     }
 }
 
-/// Mirrors `Writer#scheduled_event_schedule_doc`. `interval` is already
-/// validated by [`validate_scheduled_event`].
-fn schedule_document(declaration: &ScheduledEventDecl, schedule_id: &str) -> Document {
-    match declaration.unit {
-        ScheduleUnit::Minutes => doc! {
+/// Lowers the closed modern schedule variants independently of the retained
+/// legacy interval fields.
+fn schedule_document(declaration: &ScheduledEventDecl, schedule_id: &str) -> Bson {
+    match declaration.schedule {
+        ScheduledEventSchedule::None => Bson::Null,
+        ScheduledEventSchedule::Minute { multiplier } => Bson::Document(doc! {
             "$ID": schedule_id,
             "$Type": "ScheduledEvents$MinuteSchedule",
-            "Multiplier": declaration.interval,
-        },
-        ScheduleUnit::Hours => doc! {
+            "Multiplier": multiplier,
+        }),
+        ScheduledEventSchedule::Hour {
+            multiplier,
+            minute_offset,
+        } => Bson::Document(doc! {
             "$ID": schedule_id,
             "$Type": "ScheduledEvents$HourSchedule",
-            "Multiplier": declaration.interval,
-            "MinuteOffset": 0_i32,
-        },
-        ScheduleUnit::Days => doc! {
+            "Multiplier": multiplier,
+            "MinuteOffset": minute_offset,
+        }),
+        ScheduledEventSchedule::Day {
+            hour_of_day,
+            minute_of_hour,
+        } => Bson::Document(doc! {
             "$ID": schedule_id,
             "$Type": "ScheduledEvents$DaySchedule",
-            "HourOfDay": 0_i32,
-            "MinuteOfHour": 0_i32,
-        },
+            "HourOfDay": hour_of_day,
+            "MinuteOfHour": minute_of_hour,
+        }),
+        ScheduledEventSchedule::Week {
+            hour_of_day,
+            minute_of_hour,
+            monday,
+            tuesday,
+            wednesday,
+            thursday,
+            friday,
+            saturday,
+            sunday,
+        } => Bson::Document(doc! {
+            "$ID": schedule_id,
+            "$Type": "ScheduledEvents$WeekSchedule",
+            "HourOfDay": hour_of_day,
+            "MinuteOfHour": minute_of_hour,
+            "Monday": monday,
+            "Tuesday": tuesday,
+            "Wednesday": wednesday,
+            "Thursday": thursday,
+            "Friday": friday,
+            "Saturday": saturday,
+            "Sunday": sunday,
+        }),
     }
 }
 
-/// Mirrors the reachable subset of mxrb's `SCHEDULED_EVENT_INTERVAL_MAP` —
-/// see [`ScheduleUnit`] for why the other five values have no surface.
+/// Mirrors the complete legacy interval vocabulary.
 fn interval_type_name(unit: ScheduleUnit) -> &'static str {
     match unit {
+        ScheduleUnit::Milliseconds => "Millisecond",
+        ScheduleUnit::Seconds => "Second",
         ScheduleUnit::Minutes => "Minute",
         ScheduleUnit::Hours => "Hour",
         ScheduleUnit::Days => "Day",
+        ScheduleUnit::Weeks => "Week",
+        ScheduleUnit::Months => "Month",
+        ScheduleUnit::Years => "Year",
     }
 }
 
