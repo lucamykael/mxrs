@@ -3,6 +3,8 @@ use mxrs_ir::declaration::{
 };
 use mxrs_ir::{AssociationMarker, EntityMarker};
 
+use crate::access::AccessRuleBuilder;
+
 pub struct EntityBuilder {
     decl: EntityDecl,
 }
@@ -25,6 +27,37 @@ impl EntityBuilder {
 
     pub fn persistable(&mut self, value: bool) -> &mut Self {
         self.decl.persistable = value;
+        self
+    }
+
+    /// Declares one entity access rule for `roles`, making this entity's
+    /// access rules authoritative.
+    ///
+    /// Calling it at all switches the entity from "preserve whatever the
+    /// imported model had" to "these rules and no others", so an imported
+    /// entity keeps its rules until the declaration takes them over — the
+    /// same contract `ModuleBuilder::role` has for module security. Use
+    /// [`EntityBuilder::clear_access_rules`] to declare that an entity has
+    /// none.
+    pub fn access_rule(
+        &mut self,
+        roles: impl IntoIterator<Item = impl Into<String>>,
+        configure: impl FnOnce(&mut AccessRuleBuilder),
+    ) -> &mut Self {
+        let mut builder =
+            AccessRuleBuilder::new(roles.into_iter().map(Into::into).collect::<Vec<_>>());
+        configure(&mut builder);
+        self.decl
+            .access_rules
+            .get_or_insert_with(Vec::new)
+            .push(builder.into_decl());
+        self
+    }
+
+    /// Declares that this entity has no access rules, dropping any the
+    /// imported model carried.
+    pub fn clear_access_rules(&mut self) -> &mut Self {
+        self.decl.access_rules = Some(vec![]);
         self
     }
 

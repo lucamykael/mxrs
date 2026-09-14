@@ -49,6 +49,7 @@
 //! assert_eq!(definition.modules[0].entities[0].name, "Order");
 //! ```
 
+mod access;
 mod constant;
 mod entity;
 mod enumeration;
@@ -60,6 +61,7 @@ mod project;
 mod scheduled_event;
 mod security;
 
+pub use access::AccessRuleBuilder;
 pub use constant::ConstantBuilder;
 pub use entity::EntityBuilder;
 pub use enumeration::EnumerationBuilder;
@@ -69,7 +71,7 @@ pub use mxrs_expr::{
     Expr, ListVar, MxBool, MxDecimal, MxFloat, MxInteger, MxLong, MxString, Var, boolean, decimal,
     float, integer, long, string,
 };
-pub use mxrs_ir::{ConstantType, OnOverlap, ScheduleUnit, SecurityLevel};
+pub use mxrs_ir::{ConstantType, MemberRights, OnOverlap, ScheduleUnit, SecurityLevel};
 pub use navigation::{NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder};
 pub use page::{
     ButtonBuilder, ContainerBuilder, DataViewBuilder, LayoutBuilder, LayoutGridBuilder,

@@ -95,6 +95,11 @@ pub enum WriterError {
         actual: String,
     },
 
+    #[error(
+        "entity {module_name}.{name} declares an access rule with no module roles; a rule that grants rights to nobody is not expressible"
+    )]
+    AccessRuleWithoutRoles { module_name: String, name: String },
+
     #[error("duplicate constant {module_name}.{name:?} declared while synchronizing")]
     DuplicateConstant { module_name: String, name: String },
 

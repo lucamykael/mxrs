@@ -99,6 +99,70 @@ pub struct AssociationDecl {
     pub documentation: String,
 }
 
+/// What a module role may do with one entity member, or with every member a
+/// rule does not name. Mirrors Mendix's `AccessRights`/
+/// `DefaultMemberAccessRights` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemberRights {
+    #[default]
+    None,
+    ReadOnly,
+    ReadWrite,
+}
+
+/// Whether a [`MemberAccessDecl`] names an attribute or an association: the
+/// two land in different fields of the native `DomainModels$MemberAccess`
+/// document and cannot be told apart from the name alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMemberKind {
+    Attribute,
+    Association,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberAccessDecl {
+    /// Qualified as `"Module.Entity.Attribute"` or `"Module.Association"` —
+    /// the builder resolves it from a marker, so an unqualified spelling
+    /// cannot reach the writer.
+    pub reference: String,
+    pub kind: AccessMemberKind,
+    pub rights: MemberRights,
+}
+
+/// One entity access rule: what a set of module roles may do with an entity.
+///
+/// `members` is the explicit list only. mxrb additionally supports a
+/// `read:`/`write: :all` shorthand that expands to every member at
+/// declaration time; here that expansion is the writer's job, driven by
+/// [`AccessRuleDecl::default_rights`], so a rule declared once keeps meaning
+/// the same thing after an attribute is added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRuleDecl {
+    /// Module role names, unqualified (`"User"`), as declared by
+    /// [`crate::ModuleRoleDecl`].
+    pub roles: Vec<String>,
+    pub documentation: String,
+    pub allow_create: bool,
+    pub allow_delete: bool,
+    pub default_rights: MemberRights,
+    pub members: Vec<MemberAccessDecl>,
+    pub xpath_constraint: String,
+}
+
+impl AccessRuleDecl {
+    pub fn new(roles: Vec<String>) -> Self {
+        Self {
+            roles,
+            documentation: String::new(),
+            allow_create: false,
+            allow_delete: false,
+            default_rights: MemberRights::default(),
+            members: vec![],
+            xpath_constraint: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EntityDecl {
     pub name: String,
@@ -106,6 +170,10 @@ pub struct EntityDecl {
     pub persistable: bool,
     pub attributes: Vec<AttributeDecl>,
     pub associations: Vec<AssociationDecl>,
+    /// `None` preserves whatever access rules an imported entity already has.
+    /// `Some` is authoritative, including an explicitly empty rule set — the
+    /// same split [`ModuleDecl::roles`] draws for module security.
+    pub access_rules: Option<Vec<AccessRuleDecl>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +218,7 @@ impl EntityDecl {
             persistable: true,
             attributes: vec![],
             associations: vec![],
+            access_rules: None,
         }
     }
 }

@@ -202,7 +202,7 @@ impl Entity {
             "validationRules": mxrs_bson::build_array(self.validation_rules.iter().cloned().map(mxrs_bson::Bson::Document).collect(), 3),
             "eventHandlers": mxrs_bson::build_array(self.lifecycle.iter().map(lifecycle_bson).collect(), 3),
             "indexes": mxrs_bson::build_array(vec![], 3),
-            "accessRules": mxrs_bson::build_array(vec![], 3),
+            "accessRules": mxrs_bson::build_array(self.access_rules.iter().map(access_rule_bson).collect(), 3),
             "source": mxrs_bson::Bson::Null,
             "exportLevel": self.export_level.clone(),
             "image": self.image.clone().unwrap_or_default(),
@@ -382,6 +382,52 @@ fn lifecycle_bson(callback: &LifecycleCallback) -> mxrs_bson::Bson {
         "PassEventObject": callback.pass_event_object,
         "RaiseErrorOnFalse": callback.raise_error_on_false,
     })
+}
+
+/// Serializes one access rule back into its native `DomainModels$AccessRule`
+/// shape, the inverse of [`parse_access_rule`] and the counterpart of mxrb's
+/// `Writer#access_rule_doc`.
+///
+/// Until this existed `Entity::to_bson` wrote an empty `accessRules` array
+/// unconditionally, so an entity read with rules and written back lost its
+/// security. Roles are emitted under `AllowedModuleRoles` with array marker 1
+/// (by-name references), which is the spelling both mxrb's writer and the
+/// runtime's reader use.
+pub fn access_rule_bson(rule: &AccessRule) -> mxrs_bson::Bson {
+    let members = rule
+        .members
+        .iter()
+        .map(|member| {
+            let association = member.kind == AccessMemberKind::Association;
+            mxrs_bson::Bson::Document(doc! {
+                "$ID": member.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                "$Type": "DomainModels$MemberAccess",
+                "Association": if association { member.reference.clone() } else { String::new() },
+                "Attribute": if association { String::new() } else { member.reference.clone() },
+                "AccessRights": member.rights.clone(),
+            })
+        })
+        .collect();
+    let mut document = doc! {
+        "$ID": rule.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        "$Type": "DomainModels$AccessRule",
+        "Documentation": rule.documentation.clone(),
+        "AllowedModuleRoles": mxrs_bson::build_array(
+            rule.roles.iter().cloned().map(mxrs_bson::Bson::String).collect(),
+            1,
+        ),
+        "AllowCreate": rule.create,
+        "AllowDelete": rule.delete,
+        "DefaultMemberAccessRights": rule.default_rights.clone(),
+        "MemberAccesses": mxrs_bson::build_array(members, 3),
+        "XPathConstraint": rule.xpath.clone(),
+    };
+    // Absent and empty are different to Studio Pro, so the key is written
+    // only when the rule actually carries a caption — as mxrb does.
+    if let Some(caption) = &rule.xpath_caption {
+        document.insert("XPathConstraintCaption", caption.clone());
+    }
+    mxrs_bson::Bson::Document(document)
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use mxrs_expr::attribute;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
 use mxrs_ir::{
     AssociationOwner, AssociationStorage, AssociationType, AttributeType, ConstantType,
-    MicroflowRef, OnOverlap, Ref, ScheduleUnit,
+    MemberRights, MicroflowRef, OnOverlap, Ref, ScheduleUnit,
 };
 use mxrs_model::Project;
 use mxrs_model::association::{AssociationType as ModelAssociationType, Owner as ModelOwner};
@@ -1381,5 +1381,170 @@ fn a_scheduled_event_without_a_microflow_fails_rather_than_writing_a_job_that_ru
     assert!(matches!(
         error,
         mxrs_writer::WriterError::ScheduledEventWithoutMicroflow(name) if name == "SE_Orphan"
+    ));
+}
+
+#[test]
+fn entity_access_rules_persist_and_read_back_with_qualified_roles() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Access.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.role("User", "Regular user");
+        m.role("Manager", "Sales manager");
+        m.entity("Order", |e| {
+            e.string("Number");
+            e.decimal("Total");
+            e.access_rule(["User"], |rule| {
+                rule.documentation("Own orders, read only")
+                    .xpath("[System.owner = '[%CurrentUser%]']")
+                    .attribute::<markers::Sales::Order_Number>(MemberRights::ReadOnly)
+                    .attribute::<markers::Sales::Order_Total>(MemberRights::ReadOnly);
+            });
+            e.access_rule(["Manager", "CRM.Admin"], |rule| {
+                rule.allow_create(true)
+                    .allow_delete(true)
+                    .default_rights(MemberRights::ReadWrite)
+                    .association::<markers::Sales::Order_Order_Customer>(MemberRights::ReadWrite);
+            });
+        });
+    });
+
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let order = read.modules().unwrap()[0].entities()[0].clone();
+    assert_eq!(order.access_rules.len(), 2);
+
+    let user = &order.access_rules[0];
+    // An unqualified role resolves against the declaring module; an already
+    // qualified one is left alone.
+    assert_eq!(user.roles, ["Sales.User"]);
+    assert!(!user.create && !user.delete);
+    assert_eq!(user.default_rights, "None");
+    assert_eq!(user.xpath, "[System.owner = '[%CurrentUser%]']");
+    assert_eq!(user.documentation, "Own orders, read only");
+    assert_eq!(
+        user.members
+            .iter()
+            .map(|member| (member.reference.as_str(), member.rights.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Sales.Order.Number", "ReadOnly"),
+            ("Sales.Order.Total", "ReadOnly")
+        ]
+    );
+
+    let manager = &order.access_rules[1];
+    assert_eq!(manager.roles, ["Sales.Manager", "CRM.Admin"]);
+    assert!(manager.create && manager.delete);
+    assert_eq!(manager.default_rights, "ReadWrite");
+    assert_eq!(manager.members.len(), 1);
+    // An association member is stored under `Association`, not `Attribute`,
+    // and keeps the association's own qualified name.
+    assert_eq!(manager.members[0].reference, "Sales.Order_Customer");
+    assert_eq!(
+        manager.members[0].kind,
+        mxrs_model::entity::AccessMemberKind::Association
+    );
+}
+
+#[test]
+fn re_synchronizing_preserves_access_rule_identities_and_undeclared_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("AccessResync.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.role("User", "Regular user");
+        m.entity("Order", |e| {
+            e.string("Number");
+            e.access_rule(["User"], |rule| {
+                rule.attribute::<markers::Sales::Order_Number>(MemberRights::ReadOnly);
+            });
+        });
+    });
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let original = Project::open(&path, true).unwrap().modules().unwrap()[0].entities()[0].clone();
+    let original_rule_id = original.access_rules[0].id.clone().unwrap();
+    let original_member_id = original.access_rules[0].members[0].id.clone().unwrap();
+
+    // Re-declaring the same rule with wider rights keeps both identities: the
+    // role set, not array position, is what identifies a rule.
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.entity("Order", |e| {
+            e.string("Number");
+            e.access_rule(["User"], |rule| {
+                rule.allow_create(true)
+                    .attribute::<markers::Sales::Order_Number>(MemberRights::ReadWrite);
+            });
+        });
+    });
+    mxrs_writer::synchronize_project(&path, &project.build()).unwrap();
+
+    let updated = Project::open(&path, true).unwrap().modules().unwrap()[0].entities()[0].clone();
+    assert_eq!(updated.access_rules.len(), 1);
+    assert_eq!(
+        updated.access_rules[0].id.as_deref(),
+        Some(original_rule_id.as_str())
+    );
+    assert!(updated.access_rules[0].create);
+    assert_eq!(updated.access_rules[0].members[0].rights, "ReadWrite");
+    assert_eq!(
+        updated.access_rules[0].members[0].id.as_deref(),
+        Some(original_member_id.as_str())
+    );
+
+    // An entity that declares no rules at all leaves the existing ones alone
+    // rather than clearing them.
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.entity("Order", |e| {
+            e.string("Number");
+        });
+    });
+    mxrs_writer::synchronize_project(&path, &project.build()).unwrap();
+    let untouched = Project::open(&path, true).unwrap().modules().unwrap()[0].entities()[0].clone();
+    assert_eq!(untouched.access_rules.len(), 1);
+    assert_eq!(
+        untouched.access_rules[0].id.as_deref(),
+        Some(original_rule_id.as_str())
+    );
+
+    // Clearing is possible, but only by saying so.
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.entity("Order", |e| {
+            e.string("Number");
+            e.clear_access_rules();
+        });
+    });
+    mxrs_writer::synchronize_project(&path, &project.build()).unwrap();
+    let cleared = Project::open(&path, true).unwrap().modules().unwrap()[0].entities()[0].clone();
+    assert!(cleared.access_rules.is_empty());
+}
+
+#[test]
+fn an_access_rule_with_no_roles_fails_instead_of_granting_rights_to_nobody() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("NoRoles.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.entity("Order", |e| {
+            e.access_rule(Vec::<String>::new(), |rule| {
+                rule.allow_create(true);
+            });
+        });
+    });
+
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::AccessRuleWithoutRoles { module_name, name }
+            if module_name == "Sales" && name == "Order"
     ));
 }

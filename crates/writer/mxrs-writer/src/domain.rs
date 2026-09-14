@@ -11,9 +11,12 @@
 //! and incremental resync, unlike the narrower, entity-structure-only
 //! `synchronize_ruby_entity_structures!`). See each function's doc comment
 //! for exactly what's preserved vs. re-derived, and what's still not ported
-//! (indexes/access-rules/lifecycle/generalization-target reconciliation —
-//! `EntityDecl` has no DSL surface for those yet, so existing entities keep
-//! whatever they already had for those fields, verbatim).
+//! (indexes/lifecycle/generalization-target reconciliation — `EntityDecl` has
+//! no DSL surface for those yet, so existing entities keep whatever they
+//! already had for those fields, verbatim). Access rules *do* have a DSL
+//! surface now, and are three-state: an entity that declares none keeps its
+//! imported rules verbatim, while a declaration — including an explicitly
+//! empty one — is authoritative.
 //!
 //! Cross-module associations mirror mxrb's own `cross_association_doc`:
 //! unlike same-module associations, the target is **not** resolved to an
@@ -40,12 +43,16 @@ use std::collections::{HashMap, HashSet};
 use mxrs_bson::{Bson, Document};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::declaration::{
-    AssociationOwner, AssociationStorage, AssociationType, AttributeDecl, AttributeType, EntityDecl,
+    AccessMemberKind, AccessRuleDecl, AssociationOwner, AssociationStorage, AssociationType,
+    AttributeDecl, AttributeType, EntityDecl, MemberRights,
 };
 use mxrs_model::association::{
     Association, AssociationType as ModelAssociationType, Owner, StorageFormat,
 };
-use mxrs_model::entity::{Entity, Location, SystemMembers};
+use mxrs_model::entity::{
+    AccessMember as ModelAccessMember, AccessMemberKind as ModelAccessMemberKind,
+    AccessRule as ModelAccessRule, Entity, Location, SystemMembers, access_rule_bson,
+};
 use mxrs_model::{Attribute, AttributeType as ModelAttributeType, DomainModel};
 use mxrs_mpr::{MprFile, RawUnit};
 
@@ -71,7 +78,7 @@ pub fn build_domain_model(
         let qualified_name = format!("{module_name}.{}", decl.name);
         let id = identity.artifact_id(ArtifactKind::Entity, &qualified_name);
         entity_ids.insert(decl.name.clone(), id.clone());
-        entities.push(fresh_entity(module_name, decl, id, identity));
+        entities.push(fresh_entity(module_name, decl, id, identity)?);
     }
 
     let mut associations = Vec::new();
@@ -425,11 +432,11 @@ fn fresh_entity(
     decl: &EntityDecl,
     id: String,
     identity: ProjectIdentity,
-) -> Entity {
+) -> Result<Entity> {
     let entity_name = format!("{module_name}.{}", decl.name);
     let validation_rules =
         reconcile_validation_rules(module_name, &decl.name, &decl.attributes, vec![], identity);
-    Entity {
+    Ok(Entity {
         id: Some(id),
         name: Some(decl.name.clone()),
         qualified_name: Some(format!("{module_name}.{}", decl.name)),
@@ -440,7 +447,14 @@ fn fresh_entity(
         image: None,
         export_level: "Hidden".into(),
         generalization: None,
-        access_rules: vec![],
+        access_rules: reconcile_access_rules(
+            module_name,
+            &decl.name,
+            decl.access_rules.as_deref(),
+            &[],
+            identity,
+        )?
+        .unwrap_or_default(),
         indexes: vec![],
         system_members: SystemMembers::default(),
         lifecycle: vec![],
@@ -460,7 +474,7 @@ fn fresh_entity(
                 )
             })
             .collect(),
-    }
+    })
 }
 
 /// Reads whichever of `"name"`/`"Name"` a raw entity/attribute doc carries.
@@ -643,9 +657,9 @@ fn build_entity_doc(
     id: String,
     index: usize,
     identity: ProjectIdentity,
-) -> Document {
+) -> Result<Document> {
     let Some(prev) = previous else {
-        return fresh_entity(module_name, decl, id, identity).to_bson();
+        return Ok(fresh_entity(module_name, decl, id, identity)?.to_bson());
     };
 
     let mut out = prev.clone();
@@ -702,8 +716,34 @@ fn build_entity_doc(
             previous_validation.marker,
         )),
     );
+    // Only written when the declaration is authoritative: an entity that
+    // declares no rules keeps the imported array verbatim.
+    let rules_key = native_key(prev, "accessRules", "AccessRules");
+    let previous_rules = mxrs_bson::parse_array(array_field(prev, rules_key));
+    let previous_documents: Vec<Document> = previous_rules
+        .items
+        .iter()
+        .filter_map(Bson::as_document)
+        .cloned()
+        .collect();
+    if let Some(rules) = reconcile_access_rules(
+        module_name,
+        &decl.name,
+        decl.access_rules.as_deref(),
+        &previous_documents,
+        identity,
+    )? {
+        out.insert(
+            rules_key,
+            Bson::Array(mxrs_bson::build_array(
+                rules.iter().map(access_rule_bson).collect(),
+                previous_rules.marker,
+            )),
+        );
+    }
+
     let _ = index; // reserved: mxrb positions brand-new entities by index; fresh_entity already defaults to (0, 0)
-    out
+    Ok(out)
 }
 
 /// Re-syncs the entity graph of an *existing* domain model against a
@@ -778,7 +818,7 @@ pub fn synchronize_domain_entities(
             id,
             index,
             identity,
-        )));
+        )?));
     }
 
     doc.insert(
@@ -814,4 +854,182 @@ pub fn synchronize_domain_model(
     synchronize_domain_entities(mpr, module_id, module_name, entities)?;
     synchronize_domain_associations(mpr, module_id, module_name, entities, known_entities)?;
     Ok(())
+}
+
+/// Lowers declared access rules into `mxrs_model::AccessRule` values, which
+/// `Entity::to_bson` then serializes into native `DomainModels$AccessRule`
+/// documents. Mirrors `Writer#access_rule_doc`.
+///
+/// Returns `None` when the entity declares no rules at all
+/// (`EntityDecl::access_rules == None`): that means "leave whatever the
+/// imported model had", so the caller keeps the previous array untouched
+/// rather than writing an empty one. An explicit `Some(vec![])` does clear
+/// them.
+///
+/// Identities derive from the role set and the member reference rather than
+/// from array position, so reordering rules in source does not renumber them;
+/// a previous rule whose role set matches keeps its `$ID`, the same
+/// preservation the attribute and validation-rule paths already do.
+fn reconcile_access_rules(
+    module_name: &str,
+    entity_name: &str,
+    declared: Option<&[AccessRuleDecl]>,
+    previous: &[Document],
+    identity: ProjectIdentity,
+) -> Result<Option<Vec<ModelAccessRule>>> {
+    let Some(declared) = declared else {
+        return Ok(None);
+    };
+    // mxrb raises "access_rule requires at least one module role"; a rule with
+    // an empty role set matches nobody, so it is a declaration mistake rather
+    // than a no-op worth persisting.
+    if declared.iter().any(|rule| rule.roles.is_empty()) {
+        return Err(WriterError::AccessRuleWithoutRoles {
+            module_name: module_name.to_string(),
+            name: entity_name.to_string(),
+        });
+    }
+    let qualified_entity = format!("{module_name}.{entity_name}");
+    let previous_by_roles: HashMap<String, &Document> = previous
+        .iter()
+        .map(|document| (rule_role_key(document), document))
+        .collect();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    Ok(Some(
+        declared
+            .iter()
+            .map(|rule| {
+                let roles: Vec<String> = rule
+                    .roles
+                    .iter()
+                    .map(|role| qualify_role(module_name, role))
+                    .collect();
+                let role_key = roles.join("+");
+                // Two rules may legally target the same roles; the occurrence
+                // index disambiguates only that case, so the common
+                // one-rule-per-role-set shape keeps a position-independent key.
+                let occurrence = *seen
+                    .entry(role_key.clone())
+                    .and_modify(|count| *count += 1)
+                    .or_insert(0);
+                let rule_key = if occurrence == 0 {
+                    format!("{qualified_entity}#{role_key}")
+                } else {
+                    format!("{qualified_entity}#{role_key}#{occurrence}")
+                };
+                let prior = previous_by_roles.get(&role_key).copied();
+                let previous_members = previous_member_ids(prior);
+                ModelAccessRule {
+                    id: Some(
+                        prior
+                            .and_then(|document| document.get("$ID"))
+                            .and_then(mxrs_bson::extract_id)
+                            .unwrap_or_else(|| {
+                                identity.artifact_id(ArtifactKind::AccessRule, &rule_key)
+                            }),
+                    ),
+                    roles,
+                    create: rule.allow_create,
+                    delete: rule.allow_delete,
+                    documentation: rule.documentation.clone(),
+                    default_rights: rights_name(rule.default_rights).to_string(),
+                    members: rule
+                        .members
+                        .iter()
+                        .map(|member| ModelAccessMember {
+                            id: Some(
+                                previous_members
+                                    .get(&member.reference)
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        identity.artifact_id(
+                                            ArtifactKind::AccessMember,
+                                            &format!("{rule_key}.{}", member.reference),
+                                        )
+                                    }),
+                            ),
+                            name: member
+                                .reference
+                                .rsplit('.')
+                                .next()
+                                .unwrap_or(&member.reference)
+                                .to_string(),
+                            reference: member.reference.clone(),
+                            rights: rights_name(member.rights).to_string(),
+                            kind: match member.kind {
+                                AccessMemberKind::Attribute => ModelAccessMemberKind::Attribute,
+                                AccessMemberKind::Association => ModelAccessMemberKind::Association,
+                            },
+                        })
+                        .collect(),
+                    xpath: rule.xpath_constraint.clone(),
+                    // Captions are Studio Pro's, not ours: preserved when the
+                    // rule already had one, never invented.
+                    xpath_caption: prior
+                        .and_then(|document| document.get_str("XPathConstraintCaption").ok())
+                        .filter(|caption| !caption.is_empty())
+                        .map(str::to_string),
+                }
+            })
+            .collect(),
+    ))
+}
+
+fn previous_member_ids(previous: Option<&Document>) -> HashMap<String, String> {
+    let Some(previous) = previous else {
+        return HashMap::new();
+    };
+    mxrs_bson::parse_array(previous.get_array("MemberAccesses").ok().map(Vec::as_slice))
+        .items
+        .iter()
+        .filter_map(Bson::as_document)
+        .filter_map(|member| {
+            let association = member.get_str("Association").unwrap_or("");
+            let reference = if association.is_empty() {
+                member.get_str("Attribute").unwrap_or("")
+            } else {
+                association
+            };
+            if reference.is_empty() {
+                return None;
+            }
+            Some((
+                reference.to_string(),
+                mxrs_bson::extract_id(member.get("$ID")?)?,
+            ))
+        })
+        .collect()
+}
+
+fn rule_role_key(document: &Document) -> String {
+    mxrs_bson::parse_array(
+        document
+            .get_array("AllowedModuleRoles")
+            .or_else(|_| document.get_array("ModuleRoles"))
+            .ok()
+            .map(Vec::as_slice),
+    )
+    .items
+    .iter()
+    .filter_map(Bson::as_str)
+    .collect::<Vec<_>>()
+    .join("+")
+}
+
+/// `AllowedModuleRoles` holds qualified role names; an unqualified
+/// declaration resolves against the module that owns the entity.
+fn qualify_role(module_name: &str, role: &str) -> String {
+    if role.contains('.') {
+        role.to_string()
+    } else {
+        format!("{module_name}.{role}")
+    }
+}
+
+fn rights_name(rights: MemberRights) -> &'static str {
+    match rights {
+        MemberRights::None => "None",
+        MemberRights::ReadOnly => "ReadOnly",
+        MemberRights::ReadWrite => "ReadWrite",
+    }
 }

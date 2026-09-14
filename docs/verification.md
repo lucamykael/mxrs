@@ -100,6 +100,19 @@ Because a generated slice needs marker *types* rather than MXRB's strings, the
 templates emit hand-written markers in the same `Entity_Attribute` shape
 `mxrs-typegen` produces from a manifest.
 
+Entity access rules now have an authoring surface
+(`EntityBuilder::access_rule`, with members named by attribute/association
+marker) and are persisted as `DomainModels$AccessRule`. This closed a
+write-side loss, not only a missing feature: `Entity::to_bson` previously wrote
+an empty `accessRules` array unconditionally, so an entity read with rules and
+written back lost its security. Rules are three-state — an entity that declares
+none keeps its imported rules verbatim, and clearing them requires saying so —
+and rule/member identities derive from the role set and member reference rather
+than array position, so reordering declarations does not renumber them. Not
+covered: access rules are not re-exported into `project! {}` source (the same
+gap indexes and lifecycle handlers have), and role references are not validated
+against declared module roles, matching MXRB.
+
 ## Official fresh-project acceptance
 
 On 2026-09-13, a new application authored with the current Rust scaffold and

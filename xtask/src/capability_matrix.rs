@@ -233,7 +233,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "security" => (
             Status::Partial,
             "mxrs security init",
-            "module roles and project security scaffold; MXRB's access_rule guidance has no DSL surface",
+            "module roles and project security scaffold, plus marker-checked entity access rules on EntityBuilder; no command-contract oracle",
         ),
         "module" => (
             Status::Partial,

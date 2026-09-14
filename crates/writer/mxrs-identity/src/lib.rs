@@ -34,6 +34,8 @@ pub enum ArtifactKind {
     Enumeration,
     EnumerationValue,
     EnumerationCaption,
+    AccessRule,
+    AccessMember,
     Constant,
     /// The `Type` sub-document of a constant, which carries its own `$ID`
     /// distinct from the constant's.
@@ -71,6 +73,8 @@ impl fmt::Display for ArtifactKind {
             Self::Enumeration => "enumeration",
             Self::EnumerationValue => "enumeration-value",
             Self::EnumerationCaption => "enumeration-caption",
+            Self::AccessRule => "access-rule",
+            Self::AccessMember => "access-member",
             Self::Constant => "constant",
             Self::ConstantType => "constant-type",
             Self::ScheduledEvent => "scheduled-event",

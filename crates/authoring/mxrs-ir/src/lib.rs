@@ -19,9 +19,10 @@ pub use application::{
     ProjectSecurityDecl, RoleHomeDecl, SecurityLevel, UserRoleDecl,
 };
 pub use declaration::{
-    AssociationDecl, AssociationOwner, AssociationStorage, AssociationType, AttributeDecl,
-    AttributeType, ConstantDecl, ConstantType, EntityDecl, EnumerationDecl, EnumerationValueDecl,
-    ModuleDecl, OnOverlap, ProjectDecl, ScheduleUnit, ScheduledEventDecl,
+    AccessMemberKind, AccessRuleDecl, AssociationDecl, AssociationOwner, AssociationStorage,
+    AssociationType, AttributeDecl, AttributeType, ConstantDecl, ConstantType, EntityDecl,
+    EnumerationDecl, EnumerationValueDecl, MemberAccessDecl, MemberRights, ModuleDecl, OnOverlap,
+    ProjectDecl, ScheduleUnit, ScheduledEventDecl,
 };
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{
