@@ -39,6 +39,7 @@ pub mod documents;
 pub mod domain;
 pub mod error;
 pub mod flow_compiler;
+pub mod instrumentation;
 pub mod layout_compiler;
 pub mod module;
 mod navigation;
@@ -48,4 +49,5 @@ pub mod scaffold;
 mod security;
 
 pub use error::{Result, WriterError};
+pub use instrumentation::{InstrumentationReport, instrument_functional_tests};
 pub use project::{synchronize_project, synchronize_project_documents, write_project};

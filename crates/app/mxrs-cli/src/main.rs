@@ -69,6 +69,7 @@ fn command_options(
             &[],
         ),
         "test" => (&[], &["--json", "--plan"], &[]),
+        "functional-instrument" => (&[], &["--json"], &[]),
         "cache" => (&[], &["--json"], &[]),
         "db" => (&["--port"], &["--json"], &[]),
         "doctor" => (&[], &["--json"], &[]),
@@ -142,6 +143,7 @@ commands! {
     "env", "[DIR] [--environment NAME] [--json]", "Inspect an environment profile without values", run_env;
     "export", "<file.mpr> [-o <out.rs>] [--allow-lossy]", "Export editable Rust declarations", run_export;
     "functional-test", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create a declarative runtime test suite", run_functional_test;
+    "functional-instrument", "<writable.mpr> <suite.json> [--json]", "Instrument a disposable MPR with a functional test runner", run_functional_instrument;
     "help", "[command]", "Show command usage", run_help;
     "impact", "<file.mpr> <artifact> [--json]", "Find transitive incoming dependencies", run_impact;
     "import", "<file.mpr> --output <directory> [--mxrs-workspace <path>]", "Import into a Cargo-native project", run_import;
@@ -714,6 +716,39 @@ fn run_functional_test(args: Vec<String>) -> ExitCode {
         mxrs_scaffold::ArtifactKind::FunctionalTest,
         args,
     ))
+}
+
+fn run_functional_instrument(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let [project, definition] = args.as_slice() else {
+        eprintln!("Usage: mxrs functional-instrument <writable.mpr> <suite.json> [--json]");
+        return ExitCode::FAILURE;
+    };
+    match mxrs_cli::functional::instrument(project, definition) {
+        Ok(report) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "module": report.module,
+                        "runner": report.runner,
+                        "tests": report.tests,
+                    }))
+                    .expect("instrumentation report is serializable")
+                );
+            } else {
+                println!(
+                    "[mxrs] Instrumented {} tests; runner {}",
+                    report.tests, report.runner
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_security(args: Vec<String>) -> ExitCode {

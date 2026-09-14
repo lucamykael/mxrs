@@ -4,7 +4,8 @@
 //! `Writer#build_microflow_graph`/`#process_activity`/`#process_decision`/
 //! `#build_activity`/`#activity_action_doc` — scoped to this pass's activity
 //! subset (create/change/delete object, commit, call microflow, two-branch
-//! decision; see `mxrs-ir`'s `flow` module doc for what's deferred).
+//! decision, functional-test retrieval/count/log/return activities; see
+//! `mxrs-ir`'s `flow` module doc for what's deferred).
 //! Targets Mendix 11.x only, so the major-version branches in the Ruby
 //! source (e.g. `SequenceFlow`'s pre-v10 Bezier-vector shape, the
 //! `ArgumentModel`/`Queue` fields only present on majors 6-10/8-9) are
@@ -170,12 +171,20 @@ fn process_activity(
 
     let act_id = uuid::Uuid::new_v4().to_string();
     let terminal_type = match activity {
-        Activity::BreakLoop => Some("Microflows$BreakEvent"),
-        Activity::ContinueLoop => Some("Microflows$ContinueEvent"),
+        Activity::BreakLoop => Some(("Microflows$BreakEvent", None)),
+        Activity::ContinueLoop => Some(("Microflows$ContinueEvent", None)),
+        Activity::ReturnValue { expression } => {
+            Some(("Microflows$EndEvent", Some(expression.as_str())))
+        }
         _ => None,
     };
-    if let Some(ty) = terminal_type {
-        objects.push(flow_object_doc(&act_id, ty, x, y, "20;20"));
+    if let Some((ty, expression)) = terminal_type {
+        let mut object = flow_object_doc(&act_id, ty, x, y, "20;20");
+        if let Some(expression) = expression {
+            object.insert("Documentation", "");
+            object.insert("ReturnValue", expression);
+        }
+        objects.push(object);
     } else {
         objects.push(build_activity(activity, &act_id, x, y, error_handling));
     }
@@ -539,12 +548,64 @@ fn activity_action_doc(activity: &Activity, error_handling: &str) -> Document {
                 },
             }
         }
+        Activity::RetrieveObjects {
+            entity,
+            variable,
+            xpath,
+        } => doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$RetrieveAction",
+            "ErrorHandlingType": error_handling,
+            "ResultVariableName": variable.clone(),
+            "RetrieveSource": doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$DatabaseRetrieveSource",
+                "Entity": entity.clone(),
+                "NewSortings": doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$SortingsList",
+                    "Sortings": mxrs_bson::build_array(vec![], 2),
+                },
+                "Range": doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$ConstantRange",
+                    "SingleObject": false,
+                },
+                "XpathConstraint": xpath.clone().unwrap_or_default(),
+            },
+        },
+        Activity::AggregateCount {
+            list_variable,
+            output_variable,
+        } => doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$AggregateAction",
+            "AggregateFunction": "Count",
+            "AggregateVariableName": list_variable.clone(),
+            "Attribute": "",
+            "ErrorHandlingType": error_handling,
+            "VariableName": output_variable.clone(),
+        },
+        Activity::LogMessage {
+            message,
+            level,
+            node,
+        } => doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$LogMessageAction",
+            "ErrorHandlingType": error_handling,
+            "IncludeLatestStackTrace": false,
+            "Level": level.native_name(),
+            "MessageTemplate": doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$StringTemplate",
+                "Parameters": mxrs_bson::build_array(vec![], 2),
+                "Text": message.clone(),
+            },
+            "Node": node.clone(),
+        },
         Activity::Decision { .. }
         | Activity::LoopOver { .. }
         | Activity::WhileLoop { .. }
         | Activity::BreakLoop
         | Activity::ContinueLoop => {
             unreachable!("control-flow activities are handled before build_activity")
+        }
+        Activity::ReturnValue { .. } => {
+            unreachable!("return activities are handled before build_activity")
         }
     }
 }
@@ -669,5 +730,52 @@ mod tests {
                     .any(|c| c.as_document().and_then(|d| d.get_str("Value").ok()) == Some("false"))
         });
         assert!(direct_case_flow.is_some());
+    }
+
+    #[test]
+    fn functional_actions_have_native_shapes_and_rescue_can_return_false() {
+        let activities = vec![
+            Activity::RetrieveObjects {
+                entity: "Sales.Order".into(),
+                variable: "items".into(),
+                xpath: Some("[Number = 'A-1']".into()),
+            },
+            Activity::AggregateCount {
+                list_variable: "items".into(),
+                output_variable: "count".into(),
+            },
+            Activity::LogMessage {
+                message: "done".into(),
+                level: mxrs_ir::flow::LogLevel::Info,
+                node: "'MXRS_TEST'".into(),
+            },
+        ];
+        let rescue = vec![Activity::ReturnValue {
+            expression: "false".into(),
+        }];
+        let (objects, flows) = build_microflow_graph(&activities, &rescue, Some("$count = 1"));
+        let actions = objects
+            .iter()
+            .filter_map(|object| object.get_document("Action").ok())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions[0]
+                .get_document("RetrieveSource")
+                .unwrap()
+                .get_str("XpathConstraint")
+                .unwrap(),
+            "[Number = 'A-1']"
+        );
+        assert_eq!(actions[1].get_str("AggregateFunction").unwrap(), "Count");
+        assert_eq!(actions[2].get_str("Level").unwrap(), "Info");
+        assert!(objects.iter().any(|object| {
+            object.get_str("$Type").ok() == Some("Microflows$EndEvent")
+                && object.get_str("ReturnValue").ok() == Some("false")
+        }));
+        assert!(
+            flows
+                .iter()
+                .any(|flow| flow.get_bool("IsErrorHandler").ok() == Some(true))
+        );
     }
 }

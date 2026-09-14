@@ -46,6 +46,21 @@ pub struct MicroflowCallMapping {
     pub value: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Error,
+}
+
+impl LogLevel {
+    pub fn native_name(self) -> &'static str {
+        match self {
+            Self::Info => "Info",
+            Self::Error => "Error",
+        }
+    }
+}
+
 /// Explicit Mendix return type paired with a flow's return expression.
 /// Keeping this in the semantic IR prevents a non-void end event from being
 /// persisted with `DataTypes$VoidType`.
@@ -92,6 +107,23 @@ pub enum Activity {
         result_variable: Option<String>,
         use_return: bool,
         mappings: Vec<MicroflowCallMapping>,
+    },
+    RetrieveObjects {
+        entity: String,
+        variable: String,
+        xpath: Option<String>,
+    },
+    AggregateCount {
+        list_variable: String,
+        output_variable: String,
+    },
+    LogMessage {
+        message: String,
+        level: LogLevel,
+        node: String,
+    },
+    ReturnValue {
+        expression: String,
     },
     Decision {
         condition: String,

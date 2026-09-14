@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use mxrs_ir::flow::{Activity, FlowReturnType, LogLevel, MicroflowCallMapping, MicroflowDecl};
 use mxrs_model::{Module, Project};
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,8 @@ pub enum FunctionalError {
     },
     #[error(transparent)]
     Model(#[from] mxrs_model::ModelError),
+    #[error(transparent)]
+    Writer(#[from] mxrs_writer::WriterError),
     #[error("functional test suite is empty")]
     Empty,
     #[error("functional test {test:?}: {message}")]
@@ -102,12 +105,68 @@ pub struct FunctionalPlan {
     pub execution_supported: bool,
 }
 
+struct Prepared {
+    project: PathBuf,
+    definition_path: PathBuf,
+    mendix_version: Option<String>,
+    definition: Definition,
+}
+
 pub fn plan(
     project_path: impl AsRef<Path>,
     definition_path: impl AsRef<Path>,
 ) -> Result<FunctionalPlan> {
-    let project_path = absolute(project_path.as_ref())?;
-    let definition_path = absolute(definition_path.as_ref())?;
+    let prepared = prepare(project_path.as_ref(), definition_path.as_ref())?;
+    let tests = prepared
+        .definition
+        .tests
+        .iter()
+        .map(|test| PlannedTest {
+            name: test.name.trim().to_string(),
+            target: test.call.clone(),
+            arguments: test.arguments.len(),
+            count_assertions: test.expect.count.len(),
+            has_return_assertion: test.expect.return_value.is_some(),
+            before: test.before.as_ref().map(|hook| hook.call.clone()),
+            after: test.after.as_ref().map(|hook| hook.call.clone()),
+        })
+        .collect();
+    Ok(FunctionalPlan {
+        project: prepared.project,
+        definition: prepared.definition_path,
+        mendix_version: prepared.mendix_version,
+        tests,
+        execution_supported: false,
+    })
+}
+
+pub fn instrument(
+    project_path: impl AsRef<Path>,
+    definition_path: impl AsRef<Path>,
+) -> Result<mxrs_writer::InstrumentationReport> {
+    const MODULE: &str = "MxrsTests";
+    const RUNNER: &str = "MxrsTests.RunAll";
+    let prepared = prepare(project_path.as_ref(), definition_path.as_ref())?;
+    let mut flows = prepared
+        .definition
+        .tests
+        .iter()
+        .enumerate()
+        .map(|(index, test)| wrapper(index, test))
+        .collect::<Vec<_>>();
+    flows.push(runner(&prepared.definition.tests));
+    Ok(mxrs_writer::instrument_functional_tests(
+        prepared.project,
+        MODULE,
+        RUNNER,
+        &flows,
+        prepared.definition.tests.len(),
+    )?)
+}
+
+fn prepare(project_path: &Path, definition_path: &Path) -> Result<Prepared> {
+    let project_path = absolute(project_path)?;
+    let definition_path = absolute(definition_path)?;
     let source =
         std::fs::read_to_string(&definition_path).map_err(|source| FunctionalError::Io {
             path: definition_path.display().to_string(),
@@ -125,26 +184,114 @@ pub fn plan(
     let project = Project::open(&project_path, true)?;
     let modules = project.modules()?;
     let mut names = BTreeSet::new();
-    let mut tests = Vec::with_capacity(definition.tests.len());
     for test in &definition.tests {
         validate_test(test, &modules, &mut names)?;
-        tests.push(PlannedTest {
-            name: test.name.trim().to_string(),
-            target: test.call.clone(),
-            arguments: test.arguments.len(),
-            count_assertions: test.expect.count.len(),
-            has_return_assertion: test.expect.return_value.is_some(),
-            before: test.before.as_ref().map(|hook| hook.call.clone()),
-            after: test.after.as_ref().map(|hook| hook.call.clone()),
+    }
+    Ok(Prepared {
+        project: project_path,
+        definition_path,
+        mendix_version: project.mendix_version()?,
+        definition,
+    })
+}
+
+fn wrapper(index: usize, test: &TestCase) -> MicroflowDecl {
+    let mut flow = MicroflowDecl::new(format!("Test_{:03}", index + 1));
+    flow.return_type = Some(FlowReturnType::Boolean);
+    if let Some(hook) = &test.before {
+        flow.activities.push(call(hook, None));
+    }
+    flow.activities.push(call(
+        &Hook {
+            call: test.call.clone(),
+            arguments: test.arguments.clone(),
+        },
+        test.expect.return_value.as_ref().map(|_| "mxrs_actual"),
+    ));
+    let mut conditions = Vec::new();
+    if let Some(expected) = &test.expect.return_value {
+        conditions.push(format!("$mxrs_actual = {expected}"));
+    }
+    for (count_index, expectation) in test.expect.count.iter().enumerate() {
+        let list = format!("mxrs_items_{}", count_index + 1);
+        let count = format!("mxrs_count_{}", count_index + 1);
+        flow.activities.push(Activity::RetrieveObjects {
+            entity: expectation.entity.clone(),
+            variable: list.clone(),
+            xpath: expectation.xpath.clone(),
+        });
+        flow.activities.push(Activity::AggregateCount {
+            list_variable: list,
+            output_variable: count.clone(),
+        });
+        conditions.push(format!("${count} = {}", expectation.equals));
+    }
+    if let Some(hook) = &test.after {
+        flow.activities.push(call(hook, None));
+        flow.rescue_activities.push(call(hook, None));
+    }
+    flow.rescue_activities.push(Activity::ReturnValue {
+        expression: "false".to_string(),
+    });
+    flow.return_expression = Some(if conditions.is_empty() {
+        "true".to_string()
+    } else {
+        format!("({})", conditions.join(" and "))
+    });
+    flow
+}
+
+fn call(hook: &Hook, result: Option<&str>) -> Activity {
+    Activity::CallMicroflow {
+        name: hook.call.clone(),
+        result_variable: result.map(str::to_string),
+        use_return: result.is_some(),
+        mappings: hook
+            .arguments
+            .iter()
+            .map(|(parameter, value)| MicroflowCallMapping {
+                parameter: parameter.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn runner(tests: &[TestCase]) -> MicroflowDecl {
+    let mut flow = MicroflowDecl::new("RunAll");
+    flow.return_type = Some(FlowReturnType::Boolean);
+    for (index, test) in tests.iter().enumerate() {
+        let variable = format!("passed_{}", index + 1);
+        flow.activities.push(Activity::CallMicroflow {
+            name: format!("MxrsTests.Test_{:03}", index + 1),
+            result_variable: Some(variable.clone()),
+            use_return: true,
+            mappings: vec![],
+        });
+        flow.activities.push(Activity::Decision {
+            condition: format!("${variable}"),
+            true_branch: vec![log(
+                format!("[MXRS_TEST] PASS {}", test.name),
+                LogLevel::Info,
+            )],
+            false_branch: vec![log(
+                format!("[MXRS_TEST] FAIL {}", test.name),
+                LogLevel::Error,
+            )],
         });
     }
-    Ok(FunctionalPlan {
-        project: project_path,
-        definition: definition_path,
-        mendix_version: project.mendix_version()?,
-        tests,
-        execution_supported: false,
-    })
+    flow.activities
+        .push(log("[MXRS_TEST] DONE".to_string(), LogLevel::Info));
+    flow.return_expression = Some("true".to_string());
+    flow
+}
+
+fn log(message: String, level: LogLevel) -> Activity {
+    Activity::LogMessage {
+        message,
+        level,
+        node: "'MXRS_TEST'".to_string(),
+    }
 }
 
 fn absolute(path: &Path) -> Result<PathBuf> {
@@ -358,5 +505,30 @@ mod tests {
                     .contains(expected)
             );
         }
+    }
+
+    #[test]
+    fn wrapper_carries_return_count_hooks_and_a_false_rescue_path() {
+        let definition: Definition = serde_json::from_str(
+            r#"{"tests":[{"name":"x","call":"Sales.Create","expect":{"return":"true","count":[{"entity":"Sales.Order","equals":1}]},"before":{"call":"Sales.Setup"},"after":{"call":"Sales.Cleanup"}}]}"#,
+        )
+        .unwrap();
+        let flow = wrapper(0, &definition.tests[0]);
+        assert_eq!(
+            flow.return_expression.as_deref(),
+            Some("($mxrs_actual = true and $mxrs_count_1 = 1)")
+        );
+        assert!(matches!(
+            &flow.activities[1],
+            Activity::CallMicroflow {
+                result_variable: Some(variable),
+                use_return: true,
+                ..
+            } if variable == "mxrs_actual"
+        ));
+        assert!(matches!(
+            flow.rescue_activities.last(),
+            Some(Activity::ReturnValue { expression }) if expression == "false"
+        ));
     }
 }

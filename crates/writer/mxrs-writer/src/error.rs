@@ -25,6 +25,15 @@ pub enum WriterError {
     #[error("module unit {0:?} has no string Name")]
     MissingModuleName(String),
 
+    #[error("functional instrumentation module {0:?} already exists")]
+    InstrumentationModuleExists(String),
+
+    #[error("project settings unit not found")]
+    MissingProjectSettings,
+
+    #[error("model settings part not found")]
+    MissingModelSettings,
+
     #[error("entities missing from domain model of module {module_name:?}: {missing:?}")]
     EntitiesMissingFromDomainModel {
         module_name: String,

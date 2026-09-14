@@ -101,6 +101,7 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
         "portability",
         "test",
         "functional-test",
+        "functional-instrument",
     ] {
         assert!(names.contains(required));
     }
@@ -486,7 +487,7 @@ fn functional_test_plan_validates_real_mpr_targets_and_refuses_fake_execution() 
     let suite = directory.path().join("functional.json");
     std::fs::write(
         &suite,
-        r#"{"tests":[{"name":"starts","call":"Sales.Start","expect":{"count":[{"entity":"Sales.Order","equals":0}]}}]}"#,
+        r#"{"tests":[{"name":"starts","call":"Sales.Start","before":{"call":"Sales.Save"},"after":{"call":"Sales.Unused"},"expect":{"count":[{"entity":"Sales.Order","equals":0}]}}]}"#,
     )
     .unwrap();
 
@@ -501,6 +502,79 @@ fn functional_test_plan_validates_real_mpr_targets_and_refuses_fake_execution() 
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(plan["execution_supported"], false);
     assert_eq!(plan["tests"][0]["target"], "Sales.Start");
+
+    let instrument = cli(&[
+        "functional-instrument",
+        path.to_str().unwrap(),
+        suite.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(instrument.status.success(), "{:?}", instrument.stderr);
+    let report: Value = serde_json::from_slice(&instrument.stdout).unwrap();
+    assert_eq!(report["runner"], "MxrsTests.RunAll");
+    assert_eq!(report["tests"], 1);
+    assert!(query("validate", &path, &[]).status.success());
+
+    let project = mxrs_model::Project::open(&path, true).unwrap();
+    let modules = project.modules().unwrap();
+    let tests_module = modules
+        .iter()
+        .find(|module| module.name.as_deref() == Some("MxrsTests"))
+        .unwrap();
+    assert_eq!(tests_module.microflows.len(), 2);
+    let action_types = tests_module
+        .microflows
+        .iter()
+        .flat_map(|flow| &flow.objects)
+        .filter_map(|object| object.get_document("Action").ok())
+        .filter_map(|action| action.get_str("$Type").ok())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(action_types.contains("Microflows$RetrieveAction"));
+    assert!(action_types.contains("Microflows$AggregateAction"));
+    assert!(action_types.contains("Microflows$LogMessageAction"));
+    drop(project);
+
+    let mpr = mxrs_mpr::MprFile::open(&path, true).unwrap();
+    let settings = mpr
+        .all_units()
+        .unwrap()
+        .into_iter()
+        .find_map(|unit| {
+            let document = mpr.parse_contents(&unit).ok()?;
+            (document.get_str("$Type").ok() == Some("Settings$ProjectSettings")).then_some(document)
+        })
+        .unwrap();
+    let model_settings = mxrs_bson::parse_array(
+        settings
+            .get_array("Settings")
+            .ok()
+            .map(std::vec::Vec::as_slice),
+    )
+    .items
+    .into_iter()
+    .find_map(|value| match value {
+        mxrs_bson::Bson::Document(document)
+            if document.get_str("$Type").ok() == Some("Settings$ModelSettings") =>
+        {
+            Some(document)
+        }
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(
+        model_settings.get_str("AfterStartupMicroflow").unwrap(),
+        "MxrsTests.RunAll"
+    );
+    drop(mpr);
+    assert!(
+        !cli(&[
+            "functional-instrument",
+            path.to_str().unwrap(),
+            suite.to_str().unwrap(),
+        ])
+        .status
+        .success()
+    );
 
     let execute = cli(&["test", path.to_str().unwrap(), suite.to_str().unwrap()]);
     assert!(!execute.status.success());

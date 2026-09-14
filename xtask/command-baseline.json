@@ -26,7 +26,7 @@
   "export": "partial",
   "find": "partial",
   "frontend": "partial",
-  "functional-instrument": "missing",
+  "functional-instrument": "partial",
   "functional-test": "partial",
   "generate": "partial",
   "impact": "partial",

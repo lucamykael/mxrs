@@ -29,10 +29,12 @@ mxrs-packager = { path = "../mxrs-packager" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
 mxrs-marketplace = { path = "../mxrs-marketplace" }
 mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-oql = { path = "../../compiler/mxrs-oql" }
 mxrs-project = { path = "../mxrs-project" }
 mxrs-refactor = { path = "../mxrs-refactor" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
 serde_json.workspace = true
 serde.workspace = true
@@ -43,6 +45,4 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
-mxrs-writer = { path = "../../writer/mxrs-writer" }
-mxrs-ir = { path = "../../authoring/mxrs-ir" }
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -275,6 +275,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs functional-test new",
             "transactional JSON suite scaffold consumed directly by mxrs test --plan; runtime execution is not ported",
         ),
+        "functional-instrument" => (
+            Status::Partial,
+            "mxrs functional-instrument",
+            "atomic MPR-v2 instrumentation with isolated wrappers, assertions, logging and AfterStartup runner; Mendix Runtime execution remains outside this command",
+        ),
         "repository" => (
             Status::Partial,
             "mxrs repository new",
