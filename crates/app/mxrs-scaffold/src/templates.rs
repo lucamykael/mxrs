@@ -6,10 +6,9 @@
 //! that does not exist yet. Rust has no such slack: a scaffold that emitted a
 //! call to a builder method `mxrs-dsl` does not have would break `cargo check`
 //! for the whole project. Every template here therefore calls only methods
-//! that exist today, and the commands whose mxrb template depends on a
-//! declaration surface mxrs lacks (`constant`, `scheduled-event`) are not
-//! implemented at all rather than scaffolded into something that will not
-//! compile.
+//! that exist today; a command whose mxrb template depends on a declaration
+//! surface mxrs lacks is not implemented at all rather than scaffolded into
+//! something that will not compile.
 
 /// Entry function every scaffolded artifact file exposes, and that the family
 /// aggregator's `DECLARATIONS` table points at.
@@ -36,6 +35,41 @@ pub(crate) fn enumeration(module_name: &str, name: &str) -> String {
          //! Value vocabulary: `mxrs::EnumerationBuilder`.\n\n\
          pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
          module.enumeration({name:?}, |_enumeration| {{}});\n\
+         }}\n"
+    )
+}
+
+/// mxrb's `constant` template creates a string constant with an empty value,
+/// and says so in its help ("Create a string constant"). Same default here:
+/// the type and value are one edit away, but an empty string is the only
+/// starting value that cannot be mistaken for a real one.
+pub(crate) fn constant(module_name: &str, name: &str) -> String {
+    format!(
+        "//! Constant `{module_name}.{name}`.\n\
+         //!\n\
+         //! Type and value vocabulary: `mxrs::ConstantBuilder`.\n\n\
+         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         module.constant({name:?}, |constant| {{\n        \
+         constant.value(\"\");\n    \
+         }});\n\
+         }}\n"
+    )
+}
+
+/// mxrb's `scheduled-event` template creates "scheduled event and handler" —
+/// the event plus the microflow it runs, both under the same name. Mirrored
+/// exactly, including the daily cadence: a scheduled event naming a microflow
+/// that does not exist would fail the writer's reference checks on the very
+/// first build, so scaffolding only half of the pair is not an option.
+pub(crate) fn scheduled_event(module_name: &str, name: &str) -> String {
+    format!(
+        "//! Scheduled event `{module_name}.{name}` and the microflow it runs.\n\
+         //!\n\
+         //! Cadence vocabulary: `mxrs::ScheduledEventBuilder`. Day schedules\n\
+         //! run once per day; `every` applies to minutes and hours.\n\n\
+         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         module.microflow({name:?}, |_flow| {{}});\n    \
+         module.scheduled_event({name:?}, {name:?}, ::mxrs::ScheduleUnit::Days, |_event| {{}});\n\
          }}\n"
     )
 }

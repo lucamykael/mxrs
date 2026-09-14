@@ -77,8 +77,8 @@ fn command_options(
         "search" => (&["--limit"], &["--json"], &[]),
         "translate-oql" => (&["--dialect"], &[], &[]),
         "page" => (&["--target"], &["--dry-run", "--json"], &["--role"]),
-        "consumed-rest" | "entity" | "enumeration" | "java-action" | "module" | "nanoflow"
-        | "published-rest" | "security" | "use-case" => {
+        "constant" | "consumed-rest" | "entity" | "enumeration" | "java-action" | "module"
+        | "nanoflow" | "published-rest" | "scheduled-event" | "security" | "use-case" => {
             (&["--target"], &["--dry-run", "--json"], &[])
         }
         "scaffold" => (&["--target"], &[], &[]),
@@ -99,6 +99,7 @@ commands! {
     "callees", "<file.mpr> <artifact> [--json]", "List distinct directly called artifacts", run_callees;
     "callers", "<file.mpr> <artifact> [--json]", "List distinct direct callers", run_callers;
     "compare", "<left.mpr> <right.mpr> [--json]", "Compare structural model snapshots", run_compare;
+    "constant", "new <Module.Constant> [--target DIR] [--dry-run] [--json]", "Scaffold a string constant declaration", run_constant;
     "consumed-rest", "new <Module.Client> [--target DIR] [--dry-run] [--json]", "Scaffold a consumed REST adapter microflow", run_consumed_rest;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "dump-unit", "<file.mpr> <unit_id>", "Dump native unit bytes", run_dump_unit;
@@ -124,6 +125,7 @@ commands! {
     "refs", "<file.mpr> <artifact> [--json]", "Show incoming and outgoing references", run_refs;
     "report", "<file.mpr> [--json]", "Summarize explicit-reference lint and module dependencies", run_report;
     "scaffold", "<list|destroy> [<kind:name>] [--target DIR]", "List generators or remove a registered scaffold", run_scaffold;
+    "scheduled-event", "new <Module.Event> [--target DIR] [--dry-run] [--json]", "Scaffold a scheduled event and its handler microflow", run_scheduled_event;
     "search", "<file.mpr> <query> [--limit N] [--json]", "Search artifact names and documentation", run_semantic_search;
     "security", "init <Module> [--target DIR] [--dry-run] [--json]", "Scaffold module roles and project security", run_security;
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
@@ -258,6 +260,20 @@ fn run_entity(args: Vec<String>) -> ExitCode {
 fn run_enumeration(args: Vec<String>) -> ExitCode {
     reported(mxrs_cli::scaffold::generate(
         mxrs_scaffold::ArtifactKind::Enumeration,
+        args,
+    ))
+}
+
+fn run_constant(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Constant,
+        args,
+    ))
+}
+
+fn run_scheduled_event(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::ScheduledEvent,
         args,
     ))
 }

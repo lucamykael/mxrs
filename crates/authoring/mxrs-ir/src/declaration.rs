@@ -154,11 +154,116 @@ impl EntityDecl {
     }
 }
 
+/// The value type of a [`ConstantDecl`].
+///
+/// Mirrors mxrb's `Writer::CONSTANT_TYPE_MAP` exactly — the five `DataTypes$*`
+/// types its `constant_doc` accepts. A constant's declared value is always
+/// carried as a string because that is how `DefaultValue` is persisted; the
+/// type only selects the `Type` sub-document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConstantType {
+    #[default]
+    String,
+    Integer,
+    Boolean,
+    Decimal,
+    DateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstantDecl {
+    pub name: String,
+    pub documentation: String,
+    pub constant_type: ConstantType,
+    /// Persisted verbatim as `DefaultValue`. Not validated against
+    /// `constant_type`: mxrb does not validate it either, and inventing a
+    /// stricter contract here would make the two disagree.
+    pub value: String,
+    pub exposed_to_client: bool,
+}
+
+impl ConstantDecl {
+    pub fn new(name: impl Into<String>, constant_type: ConstantType) -> Self {
+        Self {
+            name: name.into(),
+            documentation: String::new(),
+            constant_type,
+            value: String::new(),
+            exposed_to_client: false,
+        }
+    }
+}
+
+/// How often a [`ScheduledEventDecl`] runs.
+///
+/// Deliberately narrower than mxrb's `SCHEDULED_EVENT_INTERVAL_MAP`, which
+/// names eight `IntervalType` values. Only these three are actually reachable
+/// through mxrb's declaration path: `scheduled_event_schedule_doc` raises
+/// `ArgumentError` ("modern schedules support minutes, hours, or days") for
+/// the other five, so a declaration surface offering them would emit documents
+/// the oracle refuses to build. Widening this needs oracle evidence first,
+/// not just a larger enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleUnit {
+    Minutes,
+    Hours,
+    Days,
+}
+
+/// What the runtime does when a run is still in progress at the next trigger.
+///
+/// mxrb keeps this an open string defaulting to `"SkipNext"`; these are the
+/// two values attested in its own fixtures. Typed rather than free-form so an
+/// unattested value cannot reach the `.mpr` silently — adding one is a
+/// deliberate change backed by evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnOverlap {
+    #[default]
+    SkipNext,
+    DelayNext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledEventDecl {
+    pub name: String,
+    pub documentation: String,
+    /// Qualified name of the microflow to run, as `"Microflow"` (same module)
+    /// or `"Module.Microflow"`.
+    pub microflow: String,
+    pub unit: ScheduleUnit,
+    /// Multiplier for `unit`. [`ScheduleUnit::Days`] accepts only `1`, which
+    /// the writer enforces — mirroring mxrb's "day schedules support
+    /// interval: 1".
+    pub interval: i32,
+    pub time_zone: String,
+    pub on_overlap: OnOverlap,
+    pub enabled: bool,
+}
+
+impl ScheduledEventDecl {
+    /// Defaults mirror `Writer#scheduled_event_doc`: UTC, enabled, skip an
+    /// overlapping run, and an interval of one `unit`.
+    pub fn new(name: impl Into<String>, microflow: impl Into<String>, unit: ScheduleUnit) -> Self {
+        Self {
+            name: name.into(),
+            documentation: String::new(),
+            microflow: microflow.into(),
+            unit,
+            interval: 1,
+            time_zone: "UTC".into(),
+            on_overlap: OnOverlap::default(),
+            enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ModuleDecl {
     pub name: String,
     pub entities: Vec<EntityDecl>,
     pub enumerations: Vec<EnumerationDecl>,
+    pub constants: Vec<ConstantDecl>,
+    pub scheduled_events: Vec<ScheduledEventDecl>,
     pub microflows: Vec<MicroflowDecl>,
     /// Client-side flows. They share the semantic flow IR with microflows,
     /// but persist as `Microflows$Nanoflow` documents and have an independent
@@ -209,6 +314,8 @@ impl ProjectDecl {
         };
         target.entities.extend(declared.entities);
         target.enumerations.extend(declared.enumerations);
+        target.constants.extend(declared.constants);
+        target.scheduled_events.extend(declared.scheduled_events);
         target.microflows.extend(declared.microflows);
         target.nanoflows.extend(declared.nanoflows);
         target.pages.extend(declared.pages);

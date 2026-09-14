@@ -95,6 +95,25 @@ pub enum WriterError {
         actual: String,
     },
 
+    #[error("duplicate constant {module_name}.{name:?} declared while synchronizing")]
+    DuplicateConstant { module_name: String, name: String },
+
+    #[error("duplicate scheduled event {module_name}.{name:?} declared while synchronizing")]
+    DuplicateScheduledEvent { module_name: String, name: String },
+
+    #[error(
+        "scheduled event {name:?} declares a non-positive interval ({interval}); a schedule that never advances is not expressible"
+    )]
+    InvalidScheduleInterval { name: String, interval: i32 },
+
+    #[error(
+        "scheduled event {name:?} declares a day interval of {interval}; day schedules support interval 1 only (ScheduledEvents$DaySchedule has no multiplier)"
+    )]
+    UnsupportedDayInterval { name: String, interval: i32 },
+
+    #[error("scheduled event {0:?} declares no microflow to run")]
+    ScheduledEventWithoutMicroflow(String),
+
     #[error("Forms metamodel error: {0}")]
     Forms(#[from] mxrs_forms::FormsError),
 

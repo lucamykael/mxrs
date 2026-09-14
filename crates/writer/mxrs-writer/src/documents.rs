@@ -1,11 +1,11 @@
-//! Incremental re-sync for microflow, page, and enumeration `Documents`
-//! units — mirrors the corresponding slices of `Writer#write_documents`/
-//! `#upsert_document` (mxrb's
+//! Incremental re-sync for microflow, page, enumeration, constant, and
+//! scheduled-event `Documents` units — mirrors the corresponding slices of
+//! `Writer#write_documents`/`#upsert_document` (mxrb's
 //! own method upserts pages/microflows/nanoflows/rules/menus/enumerations/
-//! constants/scheduled_events; this crate now has DSL/model surface for
-//! microflows, native/structural pages, and enumerations, widened
-//! incrementally like the rest of the codebase — see `mxrs_ir::page`'s doc
-//! comment for exactly which pages/widgets are and aren't covered yet).
+//! constants/scheduled_events; of those this crate still has no DSL/model
+//! surface for rules and menus, widened incrementally like the rest of the
+//! codebase — see `mxrs_ir::page`'s doc comment for exactly which
+//! pages/widgets are and aren't covered yet).
 //!
 //! Unlike domain-model entity/association sync, this is **upsert-only**:
 //! `microflows` is not treated as the module's complete authoritative
@@ -26,14 +26,16 @@
 //! creates folders, so every `Documents` unit it's responsible for is a
 //! direct child of the module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use mxrs_bson::{Bson, Document, build_array, doc, extract_id, parse_array};
+use mxrs_bson::{Bson, DateTime, Document, build_array, doc, extract_id, parse_array};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
-use mxrs_ir::EnumerationDecl;
 use mxrs_ir::flow::MicroflowDecl;
 use mxrs_ir::page::PageDecl;
+use mxrs_ir::{
+    ConstantDecl, ConstantType, EnumerationDecl, OnOverlap, ScheduleUnit, ScheduledEventDecl,
+};
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
 
@@ -460,5 +462,292 @@ fn caption_document(
         "$ID": caption_id,
         "$Type": "Texts$Text",
         "Items": build_array(translations, previous_items.marker),
+    }
+}
+
+/// Indexes a module's existing `Documents` units of one `$Type` by `Name`.
+///
+/// The enumeration/page/microflow paths each grew their own copy of this
+/// filter; constants and scheduled events share it rather than adding two
+/// more.
+fn existing_documents_by_name(
+    mpr: &mut MprFile,
+    module_id: &str,
+    document_type: &str,
+) -> Result<HashMap<String, (String, Document)>> {
+    Ok(mpr
+        .children_of(module_id)?
+        .into_iter()
+        .filter(|unit| unit.containment_name == "Documents")
+        .filter_map(|unit| {
+            let document = mpr.parse_contents(&unit).ok()?;
+            if document.get_str("$Type").ok()? != document_type {
+                return None;
+            }
+            let name = document.get_str("Name").ok()?.to_string();
+            Some((name, (unit.unit_id, document)))
+        })
+        .collect())
+}
+
+/// Upserts `Constants$Constant` documents, mirroring `Writer#constant_doc`.
+///
+/// Like the enumeration path this is upsert-only: a constant absent from
+/// `constants` is left alone rather than deleted.
+pub(crate) fn synchronize_constants_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    constants: &[ConstantDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let existing_by_name = existing_documents_by_name(mpr, module_id, "Constants$Constant")?;
+    let mut declared = HashSet::new();
+    for declaration in constants {
+        if !declared.insert(declaration.name.as_str()) {
+            return Err(crate::WriterError::DuplicateConstant {
+                module_name: module_name.to_string(),
+                name: declaration.name.clone(),
+            });
+        }
+        let qualified_name = format!("{module_name}.{}", declaration.name);
+        let existing = existing_by_name.get(&declaration.name);
+        let constant_id = existing
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| identity.artifact_id(ArtifactKind::Constant, &qualified_name));
+        let document = constant_document(
+            declaration,
+            &qualified_name,
+            &constant_id,
+            existing.map(|(_, document)| document),
+            identity,
+        );
+        if existing.is_some() {
+            mpr.update_unit(&constant_id, document)?;
+        } else {
+            mpr.insert_unit(module_id, "Documents", document, Some(&constant_id))?;
+        }
+    }
+    Ok(())
+}
+
+fn constant_document(
+    declaration: &ConstantDecl,
+    qualified_name: &str,
+    constant_id: &str,
+    existing: Option<&Document>,
+    identity: ProjectIdentity,
+) -> Document {
+    // The `Type` sub-document keeps its own `$ID` across re-syncs even when
+    // the declared type changes: Studio Pro treats it as the same slot, and
+    // reassigning the ID would make an otherwise field-level edit look like a
+    // replaced node.
+    let type_id = existing
+        .and_then(|document| document.get_document("Type").ok())
+        .and_then(|document| document.get("$ID"))
+        .and_then(extract_id)
+        .unwrap_or_else(|| identity.artifact_id(ArtifactKind::ConstantType, qualified_name));
+
+    let mut document = existing.cloned().unwrap_or_default();
+    document.insert("$ID", constant_id);
+    document.insert("$Type", "Constants$Constant");
+    document.insert("Name", declaration.name.clone());
+    document.insert("Documentation", declaration.documentation.clone());
+    document.insert("Excluded", document.get_bool("Excluded").unwrap_or(false));
+    document.insert(
+        "ExportLevel",
+        document
+            .get_str("ExportLevel")
+            .unwrap_or("Hidden")
+            .to_string(),
+    );
+    document.insert("ExposedToClient", declaration.exposed_to_client);
+    document.insert(
+        "Type",
+        doc! {
+            "$ID": type_id,
+            "$Type": constant_type_name(declaration.constant_type),
+        },
+    );
+    document.insert("DefaultValue", declaration.value.clone());
+    document
+}
+
+/// Mirrors mxrb's `Writer::CONSTANT_TYPE_MAP`.
+fn constant_type_name(constant_type: ConstantType) -> &'static str {
+    match constant_type {
+        ConstantType::String => "DataTypes$StringType",
+        ConstantType::Integer => "DataTypes$IntegerType",
+        ConstantType::Boolean => "DataTypes$BooleanType",
+        ConstantType::Decimal => "DataTypes$DecimalType",
+        ConstantType::DateTime => "DataTypes$DateTimeType",
+    }
+}
+
+/// Upserts `ScheduledEvents$ScheduledEvent` documents, mirroring
+/// `Writer#scheduled_event_doc` + `#scheduled_event_schedule_doc`.
+pub(crate) fn synchronize_scheduled_events_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    events: &[ScheduledEventDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let existing_by_name =
+        existing_documents_by_name(mpr, module_id, "ScheduledEvents$ScheduledEvent")?;
+    let mut declared = HashSet::new();
+    for declaration in events {
+        if !declared.insert(declaration.name.as_str()) {
+            return Err(crate::WriterError::DuplicateScheduledEvent {
+                module_name: module_name.to_string(),
+                name: declaration.name.clone(),
+            });
+        }
+        validate_scheduled_event(declaration)?;
+        let qualified_name = format!("{module_name}.{}", declaration.name);
+        let existing = existing_by_name.get(&declaration.name);
+        let event_id = existing
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| identity.artifact_id(ArtifactKind::ScheduledEvent, &qualified_name));
+        let document = scheduled_event_document(
+            declaration,
+            module_name,
+            &qualified_name,
+            &event_id,
+            existing.map(|(_, document)| document),
+            identity,
+        );
+        if existing.is_some() {
+            mpr.update_unit(&event_id, document)?;
+        } else {
+            mpr.insert_unit(module_id, "Documents", document, Some(&event_id))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_scheduled_event(declaration: &ScheduledEventDecl) -> Result<()> {
+    if declaration.microflow.trim().is_empty() {
+        return Err(crate::WriterError::ScheduledEventWithoutMicroflow(
+            declaration.name.clone(),
+        ));
+    }
+    if declaration.interval <= 0 {
+        return Err(crate::WriterError::InvalidScheduleInterval {
+            name: declaration.name.clone(),
+            interval: declaration.interval,
+        });
+    }
+    if declaration.unit == ScheduleUnit::Days && declaration.interval != 1 {
+        return Err(crate::WriterError::UnsupportedDayInterval {
+            name: declaration.name.clone(),
+            interval: declaration.interval,
+        });
+    }
+    Ok(())
+}
+
+/// mxrb defaults `StartDateTime` to `Time.utc(2000, 1, 1)` rather than to the
+/// current time, so repeated writes of the same declaration stay byte-stable.
+const DEFAULT_START_DATE_TIME_MILLIS: i64 = 946_684_800_000;
+
+fn scheduled_event_document(
+    declaration: &ScheduledEventDecl,
+    module_name: &str,
+    qualified_name: &str,
+    event_id: &str,
+    existing: Option<&Document>,
+    identity: ProjectIdentity,
+) -> Document {
+    let schedule_id = existing
+        .and_then(|document| document.get_document("Schedule").ok())
+        .and_then(|document| document.get("$ID"))
+        .and_then(extract_id)
+        .unwrap_or_else(|| {
+            identity.artifact_id(ArtifactKind::ScheduledEventSchedule, qualified_name)
+        });
+    // A start date already in the model is the author's, not ours: only a
+    // document we are creating gets the default epoch.
+    let start_date_time = existing
+        .and_then(|document| document.get_datetime("StartDateTime").ok().copied())
+        .unwrap_or_else(|| DateTime::from_millis(DEFAULT_START_DATE_TIME_MILLIS));
+
+    let mut document = existing.cloned().unwrap_or_default();
+    document.insert("$ID", event_id);
+    document.insert("$Type", "ScheduledEvents$ScheduledEvent");
+    document.insert("Name", declaration.name.clone());
+    document.insert("Documentation", declaration.documentation.clone());
+    document.insert("Excluded", document.get_bool("Excluded").unwrap_or(false));
+    document.insert(
+        "ExportLevel",
+        document
+            .get_str("ExportLevel")
+            .unwrap_or("Hidden")
+            .to_string(),
+    );
+    document.insert(
+        "Microflow",
+        qualify_microflow(module_name, &declaration.microflow),
+    );
+    document.insert("StartDateTime", start_date_time);
+    document.insert("TimeZone", declaration.time_zone.clone());
+    document.insert("Schedule", schedule_document(declaration, &schedule_id));
+    document.insert("OnOverlap", on_overlap_name(declaration.on_overlap));
+    document.insert("Enabled", declaration.enabled);
+    document.insert("IntervalType", interval_type_name(declaration.unit));
+    document.insert("Interval", declaration.interval);
+    document
+}
+
+/// Stores the microflow reference qualified. mxrb's scheduler qualifies an
+/// unqualified name against the owning module when it reads one, so both
+/// spellings resolve — writing the qualified form means the document is
+/// unambiguous on its own.
+fn qualify_microflow(module_name: &str, microflow: &str) -> String {
+    if microflow.contains('.') {
+        microflow.to_string()
+    } else {
+        format!("{module_name}.{microflow}")
+    }
+}
+
+/// Mirrors `Writer#scheduled_event_schedule_doc`. `interval` is already
+/// validated by [`validate_scheduled_event`].
+fn schedule_document(declaration: &ScheduledEventDecl, schedule_id: &str) -> Document {
+    match declaration.unit {
+        ScheduleUnit::Minutes => doc! {
+            "$ID": schedule_id,
+            "$Type": "ScheduledEvents$MinuteSchedule",
+            "Multiplier": declaration.interval,
+        },
+        ScheduleUnit::Hours => doc! {
+            "$ID": schedule_id,
+            "$Type": "ScheduledEvents$HourSchedule",
+            "Multiplier": declaration.interval,
+            "MinuteOffset": 0_i32,
+        },
+        ScheduleUnit::Days => doc! {
+            "$ID": schedule_id,
+            "$Type": "ScheduledEvents$DaySchedule",
+            "HourOfDay": 0_i32,
+            "MinuteOfHour": 0_i32,
+        },
+    }
+}
+
+/// Mirrors the reachable subset of mxrb's `SCHEDULED_EVENT_INTERVAL_MAP` —
+/// see [`ScheduleUnit`] for why the other five values have no surface.
+fn interval_type_name(unit: ScheduleUnit) -> &'static str {
+    match unit {
+        ScheduleUnit::Minutes => "Minute",
+        ScheduleUnit::Hours => "Hour",
+        ScheduleUnit::Days => "Day",
+    }
+}
+
+fn on_overlap_name(on_overlap: OnOverlap) -> &'static str {
+    match on_overlap {
+        OnOverlap::SkipNext => "SkipNext",
+        OnOverlap::DelayNext => "DelayNext",
     }
 }

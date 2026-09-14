@@ -20,7 +20,8 @@ pub use application::{
 };
 pub use declaration::{
     AssociationDecl, AssociationOwner, AssociationStorage, AssociationType, AttributeDecl,
-    AttributeType, EntityDecl, EnumerationDecl, EnumerationValueDecl, ModuleDecl, ProjectDecl,
+    AttributeType, ConstantDecl, ConstantType, EntityDecl, EnumerationDecl, EnumerationValueDecl,
+    ModuleDecl, OnOverlap, ProjectDecl, ScheduleUnit, ScheduledEventDecl,
 };
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{

@@ -1,9 +1,12 @@
+use mxrs_ir::ScheduleUnit;
 use mxrs_ir::declaration::ModuleDecl;
 
+use crate::constant::ConstantBuilder;
 use crate::entity::EntityBuilder;
 use crate::enumeration::EnumerationBuilder;
 use crate::flow::FlowBuilder;
 use crate::page::{LayoutBuilder, PageBuilder};
+use crate::scheduled_event::ScheduledEventBuilder;
 
 pub struct ModuleBuilder {
     decl: ModuleDecl,
@@ -16,6 +19,8 @@ impl ModuleBuilder {
                 name: name.into(),
                 entities: vec![],
                 enumerations: vec![],
+                constants: vec![],
+                scheduled_events: vec![],
                 microflows: vec![],
                 nanoflows: vec![],
                 pages: vec![],
@@ -73,6 +78,36 @@ impl ModuleBuilder {
         let mut builder = EnumerationBuilder::new(name);
         configure(&mut builder);
         self.decl.enumerations.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a project constant. Defaults to a `String` constant with an
+    /// empty value, which is what `mxrs constant new` scaffolds.
+    pub fn constant(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut ConstantBuilder),
+    ) -> &mut Self {
+        let mut builder = ConstantBuilder::new(name);
+        configure(&mut builder);
+        self.decl.constants.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a scheduled event running `microflow` every `unit`.
+    ///
+    /// `microflow` may be unqualified (same module) or `"Module.Microflow"`;
+    /// the writer stores the qualified form either way.
+    pub fn scheduled_event(
+        &mut self,
+        name: impl Into<String>,
+        microflow: impl Into<String>,
+        unit: ScheduleUnit,
+        configure: impl FnOnce(&mut ScheduledEventBuilder),
+    ) -> &mut Self {
+        let mut builder = ScheduledEventBuilder::new(name, microflow, unit);
+        configure(&mut builder);
+        self.decl.scheduled_events.push(builder.into_decl());
         self
     }
 

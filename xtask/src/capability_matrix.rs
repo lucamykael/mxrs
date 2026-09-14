@@ -250,20 +250,22 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs project inspect",
             "workspace inventory; MXRB has no other project subcommand",
         ),
-        // Named rather than left to the catch-all: these two are the model
-        // authoring commands that were deliberately not implemented, and the
-        // reason is a missing declaration surface, not a missing CLI. Their
-        // MXRB templates emit `constant`/`scheduled_event` declarations, which
-        // in Rust would have to compile against builders that do not exist.
+        // Named rather than left to the catch-all: these two were the model
+        // authoring commands blocked on a missing declaration surface rather
+        // than a missing CLI. That surface now exists end to end (ConstantDecl
+        // / ScheduledEventDecl, DSL builders, writer lowering, generators), and
+        // the scaffolded project compiles and reads back. They stay Partial,
+        // not Verified: neither has an executable oracle comparing mxrs's
+        // command contract against mxrb's, which is what Verified requires.
         "constant" => (
-            Status::Missing,
-            "—",
-            "mxrs-ir has no ConstantDecl and mxrs-writer persists no Constants$Constant document",
+            Status::Partial,
+            "mxrs constant new",
+            "string-constant declaration scaffold persisting Constants$Constant; no command-contract oracle",
         ),
         "scheduled-event" => (
-            Status::Missing,
-            "—",
-            "mxrs-ir has no ScheduledEventDecl and mxrs-writer persists no ScheduledEvents$ScheduledEvent document",
+            Status::Partial,
+            "mxrs scheduled-event new",
+            "scheduled event and handler scaffold persisting ScheduledEvents$ScheduledEvent with minute/hour/day schedules; MXRB's other five IntervalType values have no surface",
         ),
         "diff" => (Status::Partial, "cargo mxrs diff", "typed project diff"),
         "export" => (Status::Partial, "mxrs export", "typed Rust export"),

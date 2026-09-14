@@ -42,6 +42,8 @@ const RESERVED_ENTITY_NAMES: &[&str] = &["Owner", "ChangedBy", "CreatedDate", "C
 pub enum ArtifactKind {
     Entity,
     Enumeration,
+    Constant,
+    ScheduledEvent,
     UseCase,
     Page,
     Nanoflow,
@@ -74,6 +76,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         summary: "Create a consumed REST adapter microflow",
         destination: "src/domain/modules/<module>/integrations",
         kind: ArtifactKind::ConsumedRest,
+    },
+    ScaffoldCommand {
+        name: "constant",
+        action: "new",
+        argument: "<Module.Constant>",
+        summary: "Create a string constant declaration",
+        destination: "src/domain/modules/<module>/constants",
+        kind: ArtifactKind::Constant,
     },
     ScaffoldCommand {
         name: "entity",
@@ -132,6 +142,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         kind: ArtifactKind::PublishedRest,
     },
     ScaffoldCommand {
+        name: "scheduled-event",
+        action: "new",
+        argument: "<Module.Event>",
+        summary: "Create a scheduled event and its handler microflow",
+        destination: "src/domain/modules/<module>/jobs",
+        kind: ArtifactKind::ScheduledEvent,
+    },
+    ScaffoldCommand {
         name: "security",
         action: "init",
         argument: "<Module>",
@@ -156,6 +174,8 @@ impl ArtifactKind {
         match self {
             Self::Entity => "entity",
             Self::Enumeration => "enumeration",
+            Self::Constant => "constant",
+            Self::ScheduledEvent => "scheduled_event",
             Self::UseCase => "use_case",
             Self::Page => "page",
             Self::Nanoflow => "nanoflow",
@@ -171,6 +191,8 @@ impl ArtifactKind {
         match self {
             Self::Entity => "entities",
             Self::Enumeration => "enumerations",
+            Self::Constant => "constants",
+            Self::ScheduledEvent => "jobs",
             Self::UseCase => "use_cases",
             Self::Page => "pages",
             Self::Nanoflow => "client_actions",
@@ -436,6 +458,8 @@ fn create_artifact(
     let source = match options.kind {
         ArtifactKind::Entity => templates::entity(module_name, artifact_name),
         ArtifactKind::Enumeration => templates::enumeration(module_name, artifact_name),
+        ArtifactKind::Constant => templates::constant(module_name, artifact_name),
+        ArtifactKind::ScheduledEvent => templates::scheduled_event(module_name, artifact_name),
         ArtifactKind::UseCase => templates::use_case(module_name, artifact_name),
         ArtifactKind::Nanoflow => templates::nanoflow(module_name, artifact_name),
         ArtifactKind::PublishedRest => templates::published_rest(module_name, artifact_name),

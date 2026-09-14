@@ -47,26 +47,36 @@ cargo run -p xtask -- coverage-gate target/coverage.json --require-complete
 
 The command inventory currently covers MXRB's 76 top-level commands, not an
 exhaustive list of Studio Pro capabilities. All 76 still need complete
-command-contract evidence: 42 have partial equivalents and 34 are absent.
+command-contract evidence: 44 have partial equivalents and 32 are absent.
 
 MXRB's model-authoring generators write Ruby source into a project; the MXRS
 equivalents write Rust declarations into `src/domain/modules/`. Because the
 generated content differs by construction, no differential oracle can compare
 it, and those rows stay partial rather than verified however many tests pass.
 What is proven is narrower and stated as such: a project scaffolded with
-`module`/`entity`/`enumeration`/`use-case`/`nanoflow`/`page`/`published-rest`/
-`consumed-rest`/`java-action`/`security` compiles with real Cargo, runs, and
-the declarations reach the written `.mpr`; the argument grammar, rendering,
-dry-run and registry behavior are covered by CLI tests. Nothing here
-establishes that Studio Pro accepts the result.
+`module`/`entity`/`enumeration`/`constant`/`scheduled-event`/`use-case`/
+`nanoflow`/`page`/`published-rest`/`consumed-rest`/`java-action`/`security`
+compiles with real Cargo, runs, and the declarations reach the written `.mpr`;
+the argument grammar, rendering, dry-run and registry behavior are covered by
+CLI tests. Nothing here establishes that Studio Pro accepts the result.
 
-`constant` and `scheduled-event` remain absent on purpose. Their MXRB
-templates emit `constant`/`scheduled_event` declarations, and `mxrs-ir` has no
-`ConstantDecl` or `ScheduledEventDecl` for them to compile against —
-`mxrs-writer` persists neither `Constants$Constant` nor
-`ScheduledEvents$ScheduledEvent`. A scaffold that emitted those calls anyway
-would break `cargo check` for the user's whole project, so the commands are
-not registered at all.
+`constant` and `scheduled-event` were previously absent because `mxrs-ir` had
+no `ConstantDecl`/`ScheduledEventDecl` for their templates to compile against.
+That surface now exists end to end — IR declarations, DSL builders, and
+`mxrs-writer` lowering that persists `Constants$Constant` and
+`ScheduledEvents$ScheduledEvent` — and both commands are registered. Two
+limits are deliberate and worth naming rather than discovering later:
+
+- The schedule vocabulary is `minutes`/`hours`/`days`. MXRB names eight
+  `IntervalType` values, but its own `scheduled_event_schedule_doc` raises for
+  the other five, so offering them would emit documents the oracle refuses to
+  build. Widening this needs oracle evidence, not a larger enum.
+- `OnOverlap` accepts the two values attested in MXRB's fixtures (`SkipNext`,
+  `DelayNext`). MXRB keeps the field an open string; typing it here means an
+  unattested value cannot reach the `.mpr` silently.
+
+Neither command is verified: the readback is MXRS reading its own writes, and
+no executable oracle yet compares either command's contract against MXRB's.
 
 ## Official fresh-project acceptance
 

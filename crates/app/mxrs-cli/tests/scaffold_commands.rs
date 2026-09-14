@@ -262,3 +262,37 @@ fn inspecting_reports_the_declared_version_modules_and_registered_scaffolds() {
     assert!(rendered.contains("declared_version: 11.12.1\n"));
     assert!(rendered.contains("registered_scaffolds: module:Sales, security:Sales\n"));
 }
+
+#[test]
+fn the_constant_and_scheduled_event_generators_write_their_families_and_registry_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = project(directory.path());
+    assert!(
+        scaffold(&root, &["module", "new", "Sales"])
+            .status
+            .success()
+    );
+
+    let constant = scaffold(&root, &["constant", "new", "Sales.ApiEndpoint"]);
+    assert!(constant.status.success(), "{:?}", constant.stderr);
+    let path = root.join("src/domain/modules/sales/constants/api_endpoint.rs");
+    assert!(text(&constant).contains(&format!("  create  {}", path.display())));
+    let source = std::fs::read_to_string(&path).unwrap();
+    assert!(source.contains("module.constant(\"ApiEndpoint\""));
+
+    let event = scaffold(&root, &["scheduled-event", "new", "Sales.SE_ExpireCarts"]);
+    assert!(event.status.success(), "{:?}", event.stderr);
+    let path = root.join("src/domain/modules/sales/jobs/se_expire_carts.rs");
+    assert!(text(&event).contains(&format!("  create  {}", path.display())));
+    // Event and handler land in one file under one name, as in mxrb's
+    // "scheduled event and handler" template.
+    let source = std::fs::read_to_string(&path).unwrap();
+    assert!(source.contains("module.microflow(\"SE_ExpireCarts\""));
+    assert!(source.contains("module.scheduled_event(\"SE_ExpireCarts\", \"SE_ExpireCarts\""));
+
+    // Registry keys underscore the command name, so `scaffold destroy` takes
+    // `scheduled_event:...` rather than the dashed command spelling.
+    let listed = text(&scaffold(&root, &["scaffold", "list"]));
+    assert!(listed.contains("constant:Sales.ApiEndpoint"));
+    assert!(listed.contains("scheduled_event:Sales.SE_ExpireCarts"));
+}

@@ -9,7 +9,8 @@ use mxrs_dsl::{CallArgument, ProjectBuilder, decimal, integer, string};
 use mxrs_expr::attribute;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
 use mxrs_ir::{
-    AssociationOwner, AssociationStorage, AssociationType, AttributeType, MicroflowRef, Ref,
+    AssociationOwner, AssociationStorage, AssociationType, AttributeType, ConstantType,
+    MicroflowRef, OnOverlap, Ref, ScheduleUnit,
 };
 use mxrs_model::Project;
 use mxrs_model::association::{AssociationType as ModelAssociationType, Owner as ModelOwner};
@@ -1167,5 +1168,218 @@ fn a_page_declaring_widgets_without_a_layout_fails_loudly_at_write_time() {
     assert!(matches!(
         error,
         mxrs_writer::WriterError::PageWidgetsRequireLayout(name) if name == "Broken"
+    ));
+}
+
+/// Reads back one `Documents` unit of `document_type` by `Name`. Constants
+/// have no typed `mxrs-model` representation (mxrb materializes them
+/// separately from the artifact document compiler, and this mirrors that), so
+/// the assertions below work on the raw document.
+fn document_by_name(project: &Project, document_type: &str, name: &str) -> mxrs_bson::Document {
+    project
+        .all_units()
+        .unwrap()
+        .iter()
+        .filter_map(|unit| project.mpr().parse_contents(unit).ok())
+        .find(|document| {
+            document.get_str("$Type").ok() == Some(document_type)
+                && document.get_str("Name").ok() == Some(name)
+        })
+        .unwrap_or_else(|| panic!("no {document_type} named {name:?} was written"))
+}
+
+#[test]
+fn constants_persist_with_the_type_and_value_mxrb_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Constants.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.constant("ApiEndpoint", |c| {
+            c.documentation("Base URL of the catalog service")
+                .value("https://example.invalid/api");
+        });
+        m.constant("MaxRetries", |c| {
+            c.value_type(ConstantType::Integer)
+                .value("3")
+                .exposed_to_client(true);
+        });
+    });
+
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let endpoint = document_by_name(&read, "Constants$Constant", "ApiEndpoint");
+    assert_eq!(
+        endpoint.get_str("DefaultValue").unwrap(),
+        "https://example.invalid/api"
+    );
+    assert_eq!(
+        endpoint.get_str("Documentation").unwrap(),
+        "Base URL of the catalog service"
+    );
+    assert_eq!(endpoint.get_str("ExportLevel").unwrap(), "Hidden");
+    assert!(!endpoint.get_bool("ExposedToClient").unwrap());
+    assert!(!endpoint.get_bool("Excluded").unwrap());
+    assert_eq!(
+        endpoint
+            .get_document("Type")
+            .unwrap()
+            .get_str("$Type")
+            .unwrap(),
+        "DataTypes$StringType"
+    );
+
+    let retries = document_by_name(&read, "Constants$Constant", "MaxRetries");
+    assert_eq!(retries.get_str("DefaultValue").unwrap(), "3");
+    assert!(retries.get_bool("ExposedToClient").unwrap());
+    assert_eq!(
+        retries
+            .get_document("Type")
+            .unwrap()
+            .get_str("$Type")
+            .unwrap(),
+        "DataTypes$IntegerType"
+    );
+    // The constant and its `Type` sub-document are separately identified, and
+    // neither ID may collide with the other's. Read through `extract_id`
+    // because the codec stores `$ID` as an MS-GUID blob, not a string.
+    assert_ne!(
+        mxrs_bson::extract_id(retries.get("$ID").unwrap()),
+        mxrs_bson::extract_id(retries.get_document("Type").unwrap().get("$ID").unwrap())
+    );
+}
+
+#[test]
+fn scheduled_events_persist_with_a_schedule_matching_their_interval_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Jobs.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.microflow("ACT_ExpireCarts", |_f| {});
+        m.microflow("ACT_SyncCatalog", |_f| {});
+        m.scheduled_event(
+            "SE_ExpireCarts",
+            "ACT_ExpireCarts",
+            ScheduleUnit::Days,
+            |e| {
+                e.documentation("Drops carts nobody came back for");
+            },
+        );
+        m.scheduled_event(
+            "SE_SyncCatalog",
+            "ACT_SyncCatalog",
+            ScheduleUnit::Hours,
+            |e| {
+                e.every(6)
+                    .time_zone("America/Sao_Paulo")
+                    .on_overlap(OnOverlap::DelayNext)
+                    .enabled(false);
+            },
+        );
+    });
+
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let read = Project::open(&path, true).unwrap();
+    let daily = document_by_name(&read, "ScheduledEvents$ScheduledEvent", "SE_ExpireCarts");
+    // The unqualified declaration is stored qualified against its own module.
+    assert_eq!(daily.get_str("Microflow").unwrap(), "Sales.ACT_ExpireCarts");
+    assert_eq!(daily.get_str("IntervalType").unwrap(), "Day");
+    // `Interval` reads back as Int64: the MPR codec widens integer
+    // properties, leaving only array markers at Int32.
+    assert_eq!(daily.get_i64("Interval").unwrap(), 1);
+    assert_eq!(daily.get_str("TimeZone").unwrap(), "UTC");
+    assert_eq!(daily.get_str("OnOverlap").unwrap(), "SkipNext");
+    assert!(daily.get_bool("Enabled").unwrap());
+    let schedule = daily.get_document("Schedule").unwrap();
+    assert_eq!(
+        schedule.get_str("$Type").unwrap(),
+        "ScheduledEvents$DaySchedule"
+    );
+    assert_eq!(schedule.get_i64("HourOfDay").unwrap(), 0);
+    assert_eq!(schedule.get_i64("MinuteOfHour").unwrap(), 0);
+    // Fixed epoch rather than "now", so writing the same declaration twice
+    // produces the same bytes.
+    assert_eq!(
+        daily
+            .get_datetime("StartDateTime")
+            .unwrap()
+            .timestamp_millis(),
+        946_684_800_000
+    );
+
+    let hourly = document_by_name(&read, "ScheduledEvents$ScheduledEvent", "SE_SyncCatalog");
+    assert_eq!(hourly.get_str("IntervalType").unwrap(), "Hour");
+    assert_eq!(hourly.get_i64("Interval").unwrap(), 6);
+    assert_eq!(hourly.get_str("TimeZone").unwrap(), "America/Sao_Paulo");
+    assert_eq!(hourly.get_str("OnOverlap").unwrap(), "DelayNext");
+    assert!(!hourly.get_bool("Enabled").unwrap());
+    let schedule = hourly.get_document("Schedule").unwrap();
+    assert_eq!(
+        schedule.get_str("$Type").unwrap(),
+        "ScheduledEvents$HourSchedule"
+    );
+    assert_eq!(schedule.get_i64("Multiplier").unwrap(), 6);
+    assert_eq!(schedule.get_i64("MinuteOffset").unwrap(), 0);
+}
+
+#[test]
+fn a_day_schedule_with_an_interval_other_than_one_fails_at_write_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("BadSchedule.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.microflow("ACT_Nightly", |_f| {});
+        m.scheduled_event("SE_Nightly", "ACT_Nightly", ScheduleUnit::Days, |e| {
+            e.every(3);
+        });
+    });
+
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::UnsupportedDayInterval { name, interval }
+            if name == "SE_Nightly" && interval == 3
+    ));
+}
+
+#[test]
+fn a_non_positive_interval_fails_instead_of_producing_a_schedule_that_never_advances() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ZeroInterval.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.microflow("ACT_Poll", |_f| {});
+        m.scheduled_event("SE_Poll", "ACT_Poll", ScheduleUnit::Minutes, |e| {
+            e.every(0);
+        });
+    });
+
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::InvalidScheduleInterval { name, interval }
+            if name == "SE_Poll" && interval == 0
+    ));
+}
+
+#[test]
+fn a_scheduled_event_without_a_microflow_fails_rather_than_writing_a_job_that_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("NoHandler.mpr");
+
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |m| {
+        m.scheduled_event("SE_Orphan", "", ScheduleUnit::Minutes, |_e| {});
+    });
+
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::ScheduledEventWithoutMicroflow(name) if name == "SE_Orphan"
     ));
 }

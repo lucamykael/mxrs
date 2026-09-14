@@ -57,6 +57,8 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     scaffold(&root, ArtifactKind::Module, "Sales");
     scaffold(&root, ArtifactKind::Entity, "Sales.Order");
     scaffold(&root, ArtifactKind::Enumeration, "Sales.PaymentStatus");
+    scaffold(&root, ArtifactKind::Constant, "Sales.ApiEndpoint");
+    scaffold(&root, ArtifactKind::ScheduledEvent, "Sales.SE_ExpireCarts");
     scaffold(&root, ArtifactKind::UseCase, "Sales.ACT_CreateOrder");
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
     scaffold(&root, ArtifactKind::PublishedRest, "Sales.HandleOrder");
@@ -107,8 +109,33 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
         "HandleOrder",
         "FetchCatalog",
         "InvokeCheckout",
+        // The scheduled-event scaffold generates its handler too — a job
+        // pointing at a microflow that does not exist would not build.
+        "SE_ExpireCarts",
     ] {
         assert!(microflows.contains(&expected), "{expected}: {microflows:?}");
+    }
+    // Constants and scheduled events have no typed accessor on `Module`
+    // (constants are materialized separately, as in mxrb), so these are read
+    // from the raw documents.
+    let documents: Vec<(String, String)> = project
+        .all_units()
+        .unwrap()
+        .iter()
+        .filter_map(|unit| project.mpr().parse_contents(unit).ok())
+        .filter_map(|document| {
+            Some((
+                document.get_str("$Type").ok()?.to_string(),
+                document.get_str("Name").ok()?.to_string(),
+            ))
+        })
+        .collect();
+    for expected in [
+        ("Constants$Constant", "ApiEndpoint"),
+        ("ScheduledEvents$ScheduledEvent", "SE_ExpireCarts"),
+    ] {
+        let expected = (expected.0.to_string(), expected.1.to_string());
+        assert!(documents.contains(&expected), "{expected:?}: {documents:?}");
     }
     assert_eq!(
         module

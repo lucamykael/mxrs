@@ -119,6 +119,22 @@ pub fn write_module(
         identity,
     )?;
 
+    documents::synchronize_constants_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.constants,
+        identity,
+    )?;
+
+    documents::synchronize_scheduled_events_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.scheduled_events,
+        identity,
+    )?;
+
     crate::layout_compiler::synchronize_layouts_with_identity(
         mpr,
         &module_id,

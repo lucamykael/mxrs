@@ -5,11 +5,11 @@
 //! normal application-facing dependency surface.
 
 pub use mxrs_dsl::{
-    ButtonBuilder, CallArgument, ContainerBuilder, DataViewBuilder, EntityBuilder,
+    ButtonBuilder, CallArgument, ConstantBuilder, ContainerBuilder, DataViewBuilder, EntityBuilder,
     EnumerationBuilder, FlowBuilder, LayoutBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
     LayoutGridRowBuilder, ModuleBuilder, NavigationBuilder, NavigationItemBuilder,
-    NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder, ProjectBuilder, SecurityBuilder,
-    UserRoleBuilder,
+    NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder, ProjectBuilder,
+    ScheduledEventBuilder, SecurityBuilder, UserRoleBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
@@ -61,12 +61,13 @@ pub trait ApplicationDefinition {
 pub mod prelude {
     pub use crate::{
         ApplicationDefinition, AssociationMarker, AttributeMarker, ButtonBuilder, CallArgument,
-        ContainerBuilder, DataViewBuilder, EntityMarker, EnumerationBuilder, EnumerationMarker,
-        Expr, FlowBuilder, LayoutGridBuilder, MendixType, MicroflowMarker, MicroflowRef,
-        ModuleBuilder, MxBool, MxDecimal, MxEntity, MxEnumeration, MxFloat, MxInteger, MxLong,
-        MxString, NanoflowMarker, NanoflowRef, NavigationBuilder, NavigationItemBuilder,
-        NavigationProfileBuilder, PageBuilder, ProjectBuilder, Ref, Reference, ReferenceSet,
-        RenderExpr, SecurityBuilder, SecurityLevel, TypedAttributeMarker, UserRoleBuilder, Var,
-        application, boolean, decimal, float, integer, long, project, string,
+        ConstantBuilder, ConstantType, ContainerBuilder, DataViewBuilder, EntityMarker,
+        EnumerationBuilder, EnumerationMarker, Expr, FlowBuilder, LayoutGridBuilder, MendixType,
+        MicroflowMarker, MicroflowRef, ModuleBuilder, MxBool, MxDecimal, MxEntity, MxEnumeration,
+        MxFloat, MxInteger, MxLong, MxString, NanoflowMarker, NanoflowRef, NavigationBuilder,
+        NavigationItemBuilder, NavigationProfileBuilder, OnOverlap, PageBuilder, ProjectBuilder,
+        Ref, Reference, ReferenceSet, RenderExpr, ScheduleUnit, ScheduledEventBuilder,
+        SecurityBuilder, SecurityLevel, TypedAttributeMarker, UserRoleBuilder, Var, application,
+        boolean, decimal, float, integer, long, project, string,
     };
 }

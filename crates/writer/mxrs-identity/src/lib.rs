@@ -34,6 +34,14 @@ pub enum ArtifactKind {
     Enumeration,
     EnumerationValue,
     EnumerationCaption,
+    Constant,
+    /// The `Type` sub-document of a constant, which carries its own `$ID`
+    /// distinct from the constant's.
+    ConstantType,
+    ScheduledEvent,
+    /// The `Schedule` sub-document of a scheduled event, likewise separately
+    /// identified.
+    ScheduledEventSchedule,
     Translation,
     ProjectSettings,
     ProjectConversion,
@@ -63,6 +71,10 @@ impl fmt::Display for ArtifactKind {
             Self::Enumeration => "enumeration",
             Self::EnumerationValue => "enumeration-value",
             Self::EnumerationCaption => "enumeration-caption",
+            Self::Constant => "constant",
+            Self::ConstantType => "constant-type",
+            Self::ScheduledEvent => "scheduled-event",
+            Self::ScheduledEventSchedule => "scheduled-event-schedule",
             Self::Translation => "translation",
             Self::ProjectSettings => "project-settings",
             Self::ProjectConversion => "project-conversion",
