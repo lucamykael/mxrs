@@ -81,9 +81,16 @@ The ten runtime/deployment rows now have deliberately partial MXRS surfaces:
 - `repository new` generates a transactional application port and
   infrastructure adapter. It is Rust source and therefore cannot be compared
   byte-for-byte with MXRB's Ruby generator.
-- `upgrade` previews by default and transactionally changes only generated
-  version markers under `--apply`; inconsistent source declarations fail
-  closed. It does not run Studio Pro's metamodel conversions.
+- `upgrade` previews by default and transactionally migrates pre-layered
+  generated projects to the four-layer composition root. `--mendix VERSION`
+  additionally changes only generated version markers; without it, the model
+  version stays unchanged. Existing domain source is preserved, partial or
+  hand-shaped layouts fail closed, and writes happen only under `--apply`.
+  It does not run Studio Pro's metamodel conversions.
+- `project inspect` reports the generated source layout as `pre-layered`,
+  `layered`, or `incomplete`, so migration failures have a machine-readable
+  diagnosis instead of requiring the developer to infer it from missing
+  directories.
 - `db status/up/down/destroy/credentials/url` manages an isolated PostgreSQL
   13 container and volume. Resources are loopback-only, project-keyed, labeled,
   and ownership-checked before mutation; state and the generated password live

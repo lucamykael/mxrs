@@ -5,13 +5,54 @@ use std::path::{Path, PathBuf};
 use crate::transaction::Transaction;
 use crate::{Result, ScaffoldError, io_error};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectLayout {
+    PreLayered,
+    Layered,
+    Incomplete,
+}
+
+impl ProjectLayout {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreLayered => "pre-layered",
+            Self::Layered => "layered",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
+impl std::fmt::Display for ProjectLayout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeReport {
     pub root: PathBuf,
     pub from: String,
     pub to: String,
+    pub created: Vec<PathBuf>,
+    pub updated: Vec<PathBuf>,
     pub files: Vec<PathBuf>,
+    pub migrated_layers: bool,
     pub applied: bool,
+}
+
+/// Migrates the generated source layout without changing the Mendix version.
+///
+/// This is the actionable path for projects created before application and
+/// presentation became first-class layers. It deliberately delegates to the
+/// same transaction as a version upgrade, so preview and apply have identical
+/// safety guarantees.
+pub fn migrate_project_layers(target: impl AsRef<Path>, apply: bool) -> Result<UpgradeReport> {
+    let target = target.as_ref();
+    let root = std::path::absolute(target).map_err(|error| io_error(target, error))?;
+    let library = root.join("src/lib.rs");
+    let source = std::fs::read_to_string(&library).map_err(|error| io_error(&library, error))?;
+    let version = application_version(&source).ok_or(ScaffoldError::MissingVersionDeclaration)?;
+    upgrade_project(root, &version, apply)
 }
 
 pub fn upgrade_project(
@@ -48,6 +89,8 @@ pub fn upgrade_project(
         .ok_or(ScaffoldError::MissingVersionDeclaration)?;
     transaction.write(&library, updated_library)?;
 
+    let migrated_layers = stage_layer_migration(&mut transaction, &root)?;
+
     let manifest = root.join("mxrs.toml");
     if manifest.is_file() {
         let source =
@@ -72,7 +115,11 @@ pub fn upgrade_project(
         let source = std::fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
         transaction.write(&path, replace_builder_versions(&source, &from, version))?;
     }
-    let files = transaction.updated().to_vec();
+    let created = transaction.created().to_vec();
+    let updated = transaction.updated().to_vec();
+    let mut files = created.clone();
+    files.extend_from_slice(&updated);
+    files.sort();
     if apply {
         transaction.commit()?;
     }
@@ -80,9 +127,175 @@ pub fn upgrade_project(
         root,
         from,
         to: version.to_string(),
+        created,
+        updated,
         files,
+        migrated_layers,
         applied: apply,
     })
+}
+
+fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<bool> {
+    let library = root.join("src/lib.rs");
+    let source = transaction
+        .content(&library)?
+        .ok_or_else(|| ScaffoldError::ProjectNotFound(library.display().to_string()))?;
+    match layout_from(root, &source) {
+        ProjectLayout::Layered => return Ok(false),
+        ProjectLayout::PreLayered => {}
+        ProjectLayout::Incomplete => {
+            return Err(ScaffoldError::UnsupportedLayerMigration(
+                root.display().to_string(),
+            ));
+        }
+    }
+
+    transaction.write(&library, layered_library(&source, &library)?)?;
+    let application = root.join("src/application/mod.rs");
+    let presentation = root.join("src/presentation/mod.rs");
+    transaction.create(&application, crate::templates::application_layer())?;
+    transaction.create(
+        root.join("src/application/modules/mod.rs"),
+        crate::templates::modules_aggregator(),
+    )?;
+    transaction.create(&presentation, crate::templates::empty_presentation_layer())?;
+    transaction.create(
+        root.join("src/presentation/modules/mod.rs"),
+        crate::templates::modules_aggregator(),
+    )?;
+    let infrastructure = root.join("src/infrastructure/mod.rs");
+    if transaction.content(&infrastructure)?.is_none() {
+        transaction.create(infrastructure, crate::templates::infrastructure_layer())?;
+    }
+    Ok(true)
+}
+
+pub fn project_layout(root: impl AsRef<Path>) -> Result<ProjectLayout> {
+    let root = root.as_ref();
+    let library = root.join("src/lib.rs");
+    let source = match std::fs::read_to_string(&library) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProjectLayout::Incomplete);
+        }
+        Err(error) => return Err(io_error(&library, error)),
+    };
+    Ok(layout_from(root, &source))
+}
+
+fn layout_from(root: &Path, library: &str) -> ProjectLayout {
+    let application = root.join("src/application/mod.rs").is_file();
+    let presentation = root.join("src/presentation/mod.rs").is_file();
+    match (application, presentation) {
+        (false, false)
+            if library
+                .lines()
+                .any(|line| matches!(line.trim(), "mod domain;" | "pub mod domain;")) =>
+        {
+            ProjectLayout::PreLayered
+        }
+        (true, true) if complete_layered_layout(root, library) => ProjectLayout::Layered,
+        _ => ProjectLayout::Incomplete,
+    }
+}
+
+fn complete_layered_layout(root: &Path, library: &str) -> bool {
+    [
+        "src/application/modules/mod.rs",
+        "src/infrastructure/mod.rs",
+        "src/presentation/modules/mod.rs",
+    ]
+    .iter()
+    .all(|relative| root.join(relative).is_file())
+        && [
+            "pub mod application;",
+            "pub mod domain;",
+            "pub mod infrastructure;",
+            "pub mod presentation;",
+        ]
+        .iter()
+        .all(|declaration| library.lines().any(|line| line.trim() == *declaration))
+        && library
+            .lines()
+            .find(|line| application_version_on_line(line).is_some())
+            .is_some_and(|attribute| attribute.contains("project ="))
+}
+
+fn layered_library(source: &str, path: &Path) -> Result<String> {
+    let mut lines = Vec::new();
+    let mut inserted_layers = false;
+    let mut found_domain = false;
+    for line in source.lines() {
+        let declaration = line.trim();
+        let is_layer = matches!(
+            declaration,
+            "mod application;"
+                | "pub mod application;"
+                | "mod domain;"
+                | "pub mod domain;"
+                | "mod infrastructure;"
+                | "pub mod infrastructure;"
+                | "mod presentation;"
+                | "pub mod presentation;"
+        );
+        if matches!(declaration, "mod domain;" | "pub mod domain;") {
+            found_domain = true;
+        }
+        if is_layer {
+            if !inserted_layers {
+                lines.extend(
+                    [
+                        "pub mod application;",
+                        "pub mod domain;",
+                        "pub mod infrastructure;",
+                        "pub mod presentation;",
+                    ]
+                    .map(str::to_string),
+                );
+                inserted_layers = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !found_domain || !inserted_layers {
+        return Err(ScaffoldError::UnsupportedLayerMigration(
+            path.display().to_string(),
+        ));
+    }
+
+    let attribute = lines
+        .iter()
+        .position(|line| application_version_on_line(line).is_some())
+        .ok_or(ScaffoldError::MissingVersionDeclaration)?;
+    if lines[attribute].contains("project =") || lines.iter().any(|line| line.contains("fn build("))
+    {
+        return Err(ScaffoldError::UnsupportedLayerMigration(
+            path.display().to_string(),
+        ));
+    }
+    let Some(end) = lines[attribute].rfind(")]") else {
+        return Err(ScaffoldError::UnsupportedLayerMigration(
+            path.display().to_string(),
+        ));
+    };
+    lines[attribute].insert_str(end, ", project = crate::build");
+    let composition = [
+        "pub fn build() -> mxrs::ProjectDecl {",
+        "    let mut project = application::build();",
+        "    presentation::apply(&mut project);",
+        "    project",
+        "}",
+        "",
+    ];
+    lines.splice(attribute..attribute, composition.map(str::to_string));
+    Ok(join_lines(lines))
+}
+
+fn join_lines(lines: Vec<String>) -> String {
+    let mut source = lines.join("\n");
+    source.push('\n');
+    source
 }
 
 fn validate_version(version: &str) -> Result<()> {
@@ -180,6 +393,66 @@ fn replace_builder_versions(source: &str, from: &str, to: &str) -> String {
 mod tests {
     use super::*;
 
+    fn write(root: &Path, relative: &str, body: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn layered_shell(root: &Path) {
+        for (relative, body) in [
+            ("Cargo.toml", "[package]\nname = \"app\"\n"),
+            (
+                "src/lib.rs",
+                concat!(
+                    "pub mod application;\n",
+                    "pub mod domain;\n",
+                    "pub mod infrastructure;\n",
+                    "pub mod presentation;\n\n",
+                    "pub fn build() {}\n\n",
+                    "#[mxrs::application(version = \"11.12.1\", ",
+                    "project = crate::build)]\npub struct Application;\n"
+                ),
+            ),
+            ("src/domain/mod.rs", "pub fn build() {}\n"),
+            ("src/application/mod.rs", "pub mod modules;\n"),
+            ("src/application/modules/mod.rs", ""),
+            ("src/infrastructure/mod.rs", ""),
+            ("src/presentation/mod.rs", "pub mod modules;\n"),
+            ("src/presentation/modules/mod.rs", ""),
+        ] {
+            write(root, relative, body);
+        }
+    }
+
+    fn pre_layered_shell(root: &Path, infrastructure: bool) -> (String, Option<String>) {
+        let domain = concat!(
+            "pub fn build() -> mxrs::ProjectDecl {\n",
+            "    let mut project = mxrs::ProjectBuilder::new(\"11.12.1\");\n",
+            "    project.module(\"Main\", |_module| {});\n",
+            "    project.build()\n",
+            "}\n"
+        )
+        .to_string();
+        write(root, "Cargo.toml", "[package]\nname = \"app\"\n");
+        write(
+            root,
+            "src/lib.rs",
+            concat!(
+                "mod domain;\n\n",
+                "#[mxrs::application(version = \"11.12.1\")]\n",
+                "pub struct Application;\n"
+            ),
+        );
+        write(root, "src/domain/mod.rs", &domain);
+        let infrastructure = infrastructure.then(|| {
+            let source = "//! Existing integration code.\n".to_string();
+            write(root, "src/infrastructure/mod.rs", &source);
+            source
+        });
+        (domain, infrastructure)
+    }
+
     #[test]
     fn preview_is_read_only_and_apply_updates_only_generated_version_markers() {
         let directory = tempfile::tempdir().unwrap();
@@ -195,6 +468,7 @@ mod tests {
 
         let preview = upgrade_project(&root, "11.13.0", false).unwrap();
         assert!(!preview.applied);
+        assert!(!preview.migrated_layers);
         assert_eq!(preview.files.len(), 2);
         assert!(
             std::fs::read_to_string(root.join("src/lib.rs"))
@@ -277,24 +551,14 @@ mod tests {
     fn upgrade_rewrites_layered_and_pre_split_flow_modules() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("app");
+        layered_shell(&root);
         let builder = "fn declarations() {\n    ::mxrs_dsl::ProjectBuilder::new(\"11.12.1\");\n}\n";
         for (relative, body) in [
-            ("Cargo.toml", "[package]\nname = \"app\"\n"),
-            (
-                "src/lib.rs",
-                concat!(
-                    "#[mxrs::application(version = \"11.12.1\", ",
-                    "project = crate::build)]\npub struct Application;\n"
-                ),
-            ),
-            ("src/domain/mod.rs", "pub fn build() {}\n"),
             ("src/application/microflows/mod.rs", builder),
             ("src/presentation/nanoflows/mod.rs", builder),
             ("src/domain/flows/mod.rs", builder),
         ] {
-            let path = root.join(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, body).unwrap();
+            write(&root, relative, body);
         }
 
         let report = upgrade_project(&root, "11.13.0", true).unwrap();
@@ -327,6 +591,7 @@ mod tests {
     fn upgrade_rewrites_the_imported_documents_module_too() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("app");
+        layered_shell(&root);
         let documents = concat!(
             "//! Editable Cargo-native enumerations, constants, regular expressions, ",
             "scheduled events, and menus.\n\n",
@@ -341,22 +606,7 @@ mod tests {
             "    });\n",
             "    project.build()\n}\n",
         );
-        for (relative, body) in [
-            ("Cargo.toml", "[package]\nname = \"app\"\n"),
-            (
-                "src/lib.rs",
-                concat!(
-                    "#[mxrs::application(version = \"11.12.1\", ",
-                    "project = crate::build)]\npub struct Application;\n"
-                ),
-            ),
-            ("src/domain/mod.rs", "pub fn build() {}\n"),
-            ("src/domain/documents/mod.rs", documents),
-        ] {
-            let path = root.join(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, body).unwrap();
-        }
+        write(&root, "src/domain/documents/mod.rs", documents);
 
         let report = upgrade_project(&root, "11.13.0", true).unwrap();
         assert_eq!(report.from, "11.12.1");
@@ -372,6 +622,126 @@ mod tests {
         assert!(updated.contains("ProjectBuilder::new(\"11.13.0\")"));
         assert!(!updated.contains("ProjectBuilder::new(\"11.12.1\")"));
         assert!(updated.contains("pinned to 11.12.1"));
+    }
+
+    #[test]
+    fn pre_layered_migration_previews_applies_preserves_and_is_idempotent() {
+        for keep_infrastructure in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("app");
+            let (domain, infrastructure) = pre_layered_shell(&root, keep_infrastructure);
+            let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+            assert_eq!(project_layout(&root).unwrap(), ProjectLayout::PreLayered);
+
+            let preview = migrate_project_layers(&root, false).unwrap();
+            assert!(preview.migrated_layers);
+            assert!(!preview.applied);
+            assert_eq!(preview.from, preview.to);
+            assert!(
+                preview
+                    .updated
+                    .iter()
+                    .any(|path| path.ends_with("src/lib.rs"))
+            );
+            assert!(!root.join("src/application/mod.rs").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+                library
+            );
+
+            let applied = migrate_project_layers(&root, true).unwrap();
+            assert!(applied.migrated_layers);
+            assert!(applied.applied);
+            for relative in [
+                "src/application/mod.rs",
+                "src/application/modules/mod.rs",
+                "src/presentation/mod.rs",
+                "src/presentation/modules/mod.rs",
+                "src/infrastructure/mod.rs",
+            ] {
+                assert!(root.join(relative).is_file(), "missing {relative}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(root.join("src/domain/mod.rs")).unwrap(),
+                domain
+            );
+            if let Some(infrastructure) = infrastructure {
+                assert_eq!(
+                    std::fs::read_to_string(root.join("src/infrastructure/mod.rs")).unwrap(),
+                    infrastructure
+                );
+                assert!(
+                    !applied
+                        .created
+                        .iter()
+                        .any(|path| path.ends_with("src/infrastructure/mod.rs"))
+                );
+            } else {
+                assert!(
+                    applied
+                        .created
+                        .iter()
+                        .any(|path| path.ends_with("src/infrastructure/mod.rs"))
+                );
+            }
+            let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+            for declaration in [
+                "pub mod application;",
+                "pub mod domain;",
+                "pub mod infrastructure;",
+                "pub mod presentation;",
+                "project = crate::build",
+                "let mut project = application::build();",
+                "presentation::apply(&mut project);",
+            ] {
+                assert!(library.contains(declaration), "{declaration}: {library}");
+            }
+            assert_eq!(project_layout(&root).unwrap(), ProjectLayout::Layered);
+
+            let repeated = migrate_project_layers(&root, true).unwrap();
+            assert!(!repeated.migrated_layers);
+            assert!(repeated.files.is_empty());
+            assert!(repeated.created.is_empty());
+            assert!(repeated.updated.is_empty());
+        }
+    }
+
+    #[test]
+    fn incomplete_or_custom_layouts_fail_without_publishing_staged_changes() {
+        for partial_shape in ["one-layer", "missing-aggregators", "custom-entry-point"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("app");
+            let (domain, _) = pre_layered_shell(&root, false);
+            match partial_shape {
+                "one-layer" => write(&root, "src/application/mod.rs", "pub mod modules;\n"),
+                "missing-aggregators" => {
+                    write(&root, "src/application/mod.rs", "pub mod modules;\n");
+                    write(&root, "src/presentation/mod.rs", "pub mod modules;\n");
+                }
+                "custom-entry-point" => {
+                    let path = root.join("src/lib.rs");
+                    let source = std::fs::read_to_string(&path)
+                        .unwrap()
+                        .replace(")]", ", project = crate::domain::build)]");
+                    std::fs::write(path, source).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+            assert!(matches!(
+                upgrade_project(&root, "11.13.0", true),
+                Err(ScaffoldError::UnsupportedLayerMigration(_))
+            ));
+            assert_eq!(
+                std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+                library
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("src/domain/mod.rs")).unwrap(),
+                domain
+            );
+            assert!(!root.join("src/presentation/modules/mod.rs").exists());
+        }
     }
 
     #[test]

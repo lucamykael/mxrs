@@ -340,6 +340,7 @@ fn inspecting_reports_the_declared_version_modules_and_registered_scaffolds() {
     assert_eq!(document["declared_version"], "11.12.1");
     assert_eq!(document["manifest"], true);
     assert_eq!(document["domain_module"], true);
+    assert_eq!(document["layout"], "layered");
     assert_eq!(document["modules"][0], "sales");
     assert_eq!(document["mprs"].as_array().unwrap().len(), 0);
     assert_eq!(
@@ -398,6 +399,68 @@ fn upgrade_previews_then_transactionally_updates_a_generated_project() {
         .status
         .success()
     );
+}
+
+#[test]
+fn upgrade_without_a_version_migrates_a_pre_layered_project_and_reports_every_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = project(directory.path());
+    std::fs::remove_dir_all(root.join("src/application")).unwrap();
+    std::fs::remove_dir_all(root.join("src/presentation")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        concat!(
+            "mod domain;\n",
+            "pub mod infrastructure;\n\n",
+            "#[mxrs::application(version = \"11.12.1\")]\n",
+            "pub struct Application;\n"
+        ),
+    )
+    .unwrap();
+    let domain = std::fs::read(root.join("src/domain/mod.rs")).unwrap();
+
+    let before = cli(&["project", "inspect", root.to_str().unwrap(), "--json"]);
+    assert!(before.status.success(), "{:?}", before.stderr);
+    let before: Value = serde_json::from_slice(&before.stdout).unwrap();
+    assert_eq!(before["layout"], "pre-layered");
+
+    let preview = cli(&["upgrade", "--target", root.to_str().unwrap(), "--json"]);
+    assert!(preview.status.success(), "{:?}", preview.stderr);
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["from"], "11.12.1");
+    assert_eq!(preview["to"], "11.12.1");
+    assert_eq!(preview["migrated_layers"], true);
+    assert_eq!(preview["applied"], false);
+    assert_eq!(preview["created"].as_array().unwrap().len(), 4);
+    assert_eq!(preview["updated"].as_array().unwrap().len(), 1);
+    assert!(!root.join("src/application/mod.rs").exists());
+
+    let applied = cli(&["upgrade", "--target", root.to_str().unwrap(), "--apply"]);
+    assert!(applied.status.success(), "{:?}", applied.stderr);
+    let rendered = text(&applied);
+    assert!(rendered.contains("layers: migrated"));
+    assert!(rendered.contains("  create  "));
+    assert!(rendered.contains("  update  "));
+    assert_eq!(
+        std::fs::read(root.join("src/domain/mod.rs")).unwrap(),
+        domain
+    );
+
+    let after = cli(&["project", "inspect", root.to_str().unwrap(), "--json"]);
+    let after: Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert_eq!(after["layout"], "layered");
+
+    let repeated = cli(&[
+        "upgrade",
+        "--target",
+        root.to_str().unwrap(),
+        "--apply",
+        "--json",
+    ]);
+    assert!(repeated.status.success(), "{:?}", repeated.stderr);
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["migrated_layers"], false);
+    assert!(repeated["files"].as_array().unwrap().is_empty());
 }
 
 #[test]

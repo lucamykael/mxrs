@@ -43,7 +43,9 @@ pub enum ScaffoldError {
     ModuleExists(String),
     #[error("{0}: file already exists")]
     FileExists(String),
-    #[error("{0}: aggregator not found")]
+    #[error(
+        "{0}: aggregator not found (for a project created before layered generation, run `mxrs upgrade` from its root, inspect the preview, then rerun with `--apply`)"
+    )]
     AggregatorNotFound(String),
     #[error("{0}: build() does not end in a shape this scaffold can extend")]
     UnrecognizedProjectBuild(String),
@@ -71,6 +73,10 @@ pub enum ScaffoldError {
     UnsafeScaffoldPath(String),
     #[error("Cargo-native project has no #[mxrs::application(version = \"…\")] declaration")]
     MissingVersionDeclaration,
+    #[error(
+        "{0}: generated project layout cannot be migrated safely; restore a complete pre-layered or layered source tree"
+    )]
+    UnsupportedLayerMigration(String),
     #[error("project version declarations disagree: {0:?}")]
     VersionMismatch(Vec<String>),
 }
@@ -217,15 +223,8 @@ fn project_files(
                 "pub mod modules;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut builder = mxrs::ProjectBuilder::new({version});\n    builder.module(\"Main\", |_module| {{}});\n    let mut project = builder.build();\n    modules::apply(&mut project);\n    project\n}}\n"
             ),
         ),
-        (
-            "src/domain/modules/mod.rs",
-            templates::modules_aggregator(),
-        ),
-        (
-            "src/application/mod.rs",
-            "pub mod modules;\n\npub fn build() -> mxrs::ProjectDecl {\n    let mut project = crate::domain::build();\n    modules::apply(&mut project);\n    project\n}\n"
-                .to_string(),
-        ),
+        ("src/domain/modules/mod.rs", templates::modules_aggregator()),
+        ("src/application/mod.rs", templates::application_layer()),
         (
             "src/application/modules/mod.rs",
             templates::modules_aggregator(),
@@ -243,7 +242,7 @@ fn project_files(
         ),
         (
             "src/infrastructure/mod.rs",
-            "//! Outbound adapters and generated platform integration.\n".to_string(),
+            templates::infrastructure_layer(),
         ),
         (
             "src/main.rs",

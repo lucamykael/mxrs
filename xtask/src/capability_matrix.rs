@@ -428,7 +428,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "upgrade" => (
             Status::Partial,
             "mxrs upgrade",
-            "transactional preview/apply updates only generated Cargo-native version markers and rejects inconsistent declarations; full CLI oracle missing",
+            "transactional preview/apply migrates pre-layered generated source and optionally updates generated Cargo-native version markers; incomplete layouts and inconsistent declarations fail closed; full CLI oracle missing",
         ),
         "team-server" => (
             Status::Partial,

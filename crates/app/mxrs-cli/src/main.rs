@@ -187,7 +187,7 @@ commands! {
     "test", "<file.mpr> <suite.json> --plan [--json]", "Validate a functional runtime test plan", run_test;
     "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
     "units", "<file.mpr>", "List native units and storage metadata", run_units;
-    "upgrade", "--mendix VERSION [--target DIR] [--apply] [--json]", "Preview or apply a Cargo-native project version upgrade", run_upgrade;
+    "upgrade", "[--mendix VERSION] [--target DIR] [--apply] [--json]", "Preview or apply a generated layout and optional version upgrade", run_upgrade;
     "use-case", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold an application use-case microflow", run_use_case;
     "validate", "<file.mpr> [--json]", "Check storage-format integrity", run_validate;
     "validation", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create an application validation microflow", run_validation;
@@ -641,15 +641,15 @@ fn run_upgrade(mut args: Vec<String>) -> ExitCode {
     let target = take_value(&mut args, "--target").unwrap_or_else(|| ".".to_string());
     let apply = take_flag(&mut args, "--apply");
     let json = take_flag(&mut args, "--json");
-    let Some(version) = version else {
-        eprintln!("Usage: mxrs upgrade --mendix VERSION [--target DIR] [--apply] [--json]");
-        return ExitCode::FAILURE;
-    };
     if !args.is_empty() {
-        eprintln!("Usage: mxrs upgrade --mendix VERSION [--target DIR] [--apply] [--json]");
+        eprintln!("Usage: mxrs upgrade [--mendix VERSION] [--target DIR] [--apply] [--json]");
         return ExitCode::FAILURE;
     }
-    match mxrs_scaffold::lifecycle::upgrade_project(target, &version, apply) {
+    let result = match version {
+        Some(version) => mxrs_scaffold::lifecycle::upgrade_project(target, &version, apply),
+        None => mxrs_scaffold::lifecycle::migrate_project_layers(target, apply),
+    };
+    match result {
         Ok(report) => {
             if json {
                 println!(
@@ -658,20 +658,34 @@ fn run_upgrade(mut args: Vec<String>) -> ExitCode {
                         "root": report.root,
                         "from": report.from,
                         "to": report.to,
+                        "created": report.created,
+                        "updated": report.updated,
                         "files": report.files,
+                        "migrated_layers": report.migrated_layers,
                         "applied": report.applied,
                     }))
                     .expect("upgrade report is serializable")
                 );
             } else {
                 println!(
-                    "[mxrs] {} {}: {} -> {} ({} file(s))",
+                    "[mxrs] {} {}: {} -> {} ({} file(s), layers: {})",
                     if report.applied { "Updated" } else { "Preview" },
                     report.root.display(),
                     report.from,
                     report.to,
-                    report.files.len()
+                    report.files.len(),
+                    if report.migrated_layers {
+                        "migrated"
+                    } else {
+                        "current"
+                    }
                 );
+                for path in &report.created {
+                    println!("  create  {}", path.display());
+                }
+                for path in &report.updated {
+                    println!("  update  {}", path.display());
+                }
             }
             ExitCode::SUCCESS
         }

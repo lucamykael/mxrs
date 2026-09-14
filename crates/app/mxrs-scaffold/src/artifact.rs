@@ -456,6 +456,7 @@ pub struct ProjectInspection {
     pub root: PathBuf,
     pub manifest: bool,
     pub domain_module: bool,
+    pub layout: crate::lifecycle::ProjectLayout,
     pub declared_version: Option<String>,
     pub modules: Vec<String>,
     pub mprs: Vec<PathBuf>,
@@ -495,6 +496,7 @@ pub fn inspect_project(target: impl AsRef<Path>) -> Result<ProjectInspection> {
     Ok(ProjectInspection {
         manifest: root.join("Cargo.toml").is_file(),
         domain_module: root.join("src/domain/mod.rs").is_file(),
+        layout: crate::lifecycle::project_layout(&root)?,
         declared_version: declared_version(&root)?,
         modules,
         mprs,

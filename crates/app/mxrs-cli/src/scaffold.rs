@@ -224,6 +224,7 @@ fn document(inspection: &ProjectInspection) -> serde_json::Value {
         "root": inspection.root.display().to_string(),
         "manifest": inspection.manifest,
         "domain_module": inspection.domain_module,
+        "layout": inspection.layout.as_str(),
         "declared_version": inspection.declared_version,
         "modules": inspection.modules,
         "mprs": paths(&inspection.mprs),
@@ -239,6 +240,7 @@ fn fields(inspection: &ProjectInspection) -> Vec<(&'static str, String)> {
         ("root", inspection.root.display().to_string()),
         ("manifest", inspection.manifest.to_string()),
         ("domain_module", inspection.domain_module.to_string()),
+        ("layout", inspection.layout.to_string()),
         (
             "declared_version",
             inspection.declared_version.clone().unwrap_or_default(),
@@ -326,6 +328,7 @@ mod tests {
             root: std::path::PathBuf::from("/projects/orders"),
             manifest: true,
             domain_module: true,
+            layout: mxrs_scaffold::lifecycle::ProjectLayout::Layered,
             declared_version: None,
             modules: vec!["sales".into(), "billing".into()],
             mprs: vec![std::path::PathBuf::from(
@@ -336,9 +339,11 @@ mod tests {
         let fields = fields(&inspection);
         let document = document(&inspection);
         assert_eq!(fields[0].1, "/projects/orders");
-        assert_eq!(fields[3].1, "");
-        assert_eq!(fields[4].1, "sales, billing");
+        assert_eq!(fields[3].1, "layered");
+        assert_eq!(fields[4].1, "");
+        assert_eq!(fields[5].1, "sales, billing");
         assert!(document["declared_version"].is_null());
+        assert_eq!(document["layout"], "layered");
         assert_eq!(document["modules"][1], "billing");
         assert_eq!(fields.len(), document.as_object().unwrap().len());
     }

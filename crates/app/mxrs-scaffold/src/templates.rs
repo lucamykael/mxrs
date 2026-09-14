@@ -17,6 +17,20 @@ pub(crate) const DECLARATIONS_LIST: &str = "DECLARATIONS";
 pub(crate) const FAMILIES_LIST: &str = "FAMILIES";
 pub(crate) const MODULES_LIST: &str = "MODULES";
 
+pub(crate) fn application_layer() -> String {
+    "pub mod modules;\n\npub fn build() -> mxrs::ProjectDecl {\n    let mut project = crate::domain::build();\n    modules::apply(&mut project);\n    project\n}\n"
+        .to_string()
+}
+
+pub(crate) fn empty_presentation_layer() -> String {
+    "pub mod modules;\n\npub fn apply(project: &mut mxrs::ProjectDecl) {\n    modules::apply(project);\n}\n"
+        .to_string()
+}
+
+pub(crate) fn infrastructure_layer() -> String {
+    "//! Outbound adapters and generated platform integration.\n".to_string()
+}
+
 pub(crate) fn entity(module_name: &str, name: &str) -> String {
     format!(
         "//! Domain entity `{module_name}.{name}`.\n\

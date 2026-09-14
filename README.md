@@ -95,6 +95,12 @@ Associations use `Reference<T>` or `ReferenceSet<T>` fields; their target and
 cardinality are checked by Rust, while names and storage metadata can be
 overridden with `#[mxrs(...)]`.
 
+Projects created before the four-layer layout can run
+`mxrs upgrade --target .` for a read-only preview and add `--apply` to migrate
+transactionally. Existing domain source stays untouched; the command adds the
+composition root and missing layer aggregators so newer scaffolds have an
+unambiguous destination.
+
 Pages have a growing Cargo-native front end: `ModuleBuilder::page`
 (`mxrs-dsl`) takes a nested-closure builder — the same "locked shape"
 decision as microflows/entities, not a `#[derive(MxPage)]` struct, since a

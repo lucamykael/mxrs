@@ -6,7 +6,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
+use mxrs_scaffold::lifecycle::{ProjectLayout, migrate_project_layers, project_layout};
 use mxrs_scaffold::{
     ArtifactKind, ArtifactScaffold, MxrsDependency, PageChain, ProjectScaffold, ScaffoldError,
     generate_project, inspect_project, registry, scaffold_artifact,
@@ -14,6 +16,8 @@ use mxrs_scaffold::{
 
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
+
+static NESTED_CARGO: Mutex<()> = Mutex::new(());
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -39,6 +43,14 @@ fn scaffold(root: &Path, kind: ArtifactKind, name: &str) -> Vec<PathBuf> {
 }
 
 fn cargo(root: &Path, arguments: &[&str]) -> std::process::Output {
+    // Every fixture intentionally has the same Cargo package name. Running
+    // two of them against the shared nested target concurrently can replace
+    // the executable between build and launch, making one test observe the
+    // other fixture's model. Serialize the complete command, not just the
+    // compilation phase.
+    let _guard = NESTED_CARGO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     Command::new(env!("CARGO"))
         .args(arguments)
         .current_dir(root)
@@ -448,6 +460,69 @@ fn scaffolding_a_layer_a_pre_split_project_lacks_fails_closed() {
         );
         assert!(!root.join(format!("src/{layer}")).exists());
     }
+}
+
+#[test]
+fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    let domain = std::fs::read(root.join("src/domain/mod.rs")).unwrap();
+    std::fs::remove_dir_all(root.join("src/application")).unwrap();
+    std::fs::remove_dir_all(root.join("src/presentation")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        concat!(
+            "mod domain;\n",
+            "pub mod infrastructure;\n\n",
+            "#[mxrs::application(version = \"11.12.1\")]\n",
+            "pub struct Application;\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(project_layout(&root).unwrap(), ProjectLayout::PreLayered);
+
+    let preview = migrate_project_layers(&root, false).unwrap();
+    assert!(preview.migrated_layers);
+    assert!(!root.join("src/application/mod.rs").exists());
+    let applied = migrate_project_layers(&root, true).unwrap();
+    assert!(applied.migrated_layers);
+    assert_eq!(
+        std::fs::read(root.join("src/domain/mod.rs")).unwrap(),
+        domain
+    );
+    assert_eq!(project_layout(&root).unwrap(), ProjectLayout::Layered);
+
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    scaffold(&root, ArtifactKind::UseCase, "Sales.ACT_CreateOrder");
+    scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
+    let output = cargo(
+        &root,
+        &["run", "--offline", "--quiet", "--", "build/Migrated.mpr"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let project = mxrs_model::Project::open(root.join("build/Migrated.mpr"), true).unwrap();
+    let sales = project
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|module| module.name.as_deref() == Some("Sales"))
+        .expect("the migrated composition root includes layered scaffolds");
+    assert!(
+        sales
+            .microflows
+            .iter()
+            .any(|flow| flow.name.as_deref() == Some("ACT_CreateOrder"))
+    );
+    assert!(
+        sales
+            .nanoflows
+            .iter()
+            .any(|flow| flow.name.as_deref() == Some("NAN_RefreshOrder"))
+    );
 }
 
 /// Both generators pre-write every layer's `modules` aggregator *and* its
