@@ -1,12 +1,12 @@
-//! Structural oracle for looped activities in a real Mendix project.
+//! Structural oracle for looped activities in a configured Mendix project.
 //!
-//! This is ignored because the customer project and the `model.mdp` produced
-//! by the official compiler are deliberately not repository fixtures. Run it
-//! with the same `MXRS_ACCEPTANCE_DIR` layout documented by
-//! `acceptance_qrqc_spc.rs`.
+//! The editor project and official `model.mdp` remain outside the repository.
+//! Their paths are supplied explicitly so the harness stores no project name,
+//! corpus layout or corpus-specific metric.
 //!
 //! ```text
-//! MXRS_ACCEPTANCE_DIR=/path/to/dir cargo test -p mxrs-compiler-flow \
+//! MXRS_LOOP_ORACLE_PROJECT=/path/project.mpr \
+//! MXRS_LOOP_ORACLE_MODEL=/path/model.mdp cargo test -p mxrs-compiler-flow \
 //!     --test loop_oracle -- --ignored --nocapture
 //! ```
 
@@ -54,7 +54,8 @@ fn collect_loops(roots: impl IntoIterator<Item = Document>) -> HashMap<String, D
 }
 
 /// Loop ID -> (root ID, root type). Names are intentionally not retained or
-/// printed: this gate verifies customer data without leaking its vocabulary.
+/// printed: this gate verifies external corpus data without retaining its
+/// vocabulary.
 fn loop_owners(roots: &[Document]) -> HashMap<String, (String, String)> {
     let mut owners = HashMap::new();
     for root in roots {
@@ -233,21 +234,24 @@ fn first_difference(expected: &Bson, actual: &Bson, path: &str) -> Option<String
 }
 
 #[test]
-#[ignore = "requires MXRS_ACCEPTANCE_DIR with paired SPC .mpr and official model.mdp"]
-fn rebuilds_all_real_spc_runtime_loops() {
-    let base = std::env::var("MXRS_ACCEPTANCE_DIR")
-        .expect("set MXRS_ACCEPTANCE_DIR to the private QRQC/SPC corpus root before explicitly running this ignored test");
-    let base = std::path::Path::new(&base);
-    let mpr = base.join("spc-ruby/build/JEMScc-SPC.mpr");
-    let mdp = base.join("spc-ruby/build/deployment/model/model.mdp");
+#[ignore = "requires paired MXRS_LOOP_ORACLE_PROJECT and MXRS_LOOP_ORACLE_MODEL files"]
+fn rebuilds_all_configured_runtime_loops() {
+    let mpr = std::path::PathBuf::from(
+        std::env::var_os("MXRS_LOOP_ORACLE_PROJECT")
+            .expect("set MXRS_LOOP_ORACLE_PROJECT before explicitly running this ignored test"),
+    );
+    let mdp = std::path::PathBuf::from(
+        std::env::var_os("MXRS_LOOP_ORACLE_MODEL")
+            .expect("set MXRS_LOOP_ORACLE_MODEL before explicitly running this ignored test"),
+    );
     assert!(
         mpr.is_file(),
-        "missing SPC editor corpus: {}",
+        "loop oracle project is not a file: {}",
         mpr.display()
     );
     assert!(
         mdp.is_file(),
-        "missing paired official SPC Runtime corpus: {}",
+        "loop oracle model package is not a file: {}",
         mdp.display()
     );
 
@@ -293,7 +297,14 @@ fn rebuilds_all_real_spc_runtime_loops() {
         println!("{count}x\n{signature}");
     }
 
-    assert_eq!(runtime.len(), 118, "SPC oracle baseline changed");
+    assert!(
+        !editor.is_empty(),
+        "editor corpus contains no looped activities"
+    );
+    assert!(
+        !runtime.is_empty(),
+        "Runtime corpus contains no looped activities"
+    );
     assert!(
         omitted.iter().all(|id| owners
             .get(id)

@@ -212,8 +212,8 @@ npm run build --prefix crates/compiler/mxrs-materializers/frontend
 `oracle-diff` is the correctness ceiling for anything touching the
 BSON/writer/model path: it runs the real `mxrb` (Ruby) install as a
 behavioral oracle and requires a byte-identical round trip on both fixtures.
-`MXRB_HOME` overrides the default oracle location
-(`/home/mykael/Personal_Projects/mxrb`).
+`MXRB_HOME` overrides the default oracle location (`../mxrb`, beside this
+workspace).
 
 `capability-matrix` reads MXRB's own command inventory and classifies every
 row as verified, partial, or missing. Its identity-based CI ratchet records 76
@@ -248,5 +248,5 @@ old-layout binaries can survive and contribute obsolete coverage maps.
 Passing development floors is not 100% coverage or proof of Studio Pro parity.
 
 See [verification and remaining parity work](docs/verification.md) for exact
-readiness commands, the private-model acceptance procedure, and the limits of
+readiness commands, the unversioned-model acceptance procedure, and the limits of
 the available evidence.

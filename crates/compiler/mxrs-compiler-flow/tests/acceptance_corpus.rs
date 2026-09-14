@@ -1,28 +1,17 @@
-//! Acceptance pass against real production .mpr files (QRQC/SPC — real
-//! customer Mendix 11.12.1 apps, not synthetic fixtures). Committed as an
-//! `#[ignore]`d test parameterized by `MXRS_ACCEPTANCE_DIR` rather than a
-//! hardcoded private path, so it survives across sessions/machines instead
-//! of being silently lost as an untracked file (as it was through several
-//! prior sessions — see `decisions/mxrs-rust-rewrite-plan.md`'s update-D
-//! notes in this project's ai-memory). The referenced `.mpr`/`.mdp` files
-//! themselves are still not committed (real customer data) — this only
-//! commits the harness that consumes them.
+//! Acceptance pass against an explicitly supplied, unversioned `.mpr` corpus.
+//! The harness is generic by design: project names, directory layouts and
+//! corpus-specific baselines never become repository metadata.
 //!
 //! Run manually with:
 //! ```text
-//! MXRS_ACCEPTANCE_DIR=/path/to/dir cargo test -p mxrs-compiler-flow \
-//!     --test acceptance_qrqc_spc -- --ignored --nocapture
+//! MXRS_ACCEPTANCE_PROJECTS=/path/a.mpr:/path/b.mpr \
+//! MXRS_ACCEPTANCE_MODEL_PACKAGES=/path/a.mdp:/path/b.mdp \
+//! cargo test -p mxrs-compiler-flow --test acceptance_corpus -- --ignored --nocapture
 //! ```
-//! Expected directory layout under `MXRS_ACCEPTANCE_DIR`:
-//! ```text
-//! qrqc-ruby/build/eQRQC.mpr
-//! spc-ruby/build/JEMScc-SPC.mpr
-//! spc-ruby/build/deployment/model/model.mdp
-//! ```
-//! Default runs ignore this private-corpus test. Explicit `--ignored` runs
-//! require every input and fail on missing evidence or compilation gaps.
-//! Both projects are reported before asserting full compilation, so a QRQC
-//! gap cannot hide SPC's results. This checks compilation, not runtime parity.
+//! Both variables are platform path lists. Model packages are optional and
+//! combined into the compiler's read-only counterpart catalog. Default runs
+//! ignore this acceptance test; explicit runs fail on missing evidence or any
+//! compilation gap. This checks compilation, not runtime parity.
 
 use std::collections::BTreeMap;
 
@@ -30,13 +19,34 @@ use mxrs_bson::Document;
 use mxrs_compiler_flow::FlowCompiler;
 use mxrs_model::Project;
 
-fn run_against(path: &str, label: &str, model_package: Option<&str>) -> Vec<String> {
+fn corpus_paths(variable: &str, required: bool) -> Vec<std::path::PathBuf> {
+    let Some(value) = std::env::var_os(variable) else {
+        assert!(
+            !required,
+            "set {variable} before explicitly running this ignored test"
+        );
+        return Vec::new();
+    };
+    let paths = std::env::split_paths(&value).collect::<Vec<_>>();
+    assert!(!paths.is_empty(), "{variable} contains no paths");
+    for path in &paths {
+        assert!(
+            path.is_file(),
+            "{variable} input is not a file: {}",
+            path.display()
+        );
+    }
+    paths
+}
+
+fn run_against(
+    path: &std::path::Path,
+    label: &str,
+    existing_documents: &[Document],
+) -> Vec<String> {
     let project = Project::open(path, true)
-        .unwrap_or_else(|error| panic!("[{label}] cannot open private corpus {path}: {error}"));
-    let existing_documents = model_package
-        .map(|p| mxrs_schema::read_model_package(p).unwrap())
-        .unwrap_or_default();
-    let compiler = FlowCompiler::new(&project, &existing_documents).unwrap();
+        .unwrap_or_else(|error| panic!("[{label}] cannot open corpus {}: {error}", path.display()));
+    let compiler = FlowCompiler::new(&project, existing_documents).unwrap();
     let units = project.all_units().unwrap();
 
     let mut flow_ok = 0usize;
@@ -134,7 +144,7 @@ fn run_against(path: &str, label: &str, model_package: Option<&str>) -> Vec<Stri
 
     // Nanoflow JS compilation pass (separate compiler, own unsupported list).
     let index = compiler.index();
-    let project_root = std::path::Path::new(path).parent();
+    let project_root = path.parent();
     let mut nanoflow_compiler =
         mxrs_compiler_flow::nanoflow::NanoflowCompiler::new(index, project_root);
     let names: Vec<String> = index.nanoflows.keys().cloned().collect();
@@ -179,43 +189,28 @@ fn run_against(path: &str, label: &str, model_package: Option<&str>) -> Vec<Stri
 }
 
 #[test]
-#[ignore = "requires MXRS_ACCEPTANCE_DIR with complete QRQC/SPC private corpus"]
-fn acceptance_pass_against_real_projects() {
-    let base = std::env::var("MXRS_ACCEPTANCE_DIR")
-        .expect("set MXRS_ACCEPTANCE_DIR to the complete private QRQC/SPC corpus root before explicitly running this ignored test");
-    let base = std::path::Path::new(&base);
-    assert!(
-        base.is_dir(),
-        "MXRS_ACCEPTANCE_DIR is not a directory: {}",
-        base.display()
-    );
-    for required in [
-        "qrqc-ruby/build/eQRQC.mpr",
-        "spc-ruby/build/JEMScc-SPC.mpr",
-        "spc-ruby/build/deployment/model/model.mdp",
-    ] {
-        assert!(
-            base.join(required).is_file(),
-            "missing private corpus input: {}",
-            base.join(required).display()
-        );
+#[ignore = "requires MXRS_ACCEPTANCE_PROJECTS with an authorized local corpus"]
+fn acceptance_pass_against_configured_projects() {
+    let projects = corpus_paths("MXRS_ACCEPTANCE_PROJECTS", true);
+    let existing_documents = corpus_paths("MXRS_ACCEPTANCE_MODEL_PACKAGES", false)
+        .into_iter()
+        .flat_map(|path| {
+            mxrs_schema::read_model_package(&path).unwrap_or_else(|error| {
+                panic!("cannot read model package {}: {error}", path.display())
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut failures = Vec::new();
+    for (index, project) in projects.iter().enumerate() {
+        failures.extend(run_against(
+            project,
+            &format!("case-{}", index + 1),
+            &existing_documents,
+        ));
     }
-
-    let mut failures = run_against(
-        base.join("qrqc-ruby/build/eQRQC.mpr").to_str().unwrap(),
-        "QRQC",
-        None,
-    );
-    let spc_mpr = base.join("spc-ruby/build/JEMScc-SPC.mpr");
-    let spc_mdp = base.join("spc-ruby/build/deployment/model/model.mdp");
-    failures.extend(run_against(
-        spc_mpr.to_str().unwrap(),
-        "SPC",
-        spc_mdp.to_str(),
-    ));
     assert!(
         failures.is_empty(),
-        "private corpus compilation is incomplete:\n{}",
+        "acceptance corpus compilation is incomplete:\n{}",
         failures.join("\n")
     );
 }

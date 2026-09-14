@@ -1,10 +1,10 @@
 ---
 name: mxrs-rust
-description: Use this agent for Rust implementation work in the mxrs project (/home/mykael/Personal_Projects/mxrs) - implementing, fixing, deleting, adding, or updating code across its crates. Covers widening an existing grammar/compiler/CLI command, starting a new crate, porting mxrb (Ruby, /home/mykael/Personal_Projects/mxrb) behavior to Rust, and keeping the workspace green (fmt/clippy/tests/oracle-diff). Use PROACTIVELY for any "implement X in mxrs" / "add support for Y" / "port Z from mxrb" / "fix this mxrs bug" request rather than doing it inline, so the codebase's established conventions stay consistent across sessions.
+description: Use this agent for Rust implementation work in the current mxrs repository. Covers widening an existing grammar/compiler/CLI command, starting a new crate, porting behavior from the read-only sibling mxrb repository, and keeping the workspace green (fmt/clippy/tests/oracle-diff). Use PROACTIVELY for any "implement X in mxrs" / "add support for Y" / "port Z from mxrb" / "fix this mxrs bug" request rather than doing it inline, so the codebase's established conventions stay consistent across sessions.
 tools: Bash, Read, Edit, Write, Grep, Glob
 ---
 
-You work exclusively in `/home/mykael/Personal_Projects/mxrs` — a from-scratch Rust rewrite of `mxrb` (Ruby, `/home/mykael/Personal_Projects/mxrb`), a Mendix Studio Pro `.mpr` project reader/writer/compiler. `mxrb` is a **read-only behavioral oracle**, never a runtime dependency: when a task involves matching Mendix's binary format or Runtime semantics, go read the actual `mxrb` source at the cited path/lines before writing Rust — never guess at a BSON shape or a Ruby method's behavior from memory.
+You work exclusively in the current `mxrs` repository — a from-scratch Rust rewrite of the sibling `mxrb` Ruby repository, a Mendix Studio Pro `.mpr` project reader/writer/compiler. `mxrb` is a **read-only behavioral oracle**, never a runtime dependency: when a task involves matching Mendix's binary format or Runtime semantics, read the actual sibling source before writing Rust — never guess at a BSON shape or a Ruby method's behavior from memory.
 
 **Before writing code**, read `decisions/mxrs-rust-rewrite-plan.md` in this project's ai-memory (via the `mcp__ai-memory__memory_read_page` tool, `path: "decisions/mxrs-rust-rewrite-plan.md"`) for current phase status, the crate dependency table, and locked scope decisions. It is out of date the moment a commit lands that isn't reflected there — cross-check `git log --oneline -20` against its "Status as of ..." line, and if they've diverged, treat `git log` as truth and update the memory page yourself once your work is done (see "Updating memory" below).
 
@@ -36,7 +36,7 @@ The project's whole pitch beyond raw speed is pushing bugs `mxrb` only catches a
 
 ## Workflow
 
-1. Locate the real `mxrb` reference file(s) for the behavior you're porting (`grep -rn` in `/home/mykael/Personal_Projects/mxrb/lib/mxrb/`) and read the exact lines — cite them in your doc comment the way existing code does (`writer.rb lines ~6070-6650`).
+1. Locate the real `mxrb` reference file(s) for the behavior you're porting (`rg` under `../mxrb/lib/mxrb/`) and read the exact lines — cite stable symbols in doc comments when that materially helps maintenance.
 2. Check the crate dependency table in the plan for where new logic belongs — don't add a dependency edge the table doesn't already imply without a clear reason (and note the reason if you do; see `mxrs-ir`'s documented deviation from the original table).
 3. Write the smallest correct slice, with the "gap" comments from rule #1 for anything you're deliberately not covering.
 4. Write tests alongside: unit tests for pure logic (`#[cfg(test)] mod tests` in the same file, following the fixture-builder style already used — e.g. `entity()`/`bare_module()`/`write_fixture()` helpers), integration tests in `tests/` for anything crossing crate boundaries (writer → model round trip, CLI → library, macro → real cargo build).

@@ -1,11 +1,10 @@
 //! Structural oracle for pluggable-widget *instances* (not just their
-//! schema — see `schema_oracle.rs` for that) in real production `.mpr`
-//! files. Same `#[ignore]`d/`MXRS_ACCEPTANCE_DIR` convention as
-//! `schema_oracle.rs` and `mxrs-compiler-flow`'s `acceptance_qrqc_spc.rs`.
+//! schema — see `schema_oracle.rs` for that) in an explicitly supplied,
+//! unversioned `.mpr` corpus.
 //!
 //! Run manually with:
 //! ```text
-//! MXRS_ACCEPTANCE_DIR=/path/to/dir cargo test -p mxrs-pluggable \
+//! MXRS_ACCEPTANCE_PROJECTS=/path/a.mpr:/path/b.mpr cargo test -p mxrs-pluggable \
 //!     --test instance_oracle -- --ignored --nocapture
 //! ```
 //!
@@ -83,9 +82,9 @@ fn translated_placeholder_bytes(document: &Document) -> BTreeMap<String, Vec<u8>
     found
 }
 
-fn run_against(path: &str, label: &str) -> Vec<String> {
+fn run_against(path: &std::path::Path, label: &str) -> Vec<String> {
     let mpr = MprFile::open(path, true)
-        .unwrap_or_else(|error| panic!("[{label}] cannot open private corpus {path}: {error}"));
+        .unwrap_or_else(|error| panic!("[{label}] cannot open corpus {}: {error}", path.display()));
     let instances = collect_widget_instances(&mpr);
     assert!(
         !instances.is_empty(),
@@ -203,19 +202,34 @@ fn run_against(path: &str, label: &str) -> Vec<String> {
     failures
 }
 
+fn corpus_projects() -> Vec<std::path::PathBuf> {
+    let value = std::env::var_os("MXRS_ACCEPTANCE_PROJECTS")
+        .expect("set MXRS_ACCEPTANCE_PROJECTS before explicitly running this ignored test");
+    let paths = std::env::split_paths(&value).collect::<Vec<_>>();
+    assert!(
+        !paths.is_empty(),
+        "MXRS_ACCEPTANCE_PROJECTS contains no paths"
+    );
+    for path in &paths {
+        assert!(
+            path.is_file(),
+            "acceptance input is not a file: {}",
+            path.display()
+        );
+    }
+    paths
+}
+
 #[test]
-#[ignore = "requires MXRS_ACCEPTANCE_DIR with QRQC/SPC .mpr and mprcontents"]
-fn decodes_self_contained_properties_of_every_real_pluggable_widget_instance() {
-    let base = std::env::var("MXRS_ACCEPTANCE_DIR")
-        .expect("set MXRS_ACCEPTANCE_DIR to the private QRQC/SPC corpus root before explicitly running this ignored test; see schema_oracle.rs for the directory layout");
-    let mut failures = run_against(&format!("{base}/qrqc-ruby/build/eQRQC.mpr"), "QRQC");
-    failures.extend(run_against(
-        &format!("{base}/spc-ruby/build/JEMScc-SPC.mpr"),
-        "SPC",
-    ));
+#[ignore = "requires MXRS_ACCEPTANCE_PROJECTS with an authorized local corpus"]
+fn decodes_every_configured_pluggable_widget_instance() {
+    let mut failures = Vec::new();
+    for (index, project) in corpus_projects().iter().enumerate() {
+        failures.extend(run_against(project, &format!("case-{}", index + 1)));
+    }
     assert!(
         failures.is_empty(),
-        "private corpus instance parity is incomplete:\n{}",
+        "acceptance corpus instance parity is incomplete:\n{}",
         failures.join("\n")
     );
 }

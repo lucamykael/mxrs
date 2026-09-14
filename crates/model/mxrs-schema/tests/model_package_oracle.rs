@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use mxrs_schema::ModelPackage;
 
 #[test]
-#[ignore = "requires an explicit MXRS_MODEL_PACKAGE_ORACLE private corpus path"]
+#[ignore = "requires an explicit MXRS_MODEL_PACKAGE_ORACLE path"]
 fn rewrites_a_real_model_package_byte_identically() {
     let source = std::env::var_os("MXRS_MODEL_PACKAGE_ORACLE")
         .map(PathBuf::from)

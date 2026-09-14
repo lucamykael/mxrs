@@ -195,65 +195,40 @@ regression test. The Java compatibility correction is scoped to the audited
 This proves one new scaffold can be built by the official tool, not that
 every supported declaration, widget, platform or Mendix version is compatible.
 Always use a new output directory: an existing `model.mdp` is not evidence
-that the current run generated a valid model. Private-corpus artifacts are
+that the current run generated a valid model. External corpus artifacts are
 never overwritten to run this check.
 
-## Private-model acceptance
+## Unversioned-model acceptance
 
-The six private-corpus tests are ignored by the portable suite because their
-input projects cannot be committed. Invoking them explicitly without their
-prerequisites fails; it is never a successful skip. Use an authorized local
-corpus with this layout, including complete MPR content directories and assets:
-
-```text
-corpus/
-  qrqc-ruby/build/eQRQC.mpr
-  qrqc-ruby/build/mprcontents/
-  spc-ruby/build/JEMScc-SPC.mpr
-  spc-ruby/build/mprcontents/
-  spc-ruby/build/deployment/model/model.mdp
-```
+The six corpus tests are ignored by the portable suite because their authorized
+inputs cannot be committed. Invoking them explicitly without every configured
+prerequisite fails; it is never a successful skip. Paths are supplied as data,
+so the repository records no project name, private directory layout or
+corpus-specific baseline. `MXRS_ACCEPTANCE_PROJECTS` and
+`MXRS_ACCEPTANCE_MODEL_PACKAGES` are platform path lists.
 
 ```sh
-export MXRS_ACCEPTANCE_DIR=/path/to/corpus
-export MXRS_PAGE_BUNDLE_ORACLE_MPR="$MXRS_ACCEPTANCE_DIR/spc-ruby/build/JEMScc-SPC.mpr"
-export MXRS_MODEL_PACKAGE_ORACLE="$MXRS_ACCEPTANCE_DIR/spc-ruby/build/deployment/model/model.mdp"
+export MXRS_ACCEPTANCE_PROJECTS="/authorized/a.mpr:/authorized/b.mpr"
+export MXRS_ACCEPTANCE_MODEL_PACKAGES="/authorized/a.mdp:/authorized/b.mdp"
+export MXRS_LOOP_ORACLE_PROJECT="/authorized/loop-source.mpr"
+export MXRS_LOOP_ORACLE_MODEL="/authorized/loop-runtime.mdp"
+export MXRS_PAGE_BUNDLE_ORACLE_MPR="/authorized/pages.mpr"
+export MXRS_MODEL_PACKAGE_ORACLE="/authorized/model.mdp"
 cargo test --no-fail-fast \
   -p mxrs-compiler-flow -p mxrs-compiler-widgets -p mxrs-pluggable -p mxrs-schema \
-  --test acceptance_qrqc_spc --test loop_oracle --test page_bundle_oracle \
+  --test acceptance_corpus --test loop_oracle --test page_bundle_oracle \
   --test instance_oracle --test schema_oracle --test model_package_oracle \
   -- --ignored --nocapture
 ```
 
-Read-only acceptance on the locally audited corpus established:
-
-- SPC: 787/787 flow compilations, 256/256 code actions, 169/169 nanoflows,
-  167 page bundles without reported unsupported widgets, 682/682 widget
-  schemas and instance semantic round trips.
-- QRQC: 807/808 flow compilations, 225/225 code actions, 211/211 nanoflows,
-  378/378 widget schemas and instance semantic round trips. The remaining
-  failure references an association absent from the source domain model;
-  the acceptance command still fails, and the reference is not invented or
-  silently dropped.
-- 118 SPC loop structures and connections matched the official package;
-  another 15 editor loops belong to roots absent from that package.
-- 1,761 ordered official model-package entries round-tripped byte-identically.
-
-These checks do not prove that every generated widget works in a browser,
-that an entire widget rewrites byte-identically, or that the application has
-equivalent runtime behavior. Input MPR, MDP and content hashes must remain
-unchanged. New corpus versions require their own evidence.
+The harness checks flow/code-action/nanoflow compilation, widget schemas and
+instances, page bundles, loop structure against official compiler output and
+byte-identical model-package rewriting. It reports counts only to the local
+invocation and fails on incomplete evidence. These checks do not prove browser
+behavior or equivalent runtime behavior. Inputs and content sidecars remain
+read-only and outside version control.
 
 ## Measured performance, not universal superiority
-
-On the same local SPC corpus, compiling the 167 page bundles took
-138.17 seconds before the widget-ID fast paths, 109.59 seconds with those
-fast paths, and 25.95 seconds after also sharing the package-module cache
-within each batch. The ordered generated page-source digest remained
-`m5VV55xa05k3v2+1SubB0vdF8luUp2NVS3r2DArucgs=`. This is a debug-build,
-single-machine observation (about 5.32x faster), not a release latency budget
-or a comparison against Studio Pro. The cache is discarded between batches
-so edits to widget packages are observed.
 
 The runtime benchmark now enables the authorization policy it measures and
 creates fixtures outside the timed operation. With 1,000 stored objects,

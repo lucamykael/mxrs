@@ -258,7 +258,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "preflight" => (
             Status::Partial,
             "mxrs preflight",
-            "read-only MPR, page/layout, flow/code-action and nanoflow compatibility audit; private-corpus and CLI oracles remain incomplete",
+            "read-only MPR, page/layout, flow/code-action and nanoflow compatibility audit; unversioned-corpus and CLI oracles remain incomplete",
         ),
         "portability" => (
             Status::Partial,

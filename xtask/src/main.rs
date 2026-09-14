@@ -31,7 +31,13 @@ use sha2::{Digest, Sha256};
 fn mxrb_home() -> PathBuf {
     std::env::var("MXRB_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/home/mykael/Personal_Projects/mxrb"))
+        .unwrap_or_else(|_| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new(".."))
+                .join("mxrb")
+        })
 }
 
 fn main() {

@@ -1,21 +1,14 @@
-//! Structural oracle: decodes every real `CustomWidgets$CustomWidgetType`
-//! schema found inside real production `.mpr` files. Committed as an
-//! `#[ignore]`d test parameterized by `MXRS_ACCEPTANCE_DIR`, same
-//! convention as `mxrs-compiler-flow`'s `acceptance_qrqc_spc.rs` — the real
-//! customer `.mpr` files themselves are never committed.
+//! Structural oracle: decodes every `CustomWidgets$CustomWidgetType` schema
+//! found in an explicitly supplied, unversioned `.mpr` corpus.
 //!
 //! Run manually with:
 //! ```text
-//! MXRS_ACCEPTANCE_DIR=/path/to/dir cargo test -p mxrs-pluggable \
+//! MXRS_ACCEPTANCE_PROJECTS=/path/a.mpr:/path/b.mpr cargo test -p mxrs-pluggable \
 //!     --test schema_oracle -- --ignored --nocapture
 //! ```
-//! Expected directory layout under `MXRS_ACCEPTANCE_DIR`:
-//! ```text
-//! qrqc-ruby/build/eQRQC.mpr
-//! spc-ruby/build/JEMScc-SPC.mpr
-//! ```
-//! Explicit `--ignored` execution requires the corpus and fails if it is
-//! missing; default test runs remain ignored. A
+//! The variable is a platform path list. Explicit `--ignored` execution
+//! requires every input and fails if any is missing. Default runs remain
+//! ignored. A
 //! `CustomWidgets$CustomWidgetType` document is fully self-describing
 //! (see `mpr_codec`'s module doc — no external catalog/manifest needed to
 //! decode one), so any decode failure here is a real schema-decode bug,
@@ -55,9 +48,9 @@ fn collect_widget_types(mpr: &MprFile) -> Vec<Document> {
     found
 }
 
-fn run_against(path: &str, label: &str) {
+fn run_against(path: &std::path::Path, label: &str) {
     let mpr = MprFile::open(path, true)
-        .unwrap_or_else(|error| panic!("[{label}] cannot open private corpus {path}: {error}"));
+        .unwrap_or_else(|error| panic!("[{label}] cannot open corpus {}: {error}", path.display()));
     let widget_types = collect_widget_types(&mpr);
     assert!(
         !widget_types.is_empty(),
@@ -93,11 +86,28 @@ fn run_against(path: &str, label: &str) {
     );
 }
 
+fn corpus_projects() -> Vec<std::path::PathBuf> {
+    let value = std::env::var_os("MXRS_ACCEPTANCE_PROJECTS")
+        .expect("set MXRS_ACCEPTANCE_PROJECTS before explicitly running this ignored test");
+    let paths = std::env::split_paths(&value).collect::<Vec<_>>();
+    assert!(
+        !paths.is_empty(),
+        "MXRS_ACCEPTANCE_PROJECTS contains no paths"
+    );
+    for path in &paths {
+        assert!(
+            path.is_file(),
+            "acceptance input is not a file: {}",
+            path.display()
+        );
+    }
+    paths
+}
+
 #[test]
-#[ignore = "requires MXRS_ACCEPTANCE_DIR with QRQC/SPC .mpr and mprcontents"]
-fn decodes_every_real_pluggable_widget_schema() {
-    let base = std::env::var("MXRS_ACCEPTANCE_DIR")
-        .expect("set MXRS_ACCEPTANCE_DIR to the private QRQC/SPC corpus root before explicitly running this ignored test; see this file's directory layout");
-    run_against(&format!("{base}/qrqc-ruby/build/eQRQC.mpr"), "QRQC");
-    run_against(&format!("{base}/spc-ruby/build/JEMScc-SPC.mpr"), "SPC");
+#[ignore = "requires MXRS_ACCEPTANCE_PROJECTS with an authorized local corpus"]
+fn decodes_every_configured_pluggable_widget_schema() {
+    for (index, project) in corpus_projects().iter().enumerate() {
+        run_against(project, &format!("case-{}", index + 1));
+    }
 }

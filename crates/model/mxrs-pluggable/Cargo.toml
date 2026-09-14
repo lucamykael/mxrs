@@ -20,9 +20,9 @@ uuid = { version = "1", features = ["v4"] }
 # Dev-only, test-scoped: safe despite mxrs-forms depending on this crate
 # normally — Cargo builds a `[dev-dependencies]` cycle in two separate
 # graphs (the library graph mxrs-forms itself builds against doesn't
-# include this crate's tests). Lets instance_oracle.rs measure real
+# include this crate's tests). Lets instance_oracle.rs exercise real
 # TextTemplate/Action/Icon decode via a genuine
 # `mxrs_forms::MprCodec`-backed `EmbeddedFormsDecoder`, instead of a
-# fake/no-op stand-in that couldn't produce honest numbers.
+# fake/no-op stand-in that could not prove end-to-end behavior.
 mxrs-forms = { path = "../mxrs-forms" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }

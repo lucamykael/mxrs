@@ -6,7 +6,7 @@ use mxrs_compiler_widgets::ProjectPageBundleCompiler;
 use mxrs_model::Project;
 
 #[test]
-#[ignore = "requires an explicit MXRS_PAGE_BUNDLE_ORACLE_MPR private corpus path"]
+#[ignore = "requires an explicit MXRS_PAGE_BUNDLE_ORACLE_MPR path"]
 fn audits_page_bundle_coverage_against_a_real_project() {
     let path = std::env::var_os("MXRS_PAGE_BUNDLE_ORACLE_MPR")
         .map(PathBuf::from)

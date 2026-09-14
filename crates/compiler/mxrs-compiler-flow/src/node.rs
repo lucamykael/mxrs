@@ -357,9 +357,9 @@ impl<'a> FlowNodeCompiler<'a> {
     ) -> Result<Bson, CompilerError> {
         let type_name = get_str_any(source, &["$Type"]).unwrap_or_default();
         Ok(match field {
-            // SPC's official model.mdp has 11 mappings with this exact literal
-            // shape; mxrb's database connector emits it too. Unlike mxrb's
-            // generic node pass, deriving it does not require an old MDP.
+            // Official compiler output uses this literal shape, and mxrb's
+            // database connector emits it too. Unlike mxrb's generic node
+            // pass, deriving it does not require an old MDP.
             "ValueExpression" if type_name == "Microflows$EntityTypeCodeActionParameterValue" => {
                 let entity = get_str_any(source, &["Entity"])
                     .filter(|entity| !entity.trim().is_empty())

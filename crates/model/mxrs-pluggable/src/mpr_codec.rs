@@ -48,25 +48,11 @@
 //! up in a Mendix version this crate hasn't seen yet; nothing constructs
 //! it today.
 //!
-//! Real-world weight, measured (not guessed) by `tests/instance_oracle.rs`
-//! against every real `CustomWidgets$CustomWidget` instance in QRQC/SPC,
-//! across every pass that landed this crate's instance-decode support:
-//!
-//! | | schema+refs only | + TextTemplate/Action/Icon | + DataSource/Widgets (this pass) |
-//! |---|---|---|---|
-//! | QRQC (378 instances) | 23 fully decoded | 174 fully decoded | **358** fully decoded |
-//! | SPC (682 instances) | 13 fully decoded | 460 fully decoded | **657** fully decoded |
-//!
-//! The remaining 20 (QRQC) / 25 (SPC) instances are **not** a
-//! `mxrs-pluggable` gap: `instance_oracle.rs` categorizes every one of
-//! them as `PluggableError::EmbeddedDecodeFailed` — a real `TextTemplate`/
-//! `Action`/`Icon`/`DataSource`/`Widgets` element exists and this crate
-//! correctly handed it to `mxrs-forms`, but `mxrs-forms` itself hit one of
-//! its *own*, separately-tracked gaps decoding whatever native Forms
-//! element was nested inside (not diagnosed further here — that's
-//! `mxrs-forms`'s backlog, not this crate's). Zero unexpected errors (a
-//! panic, or any error variant other than `EmbeddedDecodeFailed`) in
-//! either file — every failure is named and expected.
+//! `tests/instance_oracle.rs` exercises every widget instance in an explicitly
+//! configured, unversioned acceptance corpus. It reports corpus-specific
+//! counts only during that local run and fails on unsupported kinds, embedded
+//! Forms decode failures, semantic drift or translated-placeholder byte drift;
+//! no project identity, layout or metric is stored in this repository.
 //!
 //! The writer side is ported as well: [`encode_widget_type`],
 //! [`encode_object`], and [`encode_widget`] cover every value kind above

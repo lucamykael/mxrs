@@ -116,9 +116,8 @@ pub fn decode_attribute_reference(raw: &Bson, path: &str) -> Result<AttributeRef
     // `EntityRef` (an attribute directly on the widget's own context
     // entity, no indirection) must be treated the same as an absent key,
     // not passed to `decode_entity_reference` as if it were a real value.
-    // Confirmed a real, previously-unexercised bug via `mxrs-pluggable`'s
-    // `instance_oracle.rs` against real QRQC/SPC `AttributeRef` values —
-    // this code just never saw one before this crate was extracted.
+    // The generic pluggable-instance oracle covers this shape against an
+    // explicitly configured acceptance corpus.
     let entity_reference = match doc.get("EntityRef") {
         Some(Bson::Null) | None => None,
         Some(v) => Some(decode_entity_reference(v, &format!("{path}.EntityRef"))?),
