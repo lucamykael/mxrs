@@ -766,6 +766,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "ureq",
  "uuid",
  "zip",
 ]

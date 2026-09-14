@@ -265,6 +265,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs portability",
             "per-unit typed/partial/preserved inventory, fail-closed --require-typed gate, and byte-exact editable-document round-trip verification; not every native family has typed authoring yet",
         ),
+        "changelog" => (
+            Status::Partial,
+            "mxrs changelog",
+            "credential-free GitHub Releases reader with optional validated version and explicit HTTP, transport and JSON failures; live release availability remains external",
+        ),
         "test" => (
             Status::Partial,
             "mxrs test --plan",

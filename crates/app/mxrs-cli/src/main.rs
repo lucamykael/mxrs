@@ -61,10 +61,9 @@ fn command_options(
     &'static [&'static str],
 ) {
     match name {
-        "callees" | "callers" | "compare" | "describe" | "evaluate" | "impact" | "inspect"
-        | "lint" | "protocols" | "refs" | "preflight" | "report" | "tree" | "validate" => {
-            (&[], &["--json"], &[])
-        }
+        "callees" | "callers" | "changelog" | "compare" | "describe" | "evaluate" | "impact"
+        | "inspect" | "lint" | "protocols" | "refs" | "preflight" | "report" | "tree"
+        | "validate" => (&[], &["--json"], &[]),
         "portability" => (
             &[],
             &["--json", "--require-typed", "--verify-round-trip"],
@@ -133,6 +132,7 @@ commands! {
     "ci", "init github [--target DIR] [--dry-run] [--json]", "Create a GitHub Actions workflow", run_ci;
     "callees", "<file.mpr> <artifact> [--json]", "List distinct directly called artifacts", run_callees;
     "callers", "<file.mpr> <artifact> [--json]", "List distinct direct callers", run_callers;
+    "changelog", "[VERSION] [--json]", "Show mxrs release notes from GitHub", run_changelog;
     "compare", "<left.mpr> <right.mpr> [--json]", "Compare structural model snapshots", run_compare;
     "constant", "new <Module.Constant> [--target DIR] [--dry-run] [--json]", "Scaffold a string constant declaration", run_constant;
     "consumed-rest", "new <Module.Client> [--target DIR] [--dry-run] [--json]", "Scaffold a consumed REST adapter microflow", run_consumed_rest;
@@ -192,6 +192,38 @@ commands! {
     "validate", "<file.mpr> [--json]", "Check storage-format integrity", run_validate;
     "validation", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create an application validation microflow", run_validation;
     "verify-package", "<archive.tar>", "Verify archive paths and content hashes", run_verify_package;
+}
+
+fn run_changelog(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.len() > 1 {
+        eprintln!("Usage: mxrs changelog [VERSION] [--json]");
+        return ExitCode::FAILURE;
+    }
+    match mxrs_cli::changelog::fetch(args.first().map(String::as_str)) {
+        Ok(release) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&release).expect("release is serializable")
+                );
+            } else {
+                match &release.published_at {
+                    Some(date) => println!("{} ({date})", release.title),
+                    None => println!("{}", release.title),
+                }
+                println!();
+                println!("{}", release.body.as_deref().unwrap_or("No release notes."));
+                println!();
+                println!("{}", release.url);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_db(mut args: Vec<String>) -> ExitCode {

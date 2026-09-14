@@ -120,10 +120,11 @@ fn audit_scaffolded_project(workspace_root: &Path) -> Result<Vec<Finding>, Strin
         if command.kind == mxrs_scaffold::ArtifactKind::Module {
             continue;
         }
-        let name = if command.kind == mxrs_scaffold::ArtifactKind::Security {
-            "AuditModule".to_string()
-        } else {
-            format!("AuditModule.Generated{}", pascal_case(command.name))
+        let name = match command.kind {
+            mxrs_scaffold::ArtifactKind::Security => "AuditModule".to_string(),
+            mxrs_scaffold::ArtifactKind::Evaluation => "GeneratedEvaluation".to_string(),
+            mxrs_scaffold::ArtifactKind::Ci => "github".to_string(),
+            _ => format!("AuditModule.Generated{}", pascal_case(command.name)),
         };
         mxrs_scaffold::scaffold_artifact(&mxrs_scaffold::ArtifactScaffold::new(
             command.kind,

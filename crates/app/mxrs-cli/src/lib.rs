@@ -51,6 +51,7 @@
 pub mod arguments;
 pub mod browse;
 pub mod cargo_project;
+pub mod changelog;
 pub mod compare;
 pub mod database;
 pub mod doctor;

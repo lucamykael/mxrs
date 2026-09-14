@@ -4,7 +4,7 @@
   "cache": "partial",
   "callees": "partial",
   "callers": "partial",
-  "changelog": "missing",
+  "changelog": "partial",
   "ci": "partial",
   "compare": "partial",
   "constant": "partial",

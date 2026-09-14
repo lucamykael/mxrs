@@ -79,7 +79,7 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
             assert!(text(&output).contains(entry["usage"].as_str().unwrap()));
         }
         assert!(cli(&["help", name]).status.success());
-        if !matches!(name, "doctor" | "help" | "env") {
+        if !matches!(name, "changelog" | "doctor" | "help" | "env") {
             assert!(
                 !cli(&[name]).status.success(),
                 "{name} accepted no arguments"
@@ -88,6 +88,7 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
     }
     for required in [
         "validate",
+        "changelog",
         "import",
         "export",
         "callees",
@@ -111,6 +112,15 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
     ] {
         assert!(names.contains(required));
     }
+}
+
+#[test]
+fn changelog_rejects_an_unsafe_version_without_opening_the_network() {
+    let output = cli(&["changelog", "../latest"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("invalid release version"));
+    assert!(error.contains("0.4.0"));
 }
 
 #[test]

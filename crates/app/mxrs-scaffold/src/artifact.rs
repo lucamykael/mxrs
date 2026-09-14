@@ -78,7 +78,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
     ScaffoldCommand {
         name: "ci",
         action: "init",
-        argument: "<github>",
+        argument: "github",
         summary: "Create a GitHub Actions workflow",
         destination: ".github/workflows",
         kind: ArtifactKind::Ci,
