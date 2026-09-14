@@ -27,7 +27,7 @@
   "find": "partial",
   "frontend": "partial",
   "functional-instrument": "missing",
-  "functional-test": "missing",
+  "functional-test": "partial",
   "generate": "partial",
   "impact": "partial",
   "init": "partial",

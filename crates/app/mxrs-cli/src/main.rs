@@ -90,9 +90,11 @@ fn command_options(
             &["--dry-run", "--json"],
             &["--role"],
         ),
-        "constant" | "consumed-rest" | "entity" | "enumeration" | "java-action" | "module"
-        | "nanoflow" | "published-rest" | "repository" | "scheduled-event" | "security"
-        | "use-case" => (&["--target"], &["--dry-run", "--json"], &[]),
+        "constant" | "consumed-rest" | "entity" | "enumeration" | "functional-test"
+        | "java-action" | "module" | "nanoflow" | "published-rest" | "repository"
+        | "scheduled-event" | "security" | "use-case" => {
+            (&["--target"], &["--dry-run", "--json"], &[])
+        }
         "scaffold" => (&["--target"], &[], &[]),
         "rename" | "remove" | "move" => (&[], &["--apply", "--json"], &[]),
         "marketplace" => (
@@ -139,6 +141,7 @@ commands! {
     "enumeration", "new <Module.Enumeration> [--target DIR] [--dry-run] [--json]", "Scaffold an enumeration declaration", run_enumeration;
     "env", "[DIR] [--environment NAME] [--json]", "Inspect an environment profile without values", run_env;
     "export", "<file.mpr> [-o <out.rs>] [--allow-lossy]", "Export editable Rust declarations", run_export;
+    "functional-test", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create a declarative runtime test suite", run_functional_test;
     "help", "[command]", "Show command usage", run_help;
     "impact", "<file.mpr> <artifact> [--json]", "Find transitive incoming dependencies", run_impact;
     "import", "<file.mpr> --output <directory> [--mxrs-workspace <path>]", "Import into a Cargo-native project", run_import;
@@ -702,6 +705,13 @@ fn run_consumed_rest(args: Vec<String>) -> ExitCode {
 fn run_java_action(args: Vec<String>) -> ExitCode {
     reported(mxrs_cli::scaffold::generate(
         mxrs_scaffold::ArtifactKind::JavaAction,
+        args,
+    ))
+}
+
+fn run_functional_test(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::FunctionalTest,
         args,
     ))
 }

@@ -100,6 +100,7 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
         "team-server",
         "portability",
         "test",
+        "functional-test",
     ] {
         assert!(names.contains(required));
     }

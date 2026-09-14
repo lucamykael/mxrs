@@ -375,6 +375,16 @@ pub(crate) fn humanize(value: &str) -> String {
     output.trim().to_string()
 }
 
+/// Declarative counterpart of mxrb's Ruby functional-test template. The file
+/// is accepted directly by `mxrs test <mpr> <suite> --plan`.
+pub(crate) fn functional_test(module_name: &str, name: &str) -> String {
+    let display = humanize(name);
+    format!(
+        "{{\n  \"tests\": [\n    {{\n      \"name\": {display:?},\n      \"call\": {target:?},\n      \"expect\": {{}}\n    }}\n  ]\n}}\n",
+        target = format!("{module_name}.{name}")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

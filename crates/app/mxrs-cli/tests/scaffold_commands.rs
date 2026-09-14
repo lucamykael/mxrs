@@ -92,6 +92,41 @@ fn generating_an_artifact_reports_created_files_and_the_build_command() {
 }
 
 #[test]
+fn functional_test_scaffold_is_a_valid_plan_and_never_overwrites() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = project(directory.path());
+    let generated = scaffold(&root, &["functional-test", "new", "Sales.Start", "--json"]);
+    assert!(generated.status.success(), "{:?}", generated.stderr);
+    let suite = root.join("functional_tests/start.json");
+    let original = std::fs::read_to_string(&suite).unwrap();
+    let document: Value = serde_json::from_str(&original).unwrap();
+    assert_eq!(document["tests"][0]["name"], "Start");
+    assert_eq!(document["tests"][0]["call"], "Sales.Start");
+
+    let mpr = root.join("Start.mpr");
+    let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+    builder.module("Sales", |module| {
+        module.microflow("Start", |_| {});
+    });
+    mxrs_writer::write_project(&mpr, &builder.build()).unwrap();
+    let plan = cli(&[
+        "test",
+        mpr.to_str().unwrap(),
+        suite.to_str().unwrap(),
+        "--plan",
+        "--json",
+    ]);
+    assert!(plan.status.success(), "{:?}", plan.stderr);
+
+    assert!(
+        !scaffold(&root, &["functional-test", "new", "Sales.Start"])
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read_to_string(&suite).unwrap(), original);
+}
+
+#[test]
 fn a_wrong_action_word_or_missing_project_fails_without_writing_anything() {
     let directory = tempfile::tempdir().unwrap();
     let root = project(directory.path());

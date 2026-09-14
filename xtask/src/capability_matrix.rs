@@ -270,6 +270,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs test --plan",
             "declarative JSON suite parsing plus exact microflow, parameter, hook and count-entity validation; runtime flow execution and reports are not ported",
         ),
+        "functional-test" => (
+            Status::Partial,
+            "mxrs functional-test new",
+            "transactional JSON suite scaffold consumed directly by mxrs test --plan; runtime execution is not ported",
+        ),
         "repository" => (
             Status::Partial,
             "mxrs repository new",

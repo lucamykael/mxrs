@@ -50,6 +50,7 @@ pub enum ArtifactKind {
     PublishedRest,
     ConsumedRest,
     JavaAction,
+    FunctionalTest,
     Repository,
     Security,
     Module,
@@ -101,6 +102,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         summary: "Create an enumeration declaration",
         destination: "src/domain/modules/<module>/enumerations",
         kind: ArtifactKind::Enumeration,
+    },
+    ScaffoldCommand {
+        name: "functional-test",
+        action: "new",
+        argument: "<Module.Flow>",
+        summary: "Create a declarative runtime test suite",
+        destination: "functional_tests",
+        kind: ArtifactKind::FunctionalTest,
     },
     ScaffoldCommand {
         name: "java-action",
@@ -191,6 +200,7 @@ impl ArtifactKind {
             Self::PublishedRest => "published_rest",
             Self::ConsumedRest => "consumed_rest",
             Self::JavaAction => "java_action",
+            Self::FunctionalTest => "functional_test",
             Self::Repository => "repository",
             Self::Security => "security",
             Self::Module => "module",
@@ -209,6 +219,7 @@ impl ArtifactKind {
             Self::PublishedRest => "endpoints",
             Self::ConsumedRest => "integrations",
             Self::JavaAction => "actions",
+            Self::FunctionalTest => "functional_tests",
             Self::Repository => "repositories",
             Self::Security | Self::Module => "security",
         }
@@ -319,7 +330,13 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
         std::path::absolute(&options.target).map_err(|error| io_error(&options.target, error))?;
     require_project(&root)?;
     let mut transaction = Transaction::default();
-    if options.kind.names_a_module() {
+    if options.kind == ArtifactKind::FunctionalTest {
+        let (module_name, artifact_name) = qualified_name(options.kind, &options.name)?;
+        let path = root
+            .join("functional_tests")
+            .join(format!("{}.json", snake_case(artifact_name)));
+        transaction.create(path, templates::functional_test(module_name, artifact_name))?;
+    } else if options.kind.names_a_module() {
         let module_name = identifier(&options.name, "module")?;
         match options.kind {
             ArtifactKind::Module => create_module_layer(&mut transaction, &root, module_name)?,
@@ -618,6 +635,7 @@ fn create_artifact(
         ArtifactKind::PublishedRest => templates::published_rest(module_name, artifact_name),
         ArtifactKind::ConsumedRest => templates::consumed_rest(module_name, artifact_name),
         ArtifactKind::JavaAction => templates::java_action(module_name, artifact_name),
+        ArtifactKind::FunctionalTest => unreachable!("handled by the caller"),
         ArtifactKind::Repository => unreachable!("handled above"),
         ArtifactKind::Page => templates::page(
             module_name,
