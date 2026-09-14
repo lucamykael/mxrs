@@ -1,9 +1,76 @@
+use mxrs_cli::arguments::{take_flag, take_value, validate_options};
 use std::process::ExitCode;
+
+const COMMANDS: &[(&str, &str)] = &[
+    (
+        "build",
+        "--output <file.mpr> [--web-output <directory>] [--manifest-path <Cargo.toml>] [--release] [--offline]",
+    ),
+    (
+        "diff",
+        "[--manifest-path <Cargo.toml>] [--snapshot <model/imported>] [--json] [--release] [--offline]",
+    ),
+    ("frontend-dev", "[--output <directory>]"),
+    (
+        "package",
+        "--mpr <file.mpr> --web <directory> --output <archive.tar>",
+    ),
+];
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|argument| argument == "mxrs") {
         args.remove(0);
+    }
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] | ["--help" | "-h" | "help"] => {
+            println!("Cargo-native MXRS build tools");
+            for (name, arguments) in COMMANDS {
+                println!("Usage: cargo mxrs {name} {arguments}");
+            }
+            return ExitCode::SUCCESS;
+        }
+        ["--version" | "-V" | "-v"] => {
+            println!("cargo-mxrs {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        ["--commands"] => {
+            for (name, arguments) in COMMANDS {
+                println!("{name}\t{arguments}");
+            }
+            return ExitCode::SUCCESS;
+        }
+        ["help", name] | [name, "--help" | "-h"] => {
+            if let Some((name, arguments)) = COMMANDS.iter().find(|(command, _)| command == name) {
+                println!("Usage: cargo mxrs {name} {arguments}");
+                return ExitCode::SUCCESS;
+            }
+            eprintln!("[mxrs] error: unknown cargo mxrs command {name:?}");
+            return ExitCode::FAILURE;
+        }
+        _ => {}
+    }
+    let (values, flags): (&[&str], &[&str]) = match args.first().map(String::as_str) {
+        Some("build") => (
+            &["--output", "-o", "--manifest-path", "--web-output"],
+            &["--release", "--offline"],
+        ),
+        Some("diff") => (
+            &["--manifest-path", "--snapshot"],
+            &["--json", "--release", "--offline"],
+        ),
+        Some("frontend-dev") => (&["--output"], &[]),
+        Some("package") => (&["--mpr", "--web", "--output", "-o"], &[]),
+        _ => (&[], &[]),
+    };
+    if let Err(error) = validate_options(&args[1..], values, flags) {
+        eprintln!("[mxrs] error: {error}");
+        return ExitCode::FAILURE;
     }
     match args.first().map(String::as_str) {
         Some("build") => {
@@ -30,16 +97,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!(
-        "Usage: cargo mxrs build --output <file.mpr> [--web-output <directory>] [--manifest-path <Cargo.toml>] [--release] [--offline]"
-    );
-    eprintln!(
-        "       cargo mxrs diff [--manifest-path <Cargo.toml>] [--snapshot <model/imported>] [--json] [--release] [--offline]"
-    );
-    eprintln!("       cargo mxrs frontend-dev [--output <directory>]");
-    eprintln!(
-        "       cargo mxrs package --mpr <file.mpr> --web <directory> --output <archive.tar>"
-    );
+    eprintln!("Run `cargo mxrs --help` to list commands and usage.");
 }
 
 fn run_package(mut args: Vec<String>) -> ExitCode {
@@ -172,23 +230,5 @@ fn run_diff(mut args: Vec<String>) -> ExitCode {
             eprintln!("[mxrs] error: {error}");
             ExitCode::FAILURE
         }
-    }
-}
-
-fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
-    let position = args.iter().position(|argument| argument == flag)?;
-    if position + 1 >= args.len() {
-        return None;
-    }
-    args.remove(position);
-    Some(args.remove(position))
-}
-
-fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
-    if let Some(position) = args.iter().position(|argument| argument == flag) {
-        args.remove(position);
-        true
-    } else {
-        false
     }
 }

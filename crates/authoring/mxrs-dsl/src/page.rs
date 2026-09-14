@@ -39,12 +39,90 @@ use mxrs_ir::markers::{
     AttributeMarker, EntityMarker, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef,
 };
 use mxrs_ir::page::{
-    ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
-    PageParameterDecl, WidgetDecl,
+    ButtonAction, DataSourceDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutKind,
+    LayoutRef, PageDecl, PageParameterDecl, WidgetDecl,
 };
 
 pub struct PageBuilder {
     decl: PageDecl,
+}
+
+pub struct LayoutBuilder {
+    decl: LayoutDecl,
+}
+
+impl LayoutBuilder {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            decl: LayoutDecl::new(name),
+        }
+    }
+    pub fn into_decl(self) -> LayoutDecl {
+        self.decl
+    }
+    pub fn documentation(&mut self, value: impl Into<String>) -> &mut Self {
+        self.decl.documentation = value.into();
+        self
+    }
+    pub fn class(&mut self, value: impl Into<String>) -> &mut Self {
+        self.decl.class = Some(value.into());
+        self
+    }
+    pub fn style(&mut self, value: impl Into<String>) -> &mut Self {
+        self.decl.style = Some(value.into());
+        self
+    }
+    pub fn excluded(&mut self, value: bool) -> &mut Self {
+        self.decl.excluded = value;
+        self
+    }
+    pub fn export_level(&mut self, value: impl Into<String>) -> &mut Self {
+        self.decl.export_level = value.into();
+        self
+    }
+    pub fn canvas(&mut self, width: i32, height: i32) -> &mut Self {
+        self.decl.canvas_width = width;
+        self.decl.canvas_height = height;
+        self
+    }
+    pub fn kind(&mut self, kind: LayoutKind) -> &mut Self {
+        self.decl.kind = kind;
+        self
+    }
+    pub fn placeholder(&mut self, name: impl Into<String>) -> &mut Self {
+        self.decl
+            .widgets
+            .push(WidgetDecl::LayoutPlaceholder { name: name.into() });
+        self
+    }
+    pub fn container(&mut self, configure: impl FnOnce(&mut ContainerBuilder)) -> &mut Self {
+        push_container(&mut self.decl.widgets, configure);
+        self
+    }
+    pub fn text(&mut self, caption: impl Into<String>) -> &mut Self {
+        push_text(&mut self.decl.widgets, caption);
+        self
+    }
+    pub fn text_with(
+        &mut self,
+        caption: impl Into<String>,
+        configure: impl FnOnce(&mut TextBuilder),
+    ) -> &mut Self {
+        push_text_with(&mut self.decl.widgets, caption, configure);
+        self
+    }
+    pub fn button(
+        &mut self,
+        caption: impl Into<String>,
+        configure: impl FnOnce(&mut ButtonBuilder),
+    ) -> &mut Self {
+        push_button(&mut self.decl.widgets, caption, configure);
+        self
+    }
+    pub fn layout_grid(&mut self, configure: impl FnOnce(&mut LayoutGridBuilder)) -> &mut Self {
+        push_layout_grid(&mut self.decl.widgets, configure);
+        self
+    }
 }
 
 impl PageBuilder {
@@ -272,6 +350,12 @@ impl ContainerBuilder {
 
     pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
         self.name = Some(name.into());
+        self
+    }
+
+    pub fn placeholder(&mut self, name: impl Into<String>) -> &mut Self {
+        self.children
+            .push(WidgetDecl::LayoutPlaceholder { name: name.into() });
         self
     }
 
@@ -509,6 +593,12 @@ pub struct LayoutGridColumnBuilder {
 }
 
 impl LayoutGridColumnBuilder {
+    pub fn placeholder(&mut self, name: impl Into<String>) -> &mut Self {
+        self.children
+            .push(WidgetDecl::LayoutPlaceholder { name: name.into() });
+        self
+    }
+
     fn new(weight: i32) -> Self {
         LayoutGridColumnBuilder {
             weight,

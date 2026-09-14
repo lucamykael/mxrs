@@ -11,6 +11,7 @@ pub mod error;
 pub mod format;
 pub mod mpr_file;
 pub mod mxunit;
+mod read_only_sql;
 pub mod transaction;
 
 pub use error::{MprError, Result};

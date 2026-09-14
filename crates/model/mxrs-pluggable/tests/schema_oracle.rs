@@ -14,7 +14,8 @@
 //! qrqc-ruby/build/eQRQC.mpr
 //! spc-ruby/build/JEMScc-SPC.mpr
 //! ```
-//! Unlike the flow compiler's acceptance test, this one *does* assert: a
+//! Explicit `--ignored` execution requires the corpus and fails if it is
+//! missing; default test runs remain ignored. A
 //! `CustomWidgets$CustomWidgetType` document is fully self-describing
 //! (see `mpr_codec`'s module doc — no external catalog/manifest needed to
 //! decode one), so any decode failure here is a real schema-decode bug,
@@ -45,19 +46,18 @@ fn collect_widget_types(mpr: &MprFile) -> Vec<Document> {
     }
 
     let mut found = Vec::new();
-    for unit in mpr.all_units().unwrap_or_default() {
-        if let Ok(document) = mpr.parse_contents(&unit) {
-            visit(&Bson::Document(document), &mut found);
-        }
+    for unit in mpr.all_units().expect("read every corpus unit") {
+        let document = mpr
+            .parse_contents(&unit)
+            .unwrap_or_else(|error| panic!("cannot parse corpus unit {}: {error}", unit.unit_id));
+        visit(&Bson::Document(document), &mut found);
     }
     found
 }
 
 fn run_against(path: &str, label: &str) {
-    let Ok(mpr) = MprFile::open(path, true) else {
-        eprintln!("[{label}] could not open {path}");
-        return;
-    };
+    let mpr = MprFile::open(path, true)
+        .unwrap_or_else(|error| panic!("[{label}] cannot open private corpus {path}: {error}"));
     let widget_types = collect_widget_types(&mpr);
     assert!(
         !widget_types.is_empty(),
@@ -94,15 +94,10 @@ fn run_against(path: &str, label: &str) {
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires MXRS_ACCEPTANCE_DIR with QRQC/SPC .mpr and mprcontents"]
 fn decodes_every_real_pluggable_widget_schema() {
-    let Ok(base) = std::env::var("MXRS_ACCEPTANCE_DIR") else {
-        eprintln!(
-            "[schema_oracle] skipped: MXRS_ACCEPTANCE_DIR is not set (see this file's module doc \
-             for the expected layout)"
-        );
-        return;
-    };
+    let base = std::env::var("MXRS_ACCEPTANCE_DIR")
+        .expect("set MXRS_ACCEPTANCE_DIR to the private QRQC/SPC corpus root before explicitly running this ignored test; see this file's directory layout");
     run_against(&format!("{base}/qrqc-ruby/build/eQRQC.mpr"), "QRQC");
     run_against(&format!("{base}/spc-ruby/build/JEMScc-SPC.mpr"), "SPC");
 }

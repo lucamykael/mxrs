@@ -56,8 +56,8 @@
 //!   (`lib/mxrb/dsl/builder.rb`) has never had a typed `Layout`
 //!   declaration either, just a raw string (see
 //!   `lib/mxrb/scaffold/templates.rb`'s `layout "#{module_name}.ApplicationLayout"`).
-//!   Layouts have no Cargo-native front end yet, the same deferred-concept
-//!   boundary pages/flows/security/navigation already draw.
+//!   [`LayoutDecl`] authors native web layouts and named placeholders;
+//!   references are still validated at the writer boundary, not Rust paths.
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ButtonAction {
@@ -106,6 +106,8 @@ pub struct PageParameterDecl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetDecl {
+    /// Only legal inside a layout, never an ordinary page body.
+    LayoutPlaceholder { name: String },
     Container {
         name: Option<String>,
         class: Option<String>,
@@ -195,6 +197,51 @@ pub struct LayoutGridRowDecl {
 pub struct LayoutRef {
     pub qualified_name: String,
     pub parameter: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LayoutKind {
+    #[default]
+    Responsive,
+    Tablet,
+    Phone,
+    ModalPopup,
+    Popup,
+    Legacy,
+}
+
+/// Web layouts use the same native widget tree as pages, with placeholders
+/// marking where a page's layout-call arguments are inserted. Native-mobile
+/// layouts and nested layout calls require separate authoring support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutDecl {
+    pub name: String,
+    pub documentation: String,
+    pub excluded: bool,
+    pub export_level: String,
+    pub canvas_width: i32,
+    pub canvas_height: i32,
+    pub class: Option<String>,
+    pub style: Option<String>,
+    pub kind: LayoutKind,
+    pub widgets: Vec<WidgetDecl>,
+}
+
+impl LayoutDecl {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            documentation: String::new(),
+            excluded: false,
+            export_level: "Hidden".into(),
+            canvas_width: 800,
+            canvas_height: 600,
+            class: None,
+            style: None,
+            kind: LayoutKind::Responsive,
+            widgets: vec![],
+        }
+    }
 }
 
 impl LayoutRef {

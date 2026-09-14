@@ -9,11 +9,16 @@
 //!   cargo run -p xtask -- oracle-diff <fixture_dir>
 //!   cargo run -p xtask -- noise-audit
 //!   cargo run -p xtask -- mxbuild-oracle <app_dir>
-//!   cargo run -p xtask -- capability-matrix [--json] [--require-complete]
+//!   cargo run -p xtask -- capability-matrix [--json] [--check-baseline] [--require-complete]
+//!   cargo run -p xtask -- coverage-gate <llvm-export.json> [--json] [--require-complete]
 
 mod capability_matrix;
+mod coverage_gate;
 mod mxbuild_oracle;
 mod noise_audit;
+
+#[cfg(test)]
+mod command_tests;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,63 +35,112 @@ fn mxrb_home() -> PathBuf {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let command = args.next();
-    let result = match command.as_deref() {
-        Some("fixture-gen") => {
-            let name = args
-                .next()
-                .expect("usage: fixture-gen <name> <dsl_source.rb>");
-            let source = args
-                .next()
-                .expect("usage: fixture-gen <name> <dsl_source.rb>");
-            fixture_gen(&name, Path::new(&source))
+    if let Err(error) = dispatch(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        eprintln!("[xtask] error: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn dispatch(arguments: &[String]) -> Result<(), String> {
+    let Some((command, arguments)) = arguments.split_first() else {
+        return Err("usage: xtask <fixture-gen | oracle-diff | noise-audit | mxbuild-oracle | capability-matrix | coverage-gate>".into());
+    };
+    match command.as_str() {
+        "fixture-gen" => match arguments {
+            [name, source] if valid_fixture_name(name) => fixture_gen(name, Path::new(source)),
+            _ => Err("usage: fixture-gen <name> <dsl_source.rb>; name must start with a letter and contain only ASCII letters, digits, '-' or '_'".into()),
+        },
+        "oracle-diff" => match arguments {
+            [fixture] => oracle_diff(Path::new(fixture)),
+            _ => Err("usage: oracle-diff <fixture_dir>".into()),
         }
-        Some("oracle-diff") => {
-            let fixture_dir = args.next().expect("usage: oracle-diff <fixture_dir>");
-            oracle_diff(Path::new(&fixture_dir))
-        }
-        Some("noise-audit") => {
+        "noise-audit" if arguments.is_empty() => {
             let root = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .expect("xtask always lives one directory below the workspace root")
                 .to_path_buf();
             noise_audit::noise_audit(&root)
         }
-        Some("mxbuild-oracle") => {
-            let app_dir = args.next().expect("usage: mxbuild-oracle <app_dir>");
-            mxbuild_oracle::mxbuild_oracle(Path::new(&app_dir))
-        }
-        Some("capability-matrix") => {
-            let arguments = args.collect::<Vec<_>>();
+        "noise-audit" => Err("usage: noise-audit".into()),
+        "mxbuild-oracle" => match arguments {
+            [app] => mxbuild_oracle::mxbuild_oracle(Path::new(app)),
+            _ => Err("usage: mxbuild-oracle <app_dir>".into()),
+        },
+        "capability-matrix" => {
             let json = arguments.iter().any(|argument| argument == "--json");
             let require_complete = arguments
                 .iter()
                 .any(|argument| argument == "--require-complete");
-            if arguments
+            let check_baseline = arguments
                 .iter()
-                .any(|argument| !matches!(argument.as_str(), "--json" | "--require-complete"))
-            {
-                Err("usage: capability-matrix [--json] [--require-complete]".into())
+                .any(|argument| argument == "--check-baseline");
+            if arguments.iter().any(|argument| {
+                !matches!(
+                    argument.as_str(),
+                    "--json" | "--require-complete" | "--check-baseline"
+                )
+            }) {
+                Err(
+                    "usage: capability-matrix [--json] [--check-baseline] [--require-complete]"
+                        .into(),
+                )
             } else {
-                capability_matrix(json, require_complete)
+                capability_matrix(json, check_baseline, require_complete)
             }
         }
-        _ => {
-            eprintln!(
-                "usage: xtask <fixture-gen <name> <dsl_source.rb> | oracle-diff <fixture_dir> | noise-audit | mxbuild-oracle <app_dir> | capability-matrix [--json] [--require-complete]>"
-            );
-            std::process::exit(2);
-        }
-    };
-
-    if let Err(e) = result {
-        eprintln!("[xtask] error: {e}");
-        std::process::exit(1);
+        "coverage-gate" => coverage_gate_command(arguments),
+        _ => Err(format!("unknown xtask command: {command}")),
     }
 }
 
-fn capability_matrix(json: bool, require_complete: bool) -> Result<(), String> {
+fn valid_fixture_name(name: &str) -> bool {
+    name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn coverage_gate_command(arguments: &[String]) -> Result<(), String> {
+    let Some((path, flags)) = arguments.split_first() else {
+        return Err("usage: coverage-gate <llvm-export.json> [--json] [--require-complete]".into());
+    };
+    if path.starts_with('-')
+        || flags
+            .iter()
+            .any(|flag| !matches!(flag.as_str(), "--json" | "--require-complete"))
+    {
+        return Err("usage: coverage-gate <llvm-export.json> [--json] [--require-complete]".into());
+    }
+    let bytes = fs::read(path).map_err(|error| format!("cannot read {path}: {error}"))?;
+    let report = coverage_gate::evaluate(&bytes)?;
+    let require_complete = flags.iter().any(|flag| flag == "--require-complete");
+    if flags.iter().any(|flag| flag == "--json") {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "source_report": path,
+            "source_sha256": format!("{:x}", Sha256::digest(&bytes)),
+            "gate": if require_complete { "release_100_percent" } else { "development_ratchet" },
+            "coverage": report,
+        })).map_err(|error| error.to_string())?);
+    } else {
+        for metric in &report.metrics {
+            println!(
+                "{}: {}/{} ({:.4}%), {} uncovered",
+                metric.metric, metric.covered, metric.count, metric.percent, metric.uncovered
+            );
+        }
+        println!(
+            "Coverage complete: {} ({} instrumented files); this does not establish Studio Pro parity",
+            report.coverage_complete, report.files
+        );
+    }
+    coverage_gate::enforce(&report, require_complete)
+}
+
+fn capability_matrix(
+    json: bool,
+    check_baseline: bool,
+    require_complete: bool,
+) -> Result<(), String> {
     let output = run_bundle_capture(&["exec", "mxrb", "--commands"])?;
     if !output.success {
         return Err(format!("mxrb --commands failed:\n{}", output.stdout));
@@ -99,6 +153,9 @@ fn capability_matrix(json: bool, require_complete: bool) -> Result<(), String> {
         );
     } else {
         capability_matrix::print_table(&report);
+    }
+    if check_baseline {
+        capability_matrix::check_baseline(&report, include_str!("../command-baseline.json"))?;
     }
     if require_complete && !report.complete() {
         return Err(format!(
@@ -119,9 +176,11 @@ fn fixture_gen(name: &str, dsl_source: &Path) -> Result<(), String> {
     // `bundle exec` below runs with mxrb's repo as its cwd, so a relative
     // path here would resolve against the wrong directory.
     let dsl_source = std::path::absolute(dsl_source).map_err(|e| e.to_string())?;
-    let build_dir = std::env::temp_dir().join(format!("mxrs-fixture-gen-{}", std::process::id()));
-    fs::create_dir_all(&build_dir).map_err(|e| e.to_string())?;
-    let built_mpr = build_dir.join(format!("{name}.mpr"));
+    let build_dir = tempfile::Builder::new()
+        .prefix("mxrs-fixture-gen-")
+        .tempdir()
+        .map_err(|e| e.to_string())?;
+    let built_mpr = build_dir.path().join(format!("{name}.mpr"));
 
     run_bundle(&[
         "exec",
@@ -131,25 +190,21 @@ fn fixture_gen(name: &str, dsl_source: &Path) -> Result<(), String> {
         &path_str(&built_mpr),
     ])?;
 
-    let migrate_script = format!(
-        "require 'mxrb'; mpr = Mxrb::IO::MprFile.open('{}', readonly: false); \
-         mpr.ensure_storage_for_version!('11.12.1'); mpr.close",
-        built_mpr.display()
-    );
-    run_bundle(&["exec", "ruby", "-e", &migrate_script])?;
+    let migrate_script = "require 'mxrb'; mpr = Mxrb::IO::MprFile.open(ARGV.fetch(0), readonly: false); \
+         mpr.ensure_storage_for_version!('11.12.1'); mpr.close";
+    run_bundle(&["exec", "ruby", "-e", migrate_script, &path_str(&built_mpr)])?;
 
     let fixture_dir = fixtures_root().join(name);
     let _ = fs::remove_dir_all(&fixture_dir);
     fs::create_dir_all(&fixture_dir).map_err(|e| e.to_string())?;
     fs::copy(&built_mpr, fixture_dir.join(format!("{name}.mpr"))).map_err(|e| e.to_string())?;
     copy_dir_recursive(
-        &build_dir.join("mprcontents"),
+        &build_dir.path().join("mprcontents"),
         &fixture_dir.join("mprcontents"),
     )?;
     fs::copy(dsl_source, fixture_dir.join("source.rb")).map_err(|e| e.to_string())?;
 
     write_manifest(&fixture_dir)?;
-    let _ = fs::remove_dir_all(&build_dir);
 
     println!("[xtask] fixture-gen: wrote {}", fixture_dir.display());
     Ok(())
@@ -167,14 +222,15 @@ fn oracle_diff(fixture_dir: &Path) -> Result<(), String> {
     let fixture_dir = std::path::absolute(fixture_dir).map_err(|e| e.to_string())?;
     let original_mpr = find_mpr_file(&fixture_dir).ok_or("no .mpr file found in fixture dir")?;
 
-    let work_dir = std::env::temp_dir().join(format!("mxrs-oracle-diff-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work_dir);
-    fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
-    let resaved_mpr = work_dir.join(original_mpr.file_name().unwrap());
+    let work_dir = tempfile::Builder::new()
+        .prefix("mxrs-oracle-diff-")
+        .tempdir()
+        .map_err(|e| e.to_string())?;
+    let resaved_mpr = work_dir.path().join(original_mpr.file_name().unwrap());
     fs::copy(&original_mpr, &resaved_mpr).map_err(|e| e.to_string())?;
     let original_contents_dir = fixture_dir.join("mprcontents");
     if original_contents_dir.is_dir() {
-        copy_dir_recursive(&original_contents_dir, &work_dir.join("mprcontents"))?;
+        copy_dir_recursive(&original_contents_dir, &work_dir.path().join("mprcontents"))?;
     }
 
     let (total, rewritten) = round_trip_all_units(&resaved_mpr)?;
@@ -191,7 +247,6 @@ fn oracle_diff(fixture_dir: &Path) -> Result<(), String> {
         &path_str(&resaved_mpr),
     ])?;
     print!("{}", compare.stdout);
-    let _ = fs::remove_dir_all(&work_dir);
 
     if !compare.success {
         return Err("mxrb compare reported structural differences".to_string());

@@ -3,7 +3,7 @@ use mxrs_ir::declaration::ModuleDecl;
 use crate::entity::EntityBuilder;
 use crate::enumeration::EnumerationBuilder;
 use crate::flow::FlowBuilder;
-use crate::page::PageBuilder;
+use crate::page::{LayoutBuilder, PageBuilder};
 
 pub struct ModuleBuilder {
     decl: ModuleDecl,
@@ -19,6 +19,7 @@ impl ModuleBuilder {
                 microflows: vec![],
                 nanoflows: vec![],
                 pages: vec![],
+                layouts: vec![],
                 roles: None,
             },
         }
@@ -97,6 +98,17 @@ impl ModuleBuilder {
         let mut builder = PageBuilder::new(name);
         configure(&mut builder);
         self.decl.pages.push(builder.into_decl());
+        self
+    }
+
+    pub fn layout(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut LayoutBuilder),
+    ) -> &mut Self {
+        let mut builder = LayoutBuilder::new(name);
+        configure(&mut builder);
+        self.decl.layouts.push(builder.into_decl());
         self
     }
 }

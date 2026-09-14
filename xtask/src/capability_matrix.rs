@@ -1,11 +1,15 @@
 //! Executable inventory of MXRB's public command surface against MXRS.
 //!
-//! This intentionally distinguishes "implemented" from parity: a row is
-//! complete only after its user-visible contract has an explicit oracle.
+//! A command name is not evidence of Studio Pro compatibility. This inventory
+//! only tracks MXRB's public CLI; the official compiler and runtime need their
+//! own versioned, behavioral acceptance evidence. No row is verified merely
+//! because similarly named unit tests exist.
 
-use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Verified,
@@ -23,6 +27,8 @@ pub struct Row {
 
 #[derive(Debug, Serialize)]
 pub struct Report {
+    pub scope: &'static str,
+    pub studio_pro_parity: &'static str,
     pub rows: Vec<Row>,
     pub verified: usize,
     pub partial: usize,
@@ -36,12 +42,8 @@ impl Report {
 }
 
 pub fn build(mxrb_commands_output: &str) -> Result<Report, String> {
-    let mut commands = parse_commands(mxrb_commands_output);
-    if commands.is_empty() {
-        return Err("could not parse any commands from mxrb --commands".into());
-    }
+    let mut commands = parse_commands(mxrb_commands_output)?;
     commands.sort();
-    commands.dedup();
     let rows = commands
         .into_iter()
         .map(|command| {
@@ -55,6 +57,8 @@ pub fn build(mxrb_commands_output: &str) -> Result<Report, String> {
         })
         .collect::<Vec<_>>();
     Ok(Report {
+        scope: "mxrb_top_level_commands",
+        studio_pro_parity: "not_established_by_command_inventory",
         verified: rows
             .iter()
             .filter(|row| row.status == Status::Verified)
@@ -71,32 +75,116 @@ pub fn build(mxrb_commands_output: &str) -> Result<Report, String> {
     })
 }
 
-fn parse_commands(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            let (command, description) = trimmed.split_once(char::is_whitespace)?;
-            (!description.trim().is_empty()
-                && command
-                    .chars()
-                    .all(|character| character.is_ascii_lowercase() || character == '-'))
-            .then(|| command.to_string())
-        })
-        .collect()
+/// Matches the catalog emitted by mxrb/lib/mxrb/cli/help.rb:379-386, including
+/// its declared count. Fail closed when the oracle format changes: silently
+/// accepting a truncated inventory can make missing commands disappear.
+fn parse_commands(output: &str) -> Result<Vec<String>, String> {
+    let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+    let count = lines
+        .next()
+        .and_then(|header| header.strip_prefix("Available MXRB commands ("))
+        .and_then(|header| header.strip_suffix("):"))
+        .and_then(|count| count.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .ok_or("invalid or empty mxrb --commands header")?;
+    let mut commands = Vec::new();
+    let mut names = BTreeSet::new();
+    for _ in 0..count {
+        let line = lines.next().ok_or("truncated mxrb command inventory")?;
+        let (name, description) = line
+            .strip_prefix("  ")
+            .and_then(|line| line.split_once("  "))
+            .ok_or_else(|| format!("invalid command inventory row: {line:?}"))?;
+        if !valid_command_name(name) || description.trim().is_empty() {
+            return Err(format!("invalid command inventory row: {line:?}"));
+        }
+        if !names.insert(name.to_owned()) {
+            return Err(format!("duplicate command in inventory: {name}"));
+        }
+        commands.push(name.to_owned());
+    }
+    if lines.next() != Some("Run `mxrb COMMAND --help` for usage and an example.")
+        || lines.next().is_some()
+    {
+        return Err("unexpected footer or count mismatch in mxrb command inventory".into());
+    }
+    Ok(commands)
+}
+
+fn valid_command_name(name: &str) -> bool {
+    name.split('-').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|character| character.is_ascii_lowercase())
+    })
+}
+
+pub fn check_baseline(report: &Report, baseline: &str) -> Result<(), String> {
+    let baseline: BTreeMap<String, Status> =
+        serde_json::from_str(baseline).map_err(|error| format!("invalid baseline: {error}"))?;
+    if baseline.is_empty() {
+        return Err("command baseline must not be empty".into());
+    }
+    let current = report
+        .rows
+        .iter()
+        .map(|row| (row.mxrb_command.as_str(), row.status))
+        .collect::<BTreeMap<_, _>>();
+    let mut regressions = Vec::new();
+    for (command, previous) in &baseline {
+        match current.get(command.as_str()) {
+            None => regressions.push(format!("command disappeared from oracle: {command}")),
+            Some(status) if status.rank() < previous.rank() => regressions.push(format!(
+                "command regressed: {command}: {previous:?} -> {status:?}"
+            )),
+            _ => {}
+        }
+    }
+    for command in current.keys() {
+        if !baseline.contains_key(*command) {
+            regressions.push(format!("new command needs baseline review: {command}"));
+        }
+    }
+    if regressions.is_empty() {
+        Ok(())
+    } else {
+        Err(regressions.join("\n"))
+    }
+}
+
+impl Status {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Missing => 0,
+            Self::Partial => 1,
+            Self::Verified => 2,
+        }
+    }
 }
 
 fn classify(command: &str) -> (Status, &'static str, &'static str) {
     match command {
-        // Byte/structural oracles exist for these storage-facing commands.
         "compare" => (
-            Status::Verified,
+            Status::Partial,
             "mxrs compare",
-            "structural comparison tests",
+            "structural comparison tests; full CLI contract not differentially verified",
         ),
-        "dump-unit" => (Status::Verified, "mxrs dump-unit", "raw unit tests"),
-        "modules" => (Status::Verified, "mxrs modules", "module listing tests"),
-        "sql" => (Status::Verified, "mxrs sql", "read-only MPR SQL tests"),
+        "dump-unit" => (
+            Status::Partial,
+            "mxrs dump-unit",
+            "raw unit tests; CLI oracle missing",
+        ),
+        "modules" => (
+            Status::Partial,
+            "mxrs modules",
+            "module listing tests; CLI oracle missing",
+        ),
+        "sql" => (
+            Status::Partial,
+            "mxrs sql",
+            "read-only MPR SQL tests; CLI oracle missing",
+        ),
         // A corresponding MXRS surface exists, but full option/output/model
         // parity has not been proved and must remain visibly partial.
         "analyze" => (Status::Partial, "mxrs oql", "risk analyzer only"),
@@ -107,8 +195,18 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "callees" | "callers" | "describe" | "refs" => (
             Status::Partial,
-            "mxrs refs",
+            "mxrs callees/callers/describe/refs",
             "deterministic reference graph",
+        ),
+        "tree" => (
+            Status::Partial,
+            "mxrs tree",
+            "semantic artifact hierarchy; full CLI oracle missing",
+        ),
+        "lint" | "report" => (
+            Status::Partial,
+            "mxrs lint/report",
+            "unresolved references and flow call cycles; full CLI oracle missing",
         ),
         "convert" => (
             Status::Partial,
@@ -182,6 +280,7 @@ pub fn print_table(report: &Report) {
         "MXRB command capability matrix ({} rows)",
         report.rows.len()
     );
+    println!("Studio Pro parity: NOT established by this inventory");
     println!("STATUS\tMXRB\tMXRS\tEVIDENCE");
     for row in &report.rows {
         println!(
@@ -202,12 +301,12 @@ mod tests {
     #[test]
     fn parses_and_classifies_command_inventory_without_counting_headers() {
         let report = build(
-            "Available MXRB commands (3):\n\n  compare  Compare projects\n  validate  Validate project\n  rename  Rename artifact\n",
+            "Available MXRB commands (3):\n\n  compare  Compare projects\n  validate  Validate project\n  rename  Rename artifact\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
         )
         .unwrap();
         assert_eq!(report.rows.len(), 3);
-        assert_eq!(report.verified, 1);
-        assert_eq!(report.partial, 1);
+        assert_eq!(report.verified, 0);
+        assert_eq!(report.partial, 2);
         assert_eq!(report.missing, 1);
         assert!(!report.complete());
     }
@@ -215,5 +314,77 @@ mod tests {
     #[test]
     fn empty_or_changed_help_format_fails_loudly() {
         assert!(build("Available commands: none").is_err());
+    }
+
+    fn inventory(commands: &[&str]) -> String {
+        format!(
+            "Available MXRB commands ({}):\n{}\nRun `mxrb COMMAND --help` for usage and an example.\n",
+            commands.len(),
+            commands
+                .iter()
+                .map(|command| format!("  {command}  Description\n"))
+                .collect::<String>()
+        )
+    }
+
+    #[test]
+    fn malformed_truncated_duplicated_and_extra_inventory_rows_fail_closed() {
+        let valid = inventory(&["modules", "dump-unit"]);
+        for invalid in [
+            String::new(),
+            inventory(&[]),
+            inventory(&["modules", "modules"]),
+            inventory(&["-modules"]),
+            inventory(&["modules-"]),
+            inventory(&["dump--unit"]),
+            inventory(&["Modules"]),
+            valid.replace("(2)", "(3)"),
+            valid.replace("(2)", "(1)"),
+            valid.replace("  modules  Description", "modules  Description"),
+            valid.replace("  modules  Description", "  modules Description"),
+            valid.replace("Description", ""),
+            valid.replace("Run `mxrb COMMAND --help` for usage and an example.\n", ""),
+            format!("{valid}unexpected warning\n"),
+        ] {
+            assert!(build(&invalid).is_err(), "accepted {invalid:?}");
+        }
+        assert!(build(&valid).is_ok());
+    }
+
+    #[test]
+    fn every_existing_command_is_individually_ratchet_checked() {
+        let report = build(&inventory(&["modules", "rename"])).unwrap();
+        assert!(check_baseline(&report, r#"{"modules":"partial","rename":"missing"}"#).is_ok());
+        assert!(check_baseline(&report, r#"{"modules":"missing","rename":"missing"}"#).is_ok());
+        let regression =
+            check_baseline(&report, r#"{"modules":"missing","rename":"partial"}"#).unwrap_err();
+        assert!(regression.contains("command regressed: rename"));
+        assert!(check_baseline(&report, r#"{"modules":"verified","rename":"missing"}"#).is_err());
+        assert!(
+            check_baseline(&report, r#"{"modules":"partial"}"#)
+                .unwrap_err()
+                .contains("new command")
+        );
+        assert!(
+            check_baseline(
+                &report,
+                r#"{"modules":"partial","rename":"missing","sql":"partial"}"#
+            )
+            .unwrap_err()
+            .contains("disappeared")
+        );
+        assert!(check_baseline(&report, "{}").is_err());
+        assert!(check_baseline(&report, "not json").is_err());
+    }
+
+    #[test]
+    fn a_named_implementation_never_implies_verified_behavior() {
+        let report = build(&inventory(&["compare", "dump-unit", "modules", "sql"])).unwrap();
+        assert_eq!(report.verified, 0);
+        assert!(!report.complete());
+        assert_eq!(
+            report.studio_pro_parity,
+            "not_established_by_command_inventory"
+        );
     }
 }

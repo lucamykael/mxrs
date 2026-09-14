@@ -145,6 +145,14 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.enumerations,
             identity,
         )?;
+        crate::layout_compiler::synchronize_layouts_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &project.mendix_version,
+            &decl.layouts,
+            identity,
+        )?;
         documents::synchronize_pages_with_identity(
             &mut mpr,
             &module_id,

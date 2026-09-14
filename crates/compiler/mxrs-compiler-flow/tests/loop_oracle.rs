@@ -233,28 +233,33 @@ fn first_difference(expected: &Bson, actual: &Bson, path: &str) -> Option<String
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires MXRS_ACCEPTANCE_DIR with paired SPC .mpr and official model.mdp"]
 fn rebuilds_all_real_spc_runtime_loops() {
-    let Ok(base) = std::env::var("MXRS_ACCEPTANCE_DIR") else {
-        eprintln!("[loop-oracle] skipped: MXRS_ACCEPTANCE_DIR is not set");
-        return;
-    };
+    let base = std::env::var("MXRS_ACCEPTANCE_DIR")
+        .expect("set MXRS_ACCEPTANCE_DIR to the private QRQC/SPC corpus root before explicitly running this ignored test");
     let base = std::path::Path::new(&base);
     let mpr = base.join("spc-ruby/build/JEMScc-SPC.mpr");
     let mdp = base.join("spc-ruby/build/deployment/model/model.mdp");
-    if !mpr.is_file() || !mdp.is_file() {
-        eprintln!(
-            "[loop-oracle] skipped: expected SPC .mpr/model.mdp under {}",
-            base.display()
-        );
-        return;
-    }
+    assert!(
+        mpr.is_file(),
+        "missing SPC editor corpus: {}",
+        mpr.display()
+    );
+    assert!(
+        mdp.is_file(),
+        "missing paired official SPC Runtime corpus: {}",
+        mdp.display()
+    );
 
     let project = Project::open(&mpr, true).unwrap();
     let units = project.all_units().unwrap();
     let editor_roots = units
         .iter()
-        .filter_map(|unit| project.mpr().parse_contents(unit).ok())
+        .map(|unit| {
+            project.mpr().parse_contents(unit).unwrap_or_else(|error| {
+                panic!("cannot parse editor corpus unit {}: {error}", unit.unit_id)
+            })
+        })
         .collect::<Vec<_>>();
     let runtime_roots = mxrs_schema::read_model_package(&mdp).unwrap();
     let runtime_root_ids: HashSet<String> = runtime_roots.iter().filter_map(document_id).collect();
@@ -324,9 +329,9 @@ fn rebuilds_all_real_spc_runtime_loops() {
     let mut rebuilt = HashMap::new();
     let mut rebuilt_roots = HashMap::new();
     for unit in &units {
-        let Ok(source) = project.mpr().parse_contents(unit) else {
-            continue;
-        };
+        let source = project.mpr().parse_contents(unit).unwrap_or_else(|error| {
+            panic!("cannot parse editor corpus unit {}: {error}", unit.unit_id)
+        });
         let Some(root_id) = document_id(&source) else {
             continue;
         };

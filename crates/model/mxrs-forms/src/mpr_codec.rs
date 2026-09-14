@@ -1,6 +1,6 @@
 //! Strict boundary between physical BSON documents and the typed
-//! [`Node`] model. Unknown storage fields fail with their path; no native
-//! fragment is kept.
+//! [`Node`] model. Unknown Forms storage fields fail with their path;
+//! known projections retain metadata needed for identity/order fidelity.
 //!
 //! Ports the core (non-pluggable) path of `Mxrb::Forms::MprCodec` from
 //! `lib/mxrb/forms/mpr_codec.rb`.
@@ -53,13 +53,18 @@
 //!
 //! Deliberately **not** ported:
 //! - The `OBSOLETE_DEFAULT_FIELDS` shim and the legacy attribute-path/
-//!   label-text/source-variable/design-property/placeholder branches, and
+//!   label-text/source-variable/design-property branches, and
 //!   the boolean-as-enum shim — these are for genuinely pre-11.x document
 //!   shapes (distinct from the dual-field quirks above, which are current);
 //!   out of scope per the locked 11.x-only MVP. The flat `Class`/`Style`
-//!   appearance shim **is** ported despite initially looking like a
-//!   same-era legacy case — it's confirmed present in fresh 11.12.1 output
-//!   (e.g. `Forms$DynamicText`), not just old projects.
+//!   appearance and translated-placeholder shims **are** ported despite
+//!   looking like same-era legacy cases: both occur in real 11.12.1
+//!   output (`DynamicText` and `TextBox`), not just old projects.
+//!
+//! A decoded plain-text placeholder exposes a typed ClientTemplate but
+//! preserves its original Texts$Text bytes on no-op writes. Its storage
+//! cannot represent fallback text or template parameters, so editing
+//! those fields fails explicitly instead of silently discarding them.
 //!
 //! `reference_decoder`/`reference_encoder` mirror mxrb's injectable
 //! resolvers for by-id references that don't resolve to a name inside the
@@ -313,6 +318,18 @@ impl MprCodec {
             "size" => return self.decode_size(raw, path),
             _ => {}
         }
+        // The official 11.12.1 schema calls this a ClientTemplate, while
+        // real TextBox documents still store a plain translated Text.
+        // Mirrors mxrb's legacy_placeholder? / decode_legacy_placeholder;
+        // it is not permission to treat arbitrary Texts nodes as Forms.
+        if property.name == "placeholderTemplate"
+            && let Bson::Document(document) = raw
+            && document.get_str("$Type").ok() == Some("Texts$Text")
+        {
+            return self
+                .decode_legacy_placeholder(document, path)
+                .map(Value::Node);
+        }
         if let Some(target) = self.catalog.type_(&property.type_name) {
             if target.is_enum() {
                 return self.expect_string(raw, path).map(Value::String);
@@ -365,6 +382,42 @@ impl MprCodec {
                 path: path.to_string(),
             }),
         }
+    }
+
+    fn decode_legacy_placeholder(&self, document: &Document, path: &str) -> Result<Node> {
+        // Defaults apply to absent values, not malformed ones. Otherwise
+        // an integer Text field could become an empty typed string and
+        // an unrelated translation edit would silently rewrite it.
+        if let Some(raw) = document.get("Items") {
+            let Bson::Array(items) = raw else {
+                return Err(FormsError::InvalidShape {
+                    shape: "Text.Items",
+                    path: path.to_string(),
+                });
+            };
+            for (index, item) in mxrs_bson::parse_array(Some(items)).items.iter().enumerate() {
+                if let Bson::Document(item) = item {
+                    for field in ["Text", "LanguageCode"] {
+                        if let Some(value) = item.get(field)
+                            && !matches!(value, Bson::String(_))
+                            && !(field == "LanguageCode" && matches!(value, Bson::Null))
+                        {
+                            return Err(FormsError::InvalidShape {
+                                shape: "translation string",
+                                path: format!("{path}.Items[{index}].{field}"),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let text = self.decode_text(&Bson::Document(document.clone()), path)?;
+        let mut template = Node::new("ClientTemplate", self.catalog.clone())?;
+        template.set("template", Value::Text(text))?;
+        template.set("fallback", Value::Text(Text::from_translations(Vec::new())))?;
+        template.set("parameters", Value::List(Vec::new()))?;
+        template.legacy_placeholder = Some(document.clone());
+        Ok(template)
     }
 
     fn decode_reference(
@@ -705,6 +758,14 @@ impl MprCodec {
         path: &str,
         local_references: &HashMap<String, String>,
     ) -> Result<Bson> {
+        if property.name == "placeholderTemplate"
+            && let Value::Node(template) = value
+            && let Some(baseline) = &template.legacy_placeholder
+        {
+            return self
+                .encode_legacy_placeholder(template, baseline, path)
+                .map(Bson::Document);
+        }
         if property.many() {
             let Value::List(items) = value else {
                 return Err(FormsError::ExpectedArray {
@@ -723,6 +784,77 @@ impl MprCodec {
             )));
         }
         self.encode_one(value, path, local_references)
+    }
+
+    fn encode_legacy_placeholder(
+        &self,
+        template: &Node,
+        baseline: &Document,
+        path: &str,
+    ) -> Result<Document> {
+        // Texts$Text has no parameter or fallback slots. Unlike mxrb's
+        // projection, never silently discard edits to those semantics.
+        if !matches!(template.fetch("fallback")?, Some(Value::Text(text)) if text.translations.is_empty())
+            || !matches!(template.fetch("parameters")?, Some(Value::List(items)) if items.is_empty())
+        {
+            return Err(FormsError::UnrepresentablePlaceholder {
+                path: path.to_string(),
+            });
+        }
+        let Some(Value::Text(text)) = template.fetch("template")? else {
+            return Err(FormsError::InvalidShape {
+                shape: "Placeholder.template",
+                path: path.to_string(),
+            });
+        };
+        let original = self.decode_text(&Bson::Document(baseline.clone()), path)?;
+        if text == &original {
+            return Ok(baseline.clone());
+        }
+        // Match repeated languages in occurrence order. Reordering,
+        // editing or deleting translations must not regenerate the IDs
+        // of surviving translations, nor reorder their BSON fields.
+        let raw_items = baseline.get_array("Items").ok().map(Vec::as_slice);
+        let parsed = mxrs_bson::parse_array(raw_items);
+        let mut originals: Vec<_> = original
+            .translations
+            .iter()
+            .zip(parsed.items)
+            .map(Some)
+            .collect();
+        let items = text
+            .translations
+            .iter()
+            .map(|translation| {
+                let matched = originals
+                    .iter_mut()
+                    .find(|candidate| {
+                        candidate
+                            .as_ref()
+                            .is_some_and(|(old, _)| old.language == translation.language)
+                    })
+                    .and_then(Option::take);
+                let mut item = match matched {
+                    Some((_, Bson::Document(document))) => document.clone(),
+                    _ => {
+                        let mut document = Document::new();
+                        document.insert("$ID", uuid::Uuid::new_v4().to_string());
+                        document.insert("$Type", "Texts$Translation");
+                        if let Some(language) = &translation.language {
+                            document.insert("LanguageCode", language.clone());
+                        }
+                        document
+                    }
+                };
+                if item.get_str("Text").ok() != Some(translation.text.as_str()) {
+                    item.insert("Text", translation.text.clone());
+                }
+                Bson::Document(item)
+            })
+            .collect();
+        let mut document = baseline.clone();
+        document.insert("Items", mxrs_bson::build_array(items, parsed.marker));
+        Ok(document)
     }
 
     fn encode_one(

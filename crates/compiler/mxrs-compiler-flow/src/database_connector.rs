@@ -479,7 +479,7 @@ fn parameter_value(scalar_type: &str, expression: &str) -> Result<String, Compil
     })
 }
 
-fn expression_literal(value: &str) -> String {
+pub(crate) fn expression_literal(value: &str) -> String {
     format!("'{value}'")
 }
 
@@ -517,7 +517,7 @@ fn entity_parameter_mapping(
             "$ID": database_derived_id(seed_id, &format!("value-{index}")),
             "$Type": "Microflows$EntityTypeCodeActionParameterValue",
             "Entity": entity,
-            "ValueExpression": format!("'{entity}'"),
+            "ValueExpression": expression_literal(entity),
         },
     }
 }

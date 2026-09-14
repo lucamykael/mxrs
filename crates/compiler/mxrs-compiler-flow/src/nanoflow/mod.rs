@@ -46,12 +46,14 @@
 //!   instruction fields and `break`/`continue` boolean return convention
 //!   were verified against the Mendix 11.12.1 client; their nested graph is
 //!   reconstructed from root-level sequence flows and acceptance-tested
-//!   against real compiled projects.
+//!   against real compiled projects. A merge with no outgoing edge is a
+//!   valid loop-body exit: it retains its label and returns `false` to
+//!   continue iteration. Outside a loop that same graph remains invalid.
 
 pub mod expression;
 pub mod js_value;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use mxrs_bson::{Bson, Document};
@@ -96,7 +98,7 @@ pub struct NanoflowCompiler<'a> {
     javascript_actions: &'a HashMap<String, Document>,
     associations: &'a HashMap<String, AssociationInfo>,
     project_root: Option<&'a Path>,
-    programs: HashMap<String, Option<CompiledProgram>>,
+    programs: BTreeMap<String, Option<CompiledProgram>>,
     flow_stack: Vec<String>,
     variable_kind_stack: Vec<HashMap<String, String>>,
     unsupported: Vec<UnsupportedNode>,
@@ -115,7 +117,7 @@ impl<'a> NanoflowCompiler<'a> {
             javascript_actions: &index.javascript_actions,
             associations: &index.associations,
             project_root,
-            programs: HashMap::new(),
+            programs: BTreeMap::new(),
             flow_stack: Vec::new(),
             variable_kind_stack: Vec::new(),
             unsupported: Vec::new(),
@@ -467,6 +469,16 @@ impl<'a> NanoflowCompiler<'a> {
         for object in &ordered {
             let id = model_id_of(object);
             let outgoing = all_flows.get(&id).cloned().unwrap_or_default();
+            // A final merge has no action to fall through from. Its incoming
+            // branches still jump to the merge ID, so the implicit iteration
+            // return must carry that ID instead of adding an unlabelled return
+            // after compile_merge has rejected the absent outgoing edge.
+            if outgoing.is_empty()
+                && get_str_any(object, &["$Type"]).as_deref() == Some("Microflows$ExclusiveMerge")
+            {
+                body.push(loop_return(Some(id), false));
+                continue;
+            }
             let has_normal_outgoing = outgoing.iter().any(|flow| !is_error_handler(flow));
             body.extend(self.compile_graph_node(object, &outgoing, all_flows, flow_name));
             if !has_normal_outgoing && !is_loop_terminal(object) {
@@ -1904,6 +1916,233 @@ mod tests {
         }
     }
 
+    fn compiled_program(document: Document) -> serde_json::Value {
+        let mut index = empty_index();
+        index.nanoflows.insert("Sales.ACT_Merge".into(), document);
+        let compile = || {
+            let mut compiler = NanoflowCompiler::new(&index, None);
+            assert!(compiler.reference("Sales.ACT_Merge").is_some());
+            assert!(compiler.unsupported().is_empty());
+            compiler.declarations()
+        };
+        let declaration = compile();
+        assert_eq!(declaration, compile());
+        serde_json::from_str(
+            declaration
+                .split_once(" = ")
+                .unwrap()
+                .1
+                .strip_suffix(';')
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn merge_branch_loop(source: Document, condition: bool) -> Document {
+        let split = "66666666-6666-6666-6666-666666666666";
+        let action = "77777777-7777-7777-7777-777777777777";
+        let merge = "88888888-8888-8888-8888-888888888888";
+        loop_flow(
+            source,
+            vec![
+                doc! {
+                    "$ID": split, "$Type": "Microflows$ExclusiveSplit",
+                    "SplitCondition": { "Expression": condition.to_string() },
+                },
+                variable_activity(action, "Visited", "true"),
+                doc! { "$ID": merge, "$Type": "Microflows$ExclusiveMerge" },
+            ],
+            vec![
+                doc! {
+                    "OriginPointer": split, "DestinationPointer": action,
+                    "CaseValues": [{ "$Type": "Microflows$EnumerationCase", "Value": "true" }],
+                },
+                doc! {
+                    "OriginPointer": split, "DestinationPointer": merge,
+                    "CaseValues": [{ "$Type": "Microflows$EnumerationCase", "Value": "false" }],
+                },
+                doc! { "OriginPointer": action, "DestinationPointer": merge },
+            ],
+        )
+    }
+
+    #[test]
+    fn terminal_loop_merges_keep_the_target_label_and_continue_both_branch_paths() {
+        for source in [
+            doc! { "$Type": "Microflows$IterableList", "ListVariableName": "Orders", "VariableName": "Order" },
+            doc! { "$Type": "Microflows$WhileLoopCondition", "WhileExpression": "$KeepGoing" },
+        ] {
+            for condition in [true, false] {
+                let program = compiled_program(merge_branch_loop(source.clone(), condition));
+                let instructions = program["instructions"][0]["body"].as_array().unwrap();
+                let mut labels = HashMap::new();
+                for (position, instruction) in instructions.iter().enumerate() {
+                    if let Some(label) = instruction["label"].as_str() {
+                        assert!(labels.insert(label, position).is_none(), "duplicate label");
+                    }
+                }
+                let merge = "88888888-8888-8888-8888-888888888888";
+                assert_eq!(instructions[labels[merge]]["type"], "return");
+                assert_eq!(instructions[labels[merge]]["result"]["value"], false);
+
+                // Execute the emitted branch/jump/return control flow, so an
+                // unlabelled appended return cannot satisfy this regression.
+                let mut position = 0;
+                let mut action_executed = false;
+                for step in 0..10 {
+                    assert!(step < 9, "branch did not reach its iteration return");
+                    let instruction = &instructions[position];
+                    match instruction["type"].as_str().unwrap() {
+                        "switch" => {
+                            let key = instruction["condition"]["value"]
+                                .as_bool()
+                                .unwrap()
+                                .to_string();
+                            position = labels[instruction["targets"][key].as_str().unwrap()];
+                        }
+                        "jump" => position = labels[instruction["target"].as_str().unwrap()],
+                        "setVariable" => {
+                            action_executed = true;
+                            position += 1;
+                        }
+                        "return" => {
+                            assert_eq!(instruction["label"], merge);
+                            assert_eq!(instruction["result"]["value"], false);
+                            break;
+                        }
+                        kind => panic!("unexpected branch instruction {kind}"),
+                    }
+                }
+                assert_eq!(action_executed, condition);
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_merges_in_nested_loops_return_from_the_inner_body_only() {
+        let inner = merge_branch_loop(
+            doc! { "$Type": "Microflows$WhileLoopCondition", "WhileExpression": "$KeepGoing" },
+            true,
+        );
+        let mut inner_loop = array_docs(
+            &inner.get_document("ObjectCollection").unwrap().clone(),
+            &["Objects"],
+        )
+        .into_iter()
+        .find(|node| node.get_str("$Type").ok() == Some("Microflows$LoopedActivity"))
+        .unwrap();
+        // Keep the nested loop's identity distinct from its new parent.
+        inner_loop.insert("$ID", "99999999-9999-9999-9999-999999999999");
+        let body_flows = array_docs(&inner, &["Flows"])
+            .into_iter()
+            .filter(|flow| {
+                ![
+                    "11111111-1111-1111-1111-111111111111",
+                    "44444444-4444-4444-4444-444444444444",
+                ]
+                .contains(&flow.get_str("OriginPointer").unwrap())
+            })
+            .collect();
+        let outer = loop_flow(
+            doc! { "$Type": "Microflows$IterableList", "ListVariableName": "Orders", "VariableName": "Order" },
+            vec![inner_loop],
+            body_flows,
+        );
+        let program = compiled_program(outer);
+        let outer_body = program["instructions"][0]["body"].as_array().unwrap();
+        assert_eq!(outer_body[0]["type"], "whileLoop");
+        assert_eq!(outer_body[1]["type"], "return");
+        assert_eq!(outer_body[1]["result"]["value"], false);
+        let inner_body = outer_body[0]["body"].as_array().unwrap();
+        let merge = inner_body
+            .iter()
+            .find(|instruction| instruction["label"] == "88888888-8888-8888-8888-888888888888")
+            .unwrap();
+        assert_eq!(merge["type"], "return");
+        assert_eq!(merge["result"]["value"], false);
+    }
+
+    #[test]
+    fn ordinary_merges_retain_single_jump_semantics_even_for_cyclic_graphs() {
+        let mut document = start_end_flow("");
+        let merge = "22222222-2222-2222-2222-222222222222";
+        document
+            .get_document_mut("ObjectCollection")
+            .unwrap()
+            .get_array_mut("Objects")
+            .unwrap()[2]
+            .as_document_mut()
+            .unwrap()
+            .insert("$Type", "Microflows$ExclusiveMerge");
+        document
+            .get_array_mut("Flows")
+            .unwrap()
+            .push(Bson::Document(doc! {
+                "OriginPointer": merge, "DestinationPointer": merge,
+            }));
+        let program = compiled_program(document);
+        assert_eq!(
+            program["instructions"],
+            serde_json::json!([
+                { "type": "jump", "label": merge, "target": merge }
+            ])
+        );
+    }
+
+    #[test]
+    fn missing_or_multiple_root_merge_exits_and_loop_error_only_exits_are_rejected() {
+        for outgoing in [0, 2] {
+            let mut document = start_end_flow("");
+            let merge = "22222222-2222-2222-2222-222222222222";
+            document
+                .get_document_mut("ObjectCollection")
+                .unwrap()
+                .get_array_mut("Objects")
+                .unwrap()[2]
+                .as_document_mut()
+                .unwrap()
+                .insert("$Type", "Microflows$ExclusiveMerge");
+            for _ in 0..outgoing {
+                document
+                    .get_array_mut("Flows")
+                    .unwrap()
+                    .push(Bson::Document(doc! {
+                        "OriginPointer": merge, "DestinationPointer": merge,
+                    }));
+            }
+            let mut index = empty_index();
+            index.nanoflows.insert("Sales.Invalid".into(), document);
+            let mut compiler = NanoflowCompiler::new(&index, None);
+            assert!(compiler.reference("Sales.Invalid").is_none());
+            assert!(compiler.declarations().is_empty());
+            assert_eq!(
+                compiler.unsupported()[0].node_type,
+                "Microflows$ExclusiveMerge"
+            );
+        }
+        let mut document = merge_branch_loop(
+            doc! { "$Type": "Microflows$WhileLoopCondition", "WhileExpression": "$KeepGoing" },
+            true,
+        );
+        document
+            .get_array_mut("Flows")
+            .unwrap()
+            .push(Bson::Document(doc! {
+                "OriginPointer": "88888888-8888-8888-8888-888888888888",
+                "DestinationPointer": "77777777-7777-7777-7777-777777777777",
+                "IsErrorHandler": true,
+            }));
+        let mut index = empty_index();
+        index.nanoflows.insert("Sales.Invalid".into(), document);
+        let mut compiler = NanoflowCompiler::new(&index, None);
+        assert!(compiler.reference("Sales.Invalid").is_none());
+        assert!(compiler.declarations().is_empty());
+        assert_eq!(
+            compiler.unsupported()[0].node_type,
+            "Microflows$ErrorHandler"
+        );
+    }
+
     #[test]
     fn compiles_a_trivial_flow_to_a_declaration() {
         let mut index = empty_index();
@@ -2041,5 +2280,25 @@ mod tests {
         let first = compiler.reference("Sales.ACT_Do").unwrap();
         let second = compiler.reference("Sales.ACT_Do").unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn declarations_are_identical_regardless_of_program_request_order() {
+        let mut index = empty_index();
+        for name in ["Sales.A", "Sales.B", "Sales.C"] {
+            index.nanoflows.insert(name.into(), start_end_flow("true"));
+        }
+        let compile = |names: [&str; 3]| {
+            let mut compiler = NanoflowCompiler::new(&index, None);
+            for name in names {
+                assert!(compiler.reference(name).is_some());
+            }
+            compiler.declarations()
+        };
+        let first = compile(["Sales.C", "Sales.A", "Sales.B"]);
+        assert_eq!(first, compile(["Sales.B", "Sales.C", "Sales.A"]));
+        assert_eq!(first, compile(["Sales.A", "Sales.B", "Sales.C"]));
+        assert!(first.find("Sales.A").unwrap() < first.find("Sales.B").unwrap());
+        assert!(first.find("Sales.B").unwrap() < first.find("Sales.C").unwrap());
     }
 }

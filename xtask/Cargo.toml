@@ -19,3 +19,4 @@ mxrs-schema = { path = "../crates/model/mxrs-schema" }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+tempfile = "3.27.0"

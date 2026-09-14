@@ -9,9 +9,10 @@
 //! whether the inline schema/object is the deliberately empty shell emitted
 //! by `mxrs-writer`; configured real-world instances remain distinguishable
 //! and must not be projected onto the name/class-only authoring IR.
-//! Every native (non-pluggable) widget kind mxrb supports — including
-//! composite ones like DataGrid, TabControl, Table and LayoutGrid — is fully
-//! ported.
+//! Native widgets mirror mxrb's display-oriented summary, including composite
+//! DataGrid, TabControl, Table and LayoutGrid. That summary is not a lossless
+//! editor representation; [`Page::raw_document`] retains the full native tree
+//! for callers deciding whether an authoring projection can safely replace it.
 
 use mxrs_bson::{Bson, Document};
 
@@ -55,6 +56,7 @@ pub struct Page {
     pub parameters: Vec<Document>,
     pub widgets: Vec<Widget>,
     pub data_source: Option<Document>,
+    raw_document: Document,
     storage_type: String,
 }
 
@@ -91,8 +93,17 @@ impl Page {
             parameters: docs_any(doc, &["Parameters", "parameters"]),
             widgets,
             data_source,
+            raw_document: doc.clone(),
             storage_type,
         }
+    }
+
+    /// The widget summary intentionally flattens unsupported editor concepts.
+    /// Authoring projections must validate against this original document before
+    /// replacing it; matching the summary alone cannot establish losslessness.
+    /// Mirrors `Mxrb::Model::Page#raw_document` in `lib/mxrb/model/page.rb`.
+    pub fn raw_document(&self) -> &Document {
+        &self.raw_document
     }
 
     pub fn to_bson(&self) -> Document {

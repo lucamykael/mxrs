@@ -1,7 +1,7 @@
 # mxrs
 
 A ground-up Rust implementation of Mendix Studio Pro `.mpr` project reading,
-writing, compiling and packaging — no Ruby, no mxcli, single static binary.
+writing, compiling and packaging — no Ruby or mxcli runtime dependency.
 
 Sibling project to [mxrb](https://github.com/lucamykael/mxrb) (Ruby), which
 remains the reference implementation and behavioral oracle during
@@ -13,8 +13,7 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
-33 crates + a dev-only `xtask` harness, ~63k lines of Rust, over 560 tests
-passing. The primary direction is now Cargo-native: Rust is the editable
+33 crates + a dev-only `xtask` harness. The primary direction is Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 
 ```text
@@ -151,6 +150,17 @@ mxrs translate-oql 'SELECT o/Number FROM Sales.Order o'
 mxrs refs build/ExistingApp.mpr Sales.Order
 mxrs impact build/ExistingApp.mpr Sales.Order/Number
 mxrs search build/ExistingApp.mpr orders
+mxrs callers build/ExistingApp.mpr Sales.ACT_Save
+mxrs callees build/ExistingApp.mpr Sales.ACT_Save
+mxrs describe build/ExistingApp.mpr Sales.Order --json
+mxrs tree build/ExistingApp.mpr Sales
+mxrs lint build/ExistingApp.mpr --json
+mxrs report build/ExistingApp.mpr
+
+# Discover implemented commands and exact usage:
+mxrs --commands --json
+mxrs help import
+cargo mxrs --help
 ```
 
 Installed/released builds omit `--mxrs-workspace` and generate the normal Git
@@ -177,7 +187,36 @@ behavioral oracle and requires a byte-identical round trip on both fixtures.
 (`/home/mykael/Personal_Projects/mxrb`).
 
 `capability-matrix` reads MXRB's own command inventory and classifies every
-row as verified, partial, or missing. Its CI ratchet currently records 76
-commands: 4 verified, 23 partial, and 49 missing. "Partial" never means
+row as verified, partial, or missing. Its identity-based CI ratchet records 76
+commands: 0 verified, 30 partial, and 46 missing. Earlier claims of four
+verified commands lacked command-specific differential evidence and were
+corrected. "Partial" never means
 command parity; each row stays incomplete until its full observable contract
 has an executable oracle.
+
+`lint` and `report` cover explicit reference fields, recursive call components
+and module dependencies, not all Studio Pro consistency checks. Their JSON
+reports include the analysis boundary. Imported layouts and unsupported page
+fields remain snapshot-backed; a typed page is emitted only if recompiling it
+preserves the original native fields and references. New projects author a
+local `Main.ApplicationLayout` and navigation home rather than referencing an
+uninstalled Atlas module.
+
+Measure coverage with `bash xtask/coverage.sh target/coverage.json`, then check it
+with `cargo run -p xtask -- coverage-gate target/coverage.json`. The driver creates
+fresh outer and nested Cargo directories, includes every instrumented ELF
+(including generated applications), and retains profiles, source/object hashes
+and toolchain details. It does not delete old evidence. For limited `/tmp` space,
+use `MXRS_COVERAGE_TMPDIR="$PWD/target" bash xtask/coverage.sh`.
+The isolated baseline measured 82.74/82.28/81.66/66.13%
+(lines/functions/regions/branches), raising development floors to 82/82/81/66%;
+`--require-complete` requires exact covered/count equality for all four metrics.
+Release tags and manual readiness CI runs enforce that strict gate. Coverage
+must be measured from clean instrumented artifacts, with no source exclusions.
+`cargo llvm-cov clean --workspace` alone is insufficient across toolchains:
+old-layout binaries can survive and contribute obsolete coverage maps.
+Passing development floors is not 100% coverage or proof of Studio Pro parity.
+
+See [verification and remaining parity work](docs/verification.md) for exact
+readiness commands, the private-model acceptance procedure, and the limits of
+the available evidence.

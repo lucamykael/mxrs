@@ -10,6 +10,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[path = "../../../../xtask/support/nested_cargo.rs"]
+mod nested_cargo;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -44,7 +47,10 @@ fn try_compile(body: &str) -> Output {
         .arg("build")
         .arg("--offline")
         .current_dir(dir.path())
-        .env("CARGO_TARGET_DIR", workspace_root().join("target"))
+        .env(
+            "CARGO_TARGET_DIR",
+            nested_cargo::target_dir(workspace_root().join("target")),
+        )
         .output()
         .expect("failed to invoke cargo for the fixture crate")
 }

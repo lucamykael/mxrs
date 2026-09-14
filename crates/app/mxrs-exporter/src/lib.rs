@@ -62,6 +62,9 @@ use mxrs_model::attribute::AttributeType;
 use mxrs_model::entity::Entity;
 use mxrs_model::{Association, Module, Project};
 
+#[cfg(test)]
+#[path = "../../../../xtask/support/nested_cargo.rs"]
+mod nested_cargo;
 mod page_export;
 pub use page_export::PageExportReport;
 
@@ -195,7 +198,14 @@ fn import_cargo_project_inner(
     modules.sort_by(|left, right| left.name.cmp(&right.name));
     let gaps = round_trip_gaps(&modules);
     let identity_source = render_identity_table(&modules);
-    let (converted_pages, page_export) = page_export::convert_pages(&modules);
+    let (mut converted_pages, mut page_export) =
+        page_export::convert_pages_for_version(&modules, &mendix_version);
+    page_export::protect_referenced_page_elements(
+        &project,
+        &modules,
+        &mut converted_pages,
+        &mut page_export,
+    )?;
     let pages_module_source = page_export::render_pages_module(&converted_pages);
     let entities_source = render(&mendix_version, &modules, &[]);
     let domain_source = render_domain_module(&converted_pages);
@@ -1491,7 +1501,7 @@ mod tests {
         let generated = generated_directory.path().join("order-management");
         let build_directory = tempfile::tempdir().unwrap();
         let output = build_directory.path().join("OrderManagement.mpr");
-        let target = build_directory.path().join("cargo-target");
+        let target = crate::nested_cargo::target_dir(build_directory.path().join("cargo-target"));
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .find(|path| path.join("xtask/Cargo.toml").is_file())

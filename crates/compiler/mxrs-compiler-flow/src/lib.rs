@@ -37,6 +37,8 @@ pub enum CompilerError {
     Model(#[from] mxrs_model::ModelError),
     #[error(transparent)]
     Schema(#[from] mxrs_schema::RuntimeModelError),
+    #[error(transparent)]
+    SystemModel(#[from] mxrs_schema::SystemModelError),
 
     // runtime_data_types.rb
     #[error("unsupported Runtime data type {type_name:?}")]

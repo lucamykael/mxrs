@@ -12,9 +12,10 @@ workspace = true
 
 [dependencies]
 mxrs-runtime = { path = "../mxrs-runtime" }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+rusqlite = { version = "0.40.2", features = ["hooks"] }

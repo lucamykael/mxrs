@@ -37,6 +37,15 @@
 //! `mxrs_ir::markers::AssociationMarker`'s doc comment for why that's a
 //! deliberately narrower wiring than the entity/attribute case.
 //!
+//! # Representation limits
+//!
+//! Native names must be plain ASCII Rust identifiers, not Rust keywords.
+//! The public marker namespace is flat: `Order.Total` becomes `Order_Total`.
+//! Some otherwise valid Mendix names therefore cannot coexist in this
+//! representation (for example an entity also named `Order_Total`). Such
+//! manifests fail explicitly; generation never silently renames public
+//! markers or the native artifacts they refer to.
+//!
 //! # Usage (in a downstream project's own `build.rs`)
 //!
 //! ```no_run
@@ -93,6 +102,16 @@ pub enum TypegenError {
     ModuleItemNameCollision(String, String),
 
     #[error(
+        "module {module} generates Rust marker {marker:?} for both {first} and {second}; these native names cannot coexist in the current flat marker namespace"
+    )]
+    GeneratedMarkerNameCollision {
+        module: String,
+        marker: String,
+        first: String,
+        second: String,
+    },
+
+    #[error(
         "association {0}.{1}.{2:?} has unknown type {3:?} (expected \"Reference\" or \"ReferenceSet\")"
     )]
     UnknownAssociationType(String, String, String, String),
@@ -110,6 +129,8 @@ pub enum TypegenError {
 pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
     codegen::generate(manifest)
 }
+
+pub use codegen::is_rust_identifier;
 
 /// Reads a JSON manifest from `manifest_path`, generates marker-type Rust
 /// source, and writes it to `out_path` — the convenience entry point a

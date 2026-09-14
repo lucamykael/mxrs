@@ -2,68 +2,174 @@
 //! `bin/mxrb`'s `when "validate"`/`when "compare"`/`when "inspect"`/
 //! `when "sql"`/... cases, narrowed the same way the library crate is (see
 //! `lib.rs`'s doc comment for exactly what each command covers and what's
-//! not ported yet — most of `bin/mxrb`'s ~45 subcommands depend on engines
+//! not ported yet — many of the 76 audited MXRB commands depend on engines
 //! mxrs hasn't built yet, e.g. `db`/`run` need runtime orchestration and
 //! `rename`/`move` need semantic mutation planning).
 //! `inspect` has no `bin/mxrb` equivalent under that name — it's a new
 //! single-file front end onto `compare`'s existing snapshot machinery.
 
+use mxrs_cli::arguments::{take_flag, take_value, validate_options};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("validate") => run_validate(args.collect()),
-        Some("compare") => run_compare(args.collect()),
-        Some("inspect") => run_inspect(args.collect()),
-        Some("units") => run_units(args.collect()),
-        Some("dump-unit") => run_dump_unit(args.collect()),
-        Some("sql") => run_sql(args.collect()),
-        Some("modules") => run_modules(args.collect()),
-        Some("import") => run_import(args.collect()),
-        Some("export") => run_export(args.collect()),
-        Some("javagen") => run_javagen(args.collect()),
-        Some("package") => run_package(args.collect()),
-        Some("verify-package") => run_verify_package(args.collect()),
-        Some("oql") => run_oql(args.collect()),
-        Some("translate-oql") => run_translate_oql(args.collect()),
-        Some("refs") => run_refs(args.collect()),
-        Some("impact") => run_impact(args.collect()),
-        Some("search") => run_semantic_search(args.collect()),
-        Some("new") => run_new(args.collect()),
-        Some(other) => {
-            eprintln!("[mxrs] error: unknown command {other:?}");
-            usage();
-            ExitCode::FAILURE
+    let name = args.next();
+    let args: Vec<_> = args.collect();
+    match name.as_deref() {
+        Some("--help" | "-h") if args.is_empty() => run_help(vec![]),
+        Some("--version" | "-V" | "-v") if args.is_empty() => {
+            println!("mxrs {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
         }
-        None => {
-            usage();
+        Some("--commands") => run_commands(args),
+        Some(name) => match COMMANDS.iter().find(|command| command.name == name) {
+            Some(command) if args == ["--help"] || args == ["-h"] => {
+                print_help(command);
+                ExitCode::SUCCESS
+            }
+            Some(command) => {
+                let (values, flags) = command_options(command.name);
+                match validate_options(&args, values, flags) {
+                    Ok(()) => (command.run)(args),
+                    Err(error) => {
+                        eprintln!("[mxrs] error: {error}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+            None => {
+                eprintln!("[mxrs] error: unknown command {name:?}");
+                usage();
+                ExitCode::FAILURE
+            }
+        },
+        None => run_help(vec![]),
+    }
+}
+
+struct Command {
+    name: &'static str,
+    arguments: &'static str,
+    summary: &'static str,
+    run: fn(Vec<String>) -> ExitCode,
+}
+
+fn command_options(name: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match name {
+        "callees" | "callers" | "compare" | "describe" | "impact" | "inspect" | "lint" | "refs"
+        | "report" | "tree" | "validate" => (&[], &["--json"]),
+        "export" => (&["-o"], &["--allow-lossy"]),
+        "import" => (&["--output", "-o", "--mxrs-workspace"], &[]),
+        "javagen" => (&["--project-root"], &[]),
+        "new" => (&["--output", "-o", "--version", "--mxrs-workspace"], &[]),
+        "oql" => (&["--dialect"], &["--json"]),
+        "package" => (&["--web", "--output", "-o"], &[]),
+        "search" => (&["--limit"], &["--json"]),
+        "translate-oql" => (&["--dialect"], &[]),
+        _ => (&[], &[]),
+    }
+}
+
+macro_rules! commands {
+    ($($name:literal, $arguments:literal, $summary:literal, $run:ident;)*) => {
+        const COMMANDS: &[Command] = &[$(Command { name: $name, arguments: $arguments, summary: $summary, run: $run }),*];
+    };
+}
+
+// Dispatch and discovery share a registry: help cannot advertise a stub or
+// silently omit an implemented command.
+commands! {
+    "callees", "<file.mpr> <artifact> [--json]", "List distinct directly called artifacts", run_callees;
+    "callers", "<file.mpr> <artifact> [--json]", "List distinct direct callers", run_callers;
+    "compare", "<left.mpr> <right.mpr> [--json]", "Compare structural model snapshots", run_compare;
+    "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
+    "dump-unit", "<file.mpr> <unit_id>", "Dump native unit bytes", run_dump_unit;
+    "export", "<file.mpr> [-o <out.rs>] [--allow-lossy]", "Export editable Rust declarations", run_export;
+    "help", "[command]", "Show command usage", run_help;
+    "impact", "<file.mpr> <artifact> [--json]", "Find transitive incoming dependencies", run_impact;
+    "import", "<file.mpr> --output <directory> [--mxrs-workspace <path>]", "Import into a Cargo-native project", run_import;
+    "inspect", "<file.mpr> [--json]", "Show a structural model snapshot", run_inspect;
+    "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
+    "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
+    "modules", "<file.mpr>", "List module names", run_modules;
+    "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
+    "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
+    "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
+    "refs", "<file.mpr> <artifact> [--json]", "Show incoming and outgoing references", run_refs;
+    "report", "<file.mpr> [--json]", "Summarize explicit-reference lint and module dependencies", run_report;
+    "search", "<file.mpr> <query> [--limit N] [--json]", "Search artifact names and documentation", run_semantic_search;
+    "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
+    "translate-oql", "<query> [--dialect postgresql|sql_server|ansi]", "Translate the supported safe OQL subset", run_translate_oql;
+    "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
+    "units", "<file.mpr>", "List native units and storage metadata", run_units;
+    "validate", "<file.mpr> [--json]", "Check storage-format integrity", run_validate;
+    "verify-package", "<archive.tar>", "Verify archive paths and content hashes", run_verify_package;
+}
+
+fn usage() {
+    eprintln!(
+        "Run `mxrs --commands` to list implemented commands or `mxrs help <command>` for usage."
+    );
+}
+
+fn print_help(command: &Command) {
+    println!(
+        "Usage: mxrs {} {}\n{}",
+        command.name, command.arguments, command.summary
+    );
+}
+
+fn run_help(args: Vec<String>) -> ExitCode {
+    match args.as_slice() {
+        [] => {
+            println!(
+                "MXRS {} — Cargo-native Mendix tooling",
+                env!("CARGO_PKG_VERSION")
+            );
+            println!(
+                "Usage: mxrs <command> [arguments]\n       mxrs --commands [--json]\n       mxrs --version"
+            );
+            for command in COMMANDS {
+                println!("  {:<18} {}", command.name, command.summary);
+            }
+            ExitCode::SUCCESS
+        }
+        [name] => match COMMANDS.iter().find(|command| command.name == name) {
+            Some(command) => {
+                print_help(command);
+                ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!("[mxrs] error: unknown command {name:?}");
+                ExitCode::FAILURE
+            }
+        },
+        _ => {
+            eprintln!("Usage: mxrs help [command]");
             ExitCode::FAILURE
         }
     }
 }
 
-fn usage() {
-    eprintln!("Usage: mxrs validate <file.mpr> [--json]");
-    eprintln!("       mxrs compare <left.mpr> <right.mpr> [--json]");
-    eprintln!("       mxrs inspect <file.mpr> [--json]");
-    eprintln!("       mxrs units <file.mpr>");
-    eprintln!("       mxrs dump-unit <file.mpr> <unit_id>");
-    eprintln!("       mxrs sql <file.mpr> \"<query>\"");
-    eprintln!("       mxrs modules <file.mpr>");
-    eprintln!("       mxrs import <file.mpr> --output <directory> [--mxrs-workspace <path>]");
-    eprintln!("       mxrs export <file.mpr> [-o <out.rs>] [--allow-lossy]");
-    eprintln!("       mxrs javagen <file.mpr> [--project-root <directory>]");
-    eprintln!("       mxrs package <file.mpr> --web <directory> --output <archive.tar>");
-    eprintln!("       mxrs verify-package <archive.tar>");
-    eprintln!("       mxrs oql <file.mpr> [--dialect postgresql|sql_server|ansi] [--json]");
-    eprintln!("       mxrs translate-oql <query> [--dialect postgresql|sql_server|ansi]");
-    eprintln!("       mxrs refs <file.mpr> <artifact> [--json]");
-    eprintln!("       mxrs impact <file.mpr> <artifact> [--json]");
-    eprintln!("       mxrs search <file.mpr> <query> [--limit N] [--json]");
-    eprintln!(
-        "       mxrs new <name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]"
-    );
+fn run_commands(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if !args.is_empty() {
+        eprintln!("Usage: mxrs --commands [--json]");
+        return ExitCode::FAILURE;
+    }
+    if json {
+        let commands: Vec<_> = COMMANDS.iter().map(|command| serde_json::json!({"name": command.name, "usage": format!("mxrs {} {}", command.name, command.arguments), "summary": command.summary})).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&commands).expect("command catalog is serializable")
+        );
+    } else {
+        println!("Available MXRS commands ({}):\n", COMMANDS.len());
+        for command in COMMANDS {
+            println!("  {:<18} {}", command.name, command.summary);
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_new(mut args: Vec<String>) -> ExitCode {
@@ -103,6 +209,228 @@ fn run_new(mut args: Vec<String>) -> ExitCode {
 fn semantic_index(path: &str) -> Result<mxrs_semantic::SemanticIndex, String> {
     let project = mxrs_model::Project::open(path, true).map_err(|error| error.to_string())?;
     mxrs_semantic::SemanticIndex::build(&project).map_err(|error| error.to_string())
+}
+
+fn run_callers(args: Vec<String>) -> ExitCode {
+    run_call_graph(args, true)
+}
+fn run_callees(args: Vec<String>) -> ExitCode {
+    run_call_graph(args, false)
+}
+
+fn graph_command(
+    mut args: Vec<String>,
+    command: &str,
+    query: impl FnOnce(&mxrs_semantic::SemanticIndex, &str, bool) -> Result<(), String>,
+) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.len() != 2 {
+        eprintln!("Usage: mxrs {command} <file.mpr> <artifact> [--json]");
+        return ExitCode::FAILURE;
+    }
+    match semantic_index(&args[0]).and_then(|index| query(&index, &args[1], json)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_call_graph(args: Vec<String>, incoming: bool) -> ExitCode {
+    graph_command(
+        args,
+        if incoming { "callers" } else { "callees" },
+        |index, name, json| {
+            let artifacts = if incoming {
+                index.callers(name)
+            } else {
+                index.callees(name)
+            }
+            .map_err(|error| error.to_string())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&artifacts).expect("artifacts are serializable")
+                );
+            } else {
+                for artifact in artifacts {
+                    println!("{}\t{}", artifact.qualified_name, artifact.kind.as_str());
+                }
+            }
+            Ok(())
+        },
+    )
+}
+
+fn run_describe(args: Vec<String>) -> ExitCode {
+    graph_command(args, "describe", |index, name, json| {
+        let artifact = index.require(name).map_err(|error| error.to_string())?;
+        let incoming = index.incoming(name).map_err(|error| error.to_string())?;
+        let outgoing = index.outgoing(name).map_err(|error| error.to_string())?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({"artifact": artifact, "incoming": incoming, "outgoing": outgoing, "fingerprint": index.fingerprint()})).expect("artifact details are serializable"));
+        } else {
+            println!(
+                "{}\t{}\nIncoming:",
+                artifact.qualified_name,
+                artifact.kind.as_str()
+            );
+            for reference in incoming {
+                println!(
+                    "  {}\t{}",
+                    index
+                        .require(&reference.from)
+                        .map_err(|error| error.to_string())?
+                        .qualified_name,
+                    reference.relation
+                );
+            }
+            println!("Outgoing:");
+            for reference in outgoing {
+                println!(
+                    "  {}\t{}",
+                    index
+                        .require(&reference.to)
+                        .map_err(|error| error.to_string())?
+                        .qualified_name,
+                    reference.relation
+                );
+            }
+        }
+        Ok(())
+    })
+}
+
+fn run_tree(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if !(1..=2).contains(&args.len()) || args.iter().any(|arg| arg.starts_with('-')) {
+        eprintln!("Usage: mxrs tree <file.mpr> [module] [--json]");
+        return ExitCode::FAILURE;
+    }
+    let index = match semantic_index(&args[0]) {
+        Ok(index) => index,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let selected = args.get(1).map(String::as_str);
+    if let Some(module) = selected
+        && !index.artifacts().any(|artifact| {
+            artifact.kind == mxrs_semantic::ArtifactKind::Module && artifact.name == module
+        })
+    {
+        eprintln!("[mxrs] error: unknown module {module:?}");
+        return ExitCode::FAILURE;
+    }
+    let mut tree: std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, Vec<&str>>> =
+        std::collections::BTreeMap::new();
+    for artifact in index.artifacts() {
+        if artifact.kind == mxrs_semantic::ArtifactKind::Module {
+            if selected.is_none_or(|module| module == artifact.name) {
+                tree.entry(&artifact.name).or_default();
+            }
+            continue;
+        }
+        if selected.is_some_and(|module| artifact.module.as_deref() != Some(module)) {
+            continue;
+        }
+        tree.entry(artifact.module.as_deref().unwrap_or("(project)"))
+            .or_default()
+            .entry(artifact.kind.as_str())
+            .or_default()
+            .push(&artifact.qualified_name);
+    }
+    for kinds in tree.values_mut() {
+        for names in kinds.values_mut() {
+            names.sort();
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tree).expect("artifact tree is serializable")
+        );
+    } else {
+        for (module, kinds) in tree {
+            println!("{module}");
+            for (kind, names) in kinds {
+                println!("  {kind}");
+                for name in names {
+                    println!("    {name}");
+                }
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_lint(args: Vec<String>) -> ExitCode {
+    run_analysis(args, false)
+}
+fn run_report(args: Vec<String>) -> ExitCode {
+    run_analysis(args, true)
+}
+
+fn run_analysis(mut args: Vec<String>, summary: bool) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.len() != 1 {
+        eprintln!(
+            "Usage: mxrs {} <file.mpr> [--json]",
+            if summary { "report" } else { "lint" }
+        );
+        return ExitCode::FAILURE;
+    }
+    let index = match semantic_index(&args[0]) {
+        Ok(index) => index,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = index.analyze();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("analysis is serializable")
+        );
+    } else {
+        println!(
+            "Scope: {} (not a full Studio Pro consistency check)",
+            report.scope
+        );
+        if summary {
+            println!(
+                "Call cycles: {}\nCross-module dependencies: {}",
+                report.call_cycles.len(),
+                report.module_dependencies.len()
+            );
+            for dependency in &report.module_dependencies {
+                println!(
+                    "{}\t->\t{}\t{} references\t{} artifacts",
+                    dependency.from,
+                    dependency.to,
+                    dependency.references.len(),
+                    dependency.source_artifacts.len()
+                );
+            }
+        }
+        for diagnostic in &report.diagnostics {
+            println!(
+                "[{}] {}: {}",
+                diagnostic.severity, diagnostic.code, diagnostic.message
+            );
+        }
+        for limitation in report.limitations {
+            println!("Not covered: {limitation}");
+        }
+    }
+    if report.valid() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn run_refs(mut args: Vec<String>) -> ExitCode {
@@ -183,11 +511,17 @@ fn run_impact(mut args: Vec<String>) -> ExitCode {
 
 fn run_semantic_search(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
-    let limit = take_value(&mut args, "--limit")
+    let limit = match take_value(&mut args, "--limit")
         .as_deref()
         .unwrap_or("20")
         .parse::<usize>()
-        .unwrap_or(20);
+    {
+        Ok(limit) if limit > 0 => limit,
+        _ => {
+            eprintln!("[mxrs] error: --limit requires a positive integer");
+            return ExitCode::FAILURE;
+        }
+    };
     if args.len() != 2 {
         eprintln!("[mxrs] error: usage: mxrs search <file.mpr> <query> [--limit N] [--json]");
         return ExitCode::FAILURE;
@@ -365,7 +699,7 @@ fn run_verify_package(args: Vec<String>) -> ExitCode {
 
 fn run_validate(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
-    let Some(path) = args.first() else {
+    let [path] = args.as_slice() else {
         eprintln!("[mxrs] error: usage: mxrs validate <file.mpr> [--json]");
         return ExitCode::FAILURE;
     };
@@ -453,7 +787,7 @@ fn run_compare(mut args: Vec<String>) -> ExitCode {
 
 fn run_inspect(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
-    let Some(path) = args.first() else {
+    let [path] = args.as_slice() else {
         eprintln!("[mxrs] error: usage: mxrs inspect <file.mpr> [--json]");
         return ExitCode::FAILURE;
     };
@@ -476,7 +810,7 @@ fn run_inspect(mut args: Vec<String>) -> ExitCode {
 }
 
 fn run_units(args: Vec<String>) -> ExitCode {
-    let Some(path) = args.first() else {
+    let [path] = args.as_slice() else {
         eprintln!("[mxrs] error: usage: mxrs units <file.mpr>");
         return ExitCode::FAILURE;
     };
@@ -562,7 +896,7 @@ fn run_sql(args: Vec<String>) -> ExitCode {
 }
 
 fn run_modules(args: Vec<String>) -> ExitCode {
-    let Some(path) = args.first() else {
+    let [path] = args.as_slice() else {
         eprintln!("[mxrs] error: usage: mxrs modules <file.mpr>");
         return ExitCode::FAILURE;
     };
@@ -583,7 +917,7 @@ fn run_modules(args: Vec<String>) -> ExitCode {
 fn run_export(mut args: Vec<String>) -> ExitCode {
     let out_path = take_value(&mut args, "-o");
     let allow_lossy = take_flag(&mut args, "--allow-lossy");
-    let Some(path) = args.first() else {
+    let [path] = args.as_slice() else {
         eprintln!("[mxrs] error: usage: mxrs export <file.mpr> [-o <out.rs>] [--allow-lossy]");
         return ExitCode::FAILURE;
     };
@@ -690,23 +1024,5 @@ fn run_javagen(mut args: Vec<String>) -> ExitCode {
             eprintln!("[mxrs] error: {error}");
             ExitCode::FAILURE
         }
-    }
-}
-
-fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
-    let pos = args.iter().position(|a| a == flag)?;
-    if pos + 1 >= args.len() {
-        return None;
-    }
-    args.remove(pos);
-    Some(args.remove(pos))
-}
-
-fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
-    if let Some(pos) = args.iter().position(|a| a == flag) {
-        args.remove(pos);
-        true
-    } else {
-        false
     }
 }

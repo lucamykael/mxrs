@@ -46,7 +46,7 @@ pub struct ProjectFlowIndex {
     pub role_map: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssociationInfo {
     pub parent: Option<String>,
     pub child: Option<String>,
@@ -69,7 +69,7 @@ impl ProjectFlowIndex {
                     .filter_map(move |entity| {
                         Some((
                             get_id_any(&entity, &["$ID"])?,
-                            format!("{module_name}.{}", get_str_any(&entity, &["Name", "name"])?),
+                            qualified_name(module_name, &entity)?,
                         ))
                     })
             })
@@ -82,7 +82,7 @@ impl ProjectFlowIndex {
             .filter_map(|(module_name, document)| {
                 Some((
                     get_id_any(document, &["$ID"])?,
-                    format!("{module_name}.{}", get_str_any(document, &["Name"])?),
+                    qualified_name(module_name, document)?,
                 ))
             })
             .collect::<HashMap<_, _>>();
@@ -139,6 +139,21 @@ impl ProjectFlowIndex {
         index
     }
 
+    /// Adds the audited Runtime-owned System associations omitted from MPR
+    /// files. Callers provide the actual project version: unavailable seeds
+    /// are errors, not guessed metadata or aliases for unknown associations.
+    /// Explicit source declarations remain authoritative.
+    pub fn with_system_model(mut self, version: &str) -> Result<Self, CompilerError> {
+        let documents = mxrs_schema::system_model_documents(version)?
+            .into_iter()
+            .map(|document| ("System".to_string(), document))
+            .collect::<Vec<_>>();
+        for (name, association) in Self::from_documents(&documents).associations {
+            self.associations.entry(name).or_insert(association);
+        }
+        Ok(self)
+    }
+
     fn index_domain_attributes(
         &mut self,
         module_name: &str,
@@ -178,15 +193,15 @@ impl ProjectFlowIndex {
         entity_qualified_name_by_id: &HashMap<String, String>,
     ) {
         for association in array_docs(document, &["Associations", "associations"]) {
-            let Some(name) = get_str_any(&association, &["Name", "name"]) else {
+            let Some(name) = qualified_name(module_name, &association) else {
                 continue;
             };
-            let parent_id = get_id_any(&association, &["ParentPointer", "ParentID"]);
-            let child_id = get_id_any(&association, &["ChildPointer", "ChildID"]);
+            let parent_id = get_id_any(&association, &["ParentPointer", "ParentID", "parentId"]);
+            let child_id = get_id_any(&association, &["ChildPointer", "ChildID", "childId"]);
             let reference_set =
                 get_str_any(&association, &["Type", "type"]).as_deref() == Some("ReferenceSet");
             self.associations.insert(
-                format!("{module_name}.{name}"),
+                name,
                 AssociationInfo {
                     parent: parent_id.and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
                     child: child_id.and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
@@ -195,15 +210,15 @@ impl ProjectFlowIndex {
             );
         }
         for association in array_docs(document, &["CrossAssociations", "crossAssociations"]) {
-            let Some(name) = get_str_any(&association, &["Name", "name"]) else {
+            let Some(name) = qualified_name(module_name, &association) else {
                 continue;
             };
-            let parent_id = get_id_any(&association, &["ParentPointer", "ParentID"]);
+            let parent_id = get_id_any(&association, &["ParentPointer", "ParentID", "parentId"]);
             let child_name = get_str_any(&association, &["Child", "child"]);
             let reference_set =
                 get_str_any(&association, &["Type", "type"]).as_deref() == Some("ReferenceSet");
             self.associations.insert(
-                format!("{module_name}.{name}"),
+                name,
                 AssociationInfo {
                     parent: parent_id.and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
                     child: child_name,
@@ -323,58 +338,32 @@ impl ProjectFlowIndex {
                         &document,
                         &enumeration_qualified_name_by_id,
                     );
-                    for association in array_docs(&document, &["Associations", "associations"]) {
-                        let Some(name) = get_str_any(&association, &["Name", "name"]) else {
-                            continue;
-                        };
-                        let parent_id = get_id_any(&association, &["ParentPointer", "ParentID"]);
-                        let child_id = get_id_any(&association, &["ChildPointer", "ChildID"]);
-                        let reference_set = get_str_any(&association, &["Type", "type"]).as_deref()
-                            == Some("ReferenceSet");
-                        index.associations.insert(
-                            format!("{module_name}.{name}"),
-                            AssociationInfo {
-                                parent: parent_id
-                                    .and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
-                                child: child_id
-                                    .and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
-                                reference_set,
-                            },
-                        );
-                    }
-                    // Cross-module associations live in a separate array with a
-                    // different child-reference shape: `Child` already holds the
-                    // dotted `"Module.Entity"` qualified name directly (see
-                    // `mxrs_model::Association::is_cross_module`/`to_bson`), not an
-                    // id needing `entity_qualified_name_by_id` resolution like
-                    // `ChildPointer`/`ChildID` above.
-                    for association in
-                        array_docs(&document, &["CrossAssociations", "crossAssociations"])
-                    {
-                        let Some(name) = get_str_any(&association, &["Name", "name"]) else {
-                            continue;
-                        };
-                        let parent_id = get_id_any(&association, &["ParentPointer", "ParentID"]);
-                        let child_name = get_str_any(&association, &["Child", "child"]);
-                        let reference_set = get_str_any(&association, &["Type", "type"]).as_deref()
-                            == Some("ReferenceSet");
-                        index.associations.insert(
-                            format!("{module_name}.{name}"),
-                            AssociationInfo {
-                                parent: parent_id
-                                    .and_then(|id| entity_qualified_name_by_id.get(&id).cloned()),
-                                child: child_name,
-                                reference_set,
-                            },
-                        );
-                    }
+                    index.index_domain_associations(
+                        module_name,
+                        &document,
+                        &entity_qualified_name_by_id,
+                    );
                 }
                 _ => {}
             }
         }
 
-        Ok(index)
+        match project.mendix_version()? {
+            Some(version) => index.with_system_model(&version),
+            None => Ok(index),
+        }
     }
+}
+
+/// Editor names belong to the containing module, including after a rename.
+/// Native Runtime documents instead carry qualified/unqualified names.
+fn qualified_name(module_name: &str, document: &Document) -> Option<String> {
+    get_str_any(document, &["Name", "name"])
+        .map(|name| format!("{module_name}.{name}"))
+        .or_else(|| get_str_any(document, &["QualifiedName"]))
+        .or_else(|| {
+            get_str_any(document, &["UnqualifiedName"]).map(|name| format!("{module_name}.{name}"))
+        })
 }
 
 fn aggregate_attribute_type(
@@ -434,6 +423,159 @@ mod tests {
     use mxrs_bson::{Bson, doc};
 
     use super::*;
+
+    #[test]
+    fn native_system_associations_match_the_ruby_runtime_oracle_in_both_directions() {
+        let index = ProjectFlowIndex::from_documents(&[])
+            .with_system_model("11.12.1")
+            .unwrap();
+        let schema = mxrs_schema::RuntimeModelSchema::for_11(&[]).unwrap();
+        let compiler = crate::FlowNodeCompiler::new(&schema, &index.associations, None);
+        // Golden metadata from mxrb's SystemModelSeed 11.12.1 and
+        // MicroflowNodeCompiler#runtime_association, not guessed endpoints.
+        for (name, parent, child, reference_set) in [
+            (
+                "System.HttpHeaders",
+                "System.HttpHeader",
+                "System.HttpMessage",
+                false,
+            ),
+            ("System.UserRoles", "System.User", "System.UserRole", true),
+            (
+                "System.User_Language",
+                "System.User",
+                "System.Language",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                index.associations[name],
+                AssociationInfo {
+                    parent: Some(parent.to_string()),
+                    child: Some(child.to_string()),
+                    reference_set,
+                }
+            );
+            for (start, target, list) in [(parent, child, reference_set), (child, parent, true)] {
+                let variables = HashMap::from([("object".to_string(), start.to_string())]);
+                let source = Bson::Document(doc! {
+                    "$ID": "11111111-1111-4111-8111-111111111111",
+                    "$Type": "Microflows$AssociationRetrieveSource",
+                    "AssociationId": name,
+                    "StartVariableName": "object",
+                });
+                let Bson::Document(compiled) = compiler.compile(&source, &variables).unwrap()
+                else {
+                    panic!("expected compiled association retrieve");
+                };
+                let expected = if list {
+                    format!("[{target}]")
+                } else {
+                    target.to_string()
+                };
+                assert_eq!(compiled.get_str("Type").unwrap(), expected);
+                assert_eq!(compiled.get_str("AssociationId").unwrap(), name);
+            }
+        }
+        let unknown = Bson::Document(doc! {
+            "$Type": "Microflows$AssociationRetrieveSource",
+            "AssociationId": "Sales.DeletedAssociation",
+            "StartVariableName": "object",
+        });
+        assert!(matches!(
+            compiler.compile(&unknown, &HashMap::new()),
+            Err(CompilerError::UnknownAssociation { association_id })
+                if association_id == "Sales.DeletedAssociation"
+        ));
+    }
+
+    #[test]
+    fn system_enrichment_is_version_checked_idempotent_and_preserves_explicit_metadata() {
+        let mut index = ProjectFlowIndex::from_documents(&[]);
+        let explicit = AssociationInfo {
+            parent: None,
+            child: None,
+            reference_set: true,
+        };
+        index
+            .associations
+            .insert("System.HttpHeaders".to_string(), explicit.clone());
+        let enriched = index.with_system_model("11.6.0").unwrap();
+        assert_eq!(enriched.associations["System.HttpHeaders"], explicit);
+        let once = enriched.associations.clone();
+        assert_eq!(
+            enriched.with_system_model("11.6.0").unwrap().associations,
+            once
+        );
+        assert!(matches!(
+            ProjectFlowIndex::from_documents(&[]).with_system_model("10.24.0"),
+            Err(CompilerError::SystemModel(mxrs_schema::SystemModelError::UnsupportedVersion(version)))
+                if version == "10.24.0"
+        ));
+    }
+
+    #[test]
+    fn association_names_use_the_owner_module_and_resolve_ids_across_domain_documents() {
+        let documents = vec![
+            (
+                "Sales".to_string(),
+                doc! {
+                    "$Type": "DomainModels$DomainModel",
+                    "entities": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "$ID": "order", "name": "Order", "QualifiedName": "Old.Order",
+                    }), Bson::Document(doc! { "$ID": "unnamed" })], 3),
+                    "associations": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "name": "Order_Customer", "QualifiedName": "Old.Order_Customer",
+                        "parentId": "order", "childId": "customer", "type": "ReferenceSet",
+                    }), Bson::Document(doc! {})], 3),
+                    "crossAssociations": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "UnqualifiedName": "Order_User", "ParentID": "order", "child": "System.User",
+                        "Type": "Reference",
+                    }), Bson::Document(doc! {})], 3),
+                },
+            ),
+            (
+                "CRM".to_string(),
+                doc! {
+                    "$Type": "DomainModels$DomainModel",
+                    "Entities": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "$ID": "customer", "QualifiedName": "CRM.Customer", "UnqualifiedName": "Customer",
+                    })], 3),
+                    "Associations": mxrs_bson::build_array(vec![Bson::Document(doc! {
+                        "Name": "Order_Customer", "ParentPointer": "customer", "ChildPointer": "missing",
+                    })], 3),
+                },
+            ),
+        ];
+        let index = ProjectFlowIndex::from_documents(&documents);
+        assert_eq!(index.associations.len(), 3);
+        assert_eq!(
+            index.associations["Sales.Order_Customer"],
+            AssociationInfo {
+                parent: Some("Sales.Order".to_string()),
+                child: Some("CRM.Customer".to_string()),
+                reference_set: true,
+            }
+        );
+        assert_eq!(
+            index.associations["Sales.Order_User"],
+            AssociationInfo {
+                parent: Some("Sales.Order".to_string()),
+                child: Some("System.User".to_string()),
+                reference_set: false,
+            }
+        );
+        assert_eq!(
+            index.associations["CRM.Order_Customer"],
+            AssociationInfo {
+                parent: Some("CRM.Customer".to_string()),
+                child: None,
+                reference_set: false,
+            }
+        );
+        assert!(!index.associations.contains_key("Old.Order_Customer"));
+        assert!(!index.associations.contains_key("Order_Customer"));
+    }
 
     #[test]
     fn indexes_runtime_scalar_types_for_aggregate_attributes() {

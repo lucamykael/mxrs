@@ -1,5 +1,5 @@
 //! Structural project comparison — ports the snapshot-and-diff shape of
-//! mxrb's `Mxrb::Compare` (`compare.rb`) in full: the flat unit list,
+//! mxrb's `Mxrb::Compare` (`compare.rb`): the flat unit list,
 //! per-module entities/associations/microflows/nanoflows/pages/menus, the
 //! project's security configuration (`security_summary` — read directly off
 //! the raw `Security$ProjectSecurity` unit, mxrs-model has no dedicated
@@ -29,14 +29,9 @@
 //!   equivalent flows compare equal regardless of their real ids or
 //!   declaration order.
 //!
-//!   **Narrowed vs. `compare.rb`**: outgoing edges out of a decision node
-//!   are ordered here by `(is_error_handler, destination's declared index)`
-//!   rather than mxrb's full `(is_error_handler, normalized_case_values)` —
-//!   porting case-value normalization (`CaseValues`/`NewCaseValue`
-//!   handling) faithfully is more machinery than a CLI skeleton needs right
-//!   now. This still gives a deterministic, declaration-order-independent
-//!   traversal; it's only decision-branch *labels* that aren't used to
-//!   break ties.
+//! Decision edges retain normalized case values and use them to order graph
+//! traversal, so changing a branch condition is observable while reordering
+//! equivalent branches does not change their identities.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -53,31 +48,37 @@ pub fn snapshot(path: impl AsRef<Path>) -> mxrs_model::Result<Value> {
     modules.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(json!({
-        "project": { "mendix_version": project.mendix_version()? },
-        "security": security_summary(&project),
+        "project": {
+            "mendix_version": project.mendix_version()?,
+            "format_version": match project.mpr().format() {
+                mxrs_mpr::StorageFormat::V1 => "v1",
+                mxrs_mpr::StorageFormat::V2 => "v2",
+            },
+        },
+        "security": security_summary(&project)?,
+        "navigation": navigation_summary(&project)?,
         "design_assets": design_asset_summary(path),
-        "units": unit_summary(&project),
+        "units": unit_summary(&project)?,
         "modules": modules.iter().map(module_summary).collect::<Vec<_>>(),
     }))
 }
 
-fn unit_summary(project: &Project) -> Vec<Value> {
+fn unit_summary(project: &Project) -> mxrs_model::Result<Vec<Value>> {
     let mut summary: Vec<Value> = project
-        .all_units()
-        .unwrap_or_default()
+        .all_units()?
         .into_iter()
         .filter(|u| u.unit_id != u.container_id)
-        .filter_map(|u| {
-            let doc = project.mpr().parse_contents(&u).ok()?;
+        .map(|u| {
+            let doc = project.mpr().parse_contents(&u)?;
             let ty = doc.get_str("$Type").unwrap_or_default().to_string();
             let name = doc
                 .get_str("Name")
                 .or_else(|_| doc.get_str("name"))
                 .unwrap_or_default()
                 .to_string();
-            Some(json!({ "containment": u.containment_name, "type": ty, "name": name }))
+            Ok(json!({ "containment": u.containment_name, "type": ty, "name": name }))
         })
-        .collect();
+        .collect::<mxrs_model::Result<Vec<_>>>()?;
     summary.sort_by(|a, b| {
         let key = |v: &Value| {
             (
@@ -88,7 +89,7 @@ fn unit_summary(project: &Project) -> Vec<Value> {
         };
         key(a).cmp(&key(b))
     });
-    summary
+    Ok(summary)
 }
 
 fn module_summary(module: &Module) -> Value {
@@ -193,18 +194,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// unit directly (there's no dedicated Security reader in `mxrs-model`,
 /// matching `compare.rb` itself, which doesn't go through a model layer for
 /// this either). `None` when the project has no such unit at all.
-fn security_summary(project: &Project) -> Option<Value> {
-    let units = project.all_units().ok()?;
-    let raw = units.into_iter().find(|u| {
-        project
-            .mpr()
-            .parse_contents(u)
-            .ok()
-            .and_then(|d| d.get_str("$Type").ok().map(str::to_string))
-            .as_deref()
-            == Some("Security$ProjectSecurity")
-    })?;
-    let doc = project.mpr().parse_contents(&raw).ok()?;
+fn security_summary(project: &Project) -> mxrs_model::Result<Option<Value>> {
+    let Some(doc) = project_document(project, "Security$ProjectSecurity")? else {
+        return Ok(None);
+    };
 
     let mut demo_users: Vec<Value> = string_array_items(&doc, "DemoUsers")
         .into_iter()
@@ -243,7 +236,7 @@ fn security_summary(project: &Project) -> Option<Value> {
         .collect();
     user_roles.sort_by_key(|v| v["name"].as_str().unwrap_or_default().to_string());
 
-    Some(json!({
+    Ok(Some(json!({
         "security_level": doc.get_str("SecurityLevel").ok(),
         "check_security": doc.get_bool("CheckSecurity").ok(),
         "admin_user_name": doc.get_str("AdminUserName").ok(),
@@ -255,7 +248,198 @@ fn security_summary(project: &Project) -> Option<Value> {
         "sign_in_microflow": doc.get_str("SignInMicroflow").ok(),
         "password_policy": doc.get("PasswordPolicySettings").map(|v| normalize_flow_value(v, &HashMap::new())).unwrap_or(Value::Null),
         "user_roles": user_roles,
+    })))
+}
+
+fn project_document(project: &Project, type_name: &str) -> mxrs_model::Result<Option<Document>> {
+    for unit in project.all_units()? {
+        let document = project.mpr().parse_contents(&unit)?;
+        if document.get_str("$Type").ok() == Some(type_name) {
+            return Ok(Some(document));
+        }
+    }
+    Ok(None)
+}
+
+fn navigation_summary(project: &Project) -> mxrs_model::Result<Value> {
+    let document = project_document(project, "Navigation$NavigationDocument")?.unwrap_or_default();
+    navigation_document_summary(&document)
+}
+
+fn navigation_document_summary(document: &Document) -> mxrs_model::Result<Value> {
+    let mut profiles = document_items(document.get("Profiles"), "Navigation.Profiles")?;
+    if profiles.is_empty() {
+        for (key, name) in [
+            ("DesktopProfile", "Desktop"),
+            ("TabletProfile", "Tablet"),
+            ("PhoneProfile", "Phone"),
+            ("OfflinePhoneProfile", "OfflinePhone"),
+            ("HybridPhoneProfile6", "HybridPhone"),
+            ("HybridTabletProfile6", "HybridTablet"),
+        ] {
+            if let Ok(profile) = document.get_document(key) {
+                let mut profile = profile.clone();
+                if !profile.contains_key("Name") {
+                    profile.insert("Name", name);
+                }
+                profiles.push(profile);
+            }
+        }
+    }
+    let profiles = profiles
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| {
+            navigation_profile_summary(profile, &format!("Navigation.Profiles[{index}]"))
+        })
+        .collect::<mxrs_model::Result<Vec<_>>>()?;
+    Ok(json!({ "profiles": profiles }))
+}
+
+fn navigation_profile_summary(profile: &Document, path: &str) -> mxrs_model::Result<Value> {
+    let (home_key, role_homes) = navigation_field(profile, "HomeItems", "RoleBasedHomePages");
+    let role_homes = document_items(role_homes, &format!("{path}.{home_key}"))?;
+    let (menu_key, menu) = navigation_field(profile, "Menu", "MenuItemCollection");
+    let menu = match menu {
+        None | Some(Bson::Null) => None,
+        Some(Bson::Document(menu)) => Some(menu),
+        Some(_) => {
+            return Err(invalid_navigation(
+                &format!("{path}.{menu_key}"),
+                "document",
+            ));
+        }
+    };
+    let items_path = format!("{path}.{menu_key}.Items");
+    let items = document_items(menu.and_then(|menu| menu.get("Items")), &items_path)?
+        .iter()
+        .enumerate()
+        .map(|(index, item)| navigation_item_summary(item, &format!("{items_path}[{index}]")))
+        .collect::<mxrs_model::Result<Vec<_>>>()?;
+    let kind = profile.get_str("Kind").unwrap_or_default();
+    Ok(json!({
+        "name": profile.get_str("Name").unwrap_or_default(),
+        "kind": kind,
+        "home_page": profile.get_document("HomePage").ok().and_then(|home| reference_value(home.get("Page"))),
+        "home_microflow": profile.get_document("HomePage").ok().and_then(|home| reference_value(home.get("Microflow"))),
+        "sign_in_page": profile.get_document("LoginPageSettings").ok().and_then(|login| reference_value(login.get("Form"))),
+        "role_homes": role_homes.iter().map(|home| {
+            let mut result = serde_json::Map::new();
+            for (field, key) in [("role", "UserRole"), ("page", "Page"), ("microflow", "Microflow")] {
+                if let Some(value) = reference_value(home.get(key)) { result.insert(field.to_string(), json!(value)); }
+            }
+            Value::Object(result)
+        }).collect::<Vec<_>>(),
+        "offline": kind.to_ascii_lowercase().contains("offline"),
+        "app_icon": profile.get("AppIcon").map(bson_to_json),
+        "app_title": navigation_text(profile.get("AppTitle"), &format!("{path}.AppTitle"))?,
+        "items": items,
     }))
+}
+
+fn navigation_field<'a>(
+    document: &'a Document,
+    key: &'a str,
+    fallback: &'a str,
+) -> (&'a str, Option<&'a Bson>) {
+    match document.get(key) {
+        Some(value) if !matches!(value, Bson::Null) => (key, Some(value)),
+        _ => (fallback, document.get(fallback)),
+    }
+}
+
+fn reference_value(value: Option<&Bson>) -> Option<String> {
+    value
+        .and_then(mxrs_bson::extract_id)
+        .filter(|reference| !reference.is_empty())
+}
+
+fn invalid_navigation(path: &str, expected: &'static str) -> mxrs_model::ModelError {
+    mxrs_model::ModelError::InvalidStructure {
+        path: path.to_string(),
+        expected,
+    }
+}
+
+/// Collection shape is checked without requiring model identity fields: these
+/// documents can also be legal property projections without `$ID` or `$Type`.
+fn document_items(value: Option<&Bson>, path: &str) -> mxrs_model::Result<Vec<Document>> {
+    match value {
+        None | Some(Bson::Null) => Ok(Vec::new()),
+        Some(Bson::Array(items)) => mxrs_bson::parse_array(Some(items))
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| {
+                if let Bson::Document(document) = item {
+                    Ok(document)
+                } else {
+                    Err(invalid_navigation(&format!("{path}[{index}]"), "document"))
+                }
+            })
+            .collect(),
+        Some(_) => Err(invalid_navigation(path, "array of documents")),
+    }
+}
+
+fn navigation_text(value: Option<&Bson>, path: &str) -> mxrs_model::Result<Value> {
+    let Some(document) = value.and_then(Bson::as_document) else {
+        return Ok(json!({}));
+    };
+    let (key, translations) = navigation_field(document, "Translations", "Items");
+    let mut values = serde_json::Map::new();
+    for translation in document_items(translations, &format!("{path}.{key}"))? {
+        values.insert(
+            translation
+                .get_str("LanguageCode")
+                .unwrap_or_default()
+                .to_string(),
+            json!(translation.get_str("Text").unwrap_or_default()),
+        );
+    }
+    values.retain(|_, value| value != "");
+    Ok(Value::Object(values))
+}
+
+fn navigation_item_summary(item: &Document, path: &str) -> mxrs_model::Result<Value> {
+    let action = item.get_document("Action").ok();
+    let mut result = serde_json::Map::new();
+    result.insert(
+        "caption".to_string(),
+        navigation_text(item.get("Caption"), &format!("{path}.Caption"))?,
+    );
+    for (name, settings, key) in [
+        ("page", "FormSettings", "Form"),
+        ("microflow", "MicroflowSettings", "Microflow"),
+    ] {
+        if let Some(reference) = action
+            .and_then(|action| action.get_document(settings).ok())
+            .and_then(|settings| reference_value(settings.get(key)))
+        {
+            result.insert(name.to_string(), json!(reference));
+        }
+    }
+    if let Some(code) = item
+        .get_document("Icon")
+        .ok()
+        .and_then(|icon| icon.get("Code"))
+        .filter(|value| !matches!(value, Bson::Null))
+    {
+        result.insert("icon".to_string(), bson_to_json(code));
+    }
+    result.insert(
+        "items".to_string(),
+        Value::Array(
+            document_items(item.get("Items"), &format!("{path}.Items"))?
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    navigation_item_summary(item, &format!("{path}.Items[{index}]"))
+                })
+                .collect::<mxrs_model::Result<Vec<_>>>()?,
+        ),
+    );
+    Ok(Value::Object(result))
 }
 
 fn string_array_items(doc: &Document, key: &str) -> Vec<Bson> {
@@ -386,18 +570,48 @@ fn flow_summary(flow: &Microflow) -> Value {
                 "origin": edge.get("OriginPointer").map(|v| normalize_flow_value(v, &ids)).unwrap_or(Value::Null),
                 "destination": edge.get("DestinationPointer").map(|v| normalize_flow_value(v, &ids)).unwrap_or(Value::Null),
                 "error_handler": edge.get_bool("IsErrorHandler").unwrap_or(false),
+                "cases": normalized_case_values(edge, &ids),
             })
         })
         .collect();
     normalized_flows.sort_by_key(|v| v.to_string());
 
+    let mut allowed_roles = flow.allowed_module_roles.clone();
+    allowed_roles.sort();
     json!({
         "name": flow.name,
         "return_type": flow.return_type,
+        "allowed_roles": allowed_roles,
         "parameters": flow.parameters.iter().map(|p| normalize_flow_value(&Bson::Document(p.clone()), &ids)).collect::<Vec<_>>(),
         "objects": objects.iter().map(|o| normalize_flow_value(&Bson::Document((*o).clone()), &ids)).collect::<Vec<_>>(),
         "flows": normalized_flows,
     })
+}
+
+fn normalized_case_values(edge: &Document, ids: &HashMap<String, usize>) -> Vec<Value> {
+    let values = match edge
+        .get("CaseValues")
+        .filter(|value| !matches!(value, Bson::Null))
+    {
+        Some(Bson::Array(items)) => mxrs_bson::parse_array(Some(items)).items,
+        Some(value) => vec![value.clone()],
+        None => edge
+            .get("NewCaseValue")
+            .filter(|value| !matches!(value, Bson::Null))
+            .cloned()
+            .into_iter()
+            .collect(),
+    };
+    values
+        .iter()
+        .filter(|value| {
+            !value
+                .as_document()
+                .and_then(|document| document.get_str("$Type").ok())
+                .is_some_and(|name| name.ends_with("$NoCase"))
+        })
+        .map(|value| normalize_flow_value(value, ids))
+        .collect()
 }
 
 fn flow_id(doc: &Document) -> Option<String> {
@@ -431,12 +645,6 @@ fn assign_flow_ids(objects: &[Document], flows: &[Document], ids: &mut HashMap<S
             has_incoming.insert(dest);
         }
     }
-    let object_index: HashMap<String, usize> = objects
-        .iter()
-        .enumerate()
-        .filter_map(|(i, o)| flow_id(o).map(|id| (id, i)))
-        .collect();
-
     let mut root_ids: HashSet<String> = HashSet::new();
     let mut roots: Vec<&Document> = Vec::new();
     for o in objects {
@@ -469,12 +677,7 @@ fn assign_flow_ids(objects: &[Document], flows: &[Document], ids: &mut HashMap<S
         let mut edges: Vec<&&Document> = outgoing.get(&id).into_iter().flatten().collect();
         edges.sort_by_key(|e| {
             let is_error = e.get_bool("IsErrorHandler").unwrap_or(false);
-            let dest_index = e
-                .get("DestinationPointer")
-                .and_then(mxrs_bson::extract_id)
-                .and_then(|d| object_index.get(&d).copied())
-                .unwrap_or(usize::MAX);
-            (is_error, dest_index)
+            (is_error, json!(normalized_case_values(e, ids)).to_string())
         });
         for edge in edges {
             if let Some(dest_id) = edge
@@ -784,6 +987,10 @@ fn diff_named_arrays(left: &[Value], right: &[Value], path: &mut Vec<String>) ->
     }
     changes
 }
+
+#[cfg(test)]
+#[path = "compare_parity_tests.rs"]
+mod parity_tests;
 
 #[cfg(test)]
 mod tests {

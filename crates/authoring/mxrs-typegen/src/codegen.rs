@@ -18,6 +18,10 @@
 //! with its entities — a microflow named the same as an entity in the same
 //! module is a [`TypegenError::ModuleItemNameCollision`], for the same
 //! reason.
+//! Derived markers also occupy that namespace: `Order.Total` conflicts
+//! with entity `Order_Total`, and `A_B.C` conflicts with `A.B_C`. Rejecting
+//! those models preserves the existing public names without pretending
+//! that a flat naming scheme can represent every legal Mendix project.
 //!
 //! An association's target is validated against every entity declared
 //! *anywhere* in the manifest (not just the current module) before any code
@@ -31,7 +35,7 @@
 //! `CRM`'s module text might appear later in the generated file than the
 //! `Sales.Order_Account` association referencing it.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
 use crate::TypegenError;
@@ -69,6 +73,7 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
         // together the same way attribute/association names share an
         // entity's flat namespace below.
         let mut seen_module_items: HashSet<&str> = HashSet::new();
+        let mut generated_names = GeneratedNamespace::default();
         for entity in &module.entities {
             let entity_ident = valid_ident(&entity.name, "entity name")?;
             if !seen_module_items.insert(entity.name.as_str()) {
@@ -78,6 +83,7 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
                 ));
             }
 
+            generated_names.claim(&entity_ident, format!("entity {}", entity.name));
             writeln!(out, "    pub struct {entity_ident};").unwrap();
             writeln!(out, "    impl mxrs_ir::EntityMarker for {entity_ident} {{").unwrap();
             writeln!(
@@ -103,6 +109,10 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
                 }
 
                 let marker_ident = format!("{entity_ident}_{attr_ident}");
+                generated_names.claim(
+                    &marker_ident,
+                    format!("attribute {}.{attribute}", entity.name),
+                );
                 writeln!(out, "    pub struct {marker_ident};").unwrap();
                 writeln!(
                     out,
@@ -123,6 +133,7 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
                     association,
                     &known_entities,
                     &mut seen_markers,
+                    &mut generated_names,
                 )?;
             }
         }
@@ -143,6 +154,7 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
                 ));
             }
 
+            generated_names.claim(&microflow_ident, format!("microflow {microflow}"));
             writeln!(out, "    pub struct {microflow_ident};").unwrap();
             writeln!(
                 out,
@@ -175,6 +187,7 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
                 ));
             }
 
+            generated_names.claim(&nanoflow_ident, format!("nanoflow {nanoflow}"));
             writeln!(out, "    pub struct {nanoflow_ident};").unwrap();
             writeln!(
                 out,
@@ -190,10 +203,39 @@ pub fn generate(manifest: &Manifest) -> Result<String, TypegenError> {
             writeln!(out, "        const NAME: &'static str = {nanoflow:?};").unwrap();
             out.push_str("    }\n");
         }
+        generated_names.validate(&module.name)?;
         out.push_str("}\n\n");
     }
 
     Ok(out)
+}
+
+/// Every emitted struct claims its actual Rust identifier. Checking after
+/// the module's dedicated duplicate/type checks preserves their specific
+/// errors; ordered claims make cross-namespace diagnostics independent of
+/// declaration order, including models with several different collisions.
+#[derive(Default)]
+struct GeneratedNamespace(BTreeMap<String, Vec<String>>);
+
+impl GeneratedNamespace {
+    fn claim(&mut self, name: &str, origin: String) {
+        self.0.entry(name.to_string()).or_default().push(origin);
+    }
+
+    fn validate(self, module: &str) -> Result<(), TypegenError> {
+        for (marker, mut origins) in self.0 {
+            if origins.len() > 1 {
+                origins.sort_unstable();
+                return Err(TypegenError::GeneratedMarkerNameCollision {
+                    module: module.to_string(),
+                    marker,
+                    first: origins[0].clone(),
+                    second: origins[1].clone(),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -205,6 +247,7 @@ fn emit_association<'a>(
     association: &'a AssociationManifest,
     known_entities: &HashSet<String>,
     seen_markers: &mut HashSet<&'a str>,
+    generated_names: &mut GeneratedNamespace,
 ) -> Result<(), TypegenError> {
     let assoc_ident = valid_ident(&association.name, "association name")?;
     if !seen_markers.insert(association.name.as_str()) {
@@ -256,6 +299,10 @@ fn emit_association<'a>(
     };
 
     let marker_ident = format!("{entity_ident}_{assoc_ident}");
+    generated_names.claim(
+        &marker_ident,
+        format!("association {}.{}", entity.name, association.name),
+    );
     writeln!(out, "    pub struct {marker_ident};").unwrap();
     writeln!(
         out,
@@ -300,7 +347,7 @@ const RUST_KEYWORDS: &[&str] = &[
     "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
     "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
     "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
-    "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen",
 ];
 
 /// Validates `name` is usable verbatim as a Rust identifier — Mendix names
@@ -308,18 +355,7 @@ const RUST_KEYWORDS: &[&str] = &[
 /// check (a clear manifest error) rather than a name-mangling scheme; a
 /// name that needs mangling is a signal the manifest itself is wrong.
 fn valid_ident(name: &str, context: &str) -> Result<String, TypegenError> {
-    let mut chars = name.chars();
-    let starts_ok = chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
-    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if !starts_ok || !rest_ok || name.is_empty() {
-        return Err(TypegenError::InvalidIdentifier(
-            name.to_string(),
-            context.to_string(),
-        ));
-    }
-    if RUST_KEYWORDS.contains(&name) {
+    if !is_rust_identifier(name) {
         return Err(TypegenError::InvalidIdentifier(
             name.to_string(),
             context.to_string(),
@@ -328,10 +364,33 @@ fn valid_ident(name: &str, context: &str) -> Result<String, TypegenError> {
     Ok(name.to_string())
 }
 
+/// Shared ASCII identifier policy for generated marker and builder names.
+/// Model names stay separate: callers may mangle generated functions, but
+/// must not silently rename the Mendix artifacts those functions describe.
+pub fn is_rust_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let starts_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    starts_ok && rest_ok && name != "_" && !RUST_KEYWORDS.contains(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::manifest::{EntityManifest, ModuleManifest};
+
+    #[test]
+    fn generated_identifiers_reject_discard_and_edition_twenty_twenty_four_keywords() {
+        for name in ["_", "gen", "match", "", "2Orders", "Order-Total", "Éntity"] {
+            assert!(!is_rust_identifier(name), "{name}");
+            assert!(valid_ident(name, "test").is_err());
+        }
+        for name in ["Order", "_order", "Order2", "page_match"] {
+            assert!(is_rust_identifier(name), "{name}");
+        }
+    }
 
     fn sample() -> Manifest {
         Manifest {
@@ -351,6 +410,242 @@ mod tests {
                 ],
                 ..Default::default()
             }],
+        }
+    }
+
+    fn entity_with_member(name: &str, member: &str, association: bool) -> EntityManifest {
+        let mut entity = EntityManifest {
+            name: name.into(),
+            ..Default::default()
+        };
+        if association {
+            entity.associations.push(AssociationManifest {
+                name: member.into(),
+                target: name.into(),
+                association_type: "Reference".into(),
+            });
+        } else {
+            entity.attributes.push(member.into());
+        }
+        entity
+    }
+
+    fn assert_generated_collision(
+        module: ModuleManifest,
+        marker: &str,
+        origins: [&str; 2],
+    ) -> String {
+        let error = generate(&Manifest {
+            modules: vec![module],
+        })
+        .unwrap_err();
+        let diagnostic = error.to_string();
+        let TypegenError::GeneratedMarkerNameCollision {
+            module,
+            marker: actual,
+            first,
+            second,
+        } = error
+        else {
+            panic!("expected a precise cross-namespace error, got {diagnostic}");
+        };
+        assert_eq!(module, "Sales");
+        assert_eq!(actual, marker);
+        let mut expected = origins;
+        expected.sort_unstable();
+        assert_eq!([first.as_str(), second.as_str()], expected);
+        assert!(diagnostic.contains("current flat marker namespace"));
+        diagnostic
+    }
+
+    #[test]
+    fn derived_attribute_and_association_markers_cannot_shadow_an_entity_in_either_order() {
+        for (association, origin) in [
+            (false, "attribute Order.Total"),
+            (true, "association Order.Total"),
+        ] {
+            let mut module = ModuleManifest {
+                name: "Sales".into(),
+                entities: vec![
+                    entity_with_member("Order", "Total", association),
+                    EntityManifest {
+                        name: "Order_Total".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let first = assert_generated_collision(
+                module.clone(),
+                "Order_Total",
+                [origin, "entity Order_Total"],
+            );
+            module.entities.reverse();
+            assert_eq!(
+                assert_generated_collision(module, "Order_Total", [origin, "entity Order_Total"]),
+                first
+            );
+        }
+    }
+
+    #[test]
+    fn derived_attribute_and_association_markers_cannot_shadow_microflows_or_nanoflows() {
+        for (association, origin) in [
+            (false, "attribute Order.Total"),
+            (true, "association Order.Total"),
+        ] {
+            for (nanoflow, flow_origin) in [
+                (false, "microflow Order_Total"),
+                (true, "nanoflow Order_Total"),
+            ] {
+                let mut module = ModuleManifest {
+                    name: "Sales".into(),
+                    entities: vec![entity_with_member("Order", "Total", association)],
+                    ..Default::default()
+                };
+                if nanoflow {
+                    module.nanoflows = vec!["Other".into(), "Order_Total".into()];
+                } else {
+                    module.microflows = vec!["Other".into(), "Order_Total".into()];
+                }
+                let first = assert_generated_collision(
+                    module.clone(),
+                    "Order_Total",
+                    [origin, flow_origin],
+                );
+                module.microflows.reverse();
+                module.nanoflows.reverse();
+                assert_eq!(
+                    assert_generated_collision(module, "Order_Total", [origin, flow_origin]),
+                    first
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ambiguous_entity_member_boundaries_fail_for_every_member_kind_and_declaration_order() {
+        for (left_association, left_origin) in
+            [(false, "attribute A_B.C"), (true, "association A_B.C")]
+        {
+            for (right_association, right_origin) in
+                [(false, "attribute A.B_C"), (true, "association A.B_C")]
+            {
+                let mut module = ModuleManifest {
+                    name: "Sales".into(),
+                    entities: vec![
+                        entity_with_member("A_B", "C", left_association),
+                        entity_with_member("A", "B_C", right_association),
+                    ],
+                    ..Default::default()
+                };
+                let first = assert_generated_collision(
+                    module.clone(),
+                    "A_B_C",
+                    [left_origin, right_origin],
+                );
+                module.entities.reverse();
+                assert_eq!(
+                    assert_generated_collision(module, "A_B_C", [left_origin, right_origin]),
+                    first
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_collisions_produce_the_same_diagnostic_after_reordering_entities() {
+        let mut module = ModuleManifest {
+            name: "Sales".into(),
+            entities: vec![
+                entity_with_member("Z_Q", "R", true),
+                entity_with_member("Z", "Q_R", false),
+                entity_with_member("A_B", "C", false),
+                entity_with_member("A", "B_C", false),
+            ],
+            ..Default::default()
+        };
+        let expected = assert_generated_collision(
+            module.clone(),
+            "A_B_C",
+            ["attribute A_B.C", "attribute A.B_C"],
+        );
+        for _ in 0..module.entities.len() {
+            module.entities.rotate_left(1);
+            assert_eq!(
+                assert_generated_collision(
+                    module.clone(),
+                    "A_B_C",
+                    ["attribute A_B.C", "attribute A.B_C"]
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn identical_marker_spellings_in_different_modules_do_not_collide_or_get_renamed() {
+        let manifest = Manifest {
+            modules: vec![
+                ModuleManifest {
+                    name: "Sales".into(),
+                    entities: vec![entity_with_member("Order", "Total", false)],
+                    ..Default::default()
+                },
+                ModuleManifest {
+                    name: "CRM".into(),
+                    entities: vec![EntityManifest {
+                        name: "Order_Total".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+        };
+        let source = generate(&manifest).unwrap();
+        assert_eq!(source.matches("pub struct Order_Total;").count(), 2);
+        assert!(source.contains("pub mod Sales {"));
+        assert!(source.contains("pub mod CRM {"));
+        assert!(source.contains("const NAME: &'static str = \"Total\";"));
+        assert!(source.contains("const NAME: &'static str = \"Order_Total\";"));
+    }
+
+    #[test]
+    fn duplicate_member_errors_take_precedence_over_derived_namespace_errors() {
+        for association in [false, true] {
+            let mut entity = entity_with_member("Order", "Total", association);
+            if association {
+                entity.associations.push(entity.associations[0].clone());
+            } else {
+                entity.attributes.push("Total".into());
+            }
+            let manifest = Manifest {
+                modules: vec![ModuleManifest {
+                    name: "Sales".into(),
+                    entities: vec![
+                        EntityManifest {
+                            name: "Order_Total".into(),
+                            ..Default::default()
+                        },
+                        entity,
+                    ],
+                    ..Default::default()
+                }],
+            };
+            let error = generate(&manifest).unwrap_err();
+            let actual = match error {
+                TypegenError::DuplicateAttribute(module, entity, member) => {
+                    (false, module, entity, member)
+                }
+                TypegenError::DuplicateAssociation(module, entity, member) => {
+                    (true, module, entity, member)
+                }
+                other => panic!("dedicated duplicate error was replaced: {other}"),
+            };
+            assert_eq!(
+                actual,
+                (association, "Sales".into(), "Order".into(), "Total".into())
+            );
         }
     }
 

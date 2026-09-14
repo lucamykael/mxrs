@@ -119,6 +119,14 @@ pub fn write_module(
         identity,
     )?;
 
+    crate::layout_compiler::synchronize_layouts_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        mendix_version,
+        &decl.layouts,
+        identity,
+    )?;
     documents::synchronize_pages_with_identity(
         mpr,
         &module_id,

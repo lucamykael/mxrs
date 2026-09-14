@@ -39,6 +39,7 @@ pub mod documents;
 pub mod domain;
 pub mod error;
 pub mod flow_compiler;
+pub mod layout_compiler;
 pub mod module;
 mod navigation;
 pub mod page_compiler;

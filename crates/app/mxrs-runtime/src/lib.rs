@@ -4,8 +4,16 @@
 //! SQLite, or Mendix's Java runtime. This makes transaction and security
 //! semantics directly testable and lets later adapters share one fail-closed
 //! implementation.
+//!
+//! StoreSchema currently declares defaults and persistence, not Mendix member
+//! types, requiredness, association targets, or lifecycle hooks. Member names
+//! and persisted identities are validated; JSON value types are deliberately
+//! not inferred from defaults. Entity access rules must still be enforced by
+//! callers using the policy, not by the raw store passed to native actions.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -35,9 +43,35 @@ pub struct ObjectValue {
     pub members: BTreeMap<String, Value>,
 }
 
+/// Persistence adapters can reject malformed rows before migrating storage,
+/// without having the project's entity schema available. Use one validator per
+/// snapshot so IDs remain unambiguous across entity and association boundaries.
+#[derive(Debug, Default)]
+pub struct PersistentObjectValidator {
+    identifiers: BTreeSet<String>,
+}
+
+impl PersistentObjectValidator {
+    pub fn validate(&mut self, object: &ObjectValue) -> Result<()> {
+        if !valid_name(&object.entity)
+            || !valid_name(&object.id)
+            || !object.members.keys().all(|member| valid_name(member))
+        {
+            return Err(RuntimeError::InvalidPersistence("entity, object ID, and member names must be nonempty and contain no control characters".into()));
+        }
+        if !self.identifiers.insert(object.id.clone()) {
+            return Err(RuntimeError::InvalidPersistence(format!(
+                "duplicate object {}/{}",
+                object.entity, object.id
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StoreSchema {
-    entities: BTreeMap<String, EntitySchema>,
+    entities: Arc<BTreeMap<String, EntitySchema>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,7 +87,7 @@ impl StoreSchema {
         defaults: BTreeMap<String, Value>,
         transient: bool,
     ) -> Self {
-        self.entities.insert(
+        Arc::make_mut(&mut self.entities).insert(
             name.into(),
             EntitySchema {
                 defaults,
@@ -70,19 +104,30 @@ impl StoreSchema {
 
 /// Unit-of-work store. New persistent records are visible within the current
 /// unit of work but disappear at transaction completion unless committed.
+///
+/// The lifecycle follows `mxrb/lib/mxrb/runtime/native.rb:93-166`, including
+/// session-local commits and rollback of transient objects. Unlike its
+/// permissive object API, unknown entity/object mutations fail explicitly.
+/// Read-only snapshots share immutable roots; writes copy map keys and only
+/// the changed object's member payload. No transaction clones every payload.
 #[derive(Debug, Clone)]
 pub struct Store {
     schema: StoreSchema,
-    records: BTreeMap<String, BTreeMap<String, ObjectValue>>,
-    committed: BTreeMap<(String, String), BTreeMap<String, Value>>,
+    records: Arc<RecordMap>,
+    committed: Arc<RecordMap>,
+    dirty: Arc<BTreeSet<(String, String)>>,
 }
+
+type EntityRecords = BTreeMap<String, Arc<ObjectValue>>;
+type RecordMap = BTreeMap<String, Arc<EntityRecords>>;
 
 impl Store {
     pub fn new(schema: StoreSchema) -> Self {
         Self {
             schema,
-            records: BTreeMap::new(),
-            committed: BTreeMap::new(),
+            records: Arc::default(),
+            committed: Arc::default(),
+            dirty: Arc::default(),
         }
     }
 
@@ -92,15 +137,18 @@ impl Store {
             .entities
             .get(entity)
             .ok_or_else(|| RuntimeError::UnknownEntity(entity.to_string()))?;
+        if !valid_name(entity) || !definition.defaults.keys().all(|member| valid_name(member)) {
+            return Err(RuntimeError::Transaction(
+                "entity and member names must be nonempty and contain no control characters".into(),
+            ));
+        }
         let value = ObjectValue {
             entity: entity.to_string(),
             id: uuid::Uuid::new_v4().to_string(),
             members: definition.defaults.clone(),
         };
-        self.records
-            .entry(entity.to_string())
-            .or_default()
-            .insert(value.id.clone(), value.clone());
+        put_record(&mut self.records, Arc::new(value.clone()));
+        self.mark_dirty(entity, &value.id);
         Ok(value)
     }
 
@@ -112,8 +160,8 @@ impl Store {
             .records
             .get(entity)
             .into_iter()
-            .flat_map(BTreeMap::values)
-            .cloned()
+            .flat_map(|records| records.values())
+            .map(|object| object.as_ref().clone())
             .collect())
     }
 
@@ -125,48 +173,51 @@ impl Store {
             .records
             .get(entity)
             .and_then(|records| records.get(id))
-            .cloned())
+            .map(|object| object.as_ref().clone()))
     }
 
     pub fn set_member(&mut self, entity: &str, id: &str, member: &str, value: Value) -> Result<()> {
+        if !valid_name(member) {
+            return Err(RuntimeError::Transaction(
+                "member names must be nonempty and contain no control characters".into(),
+            ));
+        }
         self.object_mut(entity, id)?
             .members
             .insert(member.to_string(), value);
+        self.mark_dirty(entity, id);
         Ok(())
     }
 
     pub fn commit(&mut self, entity: &str, id: &str) -> Result<ObjectValue> {
         let object = self.object(entity, id)?.clone();
-        if !self.is_transient(entity)? {
-            self.committed
-                .insert((entity.to_string(), id.to_string()), object.members.clone());
-        }
-        Ok(object)
+        put_record(&mut self.committed, object.clone());
+        Arc::make_mut(&mut self.dirty).remove(&(entity.to_string(), id.to_string()));
+        Ok(object.as_ref().clone())
     }
 
     pub fn rollback(&mut self, entity: &str, id: &str) -> Result<()> {
+        self.object(entity, id)?;
         let key = (entity.to_string(), id.to_string());
-        if let Some(members) = self.committed.get(&key).cloned() {
-            self.object_mut(entity, id)?.members = members;
+        if let Some(object) = self
+            .committed
+            .get(entity)
+            .and_then(|records| records.get(id))
+            .cloned()
+        {
+            put_record(&mut self.records, object);
         } else {
-            self.records
-                .entry(entity.to_string())
-                .or_default()
-                .remove(id);
+            remove_record(&mut self.records, entity, id);
         }
+        Arc::make_mut(&mut self.dirty).remove(&key);
         Ok(())
     }
 
     pub fn delete(&mut self, entity: &str, id: &str) -> Result<ObjectValue> {
-        let object = self
-            .records
-            .get_mut(entity)
-            .and_then(|records| records.remove(id))
-            .ok_or_else(|| RuntimeError::UnknownObject {
-                entity: entity.to_string(),
-                id: id.to_string(),
-            })?;
-        self.committed.remove(&(entity.to_string(), id.to_string()));
+        let object = self.object(entity, id)?.as_ref().clone();
+        remove_record(&mut self.records, entity, id);
+        remove_record(&mut self.committed, entity, id);
+        Arc::make_mut(&mut self.dirty).remove(&(entity.to_string(), id.to_string()));
         Ok(object)
     }
 
@@ -182,7 +233,7 @@ impl Store {
         let mut related = self
             .records
             .values()
-            .flat_map(BTreeMap::values)
+            .flat_map(|records| records.values())
             .filter(|candidate| {
                 ids.contains(candidate.id.as_str())
                     || candidate
@@ -191,7 +242,7 @@ impl Store {
                         .or_else(|| candidate.members.get(short))
                         .is_some_and(|value| reference_ids(value).contains(&start.id.as_str()))
             })
-            .cloned()
+            .map(|object| object.as_ref().clone())
             .collect::<Vec<_>>();
         related.sort_by(|left, right| left.id.cmp(&right.id));
         related.dedup_by(|left, right| left.id == right.id);
@@ -202,11 +253,9 @@ impl Store {
     pub fn persistent_objects(&self) -> Vec<ObjectValue> {
         self.committed
             .iter()
-            .map(|((entity, id), members)| ObjectValue {
-                entity: entity.clone(),
-                id: id.clone(),
-                members: members.clone(),
-            })
+            .filter(|(entity, _)| !self.is_transient(entity))
+            .flat_map(|(_, records)| records.values())
+            .map(|object| object.as_ref().clone())
             .collect()
     }
 
@@ -216,7 +265,15 @@ impl Store {
         &mut self,
         objects: impl IntoIterator<Item = ObjectValue>,
     ) -> Result<()> {
-        let mut replacement = BTreeMap::new();
+        let mut replacement: RecordMap = BTreeMap::new();
+        let mut validator = PersistentObjectValidator {
+            identifiers: self
+                .records
+                .iter()
+                .filter(|(entity, _)| self.is_transient(entity))
+                .flat_map(|(_, records)| records.keys().cloned())
+                .collect(),
+        };
         for object in objects {
             let definition = self.schema.entities.get(&object.entity).ok_or_else(|| {
                 RuntimeError::InvalidPersistence(format!("unknown entity {}", object.entity))
@@ -227,54 +284,65 @@ impl Store {
                     object.entity
                 )));
             }
-            let key = (object.entity, object.id);
-            if replacement.insert(key.clone(), object.members).is_some() {
-                return Err(RuntimeError::InvalidPersistence(format!(
-                    "duplicate object {}/{}",
-                    key.0, key.1
-                )));
-            }
+            validator.validate(&object)?;
+            Arc::make_mut(replacement.entry(object.entity.clone()).or_default())
+                .insert(object.id.clone(), Arc::new(object));
         }
-        self.committed = replacement;
-        self.discard_uncommitted();
+        let mut records = self.transient_records(&self.records);
+        records.extend(
+            replacement
+                .iter()
+                .map(|(entity, records)| (entity.clone(), records.clone())),
+        );
+        let mut committed = self.transient_records(&self.committed);
+        committed.extend(replacement);
+        self.records = Arc::new(records);
+        self.committed = Arc::new(committed);
+        self.dirty = Arc::default();
         Ok(())
     }
 
     pub fn transaction<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let snapshot = self.clone();
-        match operation(self) {
-            Ok(result) => {
+        match catch_unwind(AssertUnwindSafe(|| operation(self))) {
+            Ok(Ok(result)) => {
+                drop(snapshot);
                 self.discard_uncommitted();
                 Ok(result)
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 *self = snapshot;
                 Err(error)
+            }
+            Err(panic) => {
+                *self = snapshot;
+                resume_unwind(panic)
             }
         }
     }
 
     fn discard_uncommitted(&mut self) {
-        let transient = self
-            .records
-            .iter()
-            .filter(|(entity, _)| self.is_transient(entity).unwrap_or(false))
-            .map(|(entity, records)| (entity.clone(), records.clone()))
-            .collect::<BTreeMap<_, _>>();
-        self.records = transient;
-        for ((entity, id), members) in &self.committed {
-            self.records.entry(entity.clone()).or_default().insert(
-                id.clone(),
-                ObjectValue {
-                    entity: entity.clone(),
-                    id: id.clone(),
-                    members: members.clone(),
-                },
-            );
+        if self.dirty.is_empty() {
+            return;
+        }
+        let dirty = std::mem::take(&mut self.dirty);
+        for (entity, id) in dirty.iter() {
+            if let Some(object) = self
+                .committed
+                .get(entity)
+                .and_then(|records| records.get(id))
+            {
+                put_record(&mut self.records, object.clone());
+            } else {
+                remove_record(&mut self.records, entity, id);
+            }
         }
     }
 
-    fn object(&self, entity: &str, id: &str) -> Result<&ObjectValue> {
+    fn object(&self, entity: &str, id: &str) -> Result<&Arc<ObjectValue>> {
+        if !self.schema.contains(entity) {
+            return Err(RuntimeError::UnknownEntity(entity.to_string()));
+        }
         self.records
             .get(entity)
             .and_then(|records| records.get(id))
@@ -285,22 +353,58 @@ impl Store {
     }
 
     fn object_mut(&mut self, entity: &str, id: &str) -> Result<&mut ObjectValue> {
-        self.records
+        if !self.schema.contains(entity) {
+            return Err(RuntimeError::UnknownEntity(entity.to_string()));
+        }
+        Arc::make_mut(&mut self.records)
             .get_mut(entity)
-            .and_then(|records| records.get_mut(id))
+            .and_then(|records| Arc::make_mut(records).get_mut(id))
+            .map(Arc::make_mut)
             .ok_or_else(|| RuntimeError::UnknownObject {
                 entity: entity.to_string(),
                 id: id.to_string(),
             })
     }
 
-    fn is_transient(&self, entity: &str) -> Result<bool> {
+    fn is_transient(&self, entity: &str) -> bool {
         self.schema
             .entities
             .get(entity)
-            .map(|definition| definition.transient)
-            .ok_or_else(|| RuntimeError::UnknownEntity(entity.to_string()))
+            .is_some_and(|definition| definition.transient)
     }
+
+    fn mark_dirty(&mut self, entity: &str, id: &str) {
+        if !self.is_transient(entity) {
+            Arc::make_mut(&mut self.dirty).insert((entity.to_string(), id.to_string()));
+        }
+    }
+
+    fn transient_records(&self, records: &RecordMap) -> RecordMap {
+        records
+            .iter()
+            .filter(|(entity, _)| self.is_transient(entity))
+            .map(|(entity, records)| (entity.clone(), records.clone()))
+            .collect()
+    }
+}
+
+fn put_record(records: &mut Arc<RecordMap>, object: Arc<ObjectValue>) {
+    Arc::make_mut(
+        Arc::make_mut(records)
+            .entry(object.entity.clone())
+            .or_default(),
+    )
+    .insert(object.id.clone(), object);
+}
+
+fn remove_record(records: &mut Arc<RecordMap>, entity: &str, id: &str) {
+    if let Some(records) = Arc::make_mut(records).get_mut(entity) {
+        Arc::make_mut(records).remove(id);
+    }
+}
+
+fn valid_name(value: &str) -> bool {
+    !value.trim().is_empty() && !value.chars().any(char::is_control)
 }
 
 fn reference_ids(value: &Value) -> Vec<&str> {
@@ -674,3 +778,9 @@ mod tests {
         assert_eq!(runtime.store().retrieve("Sales.Order").unwrap().len(), 1);
     }
 }
+
+#[cfg(test)]
+mod store_tests;
+
+#[cfg(test)]
+mod security_tests;

@@ -65,6 +65,9 @@ pub enum FormsError {
     #[error("invalid {shape} at {path}")]
     InvalidShape { shape: &'static str, path: String },
 
+    #[error("translated Placeholder at {path} cannot store template parameters or fallback text")]
+    UnrepresentablePlaceholder { path: String },
+
     #[error("custom (pluggable) widget at {path} could not be decoded: {source}")]
     PluggableDecodeFailed {
         path: String,

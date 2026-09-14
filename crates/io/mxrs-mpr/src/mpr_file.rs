@@ -18,9 +18,10 @@
 //! index, architecture metadata, ruby_app sources, domain-diagram anchors)
 //! are deliberately out of scope here — see `decisions/mxrs-rust-rewrite-plan.md`.
 
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::error::{MprError, Result};
 use crate::format::{self, StorageFormat};
@@ -122,6 +123,8 @@ pub struct MprFile {
     readonly: bool,
     format: StorageFormat,
     write_stats: WriteStats,
+    recovery_required: bool,
+    managed_transaction: bool,
     pub(crate) v2_transaction: Option<V2TransactionState>,
 }
 
@@ -174,7 +177,17 @@ impl MprFile {
         let contents_dir = format::contents_dir(&path);
         std::fs::create_dir_all(&contents_dir)?;
 
-        let doc = mxrs_bson::doc! { "$ID": root_id, "$Type": "Projects$Project", "IsSystemProject": false };
+        // The native loader reads this first object ID as a 16-byte MS-GUID.
+        // Unlike mxrb's BsonCodec.serialize, raw BSON serialization does not
+        // convert UUID strings; reuse the already-validated SQL identity.
+        let doc = mxrs_bson::doc! {
+            "$ID": mxrs_bson::Binary {
+                subtype: mxrs_bson::BinarySubtype::Generic,
+                bytes: root_blob.clone(),
+            },
+            "$Type": "Projects$Project",
+            "IsSystemProject": false,
+        };
         let bytes = mxrs_bson::serialize(&doc)?;
         conn.execute(
             "INSERT INTO Unit (UnitID, ContainerID, ContainmentName, TreeConflict, ContentsHash, ContentsConflicts) \
@@ -184,7 +197,9 @@ impl MprFile {
         mxunit::write_atomic(&mxunit::path_for(&contents_dir, root_id), &bytes)?;
         drop(conn);
 
-        Self::open(&path, false)
+        let mut mpr = Self::open(&path, false)?;
+        mpr.ensure_v2_contract()?;
+        Ok(mpr)
     }
 
     pub fn open(path: impl AsRef<Path>, readonly: bool) -> Result<Self> {
@@ -206,9 +221,14 @@ impl MprFile {
             readonly,
             format,
             write_stats: WriteStats::default(),
+            recovery_required: false,
+            managed_transaction: false,
             v2_transaction: None,
         };
         mpr.recover_interrupted_v2_transaction()?;
+        if readonly {
+            mpr.conn.authorizer(Some(crate::read_only_sql::authorize))?;
+        }
         Ok(mpr)
     }
 
@@ -228,14 +248,38 @@ impl MprFile {
         self.write_stats
     }
 
+    fn ensure_recovered(&self) -> Result<()> {
+        if self.recovery_required {
+            return Err(MprError::RecoveryRequired);
+        }
+        Ok(())
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        self.ensure_recovered()?;
+        if self.readonly {
+            return Err(MprError::ReadOnly);
+        }
+        Ok(())
+    }
+
+    fn ensure_outside_transaction(&self, operation: &'static str) -> Result<()> {
+        if self.managed_transaction {
+            return Err(MprError::ManagedTransactionOperation { operation });
+        }
+        Ok(())
+    }
+
     /// Runs an arbitrary read query against the underlying SQLite store —
     /// mirrors `Mxrb::Project#query`/`bin/mxrb`'s `sql` command, a debugging
     /// escape hatch for inspecting a `.mpr`'s raw storage shape (schema
     /// exploration, ad-hoc row counts, ...), not a supported data-access API.
-    /// Like the Ruby original, this doesn't restrict the query to `SELECT` —
-    /// callers on a `readonly: true`-opened file are protected by SQLite's
-    /// own read-only connection mode; callers on a writable file are not.
+    /// Read-only handles additionally authorize only queries and introspective
+    /// PRAGMAs: SQLite's read-only opening flag alone still allows `ATTACH` to
+    /// create other files. Writable handles retain the original debugging API.
     pub fn raw_query(&self, sql: &str) -> Result<SqlResult> {
+        self.ensure_recovered()?;
+        self.ensure_outside_transaction("raw SQL")?;
         let mut stmt = self.conn.prepare(sql)?;
         let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let rows = stmt
@@ -298,6 +342,7 @@ impl MprFile {
     }
 
     pub fn update_version(&mut self, version: &str, schema_hash: &str) -> Result<()> {
+        self.ensure_writable()?;
         let result = self.conn.execute(
             "UPDATE _MetaData SET _ProductVersion = ?1, _BuildVersion = ?2, _SchemaHash = ?3",
             rusqlite::params![version, version, schema_hash],
@@ -361,6 +406,7 @@ impl MprFile {
     }
 
     pub fn content_bytes(&self, unit: &RawUnit) -> Result<Option<Vec<u8>>> {
+        mxrs_bson::uuid_to_blob(&unit.unit_id)?;
         let inline_empty = unit.contents.as_deref().is_none_or(<[u8]>::is_empty);
         if !(inline_empty && self.format == StorageFormat::V2) {
             return Ok(unit.contents.clone());
@@ -383,6 +429,7 @@ impl MprFile {
         if self.format != StorageFormat::V2 {
             return None;
         }
+        mxrs_bson::uuid_to_blob(&unit.unit_id).ok()?;
         Some(mxunit::path_for(&self.contents_dir(), &unit.unit_id))
     }
 
@@ -413,9 +460,7 @@ impl MprFile {
         contents_doc: mxrs_bson::Document,
         unit_uuid: Option<&str>,
     ) -> Result<String> {
-        if self.readonly {
-            return Err(MprError::ReadOnly);
-        }
+        self.ensure_writable()?;
 
         let extracted = contents_doc.get("$ID").and_then(mxrs_bson::extract_id);
         let uuid = extracted
@@ -487,9 +532,7 @@ impl MprFile {
     /// Returns `false` (a no-op) when the new content hashes identically to
     /// what's already stored.
     pub fn update_unit(&mut self, uuid: &str, contents_doc: mxrs_bson::Document) -> Result<bool> {
-        if self.readonly {
-            return Err(MprError::ReadOnly);
-        }
+        self.ensure_writable()?;
 
         let blob = mxrs_bson::uuid_to_blob(uuid)?.to_vec();
         let bson_bytes = self.serialize_contents(&contents_doc)?;
@@ -527,9 +570,7 @@ impl MprFile {
     }
 
     pub fn delete_unit(&mut self, uuid: &str) -> Result<Vec<PathBuf>> {
-        if self.readonly {
-            return Err(MprError::ReadOnly);
-        }
+        self.ensure_writable()?;
         let blob = mxrs_bson::uuid_to_blob(uuid)?.to_vec();
         self.conn.execute(
             "DELETE FROM Unit WHERE UnitID = ?1",
@@ -550,9 +591,7 @@ impl MprFile {
         container_uuid: &str,
         containment_name: &str,
     ) -> Result<()> {
-        if self.readonly {
-            return Err(MprError::ReadOnly);
-        }
+        self.ensure_writable()?;
         self.conn.execute(
             "UPDATE Unit SET ContainerID = ?1, ContainmentName = ?2 WHERE UnitID = ?3",
             rusqlite::params![
@@ -573,52 +612,89 @@ impl MprFile {
     /// back or recovered on next [`MprFile::open`]) — see the
     /// [`crate::transaction`] module docs for the full scheme.
     pub fn transaction<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        if self.format != StorageFormat::V2 {
-            self.conn.execute_batch("BEGIN")?;
-            return match f(self) {
-                Ok(value) => {
-                    self.conn.execute_batch("COMMIT")?;
-                    Ok(value)
-                }
-                Err(e) => {
-                    let _ = self.conn.execute_batch("ROLLBACK");
-                    Err(e)
-                }
-            };
-        }
-
-        if self.v2_transaction.is_some() {
+        self.ensure_writable()?;
+        if self.v2_transaction.is_some() || !self.conn.is_autocommit() {
             return Err(MprError::NestedTransaction);
         }
-        self.with_v2_transaction(f)
+        self.with_transaction(f)
     }
 
-    fn with_v2_transaction<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let id = uuid::Uuid::new_v4().to_string();
-        self.v2_transaction = Some(V2TransactionState::new(id.clone()));
+    fn with_transaction<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.conn.execute_batch("BEGIN")?;
-
-        let value = match f(self) {
-            Ok(value) => value,
-            Err(e) => return self.abort_v2_transaction(e),
-        };
-        if let Err(e) = self.apply_v2_transaction() {
-            return self.abort_v2_transaction(e);
+        self.managed_transaction = true;
+        let write_stats = self.write_stats;
+        if self.format == StorageFormat::V2 {
+            self.v2_transaction = Some(V2TransactionState::new(uuid::Uuid::new_v4().to_string()));
         }
-
-        self.conn.execute_batch("COMMIT")?;
-        self.cleanup_v2_transaction();
-        self.clear_v2_transaction_marker(&id);
-        self.v2_transaction = None;
-        Ok(value)
+        let attempt = catch_unwind(AssertUnwindSafe(|| {
+            let value = f(self)?;
+            if self.v2_transaction.is_some() {
+                self.apply_v2_transaction()?;
+            }
+            self.conn.execute_batch("COMMIT")?;
+            Ok(value)
+        }));
+        self.managed_transaction = false;
+        match attempt {
+            Ok(Ok(value)) => {
+                if let Err(error) = self.finish_v2_transaction() {
+                    self.recovery_required = true;
+                    return Err(MprError::CommittedTransactionCleanup(Box::new(error)));
+                }
+                Ok(value)
+            }
+            Ok(Err(original)) => match self.abort_transaction(write_stats) {
+                Ok(()) => Err(original),
+                Err(recovery) => {
+                    self.recovery_required = true;
+                    Err(MprError::TransactionRecovery {
+                        original: Box::new(original),
+                        recovery: Box::new(recovery),
+                    })
+                }
+            },
+            Err(original) => {
+                if let Err(recovery) = self.abort_transaction(write_stats) {
+                    self.recovery_required = true;
+                    resume_unwind(Box::new(crate::transaction::TransactionRecoveryPanic {
+                        original,
+                        recovery,
+                    }));
+                }
+                resume_unwind(original)
+            }
+        }
     }
 
-    fn abort_v2_transaction<T>(&mut self, error: MprError) -> Result<T> {
-        let _ = self.conn.execute_batch("ROLLBACK");
-        self.rollback_v2_transaction();
-        self.cleanup_v2_transaction();
+    fn abort_transaction(&mut self, write_stats: WriteStats) -> Result<()> {
+        // SQLite may leave a failed COMMIT active (BUSY/authorization), or
+        // automatically roll it back (some I/O errors). Never restore files
+        // until SQL rollback is confirmed. If SQL already ended, the durable
+        // marker distinguishes a commit from a rollback; lookup errors must
+        // preserve the journal rather than guess the outcome.
+        let committed = if !self.conn.is_autocommit() {
+            self.conn.execute_batch("ROLLBACK")?;
+            false
+        } else if let Some(state) = &self.v2_transaction {
+            state.journal_dir.is_some() && self.v2_transaction_committed(&state.id)?
+        } else {
+            false
+        };
+        if !committed {
+            self.rollback_v2_transaction()?;
+            self.write_stats = write_stats;
+        }
+        self.finish_v2_transaction()
+    }
+
+    fn finish_v2_transaction(&mut self) -> Result<()> {
+        self.cleanup_v2_transaction()?;
+        if let Some(state) = &self.v2_transaction {
+            let id = state.id.clone();
+            self.clear_v2_transaction_marker(&id);
+        }
         self.v2_transaction = None;
-        Err(error)
+        Ok(())
     }
 
     fn apply_v2_transaction(&mut self) -> Result<()> {
@@ -638,8 +714,8 @@ impl MprFile {
                 journal_dir.display()
             )));
         }
-        self.write_v2_transaction_manifest(&identifiers)?;
         self.v2_transaction.as_mut().unwrap().journal_dir = Some(journal_dir);
+        self.write_v2_transaction_manifest(&identifiers)?;
 
         let id = self.v2_transaction.as_ref().unwrap().id.clone();
         self.register_v2_transaction_marker(&id)?;
@@ -692,29 +768,36 @@ impl MprFile {
         Ok(())
     }
 
-    fn rollback_v2_transaction(&mut self) {
+    fn rollback_v2_transaction(&mut self) -> Result<()> {
         let Some(state) = &self.v2_transaction else {
-            return;
+            return Ok(());
         };
         for entry in state.applied.iter().rev() {
-            let _ = std::fs::remove_file(&entry.path);
-            if entry.existed && entry.backup.is_file() {
+            if entry.existed && entry.backup.try_exists()? {
                 if let Some(parent) = entry.path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                    std::fs::create_dir_all(parent)?;
                 }
-                let _ = std::fs::rename(&entry.backup, &entry.path);
+                std::fs::rename(&entry.backup, &entry.path)?;
+            } else if !entry.existed {
+                remove_file_if_present(&entry.path)?;
             }
         }
+        Ok(())
     }
 
-    fn cleanup_v2_transaction(&mut self) {
+    fn cleanup_v2_transaction(&mut self) -> Result<()> {
         if let Some(dir) = self
             .v2_transaction
             .as_ref()
             .and_then(|s| s.journal_dir.clone())
         {
-            let _ = std::fs::remove_dir_all(dir);
+            match std::fs::remove_dir_all(dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
+        Ok(())
     }
 
     fn transaction_journal_dir(&self) -> PathBuf {
@@ -775,13 +858,36 @@ impl MprFile {
         Ok(())
     }
 
+    fn v2_transaction_committed(&self, id: &str) -> Result<bool> {
+        let has_table: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_MxrbFileTransaction' COLLATE NOCASE)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_table {
+            return Ok(false);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM _MxrbFileTransaction WHERE ID = ?1",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Best-effort: mirrors Ruby's `rescue SQLite3::Exception; nil` — a
     /// failure here must never mask the outcome of the transaction it's
     /// cleaning up after.
     fn clear_v2_transaction_marker(&mut self, id: &str) {
         let has_table = self
             .tables()
-            .map(|t| t.iter().any(|n| n == "_MxrbFileTransaction"))
+            .map(|t| {
+                t.iter()
+                    .any(|n| n.eq_ignore_ascii_case("_MxrbFileTransaction"))
+            })
             .unwrap_or(false);
         if !has_table {
             return;
@@ -806,13 +912,12 @@ impl MprFile {
     /// Creates a consistent point-in-time backup via SQLite's `VACUUM INTO`,
     /// falling back to a WAL checkpoint + file copy on older SQLite builds.
     pub fn backup(&mut self, dest_path: impl AsRef<Path>) -> Result<()> {
-        if self.readonly {
-            return Err(MprError::ReadOnly);
-        }
+        self.ensure_writable()?;
+        self.ensure_outside_transaction("backup")?;
         let dest_path = dest_path.as_ref();
-        self.cleanup_backup(dest_path);
+        self.cleanup_backup(dest_path)?;
         if let Err(e) = self.backup_inner(dest_path) {
-            self.cleanup_backup(dest_path);
+            self.cleanup_backup(dest_path)?;
             return Err(e);
         }
         Ok(())
@@ -835,9 +940,12 @@ impl MprFile {
     }
 
     /// Removes all artifacts created by [`MprFile::backup`] for `dest_path`.
-    pub fn cleanup_backup(&self, dest_path: &Path) {
+    pub fn cleanup_backup(&self, dest_path: &Path) -> Result<()> {
+        self.ensure_writable()?;
+        self.ensure_outside_transaction("backup cleanup")?;
         let _ = std::fs::remove_file(dest_path);
         let _ = std::fs::remove_dir_all(Self::backup_contents_dir(dest_path));
+        Ok(())
     }
 
     fn backup_contents_dir(dest_path: &Path) -> PathBuf {
@@ -855,9 +963,8 @@ impl MprFile {
     /// Restores this database from a backup file, replacing current
     /// contents, and reopens the underlying SQLite connection.
     pub fn restore_from(&mut self, backup_path: impl AsRef<Path>) -> Result<()> {
-        if self.readonly {
-            return Err(MprError::ReadOnly);
-        }
+        self.ensure_writable()?;
+        self.ensure_outside_transaction("restore")?;
         let backup_path = backup_path.as_ref();
         let needs_snapshot = self.preflight_backup(backup_path)?;
 
@@ -1050,16 +1157,7 @@ impl MprFile {
         let manifest: crate::transaction::TransactionManifest =
             serde_json::from_slice(&manifest_bytes)?;
 
-        let has_marker_table = self.tables()?.iter().any(|t| t == "_MxrbFileTransaction");
-        let committed = has_marker_table
-            && self
-                .conn
-                .query_row(
-                    "SELECT 1 FROM _MxrbFileTransaction WHERE ID = ?1",
-                    rusqlite::params![manifest.id],
-                    |_| Ok(()),
-                )
-                .is_ok();
+        let committed = self.v2_transaction_committed(&manifest.id)?;
 
         if !committed {
             self.restore_interrupted_v2_files(&manifest.entries)?;
@@ -1078,14 +1176,13 @@ impl MprFile {
         for entry in entries.iter().rev() {
             let path = dir.join(&entry.relative_path);
             let backup = journal_dir.join("original").join(&entry.relative_path);
-            if entry.existed && backup.is_file() {
-                let _ = std::fs::remove_file(&path);
+            if entry.existed && backup.try_exists()? {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::rename(&backup, &path)?;
             } else if !entry.existed {
-                let _ = std::fs::remove_file(&path);
+                remove_file_if_present(&path)?;
             }
         }
         Ok(())
@@ -1094,11 +1191,9 @@ impl MprFile {
     /// Studio Pro 11 requires both the `_Transaction` marker table and an
     /// `mprname` sidecar file for externally stored v2 unit contents.
     pub fn ensure_v2_contract(&mut self) -> Result<()> {
+        self.ensure_writable()?;
         if self.format != StorageFormat::V2 {
             return Ok(());
-        }
-        if self.readonly {
-            return Err(MprError::ReadOnly);
         }
 
         self.conn
@@ -1151,18 +1246,40 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+fn remove_file_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn row_to_raw_unit(row: &rusqlite::Row) -> rusqlite::Result<RawUnit> {
-    let unit_id: Vec<u8> = row.get(0)?;
-    let container_id: Vec<u8> = row.get(1)?;
+    let unit_id = row_uuid(row, 0)?;
+    let container_id = row_uuid(row, 1)?;
     let containment_name: String = row.get(2)?;
     let contents_hash: Option<String> = row.get(3)?;
     let contents: Option<Vec<u8>> = row.get(4)?;
     Ok(RawUnit {
-        unit_id: mxrs_bson::blob_to_uuid(&unit_id).unwrap_or_default(),
-        container_id: mxrs_bson::blob_to_uuid(&container_id).unwrap_or_default(),
+        unit_id,
+        container_id,
         containment_name,
         contents_hash,
         contents,
+    })
+}
+
+fn row_uuid(row: &rusqlite::Row, index: usize) -> rusqlite::Result<String> {
+    let bytes: Vec<u8> = row.get(index)?;
+    mxrs_bson::blob_to_uuid(&bytes).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("MPR UUID column requires 16 bytes, found {}", bytes.len()),
+            )),
+        )
     })
 }
 
@@ -1202,6 +1319,10 @@ fn validate(path: &Path, conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "transaction_tests.rs"]
+mod transaction_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1337,10 +1458,49 @@ mod tests {
         let root = mpr.root_unit().unwrap().unwrap();
         assert_eq!(root.unit_id, root_id);
         assert_eq!(root.container_id, root_id);
+        let document = mpr.parse_contents(&root).unwrap();
+        let mxrs_bson::Bson::Binary(id) = document.get("$ID").unwrap() else {
+            panic!("the official Mendix loader requires a binary GUID, not a UUID string");
+        };
+        assert_eq!(id.subtype, mxrs_bson::BinarySubtype::Generic);
+        assert_eq!(id.bytes, mxrs_bson::uuid_to_blob(root_id).unwrap());
         assert_eq!(
-            mpr.parse_contents(&root).unwrap().get_str("$ID").unwrap(),
-            root_id
+            mxrs_bson::extract_id(document.get("$ID").unwrap()).as_deref(),
+            Some(root_id)
         );
+        let bytes = mpr.content_bytes(&root).unwrap().unwrap();
+        assert_eq!(
+            root.contents_hash.as_deref(),
+            Some(mxrs_bson::contents_hash(&bytes).as_str())
+        );
+    }
+
+    #[test]
+    fn a_new_v2_project_already_has_the_official_filename_and_transaction_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Native.mpr");
+        let mut mpr = MprFile::create(&path, "11.12.1", "test-hash").unwrap();
+        let marker: String = mpr
+            .conn
+            .query_row("SELECT LastTransactionID FROM _Transaction", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(mxrs_bson::uuid_to_blob(&marker).is_ok());
+        assert_eq!(
+            std::fs::read(directory.path().join("mprcontents/mprname")).unwrap(),
+            b"Native.mpr"
+        );
+        mpr.ensure_v2_contract().unwrap();
+        let markers: Vec<String> = mpr
+            .conn
+            .prepare("SELECT LastTransactionID FROM _Transaction")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(markers, [marker]);
     }
 
     #[test]
@@ -1660,7 +1820,7 @@ mod tests {
             "A"
         );
 
-        mpr.cleanup_backup(&backup_path);
+        mpr.cleanup_backup(&backup_path).unwrap();
         assert!(!backup_path.is_file());
     }
 

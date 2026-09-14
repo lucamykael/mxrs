@@ -105,7 +105,10 @@ fn audit_api_surface(workspace_root: &Path) -> Result<Vec<Finding>, String> {
             .join(crate_name)
             .join("src");
         if !src_dir.is_dir() {
-            continue;
+            return Err(format!(
+                "required authoring source is missing: {}",
+                src_dir.display()
+            ));
         }
         for path in rust_files(&src_dir)? {
             let relative = path
@@ -130,29 +133,32 @@ fn audit_api_surface(workspace_root: &Path) -> Result<Vec<Finding>, String> {
 fn audit_generated_fixtures(workspace_root: &Path) -> Result<Vec<Finding>, String> {
     let mut findings = Vec::new();
     let fixtures_dir = workspace_root.join("xtask").join("fixtures");
-    let Ok(entries) = std::fs::read_dir(&fixtures_dir) else {
-        return Ok(findings);
-    };
+    let entries = std::fs::read_dir(&fixtures_dir).map_err(|error| {
+        format!(
+            "cannot inspect required fixtures {}: {error}",
+            fixtures_dir.display()
+        )
+    })?;
+    let mut inspected = 0;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let fixture_dir = entry.path();
         if !fixture_dir.is_dir() {
             continue;
         }
-        let Some(mpr_path) = find_mpr_file(&fixture_dir) else {
-            continue;
-        };
+        let mpr_path = find_mpr_file(&fixture_dir)
+            .ok_or_else(|| format!("fixture {} contains no .mpr file", fixture_dir.display()))?;
         let label = format!(
             "generated::{}",
             fixture_dir.file_name().unwrap().to_string_lossy()
         );
-        let source = match mxrs_exporter::export_project(&mpr_path) {
-            Ok(source) => source,
-            // A fail-closed refusal (unsupported feature in the fixture) is
-            // not itself a noise-audit finding — export_project's own
-            // RoundTripGap reporting covers that separately.
-            Err(_) => continue,
-        };
+        let source = mxrs_exporter::export_project(&mpr_path).map_err(|error| {
+            format!(
+                "cannot audit exported fixture {}: {error}",
+                mpr_path.display()
+            )
+        })?;
+        inspected += 1;
         for (identifier, line, excerpt) in scan_identifiers(&source) {
             findings.push(Finding {
                 category: identifier,
@@ -169,6 +175,11 @@ fn audit_generated_fixtures(workspace_root: &Path) -> Result<Vec<Finding>, Strin
                 excerpt,
             });
         }
+    }
+    if inspected == 0 {
+        return Err(
+            "no exported fixtures were audited; missing evidence cannot pass noise-audit".into(),
+        );
     }
     Ok(findings)
 }
@@ -308,4 +319,142 @@ fn find_mpr_file(dir: &Path) -> Option<PathBuf> {
         .filter_map(Result::ok)
         .map(|e| e.path())
         .find(|p| p.extension().and_then(|e| e.to_str()) == Some("mpr"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn banned_identifiers_match_whole_words_and_keep_exact_source_lines() {
+        let hits = scan_identifiers(
+            "safe\n  pub fn unit_id() {}\ncontainer_id_prefix\nprefix_unit_id unit_id2\n// native_unit and native_fragment\n",
+        );
+        assert_eq!(
+            hits,
+            vec![
+                ("unit_id", 2, "pub fn unit_id() {}".into()),
+                (
+                    "native_unit",
+                    5,
+                    "// native_unit and native_fragment".into()
+                ),
+                (
+                    "native_fragment",
+                    5,
+                    "// native_unit and native_fragment".into()
+                ),
+            ]
+        );
+        assert!(contains_word("prefix_unit_id, unit_id", "unit_id"));
+        assert!(!contains_word("unit_ids", "unit_id"));
+        assert!(!contains_word("nothing", "unit_id"));
+    }
+
+    #[test]
+    fn uuids_require_complete_hex_groups_and_boundaries() {
+        let uuid = "12345678-90ab-CDEF-1234-567890abcdef";
+        for valid in [
+            uuid.to_string(),
+            format!("\"{uuid}\""),
+            format!("  {uuid}  "),
+        ] {
+            assert!(find_uuid(&valid).is_some());
+        }
+        for invalid in [
+            String::new(),
+            "12345678".into(),
+            format!("x{uuid}"),
+            format!("{uuid}x"),
+            uuid.replace("CDEF", "GHIJ"),
+            uuid.replace('-', ":"),
+            uuid[..35].into(),
+        ] {
+            assert!(find_uuid(&invalid).is_none(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn sha_digests_and_storage_keys_report_their_original_line_numbers() {
+        for length in [40, 64] {
+            let digest = "a".repeat(length);
+            assert_eq!(find_hex_digest(&digest), Some(digest.clone()));
+            assert!(find_hex_digest(&format!("\"{digest}\"")).is_some());
+        }
+        for length in [0, 39, 41, 63, 65] {
+            assert!(find_hex_digest(&"a".repeat(length)).is_none());
+        }
+        let hits = scan_opaque_text(&format!("\n{}\n\"$ID\"\n\"$Type\"", "a".repeat(40)));
+        assert_eq!(
+            hits.iter()
+                .map(|(category, line, _)| (*category, *line))
+                .collect::<Vec<_>>(),
+            vec![("digest", 2), ("storage_schema", 3), ("storage_schema", 4)]
+        );
+    }
+
+    #[test]
+    fn missing_authoring_sources_or_fixtures_cannot_report_a_successful_audit() {
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(
+            audit_api_surface(workspace.path())
+                .err()
+                .unwrap()
+                .contains("required authoring source")
+        );
+        assert!(
+            audit_generated_fixtures(workspace.path())
+                .err()
+                .unwrap()
+                .contains("required fixtures")
+        );
+        let fixtures = workspace.path().join("xtask/fixtures");
+        std::fs::create_dir_all(&fixtures).unwrap();
+        assert!(
+            audit_generated_fixtures(workspace.path())
+                .err()
+                .unwrap()
+                .contains("no exported fixtures")
+        );
+        std::fs::create_dir(fixtures.join("incomplete")).unwrap();
+        assert!(
+            audit_generated_fixtures(workspace.path())
+                .err()
+                .unwrap()
+                .contains("contains no .mpr file")
+        );
+        std::fs::write(fixtures.join("incomplete/broken.mpr"), b"invalid SQLite").unwrap();
+        assert!(
+            audit_generated_fixtures(workspace.path())
+                .err()
+                .unwrap()
+                .contains("cannot audit exported fixture")
+        );
+    }
+
+    #[test]
+    fn recursive_source_scanning_ignores_non_rust_assets_but_reports_real_violations() {
+        let workspace = tempfile::tempdir().unwrap();
+        for name in AUTHORING_CRATES {
+            let source = workspace
+                .path()
+                .join("crates/authoring")
+                .join(name)
+                .join("src/nested");
+            std::fs::create_dir_all(&source).unwrap();
+            std::fs::write(source.join("safe.rs"), "pub fn safe() {}\n").unwrap();
+            std::fs::write(source.join("not-source.txt"), "native_unit").unwrap();
+        }
+        assert!(audit_api_surface(workspace.path()).unwrap().is_empty());
+        let bad_source = workspace
+            .path()
+            .join("crates/authoring/mxrs-ir/src/nested/bad.rs");
+        std::fs::write(bad_source, "pub fn unit_id() {}\n").unwrap();
+        let findings = audit_api_surface(workspace.path()).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].category, "unit_id");
+        assert_eq!(findings[0].line, 1);
+        assert!(findings[0].location.ends_with("nested/bad.rs"));
+        assert!(rust_files(&workspace.path().join("absent")).is_err());
+    }
 }

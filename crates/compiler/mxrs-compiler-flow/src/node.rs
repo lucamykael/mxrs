@@ -285,6 +285,12 @@ impl<'a> FlowNodeCompiler<'a> {
             let microflow = get_str_any(source, &["Microflow"]).unwrap_or_default();
             return Ok(Bson::String(format!("'{microflow}'")));
         }
+        if field == "ValueExpression"
+            && type_name == "Microflows$EntityTypeCodeActionParameterValue"
+            && !source.contains_key(field)
+        {
+            return self.derived_default(source, field, vars);
+        }
 
         let existing = self.schema.counterpart(source);
         if runtime_derived_fields(&type_name).contains(&field)
@@ -351,6 +357,18 @@ impl<'a> FlowNodeCompiler<'a> {
     ) -> Result<Bson, CompilerError> {
         let type_name = get_str_any(source, &["$Type"]).unwrap_or_default();
         Ok(match field {
+            // SPC's official model.mdp has 11 mappings with this exact literal
+            // shape; mxrb's database connector emits it too. Unlike mxrb's
+            // generic node pass, deriving it does not require an old MDP.
+            "ValueExpression" if type_name == "Microflows$EntityTypeCodeActionParameterValue" => {
+                let entity = get_str_any(source, &["Entity"])
+                    .filter(|entity| !entity.trim().is_empty())
+                    .ok_or_else(|| CompilerError::CannotDeriveRuntimeField {
+                        type_name: type_name.clone(),
+                        field: field.to_string(),
+                    })?;
+                Bson::String(crate::database_connector::expression_literal(&entity))
+            }
             "Argument" => Bson::String(
                 get_doc_any(source, &["Value"])
                     .and_then(|v| get_str_any(&v, &["Argument"]))
@@ -591,6 +609,59 @@ mod tests {
         associations: &'a HashMap<String, AssociationInfo>,
     ) -> FlowNodeCompiler<'a> {
         FlowNodeCompiler::new(schema, associations, None)
+    }
+
+    #[test]
+    fn an_entity_type_argument_derives_the_official_literal_without_a_compiled_counterpart() {
+        let schema = schema();
+        let associations = HashMap::new();
+        let compiler = compiler(&schema, &associations);
+        let source = doc! { "$ID": "11111111-1111-1111-1111-111111111111", "$Type": "Microflows$EntityTypeCodeActionParameterValue", "Entity": "Sales.Order" };
+        let result = compiler
+            .compile(&Bson::Document(source.clone()), &VariableTypes::new())
+            .unwrap();
+        assert_eq!(
+            result,
+            Bson::Document(
+                doc! { "$ID": "11111111-1111-1111-1111-111111111111", "$Type": "Microflows$EntityTypeCodeActionParameterValue", "Entity": "Sales.Order", "ValueExpression": "'Sales.Order'" }
+            )
+        );
+        for entity in [None, Some(""), Some("  ")] {
+            let mut invalid = source.clone();
+            invalid.remove("Entity");
+            if let Some(entity) = entity {
+                invalid.insert("Entity", entity);
+            }
+            assert!(matches!(
+                compiler.compile(&Bson::Document(invalid), &VariableTypes::new()),
+                Err(CompilerError::CannotDeriveRuntimeField { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn entity_edits_do_not_reuse_stale_compiled_literals_and_explicit_expressions_are_preserved() {
+        let existing = doc! { "$ID": "11111111-1111-1111-1111-111111111111", "$Type": "Microflows$EntityTypeCodeActionParameterValue", "Entity": "Sales.Order", "ValueExpression": "'Sales.Previous'" };
+        let schema = RuntimeModelSchema::for_11(std::slice::from_ref(&existing)).unwrap();
+        let associations = HashMap::new();
+        let compiler = compiler(&schema, &associations);
+        let mut source = existing.clone();
+        source.remove("ValueExpression");
+        let mut expected = existing;
+        expected.insert("ValueExpression", "'Sales.Order'");
+        assert_eq!(
+            compiler
+                .compile(&Bson::Document(source.clone()), &VariableTypes::new())
+                .unwrap(),
+            Bson::Document(expected)
+        );
+        source.insert("ValueExpression", "'Sales.Explicit'");
+        assert_eq!(
+            compiler
+                .compile(&Bson::Document(source.clone()), &VariableTypes::new())
+                .unwrap(),
+            Bson::Document(source)
+        );
     }
 
     #[test]

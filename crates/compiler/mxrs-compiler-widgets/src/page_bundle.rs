@@ -78,6 +78,8 @@ pub struct PageBundleCompiler<'a> {
 
 /// Owning project adapter used by acceptance tooling and callers that want
 /// to compile every page without assembling `(module, document)` pairs.
+/// Installed widget assets are assumed stable within a batch; availability
+/// lookups are shared across its documents and refreshed for the next call.
 pub struct ProjectPageBundleCompiler {
     project_path: PathBuf,
     documents: Vec<(String, Document)>,
@@ -172,7 +174,10 @@ impl ProjectPageBundleCompiler {
                 (owner, document)
             })
             .collect();
-        let flow_index = mxrs_compiler_flow::ProjectFlowIndex::from_documents(&documents);
+        let mut flow_index = mxrs_compiler_flow::ProjectFlowIndex::from_documents(&documents);
+        if let Some(version) = project.mendix_version()? {
+            flow_index = flow_index.with_system_model(&version)?;
+        }
         Ok(Self {
             project_path: project.mpr().path().to_path_buf(),
             documents,
@@ -186,16 +191,16 @@ impl ProjectPageBundleCompiler {
 
     pub fn compile_pages(&self) -> Vec<Result<PageBundle, CompilerError>> {
         let programs = ProjectNanoflowCache::new(&self.flow_index, self.project_path.parent());
+        let render = |name: &str| programs.reference(name);
+        let declarations = || programs.declarations();
+        let compiler = PageBundleCompiler::new(&self.documents, &self.project_path)
+            .with_nanoflow_programs(&render, &declarations);
         self.documents
             .iter()
             .filter(|(_, document)| document.get_str("$Type").ok() == Some("Forms$Page"))
             .map(|(module, page)| {
                 programs.reset();
-                let render = |name: &str| programs.reference(name);
-                let declarations = || programs.declarations();
-                PageBundleCompiler::new(&self.documents, &self.project_path)
-                    .with_nanoflow_programs(&render, &declarations)
-                    .compile_page(module, page)
+                compiler.compile_page(module, page)
             })
             .collect()
     }
@@ -219,16 +224,16 @@ impl ProjectPageBundleCompiler {
 
     pub fn compile_layouts(&self) -> Vec<Result<PageBundle, CompilerError>> {
         let programs = ProjectNanoflowCache::new(&self.flow_index, self.project_path.parent());
+        let render = |name: &str| programs.reference(name);
+        let declarations = || programs.declarations();
+        let compiler = PageBundleCompiler::new(&self.documents, &self.project_path)
+            .with_nanoflow_programs(&render, &declarations);
         self.documents
             .iter()
             .filter(|(_, document)| document.get_str("$Type").ok() == Some("Forms$Layout"))
             .map(|(module, layout)| {
                 programs.reset();
-                let render = |name: &str| programs.reference(name);
-                let declarations = || programs.declarations();
-                PageBundleCompiler::new(&self.documents, &self.project_path)
-                    .with_nanoflow_programs(&render, &declarations)
-                    .compile_layout(module, layout)
+                compiler.compile_layout(module, layout)
             })
             .collect()
     }
@@ -2889,39 +2894,54 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         let nested = |widgets: &[Document], nested_scope: &str, nested_entity: &str| {
             self.render_widgets(widgets, Some(nested_scope), nested_entity)
         };
-        let mut grid =
-            DataGridBundleCompiler::new(self.compiler.documents, self.qualified_name, widget)
-                .with_widget_renderer(&nested);
-        if let Some(scope) = scope {
-            grid = grid.with_scope(scope);
-        }
-        if grid.supported() {
-            self.state.borrow_mut().used.insert(UsedBundle::DataGrid);
-            return grid.render();
+        let widget_id = widget
+            .get_document("Type")
+            .ok()
+            .and_then(|type_| type_.get_str("WidgetId").ok());
+        // Constructors index complete schema/value subtrees. Check the same
+        // exact ID required by supported() before paying that cost, while
+        // retaining the generic fallback for unsupported specialized settings.
+        if widget_id == Some(crate::DATA_GRID_WIDGET_ID) {
+            let mut grid =
+                DataGridBundleCompiler::new(self.compiler.documents, self.qualified_name, widget)
+                    .with_widget_renderer(&nested);
+            if let Some(scope) = scope {
+                grid = grid.with_scope(scope);
+            }
+            if grid.supported() {
+                self.state.borrow_mut().used.insert(UsedBundle::DataGrid);
+                return grid.render();
+            }
         }
 
-        let gallery =
-            GalleryBundleCompiler::new(self.compiler.documents, self.qualified_name, widget);
-        if gallery.supported() {
-            let nano = gallery.nanoflow_name().and_then(|name| {
-                self.compiler
-                    .nanoflow_renderer
-                    .and_then(|renderer| renderer(name))
-            });
-            if gallery.nanoflow_name().is_some() && nano.is_none() {
-                return self.unsupported_custom(widget);
+        if widget_id == Some(crate::GALLERY_WIDGET_ID) {
+            let gallery =
+                GalleryBundleCompiler::new(self.compiler.documents, self.qualified_name, widget);
+            if gallery.supported() {
+                let nano = gallery.nanoflow_name().and_then(|name| {
+                    self.compiler
+                        .nanoflow_renderer
+                        .and_then(|renderer| renderer(name))
+                });
+                if gallery.nanoflow_name().is_some() && nano.is_none() {
+                    return self.unsupported_custom(widget);
+                }
+                let content = self.render_widgets(
+                    &gallery.content_widgets(),
+                    Some(&gallery.widget_key()),
+                    gallery.entity_name(),
+                );
+                let filters = gallery.filter_widgets();
+                let rendered_filters = (!filters.is_empty()).then(|| {
+                    self.render_widgets(
+                        &filters,
+                        Some(&gallery.widget_key()),
+                        gallery.entity_name(),
+                    )
+                });
+                self.state.borrow_mut().used.insert(UsedBundle::Gallery);
+                return gallery.render(&content, nano.as_deref(), rendered_filters.as_deref());
             }
-            let content = self.render_widgets(
-                &gallery.content_widgets(),
-                Some(&gallery.widget_key()),
-                gallery.entity_name(),
-            );
-            let filters = gallery.filter_widgets();
-            let rendered_filters = (!filters.is_empty()).then(|| {
-                self.render_widgets(&filters, Some(&gallery.widget_key()), gallery.entity_name())
-            });
-            self.state.borrow_mut().used.insert(UsedBundle::Gallery);
-            return gallery.render(&content, nano.as_deref(), rendered_filters.as_deref());
         }
 
         let action = |action: &Document| {
@@ -2932,28 +2952,32 @@ impl<'a, 'b> RenderContext<'a, 'b> {
         };
         let data_source =
             |value: &Document| self.builtin_custom_list_property(widget, value, scope, entity);
-        let mut image =
-            ImageBundleCompiler::new(self.compiler.documents, self.qualified_name, widget)
-                .with_key_prefix(self.key_prefix)
-                .with_action_renderer(&action);
-        if let Some(scope) = scope {
-            image = image.with_scope(scope);
-        }
-        if image.supported() {
-            self.state.borrow_mut().used.insert(UsedBundle::Image);
-            return image.render();
+        if widget_id == Some(crate::IMAGE_WIDGET_ID) {
+            let mut image =
+                ImageBundleCompiler::new(self.compiler.documents, self.qualified_name, widget)
+                    .with_key_prefix(self.key_prefix)
+                    .with_action_renderer(&action);
+            if let Some(scope) = scope {
+                image = image.with_scope(scope);
+            }
+            if image.supported() {
+                self.state.borrow_mut().used.insert(UsedBundle::Image);
+                return image.render();
+            }
         }
 
-        let combo = ComboBoxBundleCompiler::new(
-            self.compiler.documents,
-            self.qualified_name,
-            widget,
-            scope,
-            entity,
-        );
-        if combo.supported() {
-            self.state.borrow_mut().used.insert(UsedBundle::ComboBox);
-            return combo.render();
+        if widget_id == Some(crate::COMBO_BOX_WIDGET_ID) {
+            let combo = ComboBoxBundleCompiler::new(
+                self.compiler.documents,
+                self.qualified_name,
+                widget,
+                scope,
+                entity,
+            );
+            if combo.supported() {
+                self.state.borrow_mut().used.insert(UsedBundle::ComboBox);
+                return combo.render();
+            }
         }
 
         let generic_nested = |widgets: &[Document]| self.render_widgets(widgets, scope, entity);
@@ -3923,6 +3947,127 @@ mod tests {
                 bundle.source.contains(expected),
                 "missing {expected}: {}",
                 bundle.source
+            );
+        }
+    }
+
+    #[test]
+    fn recognized_widget_ids_still_fall_back_when_specialized_settings_are_unsupported() {
+        let temp = tempdir().unwrap();
+        let project = temp.path().join("App.mpr");
+        let documents = Vec::new();
+        for widget_id in [
+            crate::DATA_GRID_WIDGET_ID,
+            crate::GALLERY_WIDGET_ID,
+            crate::IMAGE_WIDGET_ID,
+            crate::COMBO_BOX_WIDGET_ID,
+        ] {
+            let module = temp
+                .path()
+                .join("widgets")
+                .join(format!("{}.mjs", widget_id.replace('.', "/")));
+            fs::create_dir_all(module.parent().unwrap()).unwrap();
+            fs::write(module, "export default {};").unwrap();
+            let widget = custom_widget(widget_id, "fallback");
+            let bundle = PageBundleCompiler::new(&documents, &project)
+                .compile_page("Demo", &page(vec![widget]))
+                .unwrap();
+            assert!(bundle.unsupported_custom_widgets.is_empty(), "{widget_id}");
+            assert!(bundle.source.contains("asPluginWidgets"), "{widget_id}");
+            let component = widget_id.rsplit('.').next().unwrap();
+            assert!(
+                bundle.source.contains(&format!("{component}WidgetModule")),
+                "{widget_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_and_layout_batches_isolate_render_state_and_refresh_assets_between_calls() {
+        let temp = tempdir().unwrap();
+        let project_path = temp.path().join("App.mpr");
+        let widgets_path = temp.path().join("widgets/example");
+        fs::create_dir_all(&widgets_path).unwrap();
+        fs::write(widgets_path.join("Shared.mjs"), "export default {};").unwrap();
+        let mut documents = Vec::new();
+        for (name, widget) in [("First", "Clock"), ("Second", "Counter")] {
+            fs::write(
+                widgets_path.join(format!("{widget}.mjs")),
+                "export default {};",
+            )
+            .unwrap();
+            let children = vec![
+                custom_widget(&format!("example.{widget}"), "custom"),
+                custom_widget("example.Shared", "shared"),
+                doc! {
+                    "$Type": "Forms$ActionButton", "Name": "button",
+                    "Action": { "$Type": "Forms$CallNanoflowClientAction", "Nanoflow": format!("Demo.ACT_{name}") },
+                },
+            ];
+            let mut page = page(children.clone());
+            page.insert("Name", name);
+            documents.push(("Demo".into(), page));
+            documents.push(("Demo".into(), doc! {
+                "$Type": "Forms$Layout", "Name": format!("{name}Layout"),
+                "Content": { "Widgets": mxrs_bson::build_array(children.into_iter().map(Bson::Document).collect(), 2) },
+            }));
+            documents.push(("Demo".into(), doc! {
+                "$Type": "Microflows$Nanoflow", "Name": format!("ACT_{name}"),
+                "ObjectCollection": { "Objects": [
+                    { "$Type": "Microflows$StartEvent", "$ID": "11111111-1111-1111-1111-111111111111" },
+                    { "$Type": "Microflows$EndEvent", "$ID": "22222222-2222-2222-2222-222222222222", "ReturnValue": "true" },
+                ] },
+                "Flows": [{
+                    "OriginPointer": "11111111-1111-1111-1111-111111111111",
+                    "DestinationPointer": "22222222-2222-2222-2222-222222222222",
+                }],
+            }));
+        }
+        let compiler = ProjectPageBundleCompiler {
+            project_path,
+            flow_index: mxrs_compiler_flow::ProjectFlowIndex::from_documents(&documents),
+            documents,
+        };
+        for results in [compiler.compile_pages(), compiler.compile_layouts()] {
+            assert_eq!(results.len(), 2);
+            for (result, (own, other, widget, other_widget)) in results.into_iter().zip([
+                ("First", "Second", "Clock", "Counter"),
+                ("Second", "First", "Counter", "Clock"),
+            ]) {
+                let bundle = result.unwrap();
+                assert!(bundle.unsupported_custom_widgets.is_empty());
+                assert!(bundle.source.contains(&format!("{widget}WidgetModule")));
+                assert!(
+                    !bundle
+                        .source
+                        .contains(&format!("{other_widget}WidgetModule"))
+                );
+                assert!(
+                    bundle
+                        .source
+                        .contains(&format!("\"name\": \"Demo.ACT_{own}\""))
+                );
+                assert!(
+                    !bundle
+                        .source
+                        .contains(&format!("\"name\": \"Demo.ACT_{other}\""))
+                );
+            }
+        }
+        // Cache lifetime is one batch, not the adapter's lifetime. A caller
+        // replacing assets before another batch must get the new inventory.
+        fs::remove_file(widgets_path.join("Clock.mjs")).unwrap();
+        for results in [compiler.compile_pages(), compiler.compile_layouts()] {
+            assert_eq!(
+                results[0].as_ref().unwrap().unsupported_custom_widgets,
+                ["example.Clock"]
+            );
+            assert!(
+                results[1]
+                    .as_ref()
+                    .unwrap()
+                    .unsupported_custom_widgets
+                    .is_empty()
             );
         }
     }

@@ -14,8 +14,10 @@ workspace = true
 mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-forms = { path = "../../model/mxrs-forms" }
 mxrs-project = { path = "../mxrs-project" }
 mxrs-typegen = { path = "../../authoring/mxrs-typegen" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
 serde_json.workspace = true
 thiserror.workspace = true
 
@@ -23,6 +25,5 @@ thiserror.workspace = true
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
 mxrs-macros = { path = "../../authoring/mxrs-macros" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
-mxrs-writer = { path = "../../writer/mxrs-writer" }
 tempfile = "3.27.0"
 uuid = { version = "1", features = ["v4"] }

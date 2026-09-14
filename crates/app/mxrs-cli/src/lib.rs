@@ -24,6 +24,7 @@
 //! `units` here since `mxrs inspect` already means the structural summary
 //! above, a more useful default for that name). See `browse`'s module doc.
 
+pub mod arguments;
 pub mod browse;
 pub mod cargo_project;
 pub mod compare;

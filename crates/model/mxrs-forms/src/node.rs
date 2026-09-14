@@ -55,6 +55,10 @@ pub struct Node {
     catalog: Rc<Catalog>,
     type_name: String,
     assignments: Vec<Assignment>,
+    /// The 11.12.1 `Placeholder: Texts$Text` storage projection of a
+    /// typed ClientTemplate. Kept only at this documented codec seam so
+    /// no-op writes retain translation identities and BSON field order.
+    pub(crate) legacy_placeholder: Option<mxrs_bson::Document>,
 }
 
 impl std::fmt::Debug for Node {
@@ -86,6 +90,7 @@ impl Node {
             catalog,
             type_name: resolved_name,
             assignments: Vec::new(),
+            legacy_placeholder: None,
         })
     }
 
@@ -122,8 +127,16 @@ impl Node {
             .fetch_property(property_id, true)?
             .clone();
         let normalized = self.normalize(&property, value)?;
-        self.assignments
-            .retain(|a| a.property.name != property.name);
+        // Replacing a value must not move its BSON field to the end or
+        // make a semantic no-op compare unequal after decoding again.
+        if let Some(assignment) = self
+            .assignments
+            .iter_mut()
+            .find(|a| a.property.name == property.name)
+        {
+            assignment.value = normalized;
+            return Ok(());
+        }
         self.assignments.push(Assignment {
             property,
             value: normalized,

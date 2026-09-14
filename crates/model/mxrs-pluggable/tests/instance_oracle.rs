@@ -41,19 +41,51 @@ fn collect_widget_instances(mpr: &MprFile) -> Vec<Document> {
     }
 
     let mut found = Vec::new();
-    for unit in mpr.all_units().unwrap_or_default() {
-        if let Ok(document) = mpr.parse_contents(&unit) {
-            visit(&Bson::Document(document), &mut found);
-        }
+    for unit in mpr.all_units().expect("read every corpus unit") {
+        let document = mpr
+            .parse_contents(&unit)
+            .unwrap_or_else(|error| panic!("cannot parse corpus unit {}: {error}", unit.unit_id));
+        visit(&Bson::Document(document), &mut found);
     }
     found
 }
 
-fn run_against(path: &str, label: &str) {
-    let Ok(mpr) = MprFile::open(path, true) else {
-        eprintln!("[{label}] could not open {path}");
-        return;
-    };
+// The editor calls these ClientTemplates, but 11.12.1 stores Texts$Text.
+// Semantic equality alone would miss regenerated translation IDs/order.
+fn translated_placeholder_bytes(document: &Document) -> BTreeMap<String, Vec<u8>> {
+    fn visit(value: &Bson, path: &str, found: &mut BTreeMap<String, Vec<u8>>) {
+        match value {
+            Bson::Document(document) => {
+                for (key, child) in document {
+                    let path = format!("{path}.{key}");
+                    if key == "Placeholder"
+                        && let Bson::Document(text) = child
+                        && text.get_str("$Type").ok() == Some("Texts$Text")
+                    {
+                        found.insert(
+                            path.clone(),
+                            mxrs_bson::serialize(text).expect("serialize corpus placeholder"),
+                        );
+                    }
+                    visit(child, &path, found);
+                }
+            }
+            Bson::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    visit(item, &format!("{path}[{index}]"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = BTreeMap::new();
+    visit(&Bson::Document(document.clone()), "$", &mut found);
+    found
+}
+
+fn run_against(path: &str, label: &str) -> Vec<String> {
+    let mpr = MprFile::open(path, true)
+        .unwrap_or_else(|error| panic!("[{label}] cannot open private corpus {path}: {error}"));
     let instances = collect_widget_instances(&mpr);
     assert!(
         !instances.is_empty(),
@@ -75,15 +107,24 @@ fn run_against(path: &str, label: &str) {
     let mut embedded_decode_failures = 0usize;
     let mut embedded_failure_details: BTreeMap<String, usize> = BTreeMap::new();
     let mut unexpected_errors = Vec::new();
+    let mut exact_placeholders = 0usize;
 
     for (index, instance) in instances.iter().enumerate() {
         let item_path = format!("$[{index}]");
         match decode_widget(instance, &item_path, &forms_codec) {
             Ok(widget) => {
                 full_success += 1;
-                match encode_widget(&widget, &item_path, &forms_codec)
-                    .and_then(|encoded| decode_widget(&encoded, &item_path, &forms_codec))
-                {
+                match encode_widget(&widget, &item_path, &forms_codec).and_then(|encoded| {
+                    let original = translated_placeholder_bytes(instance);
+                    if original == translated_placeholder_bytes(&encoded) {
+                        exact_placeholders += original.len();
+                    } else {
+                        unexpected_errors.push(format!(
+                            "{item_path}: translated placeholder bytes, identities or order changed"
+                        ));
+                    }
+                    decode_widget(&encoded, &item_path, &forms_codec)
+                }) {
                     Ok(round_tripped) if round_tripped == widget => {}
                     Ok(_) => unexpected_errors.push(format!(
                         "{item_path} ({}): semantic value changed after encode/decode",
@@ -122,43 +163,59 @@ fn run_against(path: &str, label: &str) {
         embedded_decode_failures,
         unexpected_errors.len()
     );
+    println!(
+        "[{label}] {exact_placeholders} nested translated placeholder(s) byte-identical after encoding"
+    );
     for (kind, count) in &blocked_by_kind {
         println!("[{label}]   blocked by {kind}: {count}");
     }
     for (detail, count) in &embedded_failure_details {
         println!("[{label}]   embedded failure ({count}x): {detail}");
     }
-    assert!(
-        blocked_by_kind.is_empty(),
-        "[{label}] pluggable value kinds still need Forms integration: {blocked_by_kind:#?}"
-    );
-    assert!(
-        embedded_failure_details.is_empty(),
-        "[{label}] embedded Forms values failed decoding: {embedded_failure_details:#?}"
-    );
-    assert!(
-        unexpected_errors.is_empty(),
-        "[{label}] {} unexpected (non-NeedsFormsIntegration) error(s):\n{}",
-        unexpected_errors.len(),
-        unexpected_errors.join("\n")
-    );
-    assert_eq!(
-        full_success,
-        instances.len(),
-        "[{label}] not every pluggable widget completed its semantic round-trip"
-    );
+    let mut failures = Vec::new();
+    if exact_placeholders == 0 {
+        failures.push(format!(
+            "[{label}] no translated placeholder byte comparisons exercised"
+        ));
+    }
+    if !blocked_by_kind.is_empty() {
+        failures.push(format!(
+            "[{label}] pluggable value kinds still need Forms integration: {blocked_by_kind:#?}"
+        ));
+    }
+    if !embedded_failure_details.is_empty() {
+        failures.push(format!(
+            "[{label}] embedded Forms values failed decoding: {embedded_failure_details:#?}"
+        ));
+    }
+    if !unexpected_errors.is_empty() {
+        failures.push(format!(
+            "[{label}] unexpected round-trip errors: {}",
+            unexpected_errors.join("\n")
+        ));
+    }
+    if full_success != instances.len() {
+        failures.push(format!(
+            "[{label}] {full_success}/{} widget instances decoded",
+            instances.len()
+        ));
+    }
+    failures
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires MXRS_ACCEPTANCE_DIR with QRQC/SPC .mpr and mprcontents"]
 fn decodes_self_contained_properties_of_every_real_pluggable_widget_instance() {
-    let Ok(base) = std::env::var("MXRS_ACCEPTANCE_DIR") else {
-        eprintln!(
-            "[instance_oracle] skipped: MXRS_ACCEPTANCE_DIR is not set (see this file's module \
-             doc for the expected layout)"
-        );
-        return;
-    };
-    run_against(&format!("{base}/qrqc-ruby/build/eQRQC.mpr"), "QRQC");
-    run_against(&format!("{base}/spc-ruby/build/JEMScc-SPC.mpr"), "SPC");
+    let base = std::env::var("MXRS_ACCEPTANCE_DIR")
+        .expect("set MXRS_ACCEPTANCE_DIR to the private QRQC/SPC corpus root before explicitly running this ignored test; see schema_oracle.rs for the directory layout");
+    let mut failures = run_against(&format!("{base}/qrqc-ruby/build/eQRQC.mpr"), "QRQC");
+    failures.extend(run_against(
+        &format!("{base}/spc-ruby/build/JEMScc-SPC.mpr"),
+        "SPC",
+    ));
+    assert!(
+        failures.is_empty(),
+        "private corpus instance parity is incomplete:\n{}",
+        failures.join("\n")
+    );
 }

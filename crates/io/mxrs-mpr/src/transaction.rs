@@ -9,11 +9,27 @@
 //!
 //! Ports the `@v2_transaction`-related private methods of
 //! `Mxrb::IO::MprFile` in `lib/mxrb/io/mpr_file.rb`.
+//!
+//! Recovery assumes a trusted project directory and exclusive writer ownership.
+//! This journal covers SQL rows and `.mxunit` contents, not arbitrary sidecars
+//! written by a transaction closure. Power-loss durability, adversarial journal
+//! paths and simultaneous recovery by multiple processes are not established.
+//! A recovery failure poisons mutation access until reopen; typed reads on that
+//! handle are not a guarantee of a consistent recovered snapshot.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+/// Panic payload used only when a transaction's original panic is followed
+/// by a recovery failure. A successful rollback resumes the original payload
+/// unchanged. On recovery failure both causes remain available to the caller.
+#[derive(Debug)]
+pub struct TransactionRecoveryPanic {
+    pub original: Box<dyn std::any::Any + Send>,
+    pub recovery: crate::MprError,
+}
 
 /// A `.mxunit` file that [`apply`](super::mpr_file::MprFile::apply_v2_transaction)
 /// has already touched on disk, kept so a failed transaction can be undone.

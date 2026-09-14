@@ -126,3 +126,34 @@ fn compiling_an_unsupported_root_type_is_a_loud_error() {
         mxrs_compiler_flow::CompilerError::UnsupportedFlowRoot { .. }
     ));
 }
+
+#[test]
+fn project_index_includes_native_system_associations_without_a_counterpart_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Project.mpr");
+    let mut builder = ProjectBuilder::new("11.12.1");
+    builder.module("Sales", |module| {
+        module.entity("Order", |_| {});
+    });
+    mxrs_writer::write_project(&path, &builder.build()).unwrap();
+
+    let project = Project::open(&path, true).unwrap();
+    assert!(
+        project
+            .modules()
+            .unwrap()
+            .iter()
+            .all(|module| module.name.as_deref() != Some("System"))
+    );
+    let compiler = FlowCompiler::new(&project, &[]).unwrap();
+    let roles = &compiler.index().associations["System.UserRoles"];
+    assert_eq!(roles.parent.as_deref(), Some("System.User"));
+    assert_eq!(roles.child.as_deref(), Some("System.UserRole"));
+    assert!(roles.reference_set);
+    assert!(
+        !compiler
+            .index()
+            .associations
+            .contains_key("Sales.MissingAssociation")
+    );
+}

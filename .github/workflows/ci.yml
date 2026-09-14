@@ -13,7 +13,9 @@ name: CI
 on:
   push:
     branches: [master, main]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -90,8 +92,19 @@ jobs:
         env:
           MXRB_HOME: ${{ github.workspace }}/mxrb
         run: |
-          cargo run -q -p xtask -- capability-matrix --json > target/capability-matrix.json
-          jq -e '(.rows | length) >= 76 and .verified >= 4 and (.partial + .missing) <= 72' target/capability-matrix.json
+          cargo run -q -p xtask -- capability-matrix --json --check-baseline > target/capability-matrix.json
+      - name: command readiness (no partial or missing commands allowed)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        working-directory: mxrs
+        env:
+          MXRB_HOME: ${{ github.workspace }}/mxrb
+        run: cargo run -q -p xtask -- capability-matrix --check-baseline --require-complete
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: command-capabilities-${{ github.sha }}
+          path: mxrs/target/capability-matrix.json
+          if-no-files-found: error
 
   coverage:
     name: coverage ratchet (lines + branches)
@@ -103,15 +116,39 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
-      # 2026-09-13 measured baseline after HTTP/SQLite runtime adapters:
-      # 66.42% lines / 69.21% functions / 47.95% regions / 58.08% branches.
+      # 2026-09-13 isolated baseline, including generated Cargo applications:
+      # 82.74% lines / 82.28% functions / 81.66% regions / 66.13% branches.
+      # Development floors: 82 / 82 / 81 / 66%, respectively.
       # These floors are a ratchet, not the destination; raise them whenever
-      # tests land until both reach the project target of 100%.
-      # cargo-llvm-cov has no native --fail-under-branches option, so keep its
-      # native gates for the other metrics and assert the JSON branch total.
-      - run: cargo llvm-cov --workspace --branch --json --output-path target/coverage.json --fail-under-lines 66 --fail-under-functions 69 --fail-under-regions 47
-      - name: enforce branch floor
-        run: jq -e '.data[0].totals.branches.percent >= 58' target/coverage.json
+      # tests land until all four reach the project target of 100%.
+      # Each run has new outer/nested Cargo directories: clean --workspace
+      # alone can leave old ELF maps from another toolchain/layout behind.
+      # No source exclusion or lowered threshold is allowed to obtain 100%.
+      - name: fresh complete instrumentation (including generated Cargo applications)
+        id: measure-coverage
+        run: bash xtask/coverage.sh target/coverage.json
+      - name: validate all counters and enforce development floors
+        run: cargo run -q -p xtask -- coverage-gate target/coverage.json --json > target/coverage-gate.json
+      # This is intentionally not continue-on-error. A release/tag or explicit
+      # readiness run cannot pass while any instrumented item is uncovered.
+      # It is a coverage gate, not proof of official Studio Pro compatibility.
+      - name: release readiness (100% lines, functions, regions and branches)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        run: cargo run -q -p xtask -- coverage-gate target/coverage.json --require-complete
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-evidence-${{ github.sha }}
+          path: |
+            target/coverage.json
+            target/coverage-gate.json
+            ${{ steps.measure-coverage.outputs.evidence_dir }}/toolchain.txt
+            ${{ steps.measure-coverage.outputs.evidence_dir }}/source.sha256
+            ${{ steps.measure-coverage.outputs.evidence_dir }}/objects.txt
+            ${{ steps.measure-coverage.outputs.evidence_dir }}/objects.sha256
+            ${{ steps.measure-coverage.outputs.evidence_dir }}/workspace/*.profraw
+            ${{ steps.measure-coverage.outputs.evidence_dir }}/workspace/*.profdata
+          if-no-files-found: error
 
   benches-build:
     name: benches (build + smoke run, not a perf gate)

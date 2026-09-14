@@ -19,11 +19,10 @@
 //! spc-ruby/build/JEMScc-SPC.mpr
 //! spc-ruby/build/deployment/model/model.mdp
 //! ```
-//! If the env var is unset or the directory doesn't exist, the test prints
-//! why and returns early rather than failing — it has no assertions of its
-//! own (see the module doc below for why: this is a coverage-percentage
-//! report, not a pass/fail gate) and real customer `.mpr`/`.mdp` files are
-//! never expected to exist in CI or on a fresh checkout.
+//! Default runs ignore this private-corpus test. Explicit `--ignored` runs
+//! require every input and fail on missing evidence or compilation gaps.
+//! Both projects are reported before asserting full compilation, so a QRQC
+//! gap cannot hide SPC's results. This checks compilation, not runtime parity.
 
 use std::collections::BTreeMap;
 
@@ -31,11 +30,9 @@ use mxrs_bson::Document;
 use mxrs_compiler_flow::FlowCompiler;
 use mxrs_model::Project;
 
-fn run_against(path: &str, label: &str, model_package: Option<&str>) {
-    let Ok(project) = Project::open(path, true) else {
-        eprintln!("[{label}] could not open {path}");
-        return;
-    };
+fn run_against(path: &str, label: &str, model_package: Option<&str>) -> Vec<String> {
+    let project = Project::open(path, true)
+        .unwrap_or_else(|error| panic!("[{label}] cannot open private corpus {path}: {error}"));
     let existing_documents = model_package
         .map(|p| mxrs_schema::read_model_package(p).unwrap())
         .unwrap_or_default();
@@ -74,16 +71,32 @@ fn run_against(path: &str, label: &str, model_package: Option<&str>) {
     };
 
     for unit in &units {
-        let Ok(doc): Result<Document, _> = project.mpr().parse_contents(unit) else {
+        let doc: Document = project.mpr().parse_contents(unit).unwrap_or_else(|error| {
+            panic!(
+                "[{label}] cannot parse corpus unit {}: {error}",
+                unit.unit_id
+            )
+        });
+        let type_name = doc
+            .get_str("$Type")
+            .expect("corpus unit must have a model type");
+        if !matches!(
+            type_name,
+            "Microflows$Microflow"
+                | "Microflows$Nanoflow"
+                | "Microflows$Rule"
+                | "JavaActions$JavaAction"
+                | "JavaScriptActions$JavaScriptAction"
+        ) {
             continue;
-        };
-        let Some(type_name) = doc.get_str("$Type").ok().map(str::to_string) else {
-            continue;
-        };
-        let Some(module_name) = owning_module(&unit.container_id) else {
-            continue;
-        };
-        match type_name.as_str() {
+        }
+        let module_name = owning_module(&unit.container_id).unwrap_or_else(|| {
+            panic!(
+                "[{label}] corpus {type_name} unit {} has no resolvable owner module",
+                unit.unit_id
+            )
+        });
+        match type_name {
             "Microflows$Microflow" | "Microflows$Nanoflow" | "Microflows$Rule" => {
                 flow_total += 1;
                 match compiler.compile_flow(&doc, &module_name) {
@@ -135,56 +148,74 @@ fn run_against(path: &str, label: &str, model_package: Option<&str>) {
     let mut unsupported_counts: BTreeMap<String, usize> = BTreeMap::new();
     for u in nanoflow_compiler.unsupported() {
         *unsupported_counts.entry(u.node_type.clone()).or_default() += 1;
+        println!("[{label}] unsupported {} in {}", u.node_type, u.flow);
     }
     for (kind, count) in &unsupported_counts {
         println!("  {count:>4}x unsupported {kind}");
     }
-    assert!(flow_total > 0, "[{label}] found no flow documents");
-    assert!(
-        flow_err.is_empty(),
-        "[{label}] {} flow(s) failed compilation: {flow_err:#?}",
-        flow_total - flow_ok
-    );
-    assert!(
-        code_action_err.is_empty(),
-        "[{label}] {} code action(s) failed compilation: {code_action_err:#?}",
-        code_action_total - code_action_ok
-    );
-    assert_eq!(
-        nano_ok,
-        names.len(),
-        "[{label}] not every nanoflow produced a JS program"
-    );
-    assert!(
-        unsupported_counts.is_empty(),
-        "[{label}] unsupported nanoflow nodes remain: {unsupported_counts:#?}"
-    );
+    let mut failures = Vec::new();
+    if flow_total == 0 || code_action_total == 0 || names.is_empty() {
+        failures.push(format!("[{label}] incomplete corpus inventory: flows={flow_total}, code actions={code_action_total}, nanoflows={}", names.len()));
+    }
+    if !flow_err.is_empty() {
+        failures.push(format!(
+            "[{label}] {} flow(s) failed compilation: {flow_err:#?}",
+            flow_total - flow_ok
+        ));
+    }
+    if !code_action_err.is_empty() {
+        failures.push(format!(
+            "[{label}] {} code action(s) failed compilation: {code_action_err:#?}",
+            code_action_total - code_action_ok
+        ));
+    }
+    if nano_ok != names.len() || !unsupported_counts.is_empty() {
+        failures.push(format!(
+            "[{label}] {nano_ok}/{} nanoflows compiled; unsupported nodes: {unsupported_counts:#?}",
+            names.len()
+        ));
+    }
+    failures
 }
 
 #[test]
-#[ignore]
+#[ignore = "requires MXRS_ACCEPTANCE_DIR with complete QRQC/SPC private corpus"]
 fn acceptance_pass_against_real_projects() {
-    let Ok(base) = std::env::var("MXRS_ACCEPTANCE_DIR") else {
-        eprintln!(
-            "[acceptance] skipped: MXRS_ACCEPTANCE_DIR is not set (see this file's module doc for the expected layout)"
-        );
-        return;
-    };
+    let base = std::env::var("MXRS_ACCEPTANCE_DIR")
+        .expect("set MXRS_ACCEPTANCE_DIR to the complete private QRQC/SPC corpus root before explicitly running this ignored test");
     let base = std::path::Path::new(&base);
-    if !base.is_dir() {
-        eprintln!(
-            "[acceptance] skipped: {} is not a directory",
-            base.display()
+    assert!(
+        base.is_dir(),
+        "MXRS_ACCEPTANCE_DIR is not a directory: {}",
+        base.display()
+    );
+    for required in [
+        "qrqc-ruby/build/eQRQC.mpr",
+        "spc-ruby/build/JEMScc-SPC.mpr",
+        "spc-ruby/build/deployment/model/model.mdp",
+    ] {
+        assert!(
+            base.join(required).is_file(),
+            "missing private corpus input: {}",
+            base.join(required).display()
         );
-        return;
     }
 
-    run_against(
+    let mut failures = run_against(
         base.join("qrqc-ruby/build/eQRQC.mpr").to_str().unwrap(),
         "QRQC",
         None,
     );
     let spc_mpr = base.join("spc-ruby/build/JEMScc-SPC.mpr");
     let spc_mdp = base.join("spc-ruby/build/deployment/model/model.mdp");
-    run_against(spc_mpr.to_str().unwrap(), "SPC", spc_mdp.to_str());
+    failures.extend(run_against(
+        spc_mpr.to_str().unwrap(),
+        "SPC",
+        spc_mdp.to_str(),
+    ));
+    assert!(
+        failures.is_empty(),
+        "private corpus compilation is incomplete:\n{}",
+        failures.join("\n")
+    );
 }

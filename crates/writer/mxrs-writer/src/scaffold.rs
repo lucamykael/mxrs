@@ -52,7 +52,7 @@ pub fn write_default_project_units(
     mpr.insert_unit(
         root_id,
         "ProjectDocuments",
-        default_security_doc(),
+        default_security_doc(identity),
         Some(&security_id),
     )?;
 
@@ -101,6 +101,13 @@ fn sanitize_project_settings(document: &mut Document, version: &str) {
                     }
                 }
                 Some("Settings$ModelSettings") => {
+                    // MxBuild 11.12.1's JavaVersionPropertyConversion copies
+                    // OldJavaVersion over JavaMajorVersion. Its native seed
+                    // still carries JavaVersion=Java21; omitting that legacy
+                    // enum makes a fresh app fall back to unsupported Java 11.
+                    if version == "11.12.1" {
+                        setting.insert("JavaVersion", "Java21");
+                    }
                     for key in [
                         "AfterStartupMicroflow",
                         "BeforeShutdownMicroflow",
@@ -148,7 +155,7 @@ fn sanitize_project_settings(document: &mut Document, version: &str) {
 
 /// Ports `Writer#project_security_doc({})`: `SecurityLevel: CheckNothing`,
 /// a single default `Administrator` role, no demo users, no guest access.
-fn default_security_doc() -> Document {
+fn default_security_doc(identity: ProjectIdentity) -> Document {
     doc! {
         "$Type": "Security$ProjectSecurity",
         "SecurityLevel": "CheckNothing",
@@ -161,11 +168,12 @@ fn default_security_doc() -> Document {
         "GuestUserRole": "",
         "StrictMode": false,
         "StrictPageUrlCheck": true,
-        "UserRoles": mxrs_bson::build_array(vec![Bson::Document(default_admin_role_doc())], 2),
+        "UserRoles": mxrs_bson::build_array(vec![Bson::Document(default_admin_role_doc(identity))], 2),
         "DemoUsers": mxrs_bson::build_array(vec![], 2),
-        "FileDocumentAccess": access_container_doc("Security$FileDocumentAccessRuleContainer"),
-        "ImageAccess": access_container_doc("Security$ImageAccessRuleContainer"),
+        "FileDocumentAccess": access_container_doc("Security$FileDocumentAccessRuleContainer", identity),
+        "ImageAccess": access_container_doc("Security$ImageAccessRuleContainer", identity),
         "PasswordPolicySettings": doc! {
+            "$ID": identity.artifact_id(ArtifactKind::PasswordPolicy, "project"),
             "$Type": "Security$PasswordPolicySettings",
             "MinimumLength": 6,
             "RequireDigit": true,
@@ -176,13 +184,14 @@ fn default_security_doc() -> Document {
 }
 
 /// Ports `Writer#user_role_doc({name: "Administrator", admin: true, module_roles: []})`.
-fn default_admin_role_doc() -> Document {
+fn default_admin_role_doc(identity: ProjectIdentity) -> Document {
     doc! {
+        "$ID": identity.artifact_id(ArtifactKind::UserRole, "Administrator"),
         "$Type": "Security$UserRole",
         "Name": "Administrator",
         "Description": "",
         "CheckSecurity": true,
-        "GUID": uuid::Uuid::new_v4().to_string(),
+        "GUID": identity.artifact_id(ArtifactKind::UserRole, "Administrator.guid"),
         "ManageableRoles": mxrs_bson::build_array(vec![], 1),
         "ManageAllRoles": true,
         "ManageUsersWithoutRoles": false,
@@ -190,8 +199,9 @@ fn default_admin_role_doc() -> Document {
     }
 }
 
-fn access_container_doc(bson_type: &str) -> Document {
+fn access_container_doc(bson_type: &str, identity: ProjectIdentity) -> Document {
     doc! {
+        "$ID": identity.artifact_id(ArtifactKind::ProjectSecurity, bson_type),
         "$Type": bson_type,
         "AccessRules": mxrs_bson::build_array(vec![], 3),
     }
@@ -244,11 +254,15 @@ mod tests {
                 assert_eq!(model_settings.get_str(key).unwrap(), "");
             }
         }
+        assert_eq!(model_settings.get_str("JavaMajorVersion").unwrap(), "21");
+        assert_eq!(model_settings.get_str("JavaVersion").unwrap(), "Java21");
     }
 
     #[test]
     fn default_security_doc_has_a_single_administrator_role() {
-        let doc = default_security_doc();
+        let identity = ProjectIdentity::for_project("Security");
+        let doc = default_security_doc(identity);
+        assert_eq!(doc, default_security_doc(identity));
         assert_eq!(doc.get_str("$Type").unwrap(), "Security$ProjectSecurity");
         assert_eq!(doc.get_str("AdminUserRole").unwrap(), "Administrator");
         let Some(Bson::Array(roles)) = doc.get("UserRoles") else {
@@ -256,6 +270,46 @@ mod tests {
         };
         let parsed = mxrs_bson::parse_array(Some(roles));
         assert_eq!(parsed.items.len(), 1);
+    }
+
+    #[test]
+    fn every_fresh_security_storage_object_has_a_binary_first_id() {
+        fn assert_ids(value: &Bson) {
+            match value {
+                Bson::Document(document) => {
+                    if let Ok(kind) = document.get_str("$Type") {
+                        assert_eq!(
+                            document.keys().next().map(String::as_str),
+                            Some("$ID"),
+                            "{kind}"
+                        );
+                        assert!(
+                            matches!(document.get("$ID"), Some(Bson::Binary(id)) if id.bytes.len() == 16),
+                            "{kind}"
+                        );
+                    }
+                    for child in document.values() {
+                        assert_ids(child);
+                    }
+                }
+                Bson::Array(children) => children.iter().for_each(assert_ids),
+                _ => {}
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut mpr =
+            MprFile::create(directory.path().join("Security.mpr"), "11.12.1", "test").unwrap();
+        let root = mpr.root_unit().unwrap().unwrap();
+        let identity = ProjectIdentity::from_project_root(&root.unit_id).unwrap();
+        write_default_project_units(&mut mpr, &root.unit_id, "11.12.1", identity).unwrap();
+        let security = mpr
+            .children_of(&root.unit_id)
+            .unwrap()
+            .iter()
+            .map(|unit| mpr.parse_contents(unit).unwrap())
+            .find(|document| document.get_str("$Type").ok() == Some("Security$ProjectSecurity"))
+            .unwrap();
+        assert_ids(&Bson::Document(security));
     }
 
     #[test]

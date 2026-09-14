@@ -195,6 +195,35 @@ pub fn synchronize_pages(
     mendix_version: &str,
     pages: &[PageDecl],
 ) -> Result<()> {
+    let (identity, module_name) = module_identity(mpr, module_id)?;
+    synchronize_pages_with_identity(
+        mpr,
+        module_id,
+        &module_name,
+        mendix_version,
+        pages,
+        identity,
+    )
+}
+
+pub fn synchronize_layouts(
+    mpr: &mut MprFile,
+    module_id: &str,
+    mendix_version: &str,
+    layouts: &[mxrs_ir::LayoutDecl],
+) -> Result<()> {
+    let (identity, module_name) = module_identity(mpr, module_id)?;
+    crate::layout_compiler::synchronize_layouts_with_identity(
+        mpr,
+        module_id,
+        &module_name,
+        mendix_version,
+        layouts,
+        identity,
+    )
+}
+
+fn module_identity(mpr: &MprFile, module_id: &str) -> Result<(ProjectIdentity, String)> {
     let root_id = mpr
         .root_unit()?
         .ok_or(crate::WriterError::MissingRootUnit)?
@@ -207,7 +236,7 @@ pub fn synchronize_pages(
     let module_name = module_doc
         .get_str("Name")
         .map_err(|_| crate::WriterError::MissingModuleName(module_id.to_string()))?;
-    synchronize_pages_with_identity(mpr, module_id, module_name, mendix_version, pages, identity)
+    Ok((identity, module_name.to_string()))
 }
 
 /// Upserts pages by name, same upsert-only policy as

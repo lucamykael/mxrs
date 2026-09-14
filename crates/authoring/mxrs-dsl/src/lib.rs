@@ -69,8 +69,8 @@ pub use mxrs_expr::{
 pub use mxrs_ir::SecurityLevel;
 pub use navigation::{NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder};
 pub use page::{
-    ButtonBuilder, ContainerBuilder, DataViewBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
-    LayoutGridRowBuilder, PageBuilder, PluggableWidgetBuilder,
+    ButtonBuilder, ContainerBuilder, DataViewBuilder, LayoutBuilder, LayoutGridBuilder,
+    LayoutGridColumnBuilder, LayoutGridRowBuilder, PageBuilder, PluggableWidgetBuilder,
 };
 pub use project::ProjectBuilder;
 pub use security::{SecurityBuilder, UserRoleBuilder};

@@ -11,11 +11,32 @@ pub enum MprError {
     #[error("opened in read-only mode")]
     ReadOnly,
 
+    #[error(
+        "MPR handle requires transaction recovery; drop it and reopen writable before further queries or writes"
+    )]
+    RecoveryRequired,
+
+    #[error("{operation} is not allowed inside a managed MPR transaction")]
+    ManagedTransactionOperation { operation: &'static str },
+
     #[error("{0}")]
     IncompletePackage(String),
 
-    #[error("nested MPR v2 transactions are not supported")]
+    #[error("nested MPR transactions are not supported")]
     NestedTransaction,
+
+    #[error(
+        "transaction committed, but file-journal cleanup failed ({0}); reopen writable to finish cleanup before retrying any writes"
+    )]
+    CommittedTransactionCleanup(Box<MprError>),
+
+    #[error(
+        "transaction failed ({original}); recovery also failed ({recovery}); preserve the journal and reopen writable to recover"
+    )]
+    TransactionRecovery {
+        original: Box<MprError>,
+        recovery: Box<MprError>,
+    },
 
     #[error("unit not found: {0}")]
     UnitNotFound(String),

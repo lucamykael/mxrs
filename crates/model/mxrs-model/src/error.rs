@@ -5,6 +5,12 @@ pub enum ModelError {
     #[error("cannot save a unit without a container_id")]
     MissingContainer,
 
+    #[error("invalid model structure at {path}: expected {expected}")]
+    InvalidStructure {
+        path: String,
+        expected: &'static str,
+    },
+
     #[error("BSON codec error: {0}")]
     Bson(#[from] mxrs_bson::BsonCodecError),
 

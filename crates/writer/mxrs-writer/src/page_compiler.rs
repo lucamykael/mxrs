@@ -39,12 +39,12 @@
 //! `Forms$Page` that itself omits `Widgets`/`LayoutCall`/`Appearance`
 //! entirely — confirming `MprCodec` doesn't require every schema-"required"
 //! property to be present to produce a well-formed document; this compiler
-//! likewise only ever sets the properties this IR captures. What's *not*
-//! verified (no way to drive Studio Pro from this environment): that Studio
-//! Pro itself opens a page built this way without complaint. Only that
-//! `MprCodec` accepts what this compiler emits and decodes it back
-//! losslessly (see `page_compiler` tests in `mxrs-writer`'s own test
-//! suite).
+//! likewise only ever sets the properties this IR captures. Native fixture
+//! round trips do not certify the whole authoring surface: official MxBuild
+//! validation is a separate gate. It exposed the requirement for a nonempty
+//! language on newly authored text even though our display reader could show
+//! the unlocalized value. Every supported widget/version combination still
+//! needs its own official and browser acceptance evidence.
 //!
 //! **Pluggable widgets (`WidgetDecl::DataGrid2`/`Gallery`/`ComboBox`) via
 //! `mxrs-pluggable`, name/class only — a real, checked blocker on more, not
@@ -53,14 +53,13 @@
 //! property *schema* (`WidgetType::object_type`), or without one — Data
 //! Grid 2/Gallery/ComboBox's *real* schemas (dozens of properties each,
 //! e.g. Data Grid 2's `columns`/`datasource`/`itemSelection`) only exist
-//! inside the actual widget package Studio Pro installs into a project,
-//! which this environment has no access to (confirmed against `mxrb`'s own
-//! oracle: `lib/mxrb/writer.rb#pluggable_widget_doc` calls
+//! inside the actual widget package Studio Pro installs into a project.
+//! This authoring compiler does not yet accept a project package registry,
+//! although the read-only compiler has been exercised against real packages.
+//! In the oracle, `lib/mxrb/writer.rb#pluggable_widget_doc` calls
 //! `WidgetPackage.find(...)` first and only reaches its own
 //! `configure_data_grid2!`/`configure_combo_box!` property-filling logic
-//! when that lookup succeeds). When it doesn't — the case for every
-//! `mxrs`-authored project, same as any project not opened by a real
-//! Studio Pro install — mxrb's own fallback
+//! when that lookup succeeds. When it doesn't, mxrb's own fallback
 //! (`configure_fallback_data_grid!`/`configure_fallback_combo_box!`) emits
 //! an **empty** inline schema (`ObjectType` with zero `PropertyTypes`) so
 //! Studio Pro can recognize the widget by its real `WidgetId` and
@@ -96,7 +95,7 @@ use std::rc::Rc;
 use mxrs_bson::Document;
 use mxrs_forms::catalog::{Catalog, ReferenceKind};
 use mxrs_forms::node::{Node, Value};
-use mxrs_forms::values::{AttributeReference, Reference, Text};
+use mxrs_forms::values::{AttributeReference, Reference, Text, Translation};
 use mxrs_ir::page::{
     ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, PageDecl, WidgetDecl,
 };
@@ -116,7 +115,7 @@ pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> 
     let mut page = Node::new("Page", catalog.clone())?;
     page.set("name", Value::String(decl.name.clone()))?;
     let title = decl.title.clone().unwrap_or_else(|| decl.name.clone());
-    page.set("title", Value::Text(Text::from_plain(title)))?;
+    page.set("title", Value::Text(default_language_text(&title)))?;
     if !decl.documentation.is_empty() {
         page.set("documentation", Value::String(decl.documentation.clone()))?;
     }
@@ -184,7 +183,7 @@ pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> 
         argument.set(
             "parameter",
             Value::Reference(Reference {
-                target: layout.parameter.clone(),
+                target: qualified_layout_parameter(layout)?,
                 kind: ReferenceKind::ByName,
             }),
         )?;
@@ -203,6 +202,24 @@ pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> 
     Ok(codec.encode(&page)?)
 }
 
+/// By-name references point at `Module.Layout.Placeholder`, not the local
+/// placeholder name (`mxrb/writer.rb`, `page_doc`, FormCallArgument.Parameter).
+fn qualified_layout_parameter(layout: &mxrs_ir::LayoutRef) -> Result<String> {
+    let prefix = format!("{}.", layout.qualified_name);
+    let local = if layout.parameter.contains('.') {
+        layout.parameter.strip_prefix(&prefix)
+    } else {
+        Some(layout.parameter.as_str())
+    };
+    let Some(local) = local.filter(|name| !name.is_empty() && !name.contains('.')) else {
+        return Err(WriterError::InvalidLayoutParameterReference {
+            layout: layout.qualified_name.clone(),
+            parameter: layout.parameter.clone(),
+        });
+    };
+    Ok(format!("{prefix}{local}"))
+}
+
 fn validate_page_parameters(decl: &PageDecl) -> Result<()> {
     let mut parameters = BTreeMap::new();
     for parameter in &decl.parameters {
@@ -218,6 +235,12 @@ fn validate_page_parameters(decl: &PageDecl) -> Result<()> {
     }
     fn visit(page: &str, widget: &WidgetDecl, parameters: &BTreeMap<&str, &str>) -> Result<()> {
         match widget {
+            WidgetDecl::LayoutPlaceholder { name } => {
+                return Err(WriterError::PlaceholderOutsideLayout {
+                    page: page.to_string(),
+                    placeholder: name.clone(),
+                });
+            }
             WidgetDecl::DataView {
                 source: DataSourceDecl::Context { parameter, entity },
                 children,
@@ -265,8 +288,22 @@ fn validate_page_parameters(decl: &PageDecl) -> Result<()> {
     Ok(())
 }
 
-fn compile_widget(catalog: &Rc<Catalog>, widget: &WidgetDecl, counter: &mut u32) -> Result<Value> {
+pub(crate) fn compile_widget(
+    catalog: &Rc<Catalog>,
+    widget: &WidgetDecl,
+    counter: &mut u32,
+) -> Result<Value> {
     match widget {
+        WidgetDecl::LayoutPlaceholder { name } => {
+            let mut node = Node::new("Placeholder", catalog.clone())?;
+            node.set("name", Value::String(name.clone()))?;
+            node.set("tabIndex", Value::Integer(0))?;
+            node.set(
+                "appearance",
+                Value::Node(Node::new("Appearance", catalog.clone())?),
+            )?;
+            Ok(Value::Node(node))
+        }
         WidgetDecl::Container {
             name,
             class,
@@ -617,8 +654,20 @@ fn compile_layout_grid_column(
 
 fn client_template(catalog: &Rc<Catalog>, text: &str) -> Result<Node> {
     let mut node = Node::new("ClientTemplate", catalog.clone())?;
-    node.set("template", Value::Text(Text::from_plain(text)))?;
+    node.set("template", Value::Text(default_language_text(text)))?;
     Ok(node)
+}
+
+/// Plain authoring strings use `en_US`, as `mxrb/writer.rb#text_doc` does.
+/// An empty language is not a fallback: MxBuild 11.12.1 reports CW0263 even
+/// when the stored text is nonempty. Explicit multilingual page authoring
+/// remains outside this string-only IR; imported translations stay lossless
+/// through the snapshot fallback, without changing the generic Forms codec.
+fn default_language_text(text: &str) -> Text {
+    Text::from_translations(vec![Translation {
+        language: Some("en_US".into()),
+        text: text.into(),
+    }])
 }
 
 fn button_action_node(catalog: &Rc<Catalog>, action: &ButtonAction) -> Result<Node> {
@@ -652,7 +701,7 @@ fn button_action_node(catalog: &Rc<Catalog>, action: &ButtonAction) -> Result<No
     }
 }
 
-fn appearance_node(
+pub(crate) fn appearance_node(
     catalog: &Rc<Catalog>,
     class: Option<&str>,
     style: Option<&str>,
@@ -714,6 +763,49 @@ mod tests {
         let document = compile_page(&catalog(), &decl).unwrap();
         assert_eq!(document.get_str("$Type").unwrap(), "Forms$Page");
         assert_eq!(document.get_str("Name").unwrap(), "Empty");
+    }
+
+    #[test]
+    fn plain_page_titles_text_and_buttons_have_the_native_default_language() {
+        let mut decl = PageDecl::new("Home");
+        decl.layout = Some(LayoutRef::new("Main.ApplicationLayout", "Main"));
+        decl.widgets = vec![
+            WidgetDecl::Text {
+                name: None,
+                caption: "Welcome".into(),
+                class: None,
+            },
+            WidgetDecl::Button {
+                name: None,
+                caption: "Close".into(),
+                class: None,
+                action: ButtonAction::ClosePage,
+            },
+        ];
+        fn translations(value: &mxrs_bson::Bson, text: &mut Vec<String>) {
+            match value {
+                mxrs_bson::Bson::Document(document) => {
+                    if document.get_str("$Type").ok() == Some("Texts$Translation") {
+                        assert_eq!(document.get_str("LanguageCode").unwrap(), "en_US");
+                        text.push(document.get_str("Text").unwrap().to_string());
+                    }
+                    for (_, value) in document {
+                        translations(value, text);
+                    }
+                }
+                mxrs_bson::Bson::Array(values) => {
+                    for value in values {
+                        translations(value, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let document = compile_page(&catalog(), &decl).unwrap();
+        let mut actual = Vec::new();
+        translations(&mxrs_bson::Bson::Document(document), &mut actual);
+        actual.sort();
+        assert_eq!(actual, ["Close", "Home", "Welcome"]);
     }
 
     #[test]

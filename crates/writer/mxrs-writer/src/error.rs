@@ -64,6 +64,21 @@ pub enum WriterError {
     )]
     PageWidgetsRequireLayout(String),
 
+    #[error("layout placeholder {placeholder:?} cannot appear inside page {page:?}")]
+    PlaceholderOutsideLayout { page: String, placeholder: String },
+
+    #[error("layout {layout:?} contains invalid or duplicated placeholder {placeholder:?}")]
+    InvalidLayoutPlaceholder { layout: String, placeholder: String },
+
+    #[error("layout {0:?} declares non-positive canvas dimensions")]
+    InvalidLayoutCanvas(String),
+
+    #[error("duplicate layout {0:?} declared while synchronizing")]
+    DuplicateLayout(String),
+
+    #[error("layout reference {layout:?} has an invalid placeholder reference {parameter:?}")]
+    InvalidLayoutParameterReference { layout: String, parameter: String },
+
     #[error("page {page:?} declares duplicate parameter {parameter:?}")]
     DuplicatePageParameter { page: String, parameter: String },
 

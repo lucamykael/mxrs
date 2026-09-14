@@ -282,10 +282,7 @@ impl<'a> ImageBundleCompiler<'a> {
             ]),
             "Forms$GlyphIcon" => js_object(&[
                 ("type", js_string("glyph")),
-                (
-                    "iconClass",
-                    js_string(glyph_icon_class(icon.get_i32("Code").ok()?)?),
-                ),
+                ("iconClass", js_string(glyph_icon_class(icon.get("Code")?)?)),
             ]),
             _ => return None,
         };
@@ -457,7 +454,12 @@ fn translated_text(template: Option<&Document>) -> String {
         .to_string()
 }
 
-fn glyph_icon_class(code: i32) -> Option<&'static str> {
+fn glyph_icon_class(code: &Bson) -> Option<&'static str> {
+    let code = match code {
+        Bson::Int32(code) => i64::from(*code),
+        Bson::Int64(code) => *code,
+        _ => return None,
+    };
     match code {
         57478 => Some("glyphicon-info-sign"),
         _ => None,
@@ -715,5 +717,34 @@ mod tests {
         let rendered = compiler.render();
         assert!(rendered.contains("glyphicon-info-sign"));
         assert!(rendered.contains("\"type\": \"glyph\""));
+    }
+
+    #[test]
+    fn studio_eleven_int64_glyph_codes_keep_their_native_meaning() {
+        for code in [Bson::Int32(57478), Bson::Int64(57478)] {
+            let glyph = widget(vec![
+                property("source", doc! { "PrimitiveValue": "icon" }),
+                property(
+                    "icon",
+                    doc! { "Icon": { "$Type": "Forms$GlyphIcon", "Code": code } },
+                ),
+            ]);
+            let compiler = ImageBundleCompiler::new(&[], "Demo.Home", &glyph);
+            assert!(compiler.supported());
+            assert!(compiler.render().contains("glyphicon-info-sign"));
+        }
+        for code in [
+            Bson::Int32(0),
+            Bson::Int64(i64::MAX),
+            Bson::Int64(57478 + (1_i64 << 32)),
+            Bson::Double(57478.0),
+            Bson::String("57478".into()),
+            Bson::Null,
+        ] {
+            assert!(
+                glyph_icon_class(&code).is_none(),
+                "accepted unknown or nonintegral glyph: {code:?}"
+            );
+        }
     }
 }

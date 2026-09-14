@@ -4,7 +4,7 @@
 //! into `mxrs-model` only at the persistence boundary.
 
 use crate::flow::MicroflowDecl;
-use crate::page::PageDecl;
+use crate::page::{LayoutDecl, PageDecl};
 use crate::{ModuleRoleDecl, NavigationDecl, ProjectSecurityDecl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +165,7 @@ pub struct ModuleDecl {
     /// identity namespace.
     pub nanoflows: Vec<MicroflowDecl>,
     pub pages: Vec<PageDecl>,
+    pub layouts: Vec<LayoutDecl>,
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,

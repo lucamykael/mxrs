@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CargoProjectError {
@@ -89,7 +89,19 @@ pub fn build_with_web_output(
     if offline {
         command.arg("--offline");
     }
-    let status = command.arg("--").arg(&output).status()?;
+    // Application build binaries may print progress; keep that on stderr so
+    // `cargo mxrs diff --json` remains one parseable machine-readable document.
+    let mut child = command
+        .arg("--")
+        .arg(&output)
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let logs = std::io::copy(
+        &mut child.stdout.take().expect("stdout was piped"),
+        &mut std::io::stderr(),
+    );
+    let status = child.wait()?;
+    logs?;
     if !status.success() {
         return Err(CargoProjectError::BuildFailed);
     }

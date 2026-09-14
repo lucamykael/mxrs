@@ -6,7 +6,7 @@
 
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, ContainerBuilder, DataViewBuilder, EntityBuilder,
-    EnumerationBuilder, FlowBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
+    EnumerationBuilder, FlowBuilder, LayoutBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
     LayoutGridRowBuilder, ModuleBuilder, NavigationBuilder, NavigationItemBuilder,
     NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder, ProjectBuilder, SecurityBuilder,
     UserRoleBuilder,

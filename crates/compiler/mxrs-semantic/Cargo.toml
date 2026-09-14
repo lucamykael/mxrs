@@ -20,5 +20,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
 tempfile = "3.27.0"

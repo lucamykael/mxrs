@@ -28,6 +28,6 @@ pub use markers::{
     MicroflowRef, NanoflowMarker, NanoflowRef, Ref, Reference, ReferenceSet,
 };
 pub use page::{
-    ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
-    PageParameterDecl, WidgetDecl,
+    ButtonAction, DataSourceDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutKind,
+    LayoutRef, PageDecl, PageParameterDecl, WidgetDecl,
 };

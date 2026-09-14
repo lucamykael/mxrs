@@ -25,7 +25,7 @@
 //!    walk back to `WidgetDecl::LayoutGrid`.
 //!
 //! **Still narrower than a full page**: no conditional visibility/dynamic
-//! classes or typed page parameters. A page using any of those stays exactly
+//! classes or non-object page parameters. A page using any of those stays exactly
 //! as opaque as before — served from the generated snapshot, contributing
 //! nothing to `build()`. Static page appearance, security roles, popup
 //! dimensions, exclusion, and export level are preserved by the typed path.
@@ -39,11 +39,20 @@
 //! only when its schema/object configuration is the empty shell emitted by
 //! `mxrs-writer`. A configured Studio Pro/marketplace widget therefore stays
 //! snapshot-backed instead of being flattened to name/class.
+//!
+//! Detection is only a candidate: the existing writer recompiles it against
+//! the source metamodel and every field present in the original BSON must
+//! survive. This catches concepts the display-oriented widget summary erased
+//! already (translations, editor metadata, source settings, extra layout
+//! arguments, unknown containers). Generated element identities alone may
+//! differ; the only rebinding recognized is a pluggable object's internal
+//! schema pointer, verified against its original structural target.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::rc::Rc;
 
-use mxrs_bson::Document;
+use mxrs_bson::{Bson, Document};
 use mxrs_ir::page::{
     ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutRef, PageDecl,
     PageParameterDecl, WidgetDecl,
@@ -153,19 +162,33 @@ impl ConversionContext {
     }
 }
 
-/// Detects every convertible page across every module. Pure detection, no
-/// rendering — shared by `render_pages_module` (the `pages.rs` text) and
-/// `lib.rs::render` (the `build()` wiring), so the two can never drift
-/// apart on which pages qualify.
-pub fn convert_pages(modules: &[Module]) -> (Vec<ConvertedPage>, PageExportReport) {
+#[cfg(test)]
+fn convert_pages(modules: &[Module]) -> (Vec<ConvertedPage>, PageExportReport) {
+    convert_pages_for_version(modules, "11.12.1")
+}
+
+/// The same verified candidates drive both the Rust page functions and live
+/// build wiring. Imports additionally check references from opaque units via
+/// `protect_referenced_page_elements` before rendering either source file.
+pub fn convert_pages_for_version(
+    modules: &[Module],
+    mendix_version: &str,
+) -> (Vec<ConvertedPage>, PageExportReport) {
     let context = ConversionContext::from_modules(modules);
+    let catalog = mxrs_forms::Catalog::for_version(mendix_version)
+        .ok()
+        .map(Rc::new);
     let mut report = PageExportReport::default();
     let mut pages = Vec::new();
     for module in modules {
         let module_name = module.name.clone().unwrap_or_else(|| "Unnamed".into());
         for page in &module.pages {
             match try_convert_page(page, &context, &module_name) {
-                Some(decl) => {
+                Some(decl)
+                    if catalog
+                        .as_ref()
+                        .is_some_and(|catalog| reproduces_source(page, &decl, catalog)) =>
+                {
                     report.typed_candidates += 1;
                     pages.push(ConvertedPage {
                         module_name: module_name.clone(),
@@ -182,11 +205,249 @@ pub fn convert_pages(modules: &[Module]) -> (Vec<ConvertedPage>, PageExportRepor
                         decl,
                     });
                 }
-                None => report.opaque += 1,
+                _ => report.opaque += 1,
             }
         }
     }
+    assign_page_function_names(&mut pages);
     (pages, report)
+}
+
+fn assign_page_function_names(pages: &mut [ConvertedPage]) {
+    let mut order: Vec<_> = (0..pages.len()).collect();
+    order.sort_by(|&left, &right| {
+        (&pages[left].module_name, &pages[left].decl.name)
+            .cmp(&(&pages[right].module_name, &pages[right].decl.name))
+    });
+    let mut used = HashSet::new();
+    for index in order {
+        let page = &mut pages[index];
+        let mut base = to_snake_case(&page.decl.name);
+        if !mxrs_typegen::is_rust_identifier(&base) {
+            base.insert_str(0, "page_");
+        }
+        let mut name = base.clone();
+        let mut suffix = 2;
+        while !used.insert(name.clone()) {
+            name = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        page.function_name = name;
+    }
+}
+
+fn reproduces_source(page: &Page, decl: &PageDecl, catalog: &Rc<mxrs_forms::Catalog>) -> bool {
+    if page.raw_document().get_str("$Type").ok() != Some("Forms$Page")
+        || !page.raw_document().contains_key("$ID")
+    {
+        return false;
+    }
+    mxrs_writer::page_compiler::compile_page(catalog, decl).is_ok_and(|compiled| {
+        let mut identities = HashMap::new();
+        collect_identities(page.raw_document(), &compiled, &mut identities)
+            && preserves_document(page.raw_document(), &compiled, &identities)
+    })
+}
+
+type IdentityMap = HashMap<String, (String, String)>;
+
+fn collect_identities(
+    original: &Document,
+    compiled: &Document,
+    identities: &mut IdentityMap,
+) -> bool {
+    if let Some(id) = original.get("$ID") {
+        let Some(original_id) = mxrs_bson::extract_id(id) else {
+            return false;
+        };
+        let Some(compiled_id) = compiled.get("$ID").and_then(mxrs_bson::extract_id) else {
+            return false;
+        };
+        let Ok(kind) = original.get_str("$Type") else {
+            return false;
+        };
+        if mxrs_bson::uuid_to_blob(&original_id).is_err()
+            || compiled.get_str("$Type").ok() != Some(kind)
+            || identities
+                .insert(original_id, (compiled_id, kind.to_string()))
+                .is_some()
+        {
+            return false;
+        }
+    }
+    fn nested(original: &Bson, compiled: &Bson, identities: &mut IdentityMap) -> bool {
+        match (original, compiled) {
+            (Bson::Document(a), Bson::Document(b)) => collect_identities(a, b, identities),
+            (Bson::Array(a), Bson::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| nested(a, b, identities))
+            }
+            _ => true,
+        }
+    }
+    original.iter().all(|(key, value)| match compiled.get(key) {
+        Some(other) => nested(value, other, identities),
+        _ => true,
+    })
+}
+
+/// Extra compiler fields are metamodel defaults. Original fields, including
+/// unknown or apparently inert ones, are never inferred to be dispensable.
+fn preserves_document(original: &Document, compiled: &Document, identities: &IdentityMap) -> bool {
+    original
+        .keys()
+        .eq(compiled.keys().filter(|key| original.contains_key(*key)))
+        && original.iter().all(|(key, value)| {
+            if key == "$ID" {
+                return true;
+            }
+            if key == "TypePointer"
+                && original.get_str("$Type").ok() == Some("CustomWidgets$WidgetObject")
+            {
+                return mxrs_bson::extract_id(value)
+                    .and_then(|id| identities.get(&id))
+                    .is_some_and(|(target, kind)| {
+                        kind == "CustomWidgets$WidgetObjectType"
+                            && compiled.get(key).and_then(mxrs_bson::extract_id).as_ref()
+                                == Some(target)
+                    });
+            }
+            compiled
+                .get(key)
+                .is_some_and(|other| preserves_value(value, other, identities))
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PageOwner {
+    module: String,
+    page: String,
+    root_id: Option<String>,
+}
+
+type ElementOwners = HashMap<String, Vec<PageOwner>>;
+
+/// Synchronizing a typed page regenerates child identities. An otherwise
+/// reproducible page must stay snapshot-backed when another unit points at
+/// those identities; the writer currently preserves only its root identity.
+pub(crate) fn protect_referenced_page_elements(
+    project: &mxrs_model::Project,
+    modules: &[Module],
+    pages: &mut Vec<ConvertedPage>,
+    report: &mut PageExportReport,
+) -> mxrs_model::Result<()> {
+    let candidates: HashSet<_> = pages
+        .iter()
+        .map(|page| (page.module_name.as_str(), page.decl.name.as_str()))
+        .collect();
+    let mut owners = ElementOwners::new();
+    for module in modules {
+        for page in &module.pages {
+            let Some(module_name) = &module.name else {
+                continue;
+            };
+            let Some(page_name) = &page.name else {
+                continue;
+            };
+            if candidates.contains(&(module_name.as_str(), page_name.as_str())) {
+                let owner = PageOwner {
+                    module: module_name.clone(),
+                    page: page_name.clone(),
+                    root_id: page.id.clone(),
+                };
+                visit_document_values(page.raw_document(), &mut |key, value, _| {
+                    if key == "$ID"
+                        && let Some(id) = mxrs_bson::extract_id(value)
+                        && Some(&id) != owner.root_id.as_ref()
+                    {
+                        owners.entry(id).or_default().push(owner.clone());
+                    }
+                });
+            }
+        }
+    }
+    drop(candidates);
+    if owners.is_empty() {
+        return Ok(());
+    }
+    let mut protected = HashSet::new();
+    for unit in project.all_units()? {
+        let document = project.mpr().parse_contents(&unit)?;
+        referenced_page_elements(&document, &owners, &mut protected);
+    }
+    let before = pages.len();
+    let protected_names: HashSet<_> = protected
+        .iter()
+        .map(|owner| (owner.module.as_str(), owner.page.as_str()))
+        .collect();
+    pages.retain(|page| {
+        !protected_names.contains(&(page.module_name.as_str(), page.decl.name.as_str()))
+    });
+    let removed = before - pages.len();
+    report.typed_candidates -= removed;
+    report.opaque += removed;
+    Ok(())
+}
+
+fn referenced_page_elements(
+    document: &Document,
+    owners: &ElementOwners,
+    protected: &mut HashSet<PageOwner>,
+) {
+    let root_id = document.get("$ID").and_then(mxrs_bson::extract_id);
+    visit_document_values(document, &mut |key, value, parent| {
+        if key != "$ID"
+            && let Some(id) = mxrs_bson::extract_id(value)
+            && let Some(targets) = owners.get(&id)
+        {
+            for owner in targets {
+                let internal_schema_pointer = owner.root_id == root_id
+                    && key == "TypePointer"
+                    && parent.get_str("$Type").ok() == Some("CustomWidgets$WidgetObject");
+                if !internal_schema_pointer {
+                    protected.insert(owner.clone());
+                }
+            }
+        }
+    });
+}
+
+fn visit_document_values(document: &Document, visit: &mut impl FnMut(&str, &Bson, &Document)) {
+    fn descend(
+        key: &str,
+        value: &Bson,
+        parent: &Document,
+        visit: &mut impl FnMut(&str, &Bson, &Document),
+    ) {
+        visit(key, value, parent);
+        match value {
+            Bson::Document(document) => visit_document_values(document, visit),
+            Bson::Array(values) => {
+                for value in values {
+                    descend(key, value, parent, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+    for (key, value) in document {
+        descend(key, value, document, visit);
+    }
+}
+
+fn preserves_value(original: &Bson, compiled: &Bson, identities: &IdentityMap) -> bool {
+    match (original, compiled) {
+        (Bson::Document(original), Bson::Document(compiled)) => {
+            preserves_document(original, compiled, identities)
+        }
+        (Bson::Array(original), Bson::Array(compiled)) => {
+            original.len() == compiled.len()
+                && original
+                    .iter()
+                    .zip(compiled)
+                    .all(|(a, b)| preserves_value(a, b, identities))
+        }
+        _ => original == compiled,
+    }
 }
 
 /// Renders every converted page into one `src/domain/pages/mod.rs` source file
@@ -229,7 +490,7 @@ fn try_convert_page(
     current_module: &str,
 ) -> Option<PageDecl> {
     let name = page.name.clone()?;
-    let parameters = convert_page_parameters(&page.parameters)?;
+    let parameters = convert_page_parameters(&page.parameters, context)?;
     let page_parameters = parameters
         .iter()
         .map(|parameter| (parameter.name.clone(), parameter.entity.clone()))
@@ -459,7 +720,11 @@ fn try_convert_data_view(
     })
 }
 
-fn convert_page_parameters(parameters: &[Document]) -> Option<Vec<PageParameterDecl>> {
+fn convert_page_parameters(
+    parameters: &[Document],
+    context: &ConversionContext,
+) -> Option<Vec<PageParameterDecl>> {
+    let mut names = HashSet::new();
     parameters
         .iter()
         .map(|parameter| {
@@ -476,9 +741,24 @@ fn convert_page_parameters(parameters: &[Document]) -> Option<Vec<PageParameterD
             ) {
                 return None;
             }
+            if parameter.get_str("$Type").ok() != Some("Forms$PageParameter") {
+                return None;
+            }
+            let name = parameter.get_str("Name").ok()?;
+            if !valid_mendix_name(name) || !names.insert(name) {
+                return None;
+            }
             let parameter_type = parameter.get_document("ParameterType").ok()?;
             if !only_keys(parameter_type, &["$ID", "$Type", "Entity"])
                 || parameter_type.get_str("$Type").ok()? != "DataTypes$ObjectType"
+            {
+                return None;
+            }
+            let entity = parameter_type.get_str("Entity").ok()?;
+            let (module, entity_name) = entity.split_once('.')?;
+            if !valid_mendix_name(module)
+                || !valid_mendix_name(entity_name)
+                || !context.entity_attributes.contains_key(entity)
             {
                 return None;
             }
@@ -488,13 +768,25 @@ fn convert_page_parameters(parameters: &[Document]) -> Option<Vec<PageParameterD
                 _ => return None,
             };
             Some(PageParameterDecl {
-                name: parameter.get_str("Name").ok()?.to_string(),
-                entity: parameter_type.get_str("Entity").ok()?.to_string(),
-                required: parameter.get_bool("IsRequired").unwrap_or(true),
+                name: name.to_string(),
+                entity: entity.to_string(),
+                required: match parameter.get("IsRequired") {
+                    None => true,
+                    Some(Bson::Boolean(value)) => *value,
+                    _ => return None,
+                },
                 default_value,
             })
         })
         .collect()
+}
+
+fn valid_mendix_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn try_convert_attribute_widget(
@@ -686,7 +978,11 @@ fn string_option(document: &Document, key: &str) -> Option<String> {
 fn render_page_function(page: &ConvertedPage) -> String {
     let decl = &page.decl;
     let mut out = String::new();
-    let _ = writeln!(out, "/// `{}.{}`", page.module_name, decl.name);
+    let _ = writeln!(
+        out,
+        "/// {:?}",
+        format!("{}.{}", page.module_name, decl.name)
+    );
     let _ = writeln!(
         out,
         "pub fn {}() -> ::mxrs_ir::page::PageDecl {{",
@@ -775,6 +1071,9 @@ fn render_widget(
     let pad = "    ".repeat(indent);
     let mut out = String::new();
     match widget {
+        WidgetDecl::LayoutPlaceholder { name } => {
+            let _ = writeln!(out, "{pad}{receiver}.placeholder({name:?});");
+        }
         WidgetDecl::Container {
             name,
             class,
@@ -1020,12 +1319,12 @@ fn entity_marker_path(entity: &str) -> String {
 fn to_snake_case(name: &str) -> String {
     let mut out = String::new();
     for (index, ch) in name.chars().enumerate() {
-        if ch.is_uppercase() {
+        if ch.is_ascii_uppercase() {
             if index != 0 {
                 out.push('_');
             }
             out.extend(ch.to_lowercase());
-        } else if ch.is_alphanumeric() || ch == '_' {
+        } else if ch.is_ascii_alphanumeric() || ch == '_' {
             out.push(ch);
         } else {
             out.push('_');
@@ -1041,6 +1340,257 @@ fn to_snake_case(name: &str) -> String {
 mod tests {
     use super::*;
     use mxrs_bson::Bson;
+
+    fn compiled_page(name: &str) -> Page {
+        let mut builder = mxrs_dsl::PageBuilder::new(name);
+        builder.layout("Atlas_Core.ApplicationLayout", "Main");
+        builder.container(|container| {
+            container.text("Hello");
+        });
+        let catalog = Rc::new(mxrs_forms::Catalog::for_version("11.12.1").unwrap());
+        Page::from_bson(
+            &mxrs_writer::page_compiler::compile_page(&catalog, &builder.into_decl()).unwrap(),
+        )
+    }
+
+    fn module_with_pages(pages: Vec<Page>) -> Module {
+        Module {
+            id: "m".into(),
+            name: Some("Sales".into()),
+            sort_index: None,
+            from_app_store: false,
+            app_store_guid: None,
+            app_store_version: None,
+            export_level: "Hidden".into(),
+            domain_model: None,
+            pages,
+            microflows: vec![],
+            nanoflows: vec![],
+            rules: vec![],
+            menus: vec![],
+            module_roles: vec![],
+            artifact_units: vec![],
+        }
+    }
+
+    fn first_widget(document: &mut Document) -> &mut Document {
+        document
+            .get_document_mut("FormCall")
+            .unwrap()
+            .get_array_mut("Arguments")
+            .unwrap()[1]
+            .as_document_mut()
+            .unwrap()
+            .get_array_mut("Widgets")
+            .unwrap()[1]
+            .as_document_mut()
+            .unwrap()
+    }
+
+    #[test]
+    fn native_fields_erased_by_the_display_summary_keep_the_entire_page_opaque() {
+        let original = compiled_page("Home");
+        let mut variants = Vec::new();
+        for (key, value) in [
+            ("MarkAsUsed", Bson::Boolean(true)),
+            ("CanvasWidth", Bson::Int32(1024)),
+            (
+                "PopupCloseAction",
+                Bson::Document(mxrs_bson::doc! { "$Type": "Forms$ClosePageClientAction" }),
+            ),
+            (
+                "Variables",
+                Bson::Array(vec![Bson::Int32(3), Bson::String("editor state".into())]),
+            ),
+        ] {
+            let mut document = original.raw_document().clone();
+            document.insert(key, value);
+            variants.push(document);
+        }
+        let mut document = original.raw_document().clone();
+        first_widget(&mut document).insert(
+            "ConditionalVisibilitySettings",
+            mxrs_bson::doc! { "Condition": "$Order/Active" },
+        );
+        variants.push(document);
+        let mut document = original.raw_document().clone();
+        first_widget(&mut document).insert("$Type", "Forms$UnknownContainer");
+        variants.push(document);
+        let mut document = original.raw_document().clone();
+        document
+            .get_document_mut("FormCall")
+            .unwrap()
+            .get_array_mut("Arguments")
+            .unwrap()
+            .push(Bson::Document(
+                mxrs_bson::doc! { "Parameter": "Sidebar", "Widgets": [3] },
+            ));
+        variants.push(document);
+        let mut document = original.raw_document().clone();
+        document.get_document_mut("Title").unwrap().get_array_mut("Items").unwrap()
+            .push(Bson::Document(mxrs_bson::doc! { "$Type": "Texts$Translation", "LanguageCode": "pt_BR", "Text": "Início" }));
+        variants.push(document);
+        let mut document = original.raw_document().clone();
+        document.insert("PopupResizable", "false");
+        variants.push(document);
+        for document in variants {
+            let page = Page::from_bson(&document);
+            let (pages, report) = convert_pages(&[module_with_pages(vec![page])]);
+            assert!(
+                pages.is_empty(),
+                "unsupported native data was projected: {document:?}"
+            );
+            assert_eq!(report.opaque, 1);
+        }
+        let (_, report) = convert_pages(&[module_with_pages(vec![original])]);
+        assert_eq!(report.typed_candidates, 1);
+    }
+
+    #[test]
+    fn data_source_settings_and_context_subpaths_are_not_silently_discarded() {
+        let mut decl = PageDecl::new("OrderEdit");
+        decl.layout = Some(LayoutRef::new("Atlas_Core.ApplicationLayout", "Main"));
+        decl.parameters.push(PageParameterDecl {
+            name: "Order".into(),
+            entity: "Sales.Order".into(),
+            required: true,
+            default_value: None,
+        });
+        decl.widgets.push(WidgetDecl::DataView {
+            name: Some("orderView".into()),
+            source: DataSourceDecl::Context {
+                parameter: "Order".into(),
+                entity: "Sales.Order".into(),
+            },
+            children: vec![],
+        });
+        let catalog = Rc::new(mxrs_forms::Catalog::for_version("11.12.1").unwrap());
+        let original = mxrs_writer::page_compiler::compile_page(&catalog, &decl).unwrap();
+        assert!(reproduces_source(
+            &Page::from_bson(&original),
+            &decl,
+            &catalog
+        ));
+        let mut modified = original.clone();
+        first_widget(&mut modified)
+            .get_document_mut("DataSource")
+            .unwrap()
+            .get_document_mut("SourceVariable")
+            .unwrap()
+            .insert("SubKey", "Sales.Order_Customer");
+        let page = Page::from_bson(&modified);
+        let candidate = try_convert_page(&page, &bound_context(), "Sales").unwrap();
+        assert!(!reproduces_source(&page, &candidate, &catalog));
+        let mut modified = original;
+        first_widget(&mut modified)
+            .get_document_mut("DataSource")
+            .unwrap()
+            .insert("ApplyEntityAccess", true);
+        let page = Page::from_bson(&modified);
+        let candidate = try_convert_page(&page, &bound_context(), "Sales").unwrap();
+        assert!(!reproduces_source(&page, &candidate, &catalog));
+    }
+
+    #[test]
+    fn malformed_missing_and_duplicate_object_parameters_never_reach_marker_rendering() {
+        let valid = mxrs_bson::doc! { "$Type": "Forms$PageParameter", "Name": "Order", "ParameterType": { "$Type": "DataTypes$ObjectType", "Entity": "Sales.Order" }, "IsRequired": true };
+        let context = bound_context();
+        assert!(convert_page_parameters(std::slice::from_ref(&valid), &context).is_some());
+        for entity in [
+            "Order",
+            "",
+            "Sales.",
+            ".Order",
+            "Sales.Order.Extra",
+            "Sales.Missing",
+            "Sales.bad-name",
+        ] {
+            let mut parameter = valid.clone();
+            parameter
+                .get_document_mut("ParameterType")
+                .unwrap()
+                .insert("Entity", entity);
+            assert!(
+                convert_page_parameters(&[parameter], &context).is_none(),
+                "{entity}"
+            );
+        }
+        for name in ["", "bad name", "1Order"] {
+            let mut parameter = valid.clone();
+            parameter.insert("Name", name);
+            assert!(convert_page_parameters(&[parameter], &context).is_none());
+        }
+        for (key, value) in [
+            ("$Type", Bson::String("Forms$UnknownParameter".into())),
+            ("IsRequired", Bson::String("true".into())),
+            ("DefaultValue", Bson::Boolean(false)),
+        ] {
+            let mut parameter = valid.clone();
+            parameter.insert(key, value);
+            assert!(convert_page_parameters(&[parameter], &context).is_none());
+        }
+        assert!(convert_page_parameters(&[valid.clone(), valid.clone()], &context).is_none());
+        let mut parameter = valid;
+        parameter.remove("IsRequired");
+        assert!(convert_page_parameters(&[parameter], &context).unwrap()[0].required);
+    }
+
+    #[test]
+    fn internal_schema_pointers_must_rebind_to_the_same_element_and_unknown_pointers_do_not() {
+        let schema_id = uuid::Uuid::new_v4().to_string();
+        let root_id = uuid::Uuid::new_v4().to_string();
+        let target_id = uuid::Uuid::new_v4().to_string();
+        let original =
+            mxrs_bson::doc! { "$Type": "CustomWidgets$WidgetObject", "TypePointer": &schema_id };
+        let compiled =
+            mxrs_bson::doc! { "$Type": "CustomWidgets$WidgetObject", "TypePointer": &target_id };
+        let identities = HashMap::from([(
+            schema_id.clone(),
+            (target_id.clone(), "CustomWidgets$WidgetObjectType".into()),
+        )]);
+        assert!(preserves_document(&original, &compiled, &identities));
+        assert!(!preserves_document(&original, &compiled, &HashMap::new()));
+        let identities = HashMap::from([(schema_id.clone(), (target_id, "Forms$Text".into()))]);
+        assert!(!preserves_document(&original, &compiled, &identities));
+        let owner = PageOwner {
+            module: "Sales".into(),
+            page: "Home".into(),
+            root_id: Some(root_id.clone()),
+        };
+        let owners = HashMap::from([(schema_id.clone(), vec![owner.clone()])]);
+        let own_document = mxrs_bson::doc! { "$ID": root_id, "Object": original.clone() };
+        let mut protected = HashSet::new();
+        referenced_page_elements(&own_document, &owners, &mut protected);
+        assert!(protected.is_empty());
+        referenced_page_elements(
+            &mxrs_bson::doc! { "OtherReference": [schema_id] },
+            &owners,
+            &mut protected,
+        );
+        assert!(protected.contains(&owner));
+    }
+
+    #[test]
+    fn unsupported_metamodel_versions_and_invalid_or_duplicated_element_ids_stay_opaque() {
+        let page = compiled_page("Home");
+        let (_, report) =
+            convert_pages_for_version(&[module_with_pages(vec![page.clone()])], "9.0.0");
+        assert_eq!(report.opaque, 1);
+        for id in [
+            Bson::Boolean(false),
+            Bson::String("not-a-uuid".into()),
+            page.raw_document().get("$ID").unwrap().clone(),
+        ] {
+            let mut document = page.raw_document().clone();
+            first_widget(&mut document).insert("$ID", id);
+            assert_eq!(
+                convert_pages(&[module_with_pages(vec![Page::from_bson(&document)])])
+                    .1
+                    .opaque,
+                1
+            );
+        }
+    }
 
     fn container(children: Vec<Widget>) -> Widget {
         Widget {
@@ -1348,7 +1898,7 @@ mod tests {
 
     #[test]
     fn convert_pages_counts_typed_and_opaque_pages_separately() {
-        let convertible = bare_page("Simple", vec![text("hi")]);
+        let convertible = compiled_page("Simple");
         let unsupported = bare_page(
             "WithVisibility",
             vec![Widget {

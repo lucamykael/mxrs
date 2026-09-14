@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use divan::Bencher;
 use mxrs_runtime::{Runtime, SecurityContext, SecurityPolicy, Store, StoreSchema};
@@ -16,10 +16,19 @@ fn schema() -> StoreSchema {
     )
 }
 
-#[divan::bench]
-fn create_set_commit_transaction(bencher: Bencher) {
+fn store_with_committed_objects(count: usize) -> Store {
+    let mut store = Store::new(schema());
+    for _ in 0..count {
+        let object = store.create("Sales.Order").unwrap();
+        store.commit("Sales.Order", &object.id).unwrap();
+    }
+    store
+}
+
+#[divan::bench(consts = [0, 100, 1_000])]
+fn create_set_commit_transaction<const N: usize>(bencher: Bencher) {
     bencher
-        .with_inputs(|| Store::new(schema()))
+        .with_inputs(|| store_with_committed_objects(N))
         .bench_refs(|store| {
             store
                 .transaction(|store| {
@@ -31,11 +40,25 @@ fn create_set_commit_transaction(bencher: Bencher) {
         });
 }
 
-#[divan::bench]
-fn authorized_action_dispatch(bencher: Bencher) {
+#[divan::bench(consts = [0, 100, 1_000])]
+fn authorized_action_dispatch<const N: usize>(bencher: Bencher) {
+    let context = SecurityContext {
+        user: Some("benchmark-user".into()),
+        module_roles: BTreeSet::from(["Sales.User".into()]),
+        ..SecurityContext::default()
+    };
+    let arguments = json!({ "id": 42 });
     bencher
         .with_inputs(|| {
-            let mut runtime = Runtime::new(Store::new(schema()), SecurityPolicy::default());
+            let security = SecurityPolicy {
+                enabled: true,
+                documents: BTreeMap::from([(
+                    "Sales.ACT_Echo".into(),
+                    BTreeSet::from(["Sales.User".into()]),
+                )]),
+                ..SecurityPolicy::default()
+            };
+            let mut runtime = Runtime::new(store_with_committed_objects(N), security);
             runtime.register_action("Sales.ACT_Echo", |_store: &mut Store, arguments: &Value| {
                 Ok(arguments.clone())
             });
@@ -45,8 +68,8 @@ fn authorized_action_dispatch(bencher: Bencher) {
             runtime
                 .invoke(
                     "Sales.ACT_Echo",
-                    divan::black_box(&json!({ "id": 42 })),
-                    &SecurityContext::default(),
+                    divan::black_box(&arguments),
+                    divan::black_box(&context),
                 )
                 .unwrap()
         });

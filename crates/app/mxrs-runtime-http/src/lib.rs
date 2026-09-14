@@ -5,13 +5,25 @@
 //! [`RuntimeHttp::with_security_context`] after an authentication adapter has
 //! established a trusted context. The default is anonymous and therefore
 //! fails closed whenever project security is enabled.
+//!
+//! This is not a session/authentication implementation: one trusted context is
+//! shared by this adapter. Deployments behind a reverse proxy must configure
+//! [`RuntimeHttp::with_public_origin`] and must not trust client-supplied
+//! forwarding headers. Without a pinned origin, browser actions are limited
+//! to HTTP localhost and loopback-IP origins to prevent DNS rebinding.
+//! Actions are serialized and excess concurrent requests
+//! receive 503; running synchronous actions cannot be forcibly cancelled.
 
+mod origin;
+mod static_files;
+
+use std::future::{Future, pending};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{DefaultBodyLimit, Path as RoutePath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -19,7 +31,7 @@ use mxrs_runtime::{Runtime, RuntimeError, SecurityContext};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
+use tokio::sync::Semaphore;
 
 const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
 
@@ -27,6 +39,14 @@ const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
 pub enum HttpError {
     #[error("web root is not a directory: {0}")]
     MissingWebRoot(String),
+    #[error("cannot read public web assets: {0}")]
+    WebAssets(#[source] std::io::Error),
+    #[error("web asset path is not safe to publish: {0}")]
+    UnsafeWebAsset(String),
+    #[error("public web assets exceed the {0}-byte snapshot limit")]
+    WebAssetsTooLarge(usize),
+    #[error("public origin must be an HTTP(S) origin without credentials, path, query or fragment")]
+    InvalidPublicOrigin,
     #[error("cannot bind runtime HTTP listener: {0}")]
     Bind(#[source] std::io::Error),
     #[error("runtime HTTP server failed: {0}")]
@@ -39,6 +59,8 @@ pub type Result<T> = std::result::Result<T, HttpError>;
 struct AppState {
     runtime: Arc<Mutex<Runtime>>,
     context: SecurityContext,
+    action_slots: Arc<Semaphore>,
+    public_origin: Option<origin::Origin>,
 }
 
 /// A shareable application boundary around one transactional runtime.
@@ -53,6 +75,8 @@ impl RuntimeHttp {
             state: AppState {
                 runtime: Arc::new(Mutex::new(runtime)),
                 context: SecurityContext::default(),
+                action_slots: Arc::new(Semaphore::new(1)),
+                public_origin: None,
             },
             web_root: web_root.into(),
         }
@@ -65,31 +89,62 @@ impl RuntimeHttp {
         self
     }
 
+    /// Pins the browser-facing origin when TLS termination or a reverse proxy
+    /// makes the listener's HTTP authority different from the public one.
+    pub fn with_public_origin(mut self, origin: &str) -> Result<Self> {
+        self.state.public_origin = Some(origin::Origin::parse(origin)?);
+        Ok(self)
+    }
+
     pub fn router(&self) -> Result<Router> {
-        validate_web_root(&self.web_root)?;
-        let static_files = ServeDir::new(&self.web_root).append_index_html_on_directories(true);
+        let files = static_files::Snapshot::load(&self.web_root)?;
         Ok(Router::new()
             .route("/api/health", get(health))
             .route("/api/{kind}/{handler}", post(invoke))
             .layer(DefaultBodyLimit::max(MAX_ACTION_BODY_BYTES))
-            .fallback_service(static_files)
+            .fallback(move |request| files.clone().respond(request))
             .with_state(self.state.clone()))
     }
 
     pub async fn serve(self, address: SocketAddr) -> Result<()> {
+        self.serve_with_shutdown(address, pending()).await
+    }
+
+    pub async fn serve_with_shutdown(
+        self,
+        address: SocketAddr,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
         let router = self.router()?;
         let listener = TcpListener::bind(address).await.map_err(HttpError::Bind)?;
-        axum::serve(listener, router)
-            .await
-            .map_err(HttpError::Serve)
+        self.serve_bound(listener, router, shutdown).await
     }
-}
 
-fn validate_web_root(path: &Path) -> Result<()> {
-    if path.is_dir() {
+    /// Accepting an already-bound listener supports socket activation and lets
+    /// callers discover an ephemeral port before starting acceptance tests.
+    pub async fn serve_listener(
+        self,
+        listener: TcpListener,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        let router = self.router()?;
+        self.serve_bound(listener, router, shutdown).await
+    }
+
+    async fn serve_bound(
+        self,
+        listener: TcpListener,
+        router: Router,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(HttpError::Serve)?;
+        // A disconnected caller can drop its response future while its
+        // synchronous transaction still runs. Drain that work as well.
+        let _permit = self.state.action_slots.acquire().await;
         Ok(())
-    } else {
-        Err(HttpError::MissingWebRoot(path.display().to_string()))
     }
 }
 
@@ -100,24 +155,55 @@ async fn health() -> Json<Value> {
 async fn invoke(
     State(state): State<AppState>,
     RoutePath((kind, handler)): RoutePath<(String, String)>,
+    headers: HeaderMap,
     Json(arguments): Json<Value>,
 ) -> Response {
+    if !origin::request_allowed(&headers, state.public_origin.as_ref()) {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "cross_origin_request",
+            "runtime actions require the application's own origin",
+        );
+    }
     if !matches!(kind.as_str(), "action" | "microflow" | "nanoflow") {
         return error_response(StatusCode::NOT_FOUND, "unknown_action_kind", &kind);
     }
-    let result = match state.runtime.lock() {
-        Ok(mut runtime) => runtime.invoke(&handler, &arguments, &state.context),
+    let permit = match state.action_slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
         Err(_) => {
-            return error_response(
+            let mut response = error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime_busy",
+                "another runtime action is still running",
+            );
+            response
+                .headers_mut()
+                .insert("retry-after", "1".parse().unwrap());
+            return response;
+        }
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        match state.runtime.lock() {
+            Ok(mut runtime) => match runtime.invoke(&handler, &arguments, &state.context) {
+                Ok(value) => Json(json!({ "result": value })).into_response(),
+                Err(error) => runtime_error_response(error),
+            },
+            Err(_) => error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "runtime_lock_poisoned",
                 "runtime state is unavailable",
-            );
+            ),
         }
-    };
-    match result {
-        Ok(value) => Json(json!({ "result": value })).into_response(),
-        Err(error) => runtime_error_response(error),
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "runtime_action_failed",
+            "runtime action could not complete",
+        ),
     }
 }
 
@@ -232,7 +318,8 @@ mod tests {
         runtime.register_action("Sales.ACT_Admin", |_store: &mut Store, _value: &Value| {
             Ok(json!(true))
         });
-        let router = RuntimeHttp::new(runtime, web.path()).router().unwrap();
+        let adapter = RuntimeHttp::new(runtime, web.path());
+        let router = adapter.router().unwrap();
         let response = router
             .oneshot(
                 Request::post("/api/microflow/Sales.ACT_Admin")
@@ -243,6 +330,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let trusted = adapter.with_security_context(SecurityContext {
+            module_roles: BTreeSet::from(["Sales.Admin".into()]),
+            ..Default::default()
+        });
+        let allowed = trusted
+            .router()
+            .unwrap()
+            .oneshot(
+                Request::post("/api/microflow/Sales.ACT_Admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &allowed.into_body().collect().await.unwrap().to_bytes()
+            )
+            .unwrap()["result"],
+            true
+        );
     }
 
     #[test]
