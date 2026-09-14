@@ -16,20 +16,21 @@ use mxrs_ir::flow::{Activity, FlowReturnType, Member};
 
 pub fn return_type_document(return_type: Option<&FlowReturnType>) -> Option<Document> {
     let return_type = return_type?;
+    let id = uuid::Uuid::new_v4().to_string();
     let document = match return_type {
-        FlowReturnType::String => doc! { "$Type": "DataTypes$StringType" },
-        FlowReturnType::Integer => doc! { "$Type": "DataTypes$IntegerType" },
-        FlowReturnType::Long => doc! { "$Type": "DataTypes$LongType" },
-        FlowReturnType::Float => doc! { "$Type": "DataTypes$FloatType" },
-        FlowReturnType::Decimal => doc! { "$Type": "DataTypes$DecimalType" },
-        FlowReturnType::Boolean => doc! { "$Type": "DataTypes$BooleanType" },
-        FlowReturnType::DateTime => doc! { "$Type": "DataTypes$DateTimeType" },
-        FlowReturnType::Binary => doc! { "$Type": "DataTypes$BinaryType" },
+        FlowReturnType::String => doc! { "$ID": id, "$Type": "DataTypes$StringType" },
+        FlowReturnType::Integer => doc! { "$ID": id, "$Type": "DataTypes$IntegerType" },
+        FlowReturnType::Long => doc! { "$ID": id, "$Type": "DataTypes$LongType" },
+        FlowReturnType::Float => doc! { "$ID": id, "$Type": "DataTypes$FloatType" },
+        FlowReturnType::Decimal => doc! { "$ID": id, "$Type": "DataTypes$DecimalType" },
+        FlowReturnType::Boolean => doc! { "$ID": id, "$Type": "DataTypes$BooleanType" },
+        FlowReturnType::DateTime => doc! { "$ID": id, "$Type": "DataTypes$DateTimeType" },
+        FlowReturnType::Binary => doc! { "$ID": id, "$Type": "DataTypes$BinaryType" },
         FlowReturnType::Object(entity) => {
-            doc! { "$Type": "DataTypes$ObjectType", "Entity": entity.clone() }
+            doc! { "$ID": id, "$Type": "DataTypes$ObjectType", "Entity": entity.clone() }
         }
         FlowReturnType::List(entity) => {
-            doc! { "$Type": "DataTypes$ListType", "Entity": entity.clone() }
+            doc! { "$ID": id, "$Type": "DataTypes$ListType", "Entity": entity.clone() }
         }
     };
     Some(document)
@@ -666,6 +667,44 @@ fn qualified_association_identifier(association: &str, entity: &str) -> String {
 mod tests {
     use super::*;
 
+    fn assert_storage_ids_first(value: &Bson) {
+        match value {
+            Bson::Document(document) => {
+                if document.contains_key("$Type") {
+                    assert_eq!(document.keys().next().map(String::as_str), Some("$ID"));
+                }
+                for value in document.values() {
+                    assert_storage_ids_first(value);
+                }
+            }
+            Bson::Array(values) => {
+                for value in values {
+                    assert_storage_ids_first(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn every_typed_return_document_starts_with_a_storage_id() {
+        for return_type in [
+            FlowReturnType::String,
+            FlowReturnType::Integer,
+            FlowReturnType::Long,
+            FlowReturnType::Float,
+            FlowReturnType::Decimal,
+            FlowReturnType::Boolean,
+            FlowReturnType::DateTime,
+            FlowReturnType::Binary,
+            FlowReturnType::Object("Sales.Order".into()),
+            FlowReturnType::List("Sales.Order".into()),
+        ] {
+            let document = return_type_document(Some(&return_type)).unwrap();
+            assert_storage_ids_first(&Bson::Document(document));
+        }
+    }
+
     #[test]
     fn a_single_activity_wires_start_activity_end() {
         let activities = vec![Activity::Commit {
@@ -777,5 +816,8 @@ mod tests {
                 .iter()
                 .any(|flow| flow.get_bool("IsErrorHandler").ok() == Some(true))
         );
+        for document in objects.iter().chain(&flows) {
+            assert_storage_ids_first(&Bson::Document(document.clone()));
+        }
     }
 }
