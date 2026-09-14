@@ -21,9 +21,9 @@ pub use application::{
 pub use declaration::{
     AccessMemberKind, AccessRuleDecl, AssociationDecl, AssociationOwner, AssociationStorage,
     AssociationType, AttributeDecl, AttributeType, ConstantDecl, ConstantType, EntityDecl,
-    EnumerationDecl, EnumerationValueDecl, ExportLevel, MemberAccessDecl, MemberRights, ModuleDecl,
-    OnOverlap, ProjectDecl, RegularExpressionDecl, ScheduleUnit, ScheduledEventDecl,
-    ScheduledEventSchedule,
+    EnumerationDecl, EnumerationValueDecl, ExportLevel, LocalizedText, MemberAccessDecl,
+    MemberRights, MenuActionDecl, MenuDecl, MenuIconDecl, MenuItemDecl, ModuleDecl, OnOverlap,
+    ProjectDecl, RegularExpressionDecl, ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule,
 };
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::{

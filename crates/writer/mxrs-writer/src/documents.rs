@@ -29,13 +29,14 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use mxrs_bson::{Bson, DateTime, Document, build_array, doc, extract_id, parse_array};
+use mxrs_bson::{Bson, DateTime, Document, build_array, extract_id, parse_array};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::flow::MicroflowDecl;
 use mxrs_ir::page::PageDecl;
 use mxrs_ir::{
-    ConstantDecl, ConstantType, EnumerationDecl, ExportLevel, OnOverlap, RegularExpressionDecl,
-    ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule,
+    ConstantDecl, ConstantType, EnumerationDecl, ExportLevel, LocalizedText, MenuActionDecl,
+    MenuDecl, MenuIconDecl, MenuItemDecl, OnOverlap, RegularExpressionDecl, ScheduleUnit,
+    ScheduledEventDecl, ScheduledEventSchedule,
 };
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
@@ -783,7 +784,14 @@ fn scheduled_event_document(
     );
     document.insert("StartDateTime", start_date_time);
     document.insert("TimeZone", declaration.time_zone.clone());
-    document.insert("Schedule", schedule_document(declaration, &schedule_id));
+    document.insert(
+        "Schedule",
+        schedule_document(
+            declaration,
+            &schedule_id,
+            existing.and_then(|document| document.get_document("Schedule").ok()),
+        ),
+    );
     document.insert("OnOverlap", on_overlap_name(declaration.on_overlap));
     document.insert("Enabled", declaration.enabled);
     document.insert("IntervalType", interval_type_name(declaration.unit));
@@ -807,32 +815,43 @@ fn qualify_microflow(module_name: &str, microflow: &str) -> String {
 
 /// Lowers the closed modern schedule variants independently of the retained
 /// legacy interval fields.
-fn schedule_document(declaration: &ScheduledEventDecl, schedule_id: &str) -> Bson {
+fn schedule_document(
+    declaration: &ScheduledEventDecl,
+    schedule_id: &str,
+    previous: Option<&Document>,
+) -> Bson {
+    let expected_type = match declaration.schedule {
+        ScheduledEventSchedule::None => return Bson::Null,
+        ScheduledEventSchedule::Minute { .. } => "ScheduledEvents$MinuteSchedule",
+        ScheduledEventSchedule::Hour { .. } => "ScheduledEvents$HourSchedule",
+        ScheduledEventSchedule::Day { .. } => "ScheduledEvents$DaySchedule",
+        ScheduledEventSchedule::Week { .. } => "ScheduledEvents$WeekSchedule",
+    };
+    let mut document = previous
+        .filter(|document| document.get_str("$Type").ok() == Some(expected_type))
+        .cloned()
+        .unwrap_or_default();
+    document.insert("$ID", schedule_id);
+    document.insert("$Type", expected_type);
     match declaration.schedule {
-        ScheduledEventSchedule::None => Bson::Null,
-        ScheduledEventSchedule::Minute { multiplier } => Bson::Document(doc! {
-            "$ID": schedule_id,
-            "$Type": "ScheduledEvents$MinuteSchedule",
-            "Multiplier": multiplier,
-        }),
+        ScheduledEventSchedule::None => unreachable!("returned above"),
+        ScheduledEventSchedule::Minute { multiplier } => {
+            document.insert("Multiplier", multiplier);
+        }
         ScheduledEventSchedule::Hour {
             multiplier,
             minute_offset,
-        } => Bson::Document(doc! {
-            "$ID": schedule_id,
-            "$Type": "ScheduledEvents$HourSchedule",
-            "Multiplier": multiplier,
-            "MinuteOffset": minute_offset,
-        }),
+        } => {
+            document.insert("Multiplier", multiplier);
+            document.insert("MinuteOffset", minute_offset);
+        }
         ScheduledEventSchedule::Day {
             hour_of_day,
             minute_of_hour,
-        } => Bson::Document(doc! {
-            "$ID": schedule_id,
-            "$Type": "ScheduledEvents$DaySchedule",
-            "HourOfDay": hour_of_day,
-            "MinuteOfHour": minute_of_hour,
-        }),
+        } => {
+            document.insert("HourOfDay", hour_of_day);
+            document.insert("MinuteOfHour", minute_of_hour);
+        }
         ScheduledEventSchedule::Week {
             hour_of_day,
             minute_of_hour,
@@ -843,20 +862,19 @@ fn schedule_document(declaration: &ScheduledEventDecl, schedule_id: &str) -> Bso
             friday,
             saturday,
             sunday,
-        } => Bson::Document(doc! {
-            "$ID": schedule_id,
-            "$Type": "ScheduledEvents$WeekSchedule",
-            "HourOfDay": hour_of_day,
-            "MinuteOfHour": minute_of_hour,
-            "Monday": monday,
-            "Tuesday": tuesday,
-            "Wednesday": wednesday,
-            "Thursday": thursday,
-            "Friday": friday,
-            "Saturday": saturday,
-            "Sunday": sunday,
-        }),
+        } => {
+            document.insert("HourOfDay", hour_of_day);
+            document.insert("MinuteOfHour", minute_of_hour);
+            document.insert("Monday", monday);
+            document.insert("Tuesday", tuesday);
+            document.insert("Wednesday", wednesday);
+            document.insert("Thursday", thursday);
+            document.insert("Friday", friday);
+            document.insert("Saturday", saturday);
+            document.insert("Sunday", sunday);
+        }
     }
+    Bson::Document(document)
 }
 
 /// Mirrors the complete legacy interval vocabulary.
@@ -877,5 +895,437 @@ fn on_overlap_name(on_overlap: OnOverlap) -> &'static str {
     match on_overlap {
         OnOverlap::SkipNext => "SkipNext",
         OnOverlap::DelayNext => "DelayNext",
+    }
+}
+
+/// Upserts complete standalone `Menus$MenuDocument` declarations. Nested
+/// identities and Mendix array markers are retained on imported documents;
+/// fresh menus receive deterministic private identities.
+pub(crate) fn synchronize_menus_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    menus: &[MenuDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    if menus.is_empty() {
+        return Ok(());
+    }
+    let existing_by_name = existing_documents_by_name(mpr, module_id, "Menus$MenuDocument")?;
+    let mut declared = HashSet::new();
+    for declaration in menus {
+        if !declared.insert(declaration.name.as_str()) {
+            return Err(crate::WriterError::DuplicateMenu {
+                module_name: module_name.to_string(),
+                name: declaration.name.clone(),
+            });
+        }
+        let qualified_name = format!("{module_name}.{}", declaration.name);
+        let existing = existing_by_name.get(&declaration.name);
+        let id = existing
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| identity.artifact_id(ArtifactKind::Menu, &qualified_name));
+        let document = menu_document(
+            declaration,
+            module_name,
+            &qualified_name,
+            &id,
+            existing.map(|(_, document)| document),
+            identity,
+        );
+        if existing.is_some() {
+            mpr.update_unit(&id, document)?;
+        } else {
+            mpr.insert_unit(module_id, "Documents", document, Some(&id))?;
+        }
+    }
+    Ok(())
+}
+
+fn menu_document(
+    declaration: &MenuDecl,
+    module_name: &str,
+    qualified_name: &str,
+    id: &str,
+    previous: Option<&Document>,
+    identity: ProjectIdentity,
+) -> Document {
+    let mut document = previous.cloned().unwrap_or_default();
+    document.insert("$ID", id);
+    document.insert("$Type", "Menus$MenuDocument");
+    document.insert("Name", declaration.name.clone());
+    document.insert("Documentation", declaration.documentation.clone());
+    document.insert("Excluded", declaration.excluded);
+    document.insert("ExportLevel", export_level_name(declaration.export_level));
+
+    let previous_collection = previous.and_then(|value| value.get_document("ItemCollection").ok());
+    let mut collection = previous_collection.cloned().unwrap_or_default();
+    nested_id(
+        &mut collection,
+        identity,
+        ArtifactKind::MenuCollection,
+        qualified_name,
+    );
+    collection.insert("$Type", "Menus$MenuItemCollection");
+    collection.insert(
+        "Items",
+        menu_items_document(
+            &declaration.items,
+            previous_collection.and_then(|value| value.get("Items")),
+            module_name,
+            qualified_name,
+            identity,
+        ),
+    );
+    document.insert("ItemCollection", collection);
+    document
+}
+
+fn menu_items_document(
+    declarations: &[MenuItemDecl],
+    previous: Option<&Bson>,
+    module_name: &str,
+    key: &str,
+    identity: ProjectIdentity,
+) -> Bson {
+    let (marker, previous_items) = bson_document_array(previous, 3);
+    let items = declarations
+        .iter()
+        .enumerate()
+        .map(|(index, declaration)| {
+            let item_key = format!("{key}:item:{index}");
+            Bson::Document(menu_item_document(
+                declaration,
+                previous_items.get(index),
+                module_name,
+                &item_key,
+                identity,
+            ))
+        })
+        .collect();
+    Bson::Array(build_array(items, marker))
+}
+
+fn menu_item_document(
+    declaration: &MenuItemDecl,
+    previous: Option<&Document>,
+    module_name: &str,
+    key: &str,
+    identity: ProjectIdentity,
+) -> Document {
+    let mut document = previous.cloned().unwrap_or_default();
+    nested_id(&mut document, identity, ArtifactKind::MenuItem, key);
+    document.insert("$Type", "Menus$MenuItem");
+    document.insert(
+        "Caption",
+        menu_text_document(
+            &declaration.caption,
+            previous.and_then(|value| value.get_document("Caption").ok()),
+            &format!("{key}:caption"),
+            identity,
+        ),
+    );
+    document.insert(
+        "AlternativeText",
+        declaration
+            .alternative_text
+            .as_ref()
+            .map_or(Bson::Null, |text| {
+                Bson::Document(menu_text_document(
+                    text,
+                    previous.and_then(|value| value.get_document("AlternativeText").ok()),
+                    &format!("{key}:alternative"),
+                    identity,
+                ))
+            }),
+    );
+    document.insert(
+        "Action",
+        menu_action_document(
+            &declaration.action,
+            previous.and_then(|value| value.get_document("Action").ok()),
+            module_name,
+            &format!("{key}:action"),
+            identity,
+        ),
+    );
+    document.insert(
+        "Icon",
+        menu_icon_document(
+            declaration.icon.as_ref(),
+            previous.and_then(|value| value.get_document("Icon").ok()),
+            &format!("{key}:icon"),
+            identity,
+        ),
+    );
+    document.insert(
+        "Items",
+        menu_items_document(
+            &declaration.items,
+            previous.and_then(|value| value.get("Items")),
+            module_name,
+            key,
+            identity,
+        ),
+    );
+    document
+}
+
+fn menu_icon_document(
+    declaration: Option<&MenuIconDecl>,
+    previous: Option<&Document>,
+    key: &str,
+    identity: ProjectIdentity,
+) -> Bson {
+    let Some(declaration) = declaration else {
+        return Bson::Null;
+    };
+    let expected_type = match declaration {
+        MenuIconDecl::Glyph(_) => "Forms$GlyphIcon",
+        MenuIconDecl::Image(_) => "Forms$IconCollectionIcon",
+    };
+    let mut document = previous
+        .filter(|value| value.get_str("$Type").ok() == Some(expected_type))
+        .cloned()
+        .unwrap_or_default();
+    nested_id(&mut document, identity, ArtifactKind::MenuIcon, key);
+    document.insert("$Type", expected_type);
+    match declaration {
+        MenuIconDecl::Glyph(code) => document.insert("Code", *code),
+        MenuIconDecl::Image(image) => document.insert("Image", image.clone()),
+    };
+    Bson::Document(document)
+}
+
+fn menu_action_document(
+    declaration: &MenuActionDecl,
+    previous: Option<&Document>,
+    module_name: &str,
+    key: &str,
+    identity: ProjectIdentity,
+) -> Document {
+    let expected_type = match declaration {
+        MenuActionDecl::None { .. } => "Forms$NoAction",
+        MenuActionDecl::OpenPage { .. } => "Forms$FormAction",
+        MenuActionDecl::CreateObjectAndOpenPage { .. } => "Forms$CreateObjectClientAction",
+    };
+    let mut action = previous
+        .filter(|value| value.get_str("$Type").ok() == Some(expected_type))
+        .cloned()
+        .unwrap_or_default();
+    nested_id(&mut action, identity, ArtifactKind::MenuAction, key);
+    action.insert("$Type", expected_type);
+    match declaration {
+        MenuActionDecl::None {
+            disabled_during_execution,
+        } => {
+            action.insert("DisabledDuringExecution", *disabled_during_execution);
+        }
+        MenuActionDecl::OpenPage {
+            page,
+            disabled_during_execution,
+            pages_to_close,
+            title_override,
+        } => {
+            action.insert("DisabledDuringExecution", *disabled_during_execution);
+            action.insert(
+                "FormSettings",
+                menu_form_settings(
+                    page,
+                    title_override.as_ref(),
+                    previous.and_then(|value| value.get_document("FormSettings").ok()),
+                    module_name,
+                    &format!("{key}:settings"),
+                    identity,
+                ),
+            );
+            action.insert(
+                "NumberOfPagesToClose2",
+                pages_to_close_string(*pages_to_close),
+            );
+            action.insert(
+                "PagesForSpecializations",
+                empty_array_preserving_marker(
+                    previous.and_then(|value| value.get("PagesForSpecializations")),
+                    2,
+                ),
+            );
+        }
+        MenuActionDecl::CreateObjectAndOpenPage {
+            entity,
+            page,
+            disabled_during_execution,
+            pages_to_close,
+            title_override,
+        } => {
+            action.insert("DisabledDuringExecution", *disabled_during_execution);
+            let previous_ref = previous.and_then(|value| value.get_document("EntityRef").ok());
+            let mut entity_ref = previous_ref.cloned().unwrap_or_default();
+            nested_id(
+                &mut entity_ref,
+                identity,
+                ArtifactKind::MenuActionSettings,
+                &format!("{key}:entity"),
+            );
+            entity_ref.insert("$Type", "DomainModels$DirectEntityRef");
+            entity_ref.insert("Entity", qualify_reference(module_name, entity));
+            action.insert("EntityRef", entity_ref);
+            action.insert(
+                "NumberOfPagesToClose2",
+                pages_to_close_string(*pages_to_close),
+            );
+            action.insert(
+                "PageSettings",
+                menu_form_settings(
+                    page,
+                    title_override.as_ref(),
+                    previous.and_then(|value| value.get_document("PageSettings").ok()),
+                    module_name,
+                    &format!("{key}:settings"),
+                    identity,
+                ),
+            );
+        }
+    }
+    action
+}
+
+fn menu_form_settings(
+    page: &str,
+    title_override: Option<&LocalizedText>,
+    previous: Option<&Document>,
+    module_name: &str,
+    key: &str,
+    identity: ProjectIdentity,
+) -> Document {
+    let mut settings = previous.cloned().unwrap_or_default();
+    nested_id(
+        &mut settings,
+        identity,
+        ArtifactKind::MenuActionSettings,
+        key,
+    );
+    settings.insert("$Type", "Forms$FormSettings");
+    settings.insert("Form", qualify_reference(module_name, page));
+    settings.insert(
+        "ParameterMappings",
+        empty_array_preserving_marker(previous.and_then(|value| value.get("ParameterMappings")), 2),
+    );
+    settings.insert(
+        "TitleOverride",
+        title_override.map_or(Bson::Null, |translations| {
+            let previous_template =
+                previous.and_then(|value| value.get_document("TitleOverride").ok());
+            let mut template = previous_template.cloned().unwrap_or_default();
+            nested_id(
+                &mut template,
+                identity,
+                ArtifactKind::MenuTextTemplate,
+                &format!("{key}:title"),
+            );
+            template.insert("$Type", "Microflows$TextTemplate");
+            template.insert(
+                "Parameters",
+                empty_array_preserving_marker(
+                    previous_template.and_then(|value| value.get("Parameters")),
+                    2,
+                ),
+            );
+            template.insert(
+                "Text",
+                menu_text_document(
+                    translations,
+                    previous_template.and_then(|value| value.get_document("Text").ok()),
+                    &format!("{key}:title:text"),
+                    identity,
+                ),
+            );
+            Bson::Document(template)
+        }),
+    );
+    settings
+}
+
+fn menu_text_document(
+    translations: &LocalizedText,
+    previous: Option<&Document>,
+    key: &str,
+    identity: ProjectIdentity,
+) -> Document {
+    let mut text = previous.cloned().unwrap_or_default();
+    nested_id(&mut text, identity, ArtifactKind::MenuText, key);
+    text.insert("$Type", "Texts$Text");
+    let (marker, prior_items) =
+        bson_document_array(previous.and_then(|value| value.get("Items")), 3);
+    let prior_by_language = prior_items
+        .iter()
+        .filter_map(|item| Some((item.get_str("LanguageCode").ok()?.to_string(), item)))
+        .collect::<HashMap<_, _>>();
+    let items = translations
+        .iter()
+        .map(|(language, value)| {
+            let mut translation = prior_by_language
+                .get(language)
+                .map(|item| (*item).clone())
+                .unwrap_or_default();
+            nested_id(
+                &mut translation,
+                identity,
+                ArtifactKind::Translation,
+                &format!("{key}:{language}"),
+            );
+            translation.insert("$Type", "Texts$Translation");
+            translation.insert("LanguageCode", language.clone());
+            translation.insert("Text", value.clone());
+            Bson::Document(translation)
+        })
+        .collect();
+    text.insert("Items", build_array(items, marker));
+    text
+}
+
+fn bson_document_array(value: Option<&Bson>, default_marker: i32) -> (i32, Vec<Document>) {
+    let Some(Bson::Array(values)) = value else {
+        return (default_marker, vec![]);
+    };
+    let parsed = parse_array(Some(values));
+    let documents = parsed
+        .items
+        .into_iter()
+        .filter_map(|value| value.as_document().cloned())
+        .collect();
+    (parsed.marker, documents)
+}
+
+fn empty_array_preserving_marker(previous: Option<&Bson>, default_marker: i32) -> Bson {
+    let marker = previous
+        .and_then(Bson::as_array)
+        .map(|values| parse_array(Some(values)).marker)
+        .unwrap_or(default_marker);
+    Bson::Array(build_array(vec![], marker))
+}
+
+fn nested_id(document: &mut Document, identity: ProjectIdentity, kind: ArtifactKind, key: &str) {
+    if document.get("$ID").and_then(extract_id).is_none() {
+        document.insert("$ID", identity.artifact_id(kind, key));
+    }
+}
+
+fn qualify_reference(module_name: &str, reference: &str) -> String {
+    if reference.contains('.') {
+        reference.to_string()
+    } else {
+        format!("{module_name}.{reference}")
+    }
+}
+
+fn pages_to_close_string(value: Option<u32>) -> String {
+    value.map_or_else(String::new, |value| value.to_string())
+}
+
+fn export_level_name(value: ExportLevel) -> &'static str {
+    match value {
+        ExportLevel::Hidden => "Hidden",
+        ExportLevel::Published => "Published",
     }
 }

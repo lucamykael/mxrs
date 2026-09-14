@@ -1682,3 +1682,81 @@ fn an_access_rule_with_no_roles_fails_instead_of_granting_rights_to_nobody() {
             if module_name == "Sales" && name == "Order"
     ));
 }
+
+#[test]
+fn standalone_menu_writes_all_typed_actions_icons_and_localized_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Menus.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |module| {
+        module.menu("Main", |menu| {
+            menu.documentation("Application menu").item("Home", |item| {
+                item.caption("pt_BR", "Início")
+                    .image("Atlas_Core.Atlas_Filled.home")
+                    .page("Home");
+            });
+            menu.item("Create", |item| {
+                let mut title = mxrs_ir::LocalizedText::new();
+                title.insert("en_US".into(), "New order".into());
+                item.glyph(57_377)
+                    .action(mxrs_ir::MenuActionDecl::CreateObjectAndOpenPage {
+                        entity: "Order".into(),
+                        page: "NewOrder".into(),
+                        disabled_during_execution: true,
+                        pages_to_close: Some(1),
+                        title_override: Some(title),
+                    });
+            });
+        });
+    });
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let mpr = mxrs_mpr::MprFile::open(&path, true).unwrap();
+    let menu = mpr
+        .all_units()
+        .unwrap()
+        .into_iter()
+        .map(|unit| mpr.parse_contents(&unit).unwrap())
+        .find(|document| {
+            document.get_str("$Type").ok() == Some("Menus$MenuDocument")
+                && document.get_str("Name").ok() == Some("Main")
+        })
+        .unwrap();
+    assert_eq!(menu.get_str("Documentation").unwrap(), "Application menu");
+    let items = mxrs_bson::parse_array(Some(
+        menu.get_document("ItemCollection")
+            .unwrap()
+            .get_array("Items")
+            .unwrap(),
+    ));
+    assert_eq!(items.marker, 3);
+    let home = items.items[0].as_document().unwrap();
+    assert_eq!(
+        home.get_document("Action")
+            .unwrap()
+            .get_document("FormSettings")
+            .unwrap()
+            .get_str("Form")
+            .unwrap(),
+        "Sales.Home"
+    );
+    assert_eq!(
+        home.get_document("Icon").unwrap().get_str("Image").unwrap(),
+        "Atlas_Core.Atlas_Filled.home"
+    );
+    let create = items.items[1].as_document().unwrap();
+    let action = create.get_document("Action").unwrap();
+    assert_eq!(
+        action.get_str("$Type").unwrap(),
+        "Forms$CreateObjectClientAction"
+    );
+    assert_eq!(
+        action
+            .get_document("EntityRef")
+            .unwrap()
+            .get_str("Entity")
+            .unwrap(),
+        "Sales.Order"
+    );
+    assert_eq!(action.get_str("NumberOfPagesToClose2").unwrap(), "1");
+}

@@ -5,6 +5,7 @@ use crate::constant::ConstantBuilder;
 use crate::entity::EntityBuilder;
 use crate::enumeration::EnumerationBuilder;
 use crate::flow::FlowBuilder;
+use crate::menu::MenuBuilder;
 use crate::page::{LayoutBuilder, PageBuilder};
 use crate::regular_expression::RegularExpressionBuilder;
 use crate::scheduled_event::ScheduledEventBuilder;
@@ -23,6 +24,7 @@ impl ModuleBuilder {
                 constants: vec![],
                 regular_expressions: vec![],
                 scheduled_events: vec![],
+                menus: vec![],
                 microflows: vec![],
                 nanoflows: vec![],
                 pages: vec![],
@@ -122,6 +124,19 @@ impl ModuleBuilder {
         let mut builder = ScheduledEventBuilder::new(name, microflow, unit);
         configure(&mut builder);
         self.decl.scheduled_events.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a standalone menu document. This is distinct from the
+    /// project navigation profiles and can be referenced by menu widgets.
+    pub fn menu(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut MenuBuilder),
+    ) -> &mut Self {
+        let mut builder = MenuBuilder::new(name);
+        configure(&mut builder);
+        self.decl.menus.push(builder.into_decl());
         self
     }
 

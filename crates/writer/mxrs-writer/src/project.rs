@@ -166,6 +166,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.scheduled_events,
             identity,
         )?;
+        documents::synchronize_menus_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.menus,
+            identity,
+        )?;
         crate::layout_compiler::synchronize_layouts_with_identity(
             &mut mpr,
             &module_id,
@@ -192,7 +199,8 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
     Ok(())
 }
 
-/// Applies only enumeration, constant, regular-expression, and scheduled-event
+/// Applies only enumeration, constant, regular-expression, scheduled-event,
+/// and standalone-menu
 /// declarations to an imported model.
 ///
 /// This narrow entry point is used by the portability verifier: it proves
@@ -213,6 +221,7 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
             && declaration.constants.is_empty()
             && declaration.regular_expressions.is_empty()
             && declaration.scheduled_events.is_empty()
+            && declaration.menus.is_empty()
         {
             continue;
         }
@@ -245,6 +254,13 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
             module_id,
             &declaration.name,
             &declaration.scheduled_events,
+            identity,
+        )?;
+        documents::synchronize_menus_with_identity(
+            &mut mpr,
+            module_id,
+            &declaration.name,
+            &declaration.menus,
             identity,
         )?;
     }

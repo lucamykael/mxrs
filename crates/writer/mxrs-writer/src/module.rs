@@ -143,6 +143,8 @@ pub fn write_module(
         identity,
     )?;
 
+    documents::synchronize_menus_with_identity(mpr, &module_id, &decl.name, &decl.menus, identity)?;
+
     crate::layout_compiler::synchronize_layouts_with_identity(
         mpr,
         &module_id,

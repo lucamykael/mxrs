@@ -128,7 +128,9 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
         let typed = typed_pages_by_type.get(&native_type).copied().unwrap_or(0)
             + if matches!(
                 native_type.as_str(),
-                "RegularExpressions$RegularExpression" | "ScheduledEvents$ScheduledEvent"
+                "RegularExpressions$RegularExpression"
+                    | "ScheduledEvents$ScheduledEvent"
+                    | "Menus$MenuDocument"
             ) {
                 editable
             } else {
@@ -140,7 +142,9 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
                 total.saturating_sub(typed),
                 if matches!(
                     native_type.as_str(),
-                    "RegularExpressions$RegularExpression" | "ScheduledEvents$ScheduledEvent"
+                    "RegularExpressions$RegularExpression"
+                        | "ScheduledEvents$ScheduledEvent"
+                        | "Menus$MenuDocument"
                 ) {
                     "the complete semantic document is emitted as typed Rust and byte-exactly round-tripped"
                         .to_string()
@@ -316,6 +320,13 @@ fn editable_unit_snapshots(
                         document.name.clone(),
                     )
                 }))
+                .chain(module.menus.iter().map(|document| {
+                    (
+                        module.name.clone(),
+                        "Menus$MenuDocument",
+                        document.name.clone(),
+                    )
+                }))
         })
         .collect::<std::collections::HashSet<_>>();
     let units = project.all_units()?;
@@ -343,6 +354,7 @@ fn editable_unit_snapshots(
                 | "Constants$Constant"
                 | "RegularExpressions$RegularExpression"
                 | "ScheduledEvents$ScheduledEvent"
+                | "Menus$MenuDocument"
         ) {
             continue;
         }
@@ -535,6 +547,11 @@ mod tests {
             });
             module.microflow("Save", |_| {});
             module.scheduled_event("Nightly", "Save", mxrs_ir::ScheduleUnit::Days, |_| {});
+            module.menu("Main", |menu| {
+                menu.item("Home", |item| {
+                    item.page("Home");
+                });
+            });
         });
         mxrs_writer::write_project(&path, &project.build()).unwrap();
         (directory, path)
@@ -567,6 +584,10 @@ mod tests {
             family("ScheduledEvents$ScheduledEvent").status,
             PortabilityStatus::Typed
         );
+        assert_eq!(
+            family("Menus$MenuDocument").status,
+            PortabilityStatus::Typed
+        );
         assert!(report.model_lossless);
         assert!(!report.fully_typed);
         assert!(report.requires_imported_model);
@@ -594,7 +615,7 @@ mod tests {
         let report = verify_editable_document_round_trip(path).unwrap();
         assert!(report.passed, "{:?}", report.failures);
         assert_eq!(report.source_units, report.rebuilt_units);
-        assert_eq!(report.candidate_units, 4);
-        assert_eq!(report.byte_identical_units, 4);
+        assert_eq!(report.candidate_units, 5);
+        assert_eq!(report.byte_identical_units, 5);
     }
 }

@@ -118,6 +118,9 @@ pub enum WriterError {
     #[error("duplicate scheduled event {module_name}.{name:?} declared while synchronizing")]
     DuplicateScheduledEvent { module_name: String, name: String },
 
+    #[error("duplicate menu {module_name}.{name:?} declared while synchronizing")]
+    DuplicateMenu { module_name: String, name: String },
+
     #[error("scheduled event {name:?} declares a negative legacy interval ({interval})")]
     InvalidScheduleInterval { name: String, interval: i64 },
 

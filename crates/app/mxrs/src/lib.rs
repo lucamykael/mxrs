@@ -7,9 +7,9 @@
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, ConstantBuilder, ContainerBuilder, DataViewBuilder, EntityBuilder,
     EnumerationBuilder, FlowBuilder, LayoutBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
-    LayoutGridRowBuilder, ModuleBuilder, NavigationBuilder, NavigationItemBuilder,
-    NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder, ProjectBuilder,
-    ScheduledEventBuilder, SecurityBuilder, UserRoleBuilder,
+    LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder, ModuleBuilder, NavigationBuilder,
+    NavigationItemBuilder, NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder,
+    ProjectBuilder, ScheduledEventBuilder, SecurityBuilder, UserRoleBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
@@ -63,11 +63,12 @@ pub mod prelude {
         ApplicationDefinition, AssociationMarker, AttributeMarker, ButtonBuilder, CallArgument,
         ConstantBuilder, ConstantType, ContainerBuilder, DataViewBuilder, EntityMarker,
         EnumerationBuilder, EnumerationMarker, Expr, FlowBuilder, LayoutGridBuilder, MendixType,
-        MicroflowMarker, MicroflowRef, ModuleBuilder, MxBool, MxDecimal, MxEntity, MxEnumeration,
-        MxFloat, MxInteger, MxLong, MxString, NanoflowMarker, NanoflowRef, NavigationBuilder,
-        NavigationItemBuilder, NavigationProfileBuilder, OnOverlap, PageBuilder, ProjectBuilder,
-        Ref, Reference, ReferenceSet, RenderExpr, ScheduleUnit, ScheduledEventBuilder,
-        SecurityBuilder, SecurityLevel, TypedAttributeMarker, UserRoleBuilder, Var, application,
-        boolean, decimal, float, integer, long, project, string,
+        MenuActionDecl, MenuBuilder, MenuIconDecl, MenuItemBuilder, MicroflowMarker, MicroflowRef,
+        ModuleBuilder, MxBool, MxDecimal, MxEntity, MxEnumeration, MxFloat, MxInteger, MxLong,
+        MxString, NanoflowMarker, NanoflowRef, NavigationBuilder, NavigationItemBuilder,
+        NavigationProfileBuilder, OnOverlap, PageBuilder, ProjectBuilder, Ref, Reference,
+        ReferenceSet, RenderExpr, ScheduleUnit, ScheduledEventBuilder, SecurityBuilder,
+        SecurityLevel, TypedAttributeMarker, UserRoleBuilder, Var, application, boolean, decimal,
+        float, integer, long, project, string,
     };
 }

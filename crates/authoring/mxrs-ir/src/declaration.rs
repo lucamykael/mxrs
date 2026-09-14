@@ -373,6 +373,79 @@ pub struct ScheduledEventDecl {
     pub enabled: bool,
 }
 
+/// Localized user-facing text, keyed by Mendix language code (`en_US`,
+/// `pt_BR`, ...). A map keeps generated declarations deterministic while
+/// retaining every translation as editable text.
+pub type LocalizedText = std::collections::BTreeMap<String, String>;
+
+/// Icon variants supported by standalone Mendix menu documents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuIconDecl {
+    /// Numeric code from the legacy Mendix glyph font.
+    Glyph(i64),
+    /// Qualified image from an icon collection.
+    Image(String),
+}
+
+/// A typed destination for a standalone menu item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuActionDecl {
+    None {
+        disabled_during_execution: bool,
+    },
+    OpenPage {
+        page: String,
+        disabled_during_execution: bool,
+        pages_to_close: Option<u32>,
+        title_override: Option<LocalizedText>,
+    },
+    CreateObjectAndOpenPage {
+        entity: String,
+        page: String,
+        disabled_during_execution: bool,
+        pages_to_close: Option<u32>,
+        title_override: Option<LocalizedText>,
+    },
+}
+
+impl Default for MenuActionDecl {
+    fn default() -> Self {
+        Self::None {
+            disabled_during_execution: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MenuItemDecl {
+    pub caption: LocalizedText,
+    pub alternative_text: Option<LocalizedText>,
+    pub action: MenuActionDecl,
+    pub icon: Option<MenuIconDecl>,
+    pub items: Vec<MenuItemDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuDecl {
+    pub name: String,
+    pub documentation: String,
+    pub excluded: bool,
+    pub export_level: ExportLevel,
+    pub items: Vec<MenuItemDecl>,
+}
+
+impl MenuDecl {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            documentation: String::new(),
+            excluded: false,
+            export_level: ExportLevel::Hidden,
+            items: vec![],
+        }
+    }
+}
+
 impl ScheduledEventDecl {
     /// Defaults mirror `Writer#scheduled_event_doc`: UTC, enabled, skip an
     /// overlapping run, and an interval of one `unit`.
@@ -417,6 +490,7 @@ pub struct ModuleDecl {
     pub constants: Vec<ConstantDecl>,
     pub regular_expressions: Vec<RegularExpressionDecl>,
     pub scheduled_events: Vec<ScheduledEventDecl>,
+    pub menus: Vec<MenuDecl>,
     pub microflows: Vec<MicroflowDecl>,
     /// Client-side flows. They share the semantic flow IR with microflows,
     /// but persist as `Microflows$Nanoflow` documents and have an independent
@@ -472,6 +546,7 @@ impl ProjectDecl {
             .regular_expressions
             .extend(declared.regular_expressions);
         target.scheduled_events.extend(declared.scheduled_events);
+        target.menus.extend(declared.menus);
         target.microflows.extend(declared.microflows);
         target.nanoflows.extend(declared.nanoflows);
         target.pages.extend(declared.pages);

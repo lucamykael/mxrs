@@ -405,6 +405,10 @@ enum EditableDocument {
         module: String,
         declaration: mxrs_ir::ScheduledEventDecl,
     },
+    Menu {
+        module: String,
+        declaration: mxrs_ir::MenuDecl,
+    },
 }
 
 fn render_documents_module(
@@ -421,12 +425,13 @@ fn render_documents_module(
             EditableDocument::Constant { .. } => "Constants$Constant",
             EditableDocument::RegularExpression { .. } => "RegularExpressions$RegularExpression",
             EditableDocument::ScheduledEvent { .. } => "ScheduledEvents$ScheduledEvent",
+            EditableDocument::Menu { .. } => "Menus$MenuDocument",
         };
         *editable_counts.entry(native_type).or_default() += 1;
     }
 
     let mut source = String::from(
-        "//! Editable Cargo-native enumerations, constants, regular expressions, and scheduled events.\n\n\
+        "//! Editable Cargo-native enumerations, constants, regular expressions, scheduled events, and menus.\n\n\
          fn declarations() -> ::mxrs_ir::ProjectDecl {\n\
              let mut project = ::mxrs_dsl::ProjectBuilder::new(",
     );
@@ -460,6 +465,7 @@ fn render_documents_module(
                      target.constants.extend(declared.constants);\n\
                      target.regular_expressions.extend(declared.regular_expressions);\n\
                      target.scheduled_events.extend(declared.scheduled_events);\n\
+                     target.menus.extend(declared.menus);\n\
                  } else {\n\
                      project.modules.push(declared);\n\
                  }\n\
@@ -603,6 +609,15 @@ fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>
                     continue;
                 };
                 declarations.push(EditableDocument::ScheduledEvent {
+                    module,
+                    declaration,
+                });
+            }
+            Some("Menus$MenuDocument") => {
+                let Some(declaration) = parse_complete_menu(&document) else {
+                    continue;
+                };
+                declarations.push(EditableDocument::Menu {
                     module,
                     declaration,
                 });
@@ -805,6 +820,271 @@ fn parse_complete_event_schedule(
     }
 }
 
+fn parse_complete_menu(document: &mxrs_bson::Document) -> Option<mxrs_ir::MenuDecl> {
+    if !exact_document(
+        document,
+        &[
+            "$ID",
+            "$Type",
+            "Documentation",
+            "Excluded",
+            "ExportLevel",
+            "ItemCollection",
+            "Name",
+        ],
+        "Menus$MenuDocument",
+    ) {
+        return None;
+    }
+    let collection = document.get_document("ItemCollection").ok()?;
+    if !exact_document(
+        collection,
+        &["$ID", "$Type", "Items"],
+        "Menus$MenuItemCollection",
+    ) {
+        return None;
+    }
+    let items = complete_document_array(collection.get("Items")?)?
+        .into_iter()
+        .map(parse_complete_menu_item)
+        .collect::<Option<Vec<_>>>()?;
+    Some(mxrs_ir::MenuDecl {
+        name: document.get_str("Name").ok()?.to_string(),
+        documentation: document.get_str("Documentation").ok()?.to_string(),
+        excluded: document.get_bool("Excluded").ok()?,
+        export_level: match document.get_str("ExportLevel").ok()? {
+            "Hidden" => mxrs_ir::ExportLevel::Hidden,
+            "Published" => mxrs_ir::ExportLevel::Published,
+            _ => return None,
+        },
+        items,
+    })
+}
+
+fn parse_complete_menu_item(document: &mxrs_bson::Document) -> Option<mxrs_ir::MenuItemDecl> {
+    if !exact_document(
+        document,
+        &[
+            "$ID",
+            "$Type",
+            "Action",
+            "AlternativeText",
+            "Caption",
+            "Icon",
+            "Items",
+        ],
+        "Menus$MenuItem",
+    ) {
+        return None;
+    }
+    let alternative_text = match document.get("AlternativeText")? {
+        mxrs_bson::Bson::Null => None,
+        mxrs_bson::Bson::Document(text) => Some(parse_complete_menu_text(text)?),
+        _ => return None,
+    };
+    let icon = match document.get("Icon")? {
+        mxrs_bson::Bson::Null => None,
+        mxrs_bson::Bson::Document(icon) => Some(parse_complete_menu_icon(icon)?),
+        _ => return None,
+    };
+    let items = complete_document_array(document.get("Items")?)?
+        .into_iter()
+        .map(parse_complete_menu_item)
+        .collect::<Option<Vec<_>>>()?;
+    Some(mxrs_ir::MenuItemDecl {
+        caption: parse_complete_menu_text(document.get_document("Caption").ok()?)?,
+        alternative_text,
+        action: parse_complete_menu_action(document.get_document("Action").ok()?)?,
+        icon,
+        items,
+    })
+}
+
+fn parse_complete_menu_icon(document: &mxrs_bson::Document) -> Option<mxrs_ir::MenuIconDecl> {
+    match document.get_str("$Type").ok()? {
+        "Forms$GlyphIcon"
+            if exact_document(document, &["$ID", "$Type", "Code"], "Forms$GlyphIcon") =>
+        {
+            Some(mxrs_ir::MenuIconDecl::Glyph(document.get_i64("Code").ok()?))
+        }
+        "Forms$IconCollectionIcon"
+            if exact_document(
+                document,
+                &["$ID", "$Type", "Image"],
+                "Forms$IconCollectionIcon",
+            ) =>
+        {
+            Some(mxrs_ir::MenuIconDecl::Image(
+                document.get_str("Image").ok()?.to_string(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn parse_complete_menu_action(document: &mxrs_bson::Document) -> Option<mxrs_ir::MenuActionDecl> {
+    match document.get_str("$Type").ok()? {
+        "Forms$NoAction"
+            if exact_document(
+                document,
+                &["$ID", "$Type", "DisabledDuringExecution"],
+                "Forms$NoAction",
+            ) =>
+        {
+            Some(mxrs_ir::MenuActionDecl::None {
+                disabled_during_execution: document.get_bool("DisabledDuringExecution").ok()?,
+            })
+        }
+        "Forms$FormAction"
+            if exact_document(
+                document,
+                &[
+                    "$ID",
+                    "$Type",
+                    "DisabledDuringExecution",
+                    "FormSettings",
+                    "NumberOfPagesToClose2",
+                    "PagesForSpecializations",
+                ],
+                "Forms$FormAction",
+            ) && complete_empty_array(document.get("PagesForSpecializations")?) =>
+        {
+            let (page, title_override) =
+                parse_complete_menu_form_settings(document.get_document("FormSettings").ok()?)?;
+            Some(mxrs_ir::MenuActionDecl::OpenPage {
+                page,
+                disabled_during_execution: document.get_bool("DisabledDuringExecution").ok()?,
+                pages_to_close: parse_pages_to_close(
+                    document.get_str("NumberOfPagesToClose2").ok()?,
+                )?,
+                title_override,
+            })
+        }
+        "Forms$CreateObjectClientAction"
+            if exact_document(
+                document,
+                &[
+                    "$ID",
+                    "$Type",
+                    "DisabledDuringExecution",
+                    "EntityRef",
+                    "NumberOfPagesToClose2",
+                    "PageSettings",
+                ],
+                "Forms$CreateObjectClientAction",
+            ) =>
+        {
+            let entity_ref = document.get_document("EntityRef").ok()?;
+            if !exact_document(
+                entity_ref,
+                &["$ID", "$Type", "Entity"],
+                "DomainModels$DirectEntityRef",
+            ) {
+                return None;
+            }
+            let (page, title_override) =
+                parse_complete_menu_form_settings(document.get_document("PageSettings").ok()?)?;
+            Some(mxrs_ir::MenuActionDecl::CreateObjectAndOpenPage {
+                entity: entity_ref.get_str("Entity").ok()?.to_string(),
+                page,
+                disabled_during_execution: document.get_bool("DisabledDuringExecution").ok()?,
+                pages_to_close: parse_pages_to_close(
+                    document.get_str("NumberOfPagesToClose2").ok()?,
+                )?,
+                title_override,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_complete_menu_form_settings(
+    document: &mxrs_bson::Document,
+) -> Option<(String, Option<mxrs_ir::LocalizedText>)> {
+    if !exact_document(
+        document,
+        &["$ID", "$Type", "Form", "ParameterMappings", "TitleOverride"],
+        "Forms$FormSettings",
+    ) || !complete_empty_array(document.get("ParameterMappings")?)
+    {
+        return None;
+    }
+    let title = match document.get("TitleOverride")? {
+        mxrs_bson::Bson::Null => None,
+        mxrs_bson::Bson::Document(template)
+            if exact_document(
+                template,
+                &["$ID", "$Type", "Parameters", "Text"],
+                "Microflows$TextTemplate",
+            ) && complete_empty_array(template.get("Parameters")?) =>
+        {
+            Some(parse_complete_menu_text(
+                template.get_document("Text").ok()?,
+            )?)
+        }
+        _ => return None,
+    };
+    Some((document.get_str("Form").ok()?.to_string(), title))
+}
+
+fn parse_complete_menu_text(document: &mxrs_bson::Document) -> Option<mxrs_ir::LocalizedText> {
+    if !exact_document(document, &["$ID", "$Type", "Items"], "Texts$Text") {
+        return None;
+    }
+    let mut translations = mxrs_ir::LocalizedText::new();
+    for translation in complete_document_array(document.get("Items")?)? {
+        if !exact_document(
+            translation,
+            &["$ID", "$Type", "LanguageCode", "Text"],
+            "Texts$Translation",
+        ) {
+            return None;
+        }
+        let language = translation.get_str("LanguageCode").ok()?.to_string();
+        let text = translation.get_str("Text").ok()?.to_string();
+        if translations.insert(language, text).is_some() {
+            return None;
+        }
+    }
+    Some(translations)
+}
+
+fn exact_document(document: &mxrs_bson::Document, fields: &[&str], native_type: &str) -> bool {
+    document.len() == fields.len()
+        && document
+            .keys()
+            .all(|field| fields.contains(&field.as_str()))
+        && document
+            .get("$ID")
+            .and_then(mxrs_bson::extract_id)
+            .is_some()
+        && document.get_str("$Type").ok() == Some(native_type)
+}
+
+fn complete_document_array(value: &mxrs_bson::Bson) -> Option<Vec<&mxrs_bson::Document>> {
+    let mxrs_bson::Bson::Array(values) = value else {
+        return None;
+    };
+    let (marker, items) = values.split_first()?;
+    match marker {
+        mxrs_bson::Bson::Int32(_) | mxrs_bson::Bson::Int64(_) => {}
+        _ => return None,
+    }
+    items.iter().map(mxrs_bson::Bson::as_document).collect()
+}
+
+fn complete_empty_array(value: &mxrs_bson::Bson) -> bool {
+    complete_document_array(value).is_some_and(|items| items.is_empty())
+}
+
+fn parse_pages_to_close(value: &str) -> Option<Option<u32>> {
+    if value.is_empty() {
+        Some(None)
+    } else {
+        value.parse().ok().map(Some)
+    }
+}
+
 fn render_editable_document_body(source: &mut String, declaration: EditableDocument) {
     match declaration {
         EditableDocument::Enumeration {
@@ -931,6 +1211,10 @@ fn render_editable_document_body(source: &mut String, declaration: EditableDocum
             module: _,
             declaration,
         } => render_scheduled_event_body(source, &declaration),
+        EditableDocument::Menu {
+            module: _,
+            declaration,
+        } => render_menu_body(source, &declaration),
     }
 }
 
@@ -1019,12 +1303,191 @@ fn render_event_schedule(schedule: &mxrs_ir::ScheduledEventSchedule) -> String {
     }
 }
 
+fn render_menu_body(source: &mut String, menu: &mxrs_ir::MenuDecl) {
+    let _ = writeln!(
+        source,
+        "        module.menu({}, |menu| {{",
+        rust_string(&menu.name)
+    );
+    if !menu.documentation.is_empty() {
+        let _ = writeln!(
+            source,
+            "            menu.documentation({});",
+            rust_string(&menu.documentation)
+        );
+    }
+    if menu.excluded {
+        source.push_str("            menu.excluded(true);\n");
+    }
+    if menu.export_level != mxrs_ir::ExportLevel::Hidden {
+        let _ = writeln!(
+            source,
+            "            menu.export_level(::mxrs_ir::ExportLevel::{:?});",
+            menu.export_level
+        );
+    }
+    for item in &menu.items {
+        render_menu_item(source, item, 3, "menu");
+    }
+    source.push_str("        });\n");
+}
+
+fn render_menu_item(source: &mut String, item: &mxrs_ir::MenuItemDecl, depth: usize, parent: &str) {
+    let indent = "    ".repeat(depth);
+    let default_action = matches!(
+        item.action,
+        mxrs_ir::MenuActionDecl::None {
+            disabled_during_execution: true
+        }
+    );
+    let only_primary_caption = item.caption.len() == 1 && item.caption.contains_key("en_US");
+    let has_body = !default_action
+        || item.icon.is_some()
+        || item.alternative_text.is_some()
+        || !item.items.is_empty()
+        || !only_primary_caption;
+    let parameter = if has_body { "item" } else { "_" };
+    if let Some(caption) = item.caption.get("en_US") {
+        let _ = writeln!(
+            source,
+            "{indent}{parent}.item({}, |{parameter}| {{",
+            rust_string(caption)
+        );
+    } else {
+        let _ = writeln!(
+            source,
+            "{indent}{parent}.localized_item({}, |{parameter}| {{",
+            localized_text_expression(&item.caption)
+        );
+    }
+    if has_body {
+        for (locale, caption) in &item.caption {
+            if locale != "en_US" {
+                let _ = writeln!(
+                    source,
+                    "{indent}    item.caption({}, {});",
+                    rust_string(locale),
+                    rust_string(caption)
+                );
+            }
+        }
+        if let Some(alternative_text) = &item.alternative_text {
+            for (locale, text) in alternative_text {
+                let _ = writeln!(
+                    source,
+                    "{indent}    item.alternative_text({}, {});",
+                    rust_string(locale),
+                    rust_string(text)
+                );
+            }
+        }
+        match &item.action {
+            mxrs_ir::MenuActionDecl::None {
+                disabled_during_execution: true,
+            } => {}
+            mxrs_ir::MenuActionDecl::OpenPage {
+                page,
+                disabled_during_execution: true,
+                pages_to_close: None,
+                title_override: None,
+            } => {
+                let _ = writeln!(source, "{indent}    item.page({});", rust_string(page));
+            }
+            action => {
+                let _ = writeln!(
+                    source,
+                    "{indent}    item.action({});",
+                    menu_action_expression(action)
+                );
+            }
+        }
+        match &item.icon {
+            Some(mxrs_ir::MenuIconDecl::Glyph(code)) => {
+                let _ = writeln!(source, "{indent}    item.glyph({code});");
+            }
+            Some(mxrs_ir::MenuIconDecl::Image(reference)) => {
+                let _ = writeln!(
+                    source,
+                    "{indent}    item.image({});",
+                    rust_string(reference)
+                );
+            }
+            None => {}
+        }
+        for child in &item.items {
+            render_menu_item(source, child, depth + 1, "item");
+        }
+    }
+    let _ = writeln!(source, "{indent}}});");
+}
+
+fn menu_action_expression(action: &mxrs_ir::MenuActionDecl) -> String {
+    match action {
+        mxrs_ir::MenuActionDecl::None {
+            disabled_during_execution,
+        } => format!(
+            "::mxrs_ir::MenuActionDecl::None {{ disabled_during_execution: {disabled_during_execution} }}"
+        ),
+        mxrs_ir::MenuActionDecl::OpenPage {
+            page,
+            disabled_during_execution,
+            pages_to_close,
+            title_override,
+        } => format!(
+            "::mxrs_ir::MenuActionDecl::OpenPage {{ page: {}.to_string(), disabled_during_execution: {disabled_during_execution}, pages_to_close: {}, title_override: {} }}",
+            rust_string(page),
+            option_u32(*pages_to_close),
+            option_localized_text(title_override.as_ref()),
+        ),
+        mxrs_ir::MenuActionDecl::CreateObjectAndOpenPage {
+            entity,
+            page,
+            disabled_during_execution,
+            pages_to_close,
+            title_override,
+        } => format!(
+            "::mxrs_ir::MenuActionDecl::CreateObjectAndOpenPage {{ entity: {}.to_string(), page: {}.to_string(), disabled_during_execution: {disabled_during_execution}, pages_to_close: {}, title_override: {} }}",
+            rust_string(entity),
+            rust_string(page),
+            option_u32(*pages_to_close),
+            option_localized_text(title_override.as_ref()),
+        ),
+    }
+}
+
+fn localized_text_expression(text: &mxrs_ir::LocalizedText) -> String {
+    format!(
+        "[{}]",
+        text.iter()
+            .map(|(locale, value)| format!("({}, {})", rust_string(locale), rust_string(value)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn option_localized_text(text: Option<&mxrs_ir::LocalizedText>) -> String {
+    text.map_or_else(
+        || "None".to_string(),
+        |text| {
+            format!(
+                "Some({}.into_iter().map(|(locale, text)| (locale.to_string(), text.to_string())).collect())",
+                localized_text_expression(text)
+            )
+        },
+    )
+}
+
+fn option_u32(value: Option<u32>) -> String {
+    value.map_or_else(|| "None".to_string(), |value| format!("Some({value})"))
+}
+
 fn editable_document_module(document: &EditableDocument) -> &str {
     match document {
         EditableDocument::Enumeration { module, .. }
         | EditableDocument::Constant { module, .. }
         | EditableDocument::RegularExpression { module, .. }
         | EditableDocument::ScheduledEvent { module, .. } => module,
+        EditableDocument::Menu { module, .. } => module,
     }
 }
 
@@ -1037,6 +1500,10 @@ fn editable_document_key(document: &EditableDocument) -> (&str, u8, &str) {
             module,
             declaration,
         } => (module, 3, &declaration.name),
+        EditableDocument::Menu {
+            module,
+            declaration,
+        } => (module, 4, &declaration.name),
     }
 }
 
@@ -1048,6 +1515,7 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
             | EditableDocument::Constant { module, .. }
             | EditableDocument::RegularExpression { module, .. }
             | EditableDocument::ScheduledEvent { module, .. } => module.clone(),
+            EditableDocument::Menu { module, .. } => module.clone(),
         };
         let module = modules
             .entry(module_name.clone())
@@ -1113,6 +1581,7 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
             EditableDocument::ScheduledEvent { declaration, .. } => {
                 module.scheduled_events.push(declaration)
             }
+            EditableDocument::Menu { declaration, .. } => module.menus.push(declaration),
         }
     }
     Ok(mxrs_ir::ProjectDecl {
@@ -1170,6 +1639,8 @@ fn sensitive_constant_name(name: &str) -> bool {
         "credential",
         "apikey",
         "privatekey",
+        "encryptionkey",
+        "signingkey",
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
@@ -1632,7 +2103,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, and scheduled events. `src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. `src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -2059,6 +2530,13 @@ mod tests {
     }
 
     #[test]
+    fn cryptographic_constant_values_never_enter_generated_rust() {
+        assert!(sensitive_constant_name("EncryptionKey"));
+        assert!(sensitive_constant_name("JWT_Signing_Key"));
+        assert!(!sensitive_constant_name("PublicKeyAlgorithm"));
+    }
+
+    #[test]
     fn sanitize_ident_replaces_invalid_characters() {
         assert_eq!(sanitize_ident("Order Total"), "Order_Total");
         assert_eq!(sanitize_ident("2FA"), "_2FA");
@@ -2108,6 +2586,96 @@ mod tests {
         );
         assert!(source.contains("|_|"), "{source}");
         assert!(!source.contains("|regular_expression|"), "{source}");
+    }
+
+    fn identified(native_type: &str) -> mxrs_bson::Document {
+        mxrs_bson::doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": native_type,
+        }
+    }
+
+    fn translated(text: &str) -> mxrs_bson::Document {
+        let mut translation = identified("Texts$Translation");
+        translation.insert("LanguageCode", "en_US");
+        translation.insert("Text", text);
+        let mut result = identified("Texts$Text");
+        result.insert(
+            "Items",
+            mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(translation)], 3),
+        );
+        result
+    }
+
+    #[test]
+    fn complete_menu_projection_types_actions_icons_and_nested_items() {
+        let mut settings = identified("Forms$FormSettings");
+        settings.insert("Form", "Sales.Home");
+        settings.insert("ParameterMappings", mxrs_bson::build_array(vec![], 2));
+        settings.insert("TitleOverride", mxrs_bson::Bson::Null);
+        let mut action = identified("Forms$FormAction");
+        action.insert("DisabledDuringExecution", true);
+        action.insert("FormSettings", settings);
+        action.insert("NumberOfPagesToClose2", "1");
+        action.insert("PagesForSpecializations", mxrs_bson::build_array(vec![], 2));
+        let mut icon = identified("Forms$IconCollectionIcon");
+        icon.insert("Image", "Atlas_Core.Atlas_Filled.home");
+        let mut item = identified("Menus$MenuItem");
+        item.insert("Action", action);
+        item.insert("AlternativeText", mxrs_bson::Bson::Null);
+        item.insert("Caption", translated("Home"));
+        item.insert("Icon", icon);
+        item.insert("Items", mxrs_bson::build_array(vec![], 3));
+        let mut collection = identified("Menus$MenuItemCollection");
+        collection.insert(
+            "Items",
+            mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(item)], 3),
+        );
+        let mut document = identified("Menus$MenuDocument");
+        document.insert("Documentation", "Main navigation");
+        document.insert("Excluded", false);
+        document.insert("ExportLevel", "Hidden");
+        document.insert("ItemCollection", collection);
+        document.insert("Name", "Main");
+
+        let menu = parse_complete_menu(&document).unwrap();
+        assert_eq!(menu.items[0].caption["en_US"], "Home");
+        assert_eq!(
+            menu.items[0].icon,
+            Some(mxrs_ir::MenuIconDecl::Image(
+                "Atlas_Core.Atlas_Filled.home".into()
+            ))
+        );
+        assert!(matches!(
+            menu.items[0].action,
+            mxrs_ir::MenuActionDecl::OpenPage {
+                pages_to_close: Some(1),
+                ..
+            }
+        ));
+
+        document.insert("FutureField", true);
+        assert!(parse_complete_menu(&document).is_none());
+    }
+
+    #[test]
+    fn leaf_menu_item_uses_an_unnamed_builder_parameter() {
+        let mut caption = mxrs_ir::LocalizedText::new();
+        caption.insert("en_US".into(), "Heading".into());
+        let menu = mxrs_ir::MenuDecl {
+            name: "Main".into(),
+            documentation: String::new(),
+            excluded: false,
+            export_level: mxrs_ir::ExportLevel::Hidden,
+            items: vec![mxrs_ir::MenuItemDecl {
+                caption,
+                ..Default::default()
+            }],
+        };
+        let mut source = String::new();
+        render_menu_body(&mut source, &menu);
+        assert!(source.contains("menu.item(\"Heading\", |_|"), "{source}");
+        assert!(!source.contains("$ID"), "{source}");
     }
 
     #[test]

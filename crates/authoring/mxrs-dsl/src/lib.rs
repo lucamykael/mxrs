@@ -54,6 +54,7 @@ mod constant;
 mod entity;
 mod enumeration;
 mod flow;
+mod menu;
 mod module;
 mod navigation;
 pub mod page;
@@ -67,14 +68,15 @@ pub use constant::ConstantBuilder;
 pub use entity::EntityBuilder;
 pub use enumeration::EnumerationBuilder;
 pub use flow::{CallArgument, FlowBuilder};
+pub use menu::{MenuBuilder, MenuItemBuilder};
 pub use module::ModuleBuilder;
 pub use mxrs_expr::{
     Expr, ListVar, MxBool, MxDecimal, MxFloat, MxInteger, MxLong, MxString, Var, boolean, decimal,
     float, integer, long, string,
 };
 pub use mxrs_ir::{
-    ConstantType, ExportLevel, MemberRights, OnOverlap, ScheduleUnit, ScheduledEventSchedule,
-    SecurityLevel,
+    ConstantType, ExportLevel, MemberRights, MenuActionDecl, MenuIconDecl, OnOverlap, ScheduleUnit,
+    ScheduledEventSchedule, SecurityLevel,
 };
 pub use navigation::{NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder};
 pub use page::{
