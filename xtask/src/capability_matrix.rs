@@ -325,6 +325,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs validate",
             "storage validation; scope differs",
         ),
+        "marketplace" => (
+            Status::Partial,
+            "mxrs marketplace search/show/versions/download",
+            "official Content API client verified against the live API and recorded responses; installing a downloaded .mpk into an .mpr is not ported",
+        ),
         // Semantic refactoring. All three preview by default and mutate only
         // under `--apply`, like MXRB's own; none has a command-contract
         // oracle, so none is verified.

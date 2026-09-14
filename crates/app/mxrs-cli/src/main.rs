@@ -86,6 +86,11 @@ fn command_options(
         }
         "scaffold" => (&["--target"], &[], &[]),
         "rename" | "remove" | "move" => (&[], &["--apply", "--json"], &[]),
+        "marketplace" => (
+            &["--version", "--mendix-version", "--output", "-o", "--limit"],
+            &["--json"],
+            &[],
+        ),
         "project" => (&[], &["--json"], &[]),
         _ => (&[], &[], &[]),
     }
@@ -118,6 +123,7 @@ commands! {
     "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
     "module", "new <Module> [--target DIR] [--dry-run] [--json]", "Scaffold an editable module declaration layer", run_module;
+    "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json]", "Search and download official Marketplace content", run_marketplace;
     "modules", "<file.mpr>", "List module names", run_modules;
     "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a same-module unit move", run_move;
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
@@ -269,6 +275,10 @@ fn run_enumeration(args: Vec<String>) -> ExitCode {
         mxrs_scaffold::ArtifactKind::Enumeration,
         args,
     ))
+}
+
+fn run_marketplace(args: Vec<String>) -> ExitCode {
+    mxrs_cli::marketplace::run(args)
 }
 
 fn run_rename(args: Vec<String>) -> ExitCode {

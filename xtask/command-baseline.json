@@ -35,7 +35,7 @@
   "integration": "missing",
   "java-action": "partial",
   "lint": "partial",
-  "marketplace": "missing",
+  "marketplace": "partial",
   "mda": "missing",
   "migrate": "missing",
   "module": "partial",

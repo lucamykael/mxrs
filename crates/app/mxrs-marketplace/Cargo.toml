@@ -1,0 +1,23 @@
+[package]
+name = "mxrs-marketplace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Client for the official Mendix Marketplace Content API: search published content, list versions, resolve a version for a Mendix target, and download its package. HTTP transport is a trait, so every parsing and validation rule is tested offline against recorded responses."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+# The workspace's only HTTPS client. Confined to this crate's `ureq_transport`
+# module: nothing else here needs the network, and `Transport` keeps the API
+# logic testable without it.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

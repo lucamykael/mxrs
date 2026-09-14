@@ -25,6 +25,7 @@ mxrs-javagen = { path = "../../compiler/mxrs-javagen" }
 mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
 mxrs-packager = { path = "../mxrs-packager" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
+mxrs-marketplace = { path = "../mxrs-marketplace" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-oql = { path = "../../compiler/mxrs-oql" }
 mxrs-project = { path = "../mxrs-project" }

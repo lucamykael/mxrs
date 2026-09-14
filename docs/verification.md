@@ -47,7 +47,7 @@ cargo run -p xtask -- coverage-gate target/coverage.json --require-complete
 
 The command inventory currently covers MXRB's 76 top-level commands, not an
 exhaustive list of Studio Pro capabilities. All 76 still need complete
-command-contract evidence: 47 have partial equivalents and 29 are absent.
+command-contract evidence: 48 have partial equivalents and 28 are absent.
 
 MXRB's model-authoring generators write Ruby source into a project; the MXRS
 equivalents write Rust declarations into `src/domain/modules/`. Because the
@@ -255,3 +255,77 @@ Limits worth naming, because they are not obvious from the command names:
 
 None of the three is verified: nothing compares their command contract against
 MXRB's execution.
+
+## Marketplace
+
+`mxrs marketplace search|show|versions|download` speaks the official Mendix
+Marketplace Content API (`https://marketplace-api.mendix.com/v1`). It is the
+only command in the workspace that makes an outbound request.
+
+What is proven: the client was run against the live API on 2026-09-14 and
+downloaded Community Commons 11.5.1 as an 8,250,622-byte `.mpk` — a valid
+archive of 128 entries with intact CRCs, containing `project.mpr` and
+`package.xml`. Parsing, parameter validation, version selection, compatibility
+checking and the redirect/credential policy are all covered offline against
+responses recorded from that same API, so the suite needs neither a token nor
+connectivity; one opt-in `#[ignore]`d test re-checks the live shape.
+
+Credential handling is the part worth stating explicitly:
+
+- The token is read from `MXRS_MENDIX_PAT` or the file named by
+  `MXRS_MENDIX_PAT_FILE`, never from a command-line argument — an argument
+  lands in shell history and in every process listing on the machine. There is
+  no default path: reading a file the user did not name is how a credential
+  gets used by surprise.
+- `Pat` has a hand-written `Debug` printing `Pat(<redacted>)`, so the token
+  cannot reach a panic message or a test failure through a derived `Debug`.
+- Nothing persists the token. MXRB offers to save one into its own credentials
+  file; this deliberately does not.
+- Two host allow-lists, not one. The download endpoint answers HTTP 303 towards
+  `files.appstore.mendix.com`, which serves a pre-signed URL. That host may be
+  *fetched from* but is never *sent the account token*; redirects are resolved
+  by the API layer, one hop at a time, re-checking the host each time, because
+  both the initial `downloadUrl` and every `Location` are server-controlled.
+
+Not covered: installing a downloaded package into an `.mpr`. Unpacking the
+`.mpk`, merging its units, resolving the dependency graph, writing a lockfile
+and rolling back is what MXRB spreads across four files, and none of it is
+here. `module add` therefore remains unported, and `marketplace` is not
+verified: nothing compares its command contract against MXRB's execution.
+
+## Marketplace
+
+`mxrs marketplace search|show|versions|download` speaks the official Mendix
+Marketplace Content API (`https://marketplace-api.mendix.com/v1`). It is the
+only command in the workspace that makes an outbound request.
+
+What is proven: the client was run against the live API on 2026-09-14 and
+downloaded Community Commons 11.5.1 as an 8,250,622-byte `.mpk` — a valid
+archive of 128 entries with intact CRCs, containing `project.mpr` and
+`package.xml`. Parsing, parameter validation, version selection, compatibility
+checking and the redirect/credential policy are all covered offline against
+responses recorded from that same API, so the suite needs neither a token nor
+connectivity; one opt-in `#[ignore]`d test re-checks the live shape.
+
+Credential handling is the part worth stating explicitly:
+
+- The token is read from `MXRS_MENDIX_PAT` or the file named by
+  `MXRS_MENDIX_PAT_FILE`, never from a command-line argument — an argument
+  lands in shell history and in every process listing on the machine. There is
+  no default path: reading a file the user did not name is how a credential
+  gets used by surprise.
+- `Pat` has a hand-written `Debug` printing `Pat(<redacted>)`, so the token
+  cannot reach a panic message or a test failure through a derived `Debug`.
+- Nothing persists the token. MXRB offers to save one into its own credentials
+  file; this deliberately does not.
+- Two host allow-lists, not one. The download endpoint answers HTTP 303 towards
+  `files.appstore.mendix.com`, which serves a pre-signed URL. That host may be
+  *fetched from* but is never *sent the account token*; redirects are resolved
+  by the API layer, one hop at a time, re-checking the host each time, because
+  both the initial `downloadUrl` and every `Location` are server-controlled.
+
+Not covered: installing a downloaded package into an `.mpr`. Unpacking the
+`.mpk`, merging its units, resolving the dependency graph, writing a lockfile
+and rolling back is what MXRB spreads across four files, and none of it is
+here. `module add` therefore remains unported, and `marketplace` is not
+verified: nothing compares its command contract against MXRB's execution.

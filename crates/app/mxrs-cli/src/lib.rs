@@ -32,6 +32,11 @@
 //! `artifact` module for what necessarily differs between generating Ruby that
 //! is evaluated at run time and Rust that has to compile.
 //!
+//! **Marketplace** (`marketplace search|show|versions|download`) ports the
+//! network half of mxrb's command of the same name. It needs a Mendix PAT from
+//! the environment and is the only command that makes an outbound request; see
+//! `marketplace`'s module doc.
+//!
 //! **Semantic refactoring** (`rename`/`remove`/`move`) ports mxrb's commands
 //! of the same names. Unlike the generators these mutate an `.mpr` directly,
 //! so they preview by default and write only under `--apply` — see
@@ -43,6 +48,7 @@ pub mod browse;
 pub mod cargo_project;
 pub mod compare;
 pub mod inspect;
+pub mod marketplace;
 pub mod refactor;
 pub mod scaffold;
 pub mod validate;

@@ -575,3 +575,66 @@ fn refactoring_commands_render_json_and_reject_malformed_invocations() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("[mxrs] error:"));
     }
 }
+
+/// The marketplace command is the only one that would reach the network, so
+/// these assert the paths that must work *without* a credential: usage errors,
+/// and a missing token reported as such instead of as an HTTP failure.
+fn marketplace(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mxrs"))
+        .args(args)
+        // Cleared explicitly: a developer with a token in their environment
+        // must not turn these into live calls.
+        .env_remove("MXRS_MENDIX_PAT")
+        .env_remove("MXRS_MENDIX_PAT_FILE")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn marketplace_without_a_credential_says_so_instead_of_failing_at_the_network() {
+    let output = marketplace(&["marketplace", "search", "Community Commons"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no Mendix credential"), "{stderr}");
+    assert!(stderr.contains("MXRS_MENDIX_PAT"), "{stderr}");
+    // The message must name the variables without inventing a default path to
+    // read a secret from.
+    assert!(!stderr.contains(".ssh"), "{stderr}");
+}
+
+#[test]
+fn marketplace_rejects_unknown_subcommands_and_wrong_arity_before_touching_credentials() {
+    for arguments in [
+        vec!["marketplace"],
+        vec!["marketplace", "install", "170"],
+        vec!["marketplace", "search"],
+        vec!["marketplace", "show", "170", "extra"],
+        vec!["marketplace", "download"],
+    ] {
+        let output = marketplace(&arguments);
+        assert!(!output.status.success(), "{arguments:?} was accepted");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("usage: mxrs marketplace"),
+            "{arguments:?}: {stderr}"
+        );
+        // A usage error must not be reported as a missing credential: the
+        // invocation is wrong regardless of whether a token exists.
+        assert!(
+            !stderr.contains("no Mendix credential"),
+            "{arguments:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn marketplace_is_discoverable_and_its_options_are_validated() {
+    let listed = text(&cli(&["--commands"]));
+    assert!(listed.contains("marketplace"), "{listed}");
+    assert!(cli(&["help", "marketplace"]).status.success());
+
+    // An unknown option is a usage error rather than being passed through as
+    // a positional argument.
+    let output = marketplace(&["marketplace", "search", "x", "--not-an-option"]);
+    assert!(!output.status.success());
+}
