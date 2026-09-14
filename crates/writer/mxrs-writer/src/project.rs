@@ -152,6 +152,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.constants,
             identity,
         )?;
+        documents::synchronize_regular_expressions_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.regular_expressions,
+            identity,
+        )?;
         documents::synchronize_scheduled_events_with_identity(
             &mut mpr,
             &module_id,
@@ -185,7 +192,8 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
     Ok(())
 }
 
-/// Applies only enumeration and constant declarations to an imported model.
+/// Applies only enumeration, constant, and regular-expression declarations
+/// to an imported model.
 ///
 /// This narrow entry point is used by the portability verifier: it proves
 /// document-family round trips without rewriting unrelated domain, security,
@@ -201,7 +209,10 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
     let identity = ProjectIdentity::from_project_root(&root_id)?;
     let existing_modules_by_name = existing_module_ids_by_name(&mpr, &root_id)?;
     for declaration in &project.modules {
-        if declaration.enumerations.is_empty() && declaration.constants.is_empty() {
+        if declaration.enumerations.is_empty()
+            && declaration.constants.is_empty()
+            && declaration.regular_expressions.is_empty()
+        {
             continue;
         }
         let module_id = existing_modules_by_name
@@ -219,6 +230,13 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
             module_id,
             &declaration.name,
             &declaration.constants,
+            identity,
+        )?;
+        documents::synchronize_regular_expressions_with_identity(
+            &mut mpr,
+            module_id,
+            &declaration.name,
+            &declaration.regular_expressions,
             identity,
         )?;
     }

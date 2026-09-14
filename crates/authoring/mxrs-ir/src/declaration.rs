@@ -1,6 +1,6 @@
 //! Storage-independent project/module/entity declarations. Nothing in this
-//! module knows about BSON field names, UUIDs, raw documents, export levels,
-//! or other `.mpr` representation details. `mxrs-writer` lowers these values
+//! module knows about BSON field names, UUIDs, raw documents, or other `.mpr`
+//! representation details. `mxrs-writer` lowers these values
 //! into `mxrs-model` only at the persistence boundary.
 
 use crate::flow::MicroflowDecl;
@@ -265,6 +265,36 @@ impl ConstantDecl {
     }
 }
 
+/// Visibility of a module document to consumers outside its module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExportLevel {
+    #[default]
+    Hidden,
+    Published,
+}
+
+/// An editable Mendix regular-expression document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegularExpressionDecl {
+    pub name: String,
+    pub documentation: String,
+    pub expression: String,
+    pub excluded: bool,
+    pub export_level: ExportLevel,
+}
+
+impl RegularExpressionDecl {
+    pub fn new(name: impl Into<String>, expression: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            documentation: String::new(),
+            expression: expression.into(),
+            excluded: false,
+            export_level: ExportLevel::Hidden,
+        }
+    }
+}
+
 /// How often a [`ScheduledEventDecl`] runs.
 ///
 /// Deliberately narrower than mxrb's `SCHEDULED_EVENT_INTERVAL_MAP`, which
@@ -334,6 +364,7 @@ pub struct ModuleDecl {
     pub entities: Vec<EntityDecl>,
     pub enumerations: Vec<EnumerationDecl>,
     pub constants: Vec<ConstantDecl>,
+    pub regular_expressions: Vec<RegularExpressionDecl>,
     pub scheduled_events: Vec<ScheduledEventDecl>,
     pub microflows: Vec<MicroflowDecl>,
     /// Client-side flows. They share the semantic flow IR with microflows,
@@ -386,6 +417,9 @@ impl ProjectDecl {
         target.entities.extend(declared.entities);
         target.enumerations.extend(declared.enumerations);
         target.constants.extend(declared.constants);
+        target
+            .regular_expressions
+            .extend(declared.regular_expressions);
         target.scheduled_events.extend(declared.scheduled_events);
         target.microflows.extend(declared.microflows);
         target.nanoflows.extend(declared.nanoflows);
@@ -423,6 +457,9 @@ mod tests {
         declared
             .enumerations
             .push(EnumerationDecl::new("PaymentStatus"));
+        declared
+            .regular_expressions
+            .push(RegularExpressionDecl::new("OrderCode", "[A-Z]+"));
         project.merge_module(declared);
         assert_eq!(project.modules.len(), 1);
         let names = project.modules[0]
@@ -432,6 +469,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["Order", "Invoice"]);
         assert_eq!(project.modules[0].enumerations.len(), 1);
+        assert_eq!(project.modules[0].regular_expressions.len(), 1);
         project.merge_module(module("Billing"));
         assert_eq!(project.modules.len(), 2);
         assert_eq!(project.modules[1].name, "Billing");

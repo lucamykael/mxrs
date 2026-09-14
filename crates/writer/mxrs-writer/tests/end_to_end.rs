@@ -10,7 +10,7 @@ use mxrs_expr::attribute;
 use mxrs_ir::declaration::{AssociationDecl, EntityDecl};
 use mxrs_ir::{
     AssociationOwner, AssociationStorage, AssociationType, AttributeType, ConstantType,
-    MemberRights, MicroflowRef, OnOverlap, Ref, ScheduleUnit,
+    ExportLevel, MemberRights, MicroflowRef, OnOverlap, Ref, ScheduleUnit,
 };
 use mxrs_model::Project;
 use mxrs_model::association::{AssociationType as ModelAssociationType, Owner as ModelOwner};
@@ -1382,6 +1382,42 @@ fn a_scheduled_event_without_a_microflow_fails_rather_than_writing_a_job_that_ru
         error,
         mxrs_writer::WriterError::ScheduledEventWithoutMicroflow(name) if name == "SE_Orphan"
     ));
+}
+
+#[test]
+fn regular_expressions_round_trip_every_semantic_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("RegularExpression.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |module| {
+        module.regular_expression("OrderCode", "[A-Z]{3}-[0-9]+", |expression| {
+            expression
+                .documentation("Public order code")
+                .excluded(true)
+                .export_level(ExportLevel::Published);
+        });
+    });
+    mxrs_writer::write_project(&path, &project.build()).unwrap();
+
+    let model = Project::open(&path, true).unwrap();
+    let document = model
+        .all_units()
+        .unwrap()
+        .into_iter()
+        .find_map(|unit| {
+            let document = model.mpr().parse_contents(&unit).ok()?;
+            (document.get_str("$Type").ok() == Some("RegularExpressions$RegularExpression"))
+                .then_some(document)
+        })
+        .unwrap();
+    assert_eq!(document.get_str("Name").unwrap(), "OrderCode");
+    assert_eq!(document.get_str("Expression").unwrap(), "[A-Z]{3}-[0-9]+");
+    assert_eq!(
+        document.get_str("Documentation").unwrap(),
+        "Public order code"
+    );
+    assert!(document.get_bool("Excluded").unwrap());
+    assert_eq!(document.get_str("ExportLevel").unwrap(), "Published");
 }
 
 #[test]

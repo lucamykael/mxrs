@@ -127,6 +127,14 @@ pub fn write_module(
         identity,
     )?;
 
+    documents::synchronize_regular_expressions_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.regular_expressions,
+        identity,
+    )?;
+
     documents::synchronize_scheduled_events_with_identity(
         mpr,
         &module_id,

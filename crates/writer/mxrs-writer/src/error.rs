@@ -112,6 +112,9 @@ pub enum WriterError {
     #[error("duplicate constant {module_name}.{name:?} declared while synchronizing")]
     DuplicateConstant { module_name: String, name: String },
 
+    #[error("duplicate regular expression {module_name}.{name:?} declared while synchronizing")]
+    DuplicateRegularExpression { module_name: String, name: String },
+
     #[error("duplicate scheduled event {module_name}.{name:?} declared while synchronizing")]
     DuplicateScheduledEvent { module_name: String, name: String },
 

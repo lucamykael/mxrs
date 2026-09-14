@@ -40,6 +40,7 @@ pub enum ArtifactKind {
     /// The `Type` sub-document of a constant, which carries its own `$ID`
     /// distinct from the constant's.
     ConstantType,
+    RegularExpression,
     ScheduledEvent,
     /// The `Schedule` sub-document of a scheduled event, likewise separately
     /// identified.
@@ -77,6 +78,7 @@ impl fmt::Display for ArtifactKind {
             Self::AccessMember => "access-member",
             Self::Constant => "constant",
             Self::ConstantType => "constant-type",
+            Self::RegularExpression => "regular-expression",
             Self::ScheduledEvent => "scheduled-event",
             Self::ScheduledEventSchedule => "scheduled-event-schedule",
             Self::Translation => "translation",

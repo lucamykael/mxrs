@@ -121,17 +121,27 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
 
     let mut families = Vec::with_capacity(counts.len());
     for (native_type, total) in counts {
-        let typed = typed_pages_by_type.get(&native_type).copied().unwrap_or(0);
         let editable = editable_documents
             .get(native_type.as_str())
             .copied()
             .unwrap_or(0);
+        let typed = typed_pages_by_type.get(&native_type).copied().unwrap_or(0)
+            + if native_type == "RegularExpressions$RegularExpression" {
+                editable
+            } else {
+                0
+            };
         let (partial, preserved, reason) = if typed > 0 {
             (
                 0,
                 total.saturating_sub(typed),
-                "typed pages are recompiled and field-compared; remaining pages are preserved byte-for-byte"
-                    .to_string(),
+                if native_type == "RegularExpressions$RegularExpression" {
+                    "the complete semantic document is emitted as typed Rust and byte-exactly round-tripped"
+                        .to_string()
+                } else {
+                    "typed pages are recompiled and field-compared; remaining pages are preserved byte-for-byte"
+                        .to_string()
+                },
             )
         } else if editable > 0 {
             (
@@ -286,6 +296,13 @@ fn editable_unit_snapshots(
                         document.name.clone(),
                     )
                 }))
+                .chain(module.regular_expressions.iter().map(|document| {
+                    (
+                        module.name.clone(),
+                        "RegularExpressions$RegularExpression",
+                        document.name.clone(),
+                    )
+                }))
         })
         .collect::<std::collections::HashSet<_>>();
     let units = project.all_units()?;
@@ -309,7 +326,9 @@ fn editable_unit_snapshots(
         };
         if !matches!(
             native_type,
-            "Enumerations$Enumeration" | "Constants$Constant"
+            "Enumerations$Enumeration"
+                | "Constants$Constant"
+                | "RegularExpressions$RegularExpression"
         ) {
             continue;
         }
@@ -497,6 +516,9 @@ mod tests {
             module.constant("Limit", |constant| {
                 constant.value("10");
             });
+            module.regular_expression("Code", "[A-Z]+", |regular_expression| {
+                regular_expression.documentation("Uppercase code");
+            });
             module.microflow("Save", |_| {});
         });
         mxrs_writer::write_project(&path, &project.build()).unwrap();
@@ -521,6 +543,10 @@ mod tests {
         assert_eq!(
             family("Microflows$Microflow").status,
             PortabilityStatus::Preserved
+        );
+        assert_eq!(
+            family("RegularExpressions$RegularExpression").status,
+            PortabilityStatus::Typed
         );
         assert!(report.model_lossless);
         assert!(!report.fully_typed);
@@ -549,7 +575,7 @@ mod tests {
         let report = verify_editable_document_round_trip(path).unwrap();
         assert!(report.passed, "{:?}", report.failures);
         assert_eq!(report.source_units, report.rebuilt_units);
-        assert_eq!(report.candidate_units, 2);
-        assert_eq!(report.byte_identical_units, 2);
+        assert_eq!(report.candidate_units, 3);
+        assert_eq!(report.byte_identical_units, 3);
     }
 }

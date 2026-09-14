@@ -19,8 +19,9 @@
 //!
 //! - **Domain model** — entities, attributes, associations.
 //! - **Documents** — enumerations (values, localized captions and
-//!   documentation) and constants (type, value, documentation and client
-//!   exposure) are emitted into `src/domain/documents/mod.rs`. Imported
+//!   documentation), constants (type, value, documentation and client
+//!   exposure), and regular expressions (pattern, visibility and exclusion)
+//!   are emitted into `src/domain/documents/mod.rs`. Imported
 //!   fields outside that IR are retained by the writer. `portability
 //!   --verify-round-trip` checks these documents by identity, containment
 //!   and raw BSON bytes.
@@ -391,6 +392,14 @@ enum EditableDocument {
         value: Option<String>,
         exposed_to_client: bool,
     },
+    RegularExpression {
+        module: String,
+        name: String,
+        documentation: String,
+        expression: String,
+        excluded: bool,
+        export_level: &'static str,
+    },
 }
 
 fn render_documents_module(
@@ -405,12 +414,13 @@ fn render_documents_module(
         let native_type = match declaration {
             EditableDocument::Enumeration { .. } => "Enumerations$Enumeration",
             EditableDocument::Constant { .. } => "Constants$Constant",
+            EditableDocument::RegularExpression { .. } => "RegularExpressions$RegularExpression",
         };
         *editable_counts.entry(native_type).or_default() += 1;
     }
 
     let mut source = String::from(
-        "//! Editable Cargo-native enumerations and constants.\n\n\
+        "//! Editable Cargo-native enumerations, constants, and regular expressions.\n\n\
          fn declarations() -> ::mxrs_ir::ProjectDecl {\n\
              let mut project = ::mxrs_dsl::ProjectBuilder::new(",
     );
@@ -442,6 +452,7 @@ fn render_documents_module(
                  if let Some(target) = project.modules.iter_mut().find(|module| module.name == declared.name) {\n\
                      target.enumerations.extend(declared.enumerations);\n\
                      target.constants.extend(declared.constants);\n\
+                     target.regular_expressions.extend(declared.regular_expressions);\n\
                  } else {\n\
                      project.modules.push(declared);\n\
                  }\n\
@@ -554,10 +565,66 @@ fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>
                     exposed_to_client: document.get_bool("ExposedToClient").unwrap_or(false),
                 });
             }
+            Some("RegularExpressions$RegularExpression") => {
+                if !is_complete_regular_expression_document(&document) {
+                    continue;
+                }
+                let (Some(name), Some(expression), Some(export_level)) = (
+                    document.get_str("Name").ok(),
+                    document.get_str("Expression").ok(),
+                    document
+                        .get_str("ExportLevel")
+                        .ok()
+                        .and_then(export_level_variant),
+                ) else {
+                    continue;
+                };
+                declarations.push(EditableDocument::RegularExpression {
+                    module,
+                    name: name.to_string(),
+                    documentation: document
+                        .get_str("Documentation")
+                        .expect("shape was checked")
+                        .to_string(),
+                    expression: expression.to_string(),
+                    excluded: document.get_bool("Excluded").expect("shape was checked"),
+                    export_level,
+                });
+            }
             _ => {}
         }
     }
     Ok(declarations)
+}
+
+/// Only promote a native document to the typed projection when the IR owns
+/// every field and each required value has the expected representation. A
+/// future Mendix field or shape therefore remains byte-preserved instead of
+/// being silently normalized by a declaration that does not understand it.
+fn is_complete_regular_expression_document(document: &mxrs_bson::Document) -> bool {
+    const FIELDS: [&str; 7] = [
+        "$ID",
+        "$Type",
+        "Documentation",
+        "Excluded",
+        "ExportLevel",
+        "Expression",
+        "Name",
+    ];
+    document.len() == FIELDS.len()
+        && document
+            .keys()
+            .all(|field| FIELDS.contains(&field.as_str()))
+        && document
+            .get("$ID")
+            .and_then(mxrs_bson::extract_id)
+            .is_some()
+        && document.get_str("$Type").is_ok()
+        && document.get_str("Documentation").is_ok()
+        && document.get_bool("Excluded").is_ok()
+        && document.get_str("ExportLevel").is_ok()
+        && document.get_str("Expression").is_ok()
+        && document.get_str("Name").is_ok()
 }
 
 fn render_editable_document_body(source: &mut String, declaration: EditableDocument) {
@@ -644,13 +711,52 @@ fn render_editable_document_body(source: &mut String, declaration: EditableDocum
             }
             source.push_str("        });\n");
         }
+        EditableDocument::RegularExpression {
+            module: _,
+            name,
+            documentation,
+            expression,
+            excluded,
+            export_level,
+        } => {
+            let has_options = !documentation.is_empty() || excluded || export_level != "Hidden";
+            let parameter = if has_options {
+                "regular_expression"
+            } else {
+                "_"
+            };
+            let _ = writeln!(
+                source,
+                "        module.regular_expression({}, {}, |{parameter}| {{",
+                rust_string(&name),
+                rust_string(&expression),
+            );
+            if !documentation.is_empty() {
+                let _ = writeln!(
+                    source,
+                    "            regular_expression.documentation({});",
+                    rust_string(&documentation)
+                );
+            }
+            if excluded {
+                source.push_str("            regular_expression.excluded(true);\n");
+            }
+            if export_level != "Hidden" {
+                let _ = writeln!(
+                    source,
+                    "            regular_expression.export_level(::mxrs_ir::ExportLevel::{export_level});"
+                );
+            }
+            source.push_str("        });\n");
+        }
     }
 }
 
 fn editable_document_module(document: &EditableDocument) -> &str {
     match document {
         EditableDocument::Enumeration { module, .. }
-        | EditableDocument::Constant { module, .. } => module,
+        | EditableDocument::Constant { module, .. }
+        | EditableDocument::RegularExpression { module, .. } => module,
     }
 }
 
@@ -658,6 +764,7 @@ fn editable_document_key(document: &EditableDocument) -> (&str, u8, &str) {
     match document {
         EditableDocument::Enumeration { module, name, .. } => (module, 0, name),
         EditableDocument::Constant { module, name, .. } => (module, 1, name),
+        EditableDocument::RegularExpression { module, name, .. } => (module, 2, name),
     }
 }
 
@@ -666,7 +773,8 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
     for document in collect_editable_documents(project)? {
         let module_name = match &document {
             EditableDocument::Enumeration { module, .. }
-            | EditableDocument::Constant { module, .. } => module.clone(),
+            | EditableDocument::Constant { module, .. }
+            | EditableDocument::RegularExpression { module, .. } => module.clone(),
         };
         let module = modules
             .entry(module_name.clone())
@@ -709,6 +817,26 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
                 value,
                 exposed_to_client,
             }),
+            EditableDocument::RegularExpression {
+                name,
+                documentation,
+                expression,
+                excluded,
+                export_level,
+                ..
+            } => module
+                .regular_expressions
+                .push(mxrs_ir::RegularExpressionDecl {
+                    name,
+                    documentation,
+                    expression,
+                    excluded,
+                    export_level: match export_level {
+                        "Hidden" => mxrs_ir::ExportLevel::Hidden,
+                        "Published" => mxrs_ir::ExportLevel::Published,
+                        _ => unreachable!("export_level_variant returns a closed set"),
+                    },
+                }),
         }
     }
     Ok(mxrs_ir::ProjectDecl {
@@ -745,6 +873,14 @@ fn constant_type_variant(native_type: &str) -> Option<&'static str> {
         "DataTypes$BooleanType" => Some("Boolean"),
         "DataTypes$DecimalType" => Some("Decimal"),
         "DataTypes$DateTimeType" => Some("DateTime"),
+        _ => None,
+    }
+}
+
+fn export_level_variant(value: &str) -> Option<&'static str> {
+    match value {
+        "Hidden" => Some("Hidden"),
+        "Published" => Some("Published"),
         _ => None,
     }
 }
@@ -1220,7 +1356,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations and constants. `src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, and regular expressions. `src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -1652,6 +1788,50 @@ mod tests {
         assert_eq!(sanitize_ident("2FA"), "_2FA");
         assert_eq!(sanitize_ident(""), "_");
         assert_eq!(sanitize_ident("Order"), "Order");
+    }
+
+    #[test]
+    fn regular_expression_projection_is_fail_closed_on_native_shape() {
+        let complete = mxrs_bson::doc! {
+            "$ID": "8c3f4c59-e0a4-4a5c-8e35-8643a6dfbd09",
+            "$Type": "RegularExpressions$RegularExpression",
+            "Documentation": "An order code",
+            "Excluded": false,
+            "ExportLevel": "Hidden",
+            "Expression": "[A-Z]+",
+            "Name": "OrderCode",
+        };
+        assert!(is_complete_regular_expression_document(&complete));
+
+        let mut future_shape = complete.clone();
+        future_shape.insert("FutureField", true);
+        assert!(!is_complete_regular_expression_document(&future_shape));
+
+        let mut missing_field = complete.clone();
+        missing_field.remove("Documentation");
+        assert!(!is_complete_regular_expression_document(&missing_field));
+
+        let mut wrong_type = complete;
+        wrong_type.insert("Excluded", "false");
+        assert!(!is_complete_regular_expression_document(&wrong_type));
+    }
+
+    #[test]
+    fn optionless_regular_expression_does_not_name_an_unused_parameter() {
+        let mut source = String::new();
+        render_editable_document_body(
+            &mut source,
+            EditableDocument::RegularExpression {
+                module: "Sales".to_string(),
+                name: "OrderCode".to_string(),
+                documentation: String::new(),
+                expression: "[A-Z]+".to_string(),
+                excluded: false,
+                export_level: "Hidden",
+            },
+        );
+        assert!(source.contains("|_|"), "{source}");
+        assert!(!source.contains("|regular_expression|"), "{source}");
     }
 
     #[test]

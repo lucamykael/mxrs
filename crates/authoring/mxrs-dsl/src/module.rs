@@ -6,6 +6,7 @@ use crate::entity::EntityBuilder;
 use crate::enumeration::EnumerationBuilder;
 use crate::flow::FlowBuilder;
 use crate::page::{LayoutBuilder, PageBuilder};
+use crate::regular_expression::RegularExpressionBuilder;
 use crate::scheduled_event::ScheduledEventBuilder;
 
 pub struct ModuleBuilder {
@@ -20,6 +21,7 @@ impl ModuleBuilder {
                 entities: vec![],
                 enumerations: vec![],
                 constants: vec![],
+                regular_expressions: vec![],
                 scheduled_events: vec![],
                 microflows: vec![],
                 nanoflows: vec![],
@@ -91,6 +93,18 @@ impl ModuleBuilder {
         let mut builder = ConstantBuilder::new(name);
         configure(&mut builder);
         self.decl.constants.push(builder.into_decl());
+        self
+    }
+
+    pub fn regular_expression(
+        &mut self,
+        name: impl Into<String>,
+        expression: impl Into<String>,
+        configure: impl FnOnce(&mut RegularExpressionBuilder),
+    ) -> &mut Self {
+        let mut builder = RegularExpressionBuilder::new(name, expression);
+        configure(&mut builder);
+        self.decl.regular_expressions.push(builder.into_decl());
         self
     }
 

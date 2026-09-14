@@ -58,6 +58,7 @@ mod module;
 mod navigation;
 pub mod page;
 mod project;
+mod regular_expression;
 mod scheduled_event;
 mod security;
 
@@ -71,12 +72,15 @@ pub use mxrs_expr::{
     Expr, ListVar, MxBool, MxDecimal, MxFloat, MxInteger, MxLong, MxString, Var, boolean, decimal,
     float, integer, long, string,
 };
-pub use mxrs_ir::{ConstantType, MemberRights, OnOverlap, ScheduleUnit, SecurityLevel};
+pub use mxrs_ir::{
+    ConstantType, ExportLevel, MemberRights, OnOverlap, ScheduleUnit, SecurityLevel,
+};
 pub use navigation::{NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder};
 pub use page::{
     ButtonBuilder, ContainerBuilder, DataViewBuilder, LayoutBuilder, LayoutGridBuilder,
     LayoutGridColumnBuilder, LayoutGridRowBuilder, PageBuilder, PluggableWidgetBuilder,
 };
 pub use project::ProjectBuilder;
+pub use regular_expression::RegularExpressionBuilder;
 pub use scheduled_event::ScheduledEventBuilder;
 pub use security::{SecurityBuilder, UserRoleBuilder};

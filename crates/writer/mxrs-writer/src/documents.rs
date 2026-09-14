@@ -1,6 +1,6 @@
-//! Incremental re-sync for microflow, page, enumeration, constant, and
-//! scheduled-event `Documents` units — mirrors the corresponding slices of
-//! `Writer#write_documents`/`#upsert_document` (mxrb's
+//! Incremental re-sync for microflow, page, enumeration, constant,
+//! regular-expression, and scheduled-event `Documents` units — mirrors the
+//! corresponding slices of `Writer#write_documents`/`#upsert_document` (mxrb's
 //! own method upserts pages/microflows/nanoflows/rules/menus/enumerations/
 //! constants/scheduled_events; of those this crate still has no DSL/model
 //! surface for rules and menus, widened incrementally like the rest of the
@@ -21,10 +21,10 @@
 //! principle already used for attribute/association reconciliation in
 //! `domain.rs`).
 //!
-//! Imported enumerations and constants may live under arbitrarily nested
-//! `Projects$Folder` units. Their lookup therefore walks the containment
-//! tree and preserves the original unit ID and container when applying an
-//! editable declaration.
+//! Imported enumerations, constants, and regular expressions may live under
+//! arbitrarily nested `Projects$Folder` units. Their lookup therefore walks
+//! the containment tree and preserves the original unit ID and container when
+//! applying an editable declaration.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -34,7 +34,8 @@ use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::flow::MicroflowDecl;
 use mxrs_ir::page::PageDecl;
 use mxrs_ir::{
-    ConstantDecl, ConstantType, EnumerationDecl, OnOverlap, ScheduleUnit, ScheduledEventDecl,
+    ConstantDecl, ConstantType, EnumerationDecl, ExportLevel, OnOverlap, RegularExpressionDecl,
+    ScheduleUnit, ScheduledEventDecl,
 };
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
@@ -572,6 +573,57 @@ fn constant_type_name(constant_type: ConstantType) -> &'static str {
         ConstantType::Decimal => "DataTypes$DecimalType",
         ConstantType::DateTime => "DataTypes$DateTimeType",
     }
+}
+
+pub(crate) fn synchronize_regular_expressions_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    declarations: &[RegularExpressionDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    if declarations.is_empty() {
+        return Ok(());
+    }
+    let existing_by_name =
+        existing_documents_by_name(mpr, module_id, "RegularExpressions$RegularExpression")?;
+    let mut declared = HashSet::new();
+    for declaration in declarations {
+        if !declared.insert(declaration.name.as_str()) {
+            return Err(crate::WriterError::DuplicateRegularExpression {
+                module_name: module_name.to_string(),
+                name: declaration.name.clone(),
+            });
+        }
+        let qualified_name = format!("{module_name}.{}", declaration.name);
+        let existing = existing_by_name.get(&declaration.name);
+        let id = existing.map_or_else(
+            || identity.artifact_id(ArtifactKind::RegularExpression, &qualified_name),
+            |(id, _)| id.clone(),
+        );
+        let mut document = existing
+            .map(|(_, document)| document.clone())
+            .unwrap_or_default();
+        document.insert("$ID", id.clone());
+        document.insert("$Type", "RegularExpressions$RegularExpression");
+        document.insert("Documentation", declaration.documentation.clone());
+        document.insert("Excluded", declaration.excluded);
+        document.insert(
+            "ExportLevel",
+            match declaration.export_level {
+                ExportLevel::Hidden => "Hidden",
+                ExportLevel::Published => "Published",
+            },
+        );
+        document.insert("Expression", declaration.expression.clone());
+        document.insert("Name", declaration.name.clone());
+        if existing.is_some() {
+            mpr.update_unit(&id, document)?;
+        } else {
+            mpr.insert_unit(module_id, "Documents", document, Some(&id))?;
+        }
+    }
+    Ok(())
 }
 
 /// Upserts `ScheduledEvents$ScheduledEvent` documents, mirroring
