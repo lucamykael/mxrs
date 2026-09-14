@@ -238,7 +238,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "module" => (
             Status::Partial,
             "mxrs module new",
-            "module declaration layer; MXRB's marketplace search/add subcommands not ported",
+            "module declaration layer; MXRB's marketplace search/add subcommands need a live Mendix Marketplace and .mpk installer, with no offline oracle to port against",
         ),
         "scaffold" => (
             Status::Partial,
