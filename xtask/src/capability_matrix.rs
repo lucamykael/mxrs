@@ -213,6 +213,58 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs import/export",
             "Cargo-native conversion",
         ),
+        // MXRB's source generators. MXRS writes Rust declarations where MXRB
+        // writes Ruby, so the generated content is not comparable by
+        // construction and no differential oracle can exist for it; the
+        // argument grammar, rendering and registry behavior are ported and
+        // covered by mxrs-cli's scaffold_commands tests, which is exactly
+        // "partial", not "verified".
+        "consumed-rest" | "entity" | "enumeration" | "java-action" | "nanoflow"
+        | "published-rest" | "use-case" => (
+            Status::Partial,
+            "mxrs <kind> new",
+            "transactional Rust declaration scaffold; generated content is not MXRB-comparable",
+        ),
+        "page" => (
+            Status::Partial,
+            "mxrs page new",
+            "page and module layout scaffold with --role; MXRB's --chain slices and template catalog not ported",
+        ),
+        "security" => (
+            Status::Partial,
+            "mxrs security init",
+            "module roles and project security scaffold; MXRB's access_rule guidance has no DSL surface",
+        ),
+        "module" => (
+            Status::Partial,
+            "mxrs module new",
+            "module declaration layer; MXRB's marketplace search/add subcommands not ported",
+        ),
+        "scaffold" => (
+            Status::Partial,
+            "mxrs scaffold list/destroy",
+            "generator catalog and digest-checked removal",
+        ),
+        "project" => (
+            Status::Partial,
+            "mxrs project inspect",
+            "workspace inventory; MXRB has no other project subcommand",
+        ),
+        // Named rather than left to the catch-all: these two are the model
+        // authoring commands that were deliberately not implemented, and the
+        // reason is a missing declaration surface, not a missing CLI. Their
+        // MXRB templates emit `constant`/`scheduled_event` declarations, which
+        // in Rust would have to compile against builders that do not exist.
+        "constant" => (
+            Status::Missing,
+            "—",
+            "mxrs-ir has no ConstantDecl and mxrs-writer persists no Constants$Constant document",
+        ),
+        "scheduled-event" => (
+            Status::Missing,
+            "—",
+            "mxrs-ir has no ScheduledEventDecl and mxrs-writer persists no ScheduledEvents$ScheduledEvent document",
+        ),
         "diff" => (Status::Partial, "cargo mxrs diff", "typed project diff"),
         "export" => (Status::Partial, "mxrs export", "typed Rust export"),
         "find" | "search" => (

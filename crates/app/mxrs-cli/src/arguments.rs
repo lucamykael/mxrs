@@ -1,15 +1,19 @@
+/// `repeatable` names value options a command accepts more than once (mxrb's
+/// `--role`, for example, is repeatable). Everything else stays single-use so
+/// a typo'd second `--output` is rejected instead of silently winning.
 pub fn validate_options(
     arguments: &[String],
     values: &[&str],
     flags: &[&str],
+    repeatable: &[&str],
 ) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut index = 0;
     while index < arguments.len() {
         let argument = arguments[index].as_str();
-        let is_value = values.contains(&argument);
+        let is_value = values.contains(&argument) || repeatable.contains(&argument);
         if is_value || flags.contains(&argument) {
-            if !seen.insert(argument) {
+            if !seen.insert(argument) && !repeatable.contains(&argument) {
                 return Err(format!("duplicate option {argument}"));
             }
             if is_value {
@@ -52,6 +56,17 @@ pub fn take_flag(arguments: &mut Vec<String>, flag: &str) -> bool {
     }
 }
 
+/// Drains every occurrence of a repeatable value option, preserving the order
+/// the user wrote them in — `--role A --role B` is not the same declaration as
+/// `--role B --role A` once it reaches a page's allowed-role list.
+pub fn take_values(arguments: &mut Vec<String>, flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    while let Some(value) = take_value(arguments, flag) {
+        values.push(value);
+    }
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,7 +83,7 @@ mod tests {
         ] {
             let args = raw.iter().map(ToString::to_string).collect::<Vec<_>>();
             assert!(
-                validate_options(&args, &["--limit"], &["--json"]).is_err(),
+                validate_options(&args, &["--limit"], &["--json"], &[]).is_err(),
                 "{raw:?}"
             );
         }
@@ -82,11 +97,26 @@ mod tests {
                     "--json".into()
                 ],
                 &["--limit"],
-                &["--json"]
+                &["--json"],
+                &[]
             )
             .is_ok()
         );
-        assert!(validate_options(&[], &[], &[]).is_ok());
+        assert!(validate_options(&[], &[], &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn a_repeatable_option_accepts_many_values_while_the_rest_stay_single_use() {
+        let repeated = ["--role", "A", "--role", "B"].map(str::to_string).to_vec();
+        assert!(validate_options(&repeated, &[], &[], &["--role"]).is_ok());
+        assert!(validate_options(&repeated, &["--role"], &[], &[]).is_err());
+        assert!(validate_options(&["--role".into()], &[], &[], &["--role"]).is_err());
+        let mut arguments = ["new", "Sales.Page", "--role", "A", "--role", "B"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(take_values(&mut arguments, "--role"), ["A", "B"]);
+        assert_eq!(arguments, ["new", "Sales.Page"]);
+        assert!(take_values(&mut arguments, "--role").is_empty());
     }
 
     #[test]

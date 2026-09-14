@@ -28,8 +28,8 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Some(command) => {
-                let (values, flags) = command_options(command.name);
-                match validate_options(&args, values, flags) {
+                let (values, flags, repeatable) = command_options(command.name);
+                match validate_options(&args, values, flags, repeatable) {
                     Ok(()) => (command.run)(args),
                     Err(error) => {
                         eprintln!("[mxrs] error: {error}");
@@ -54,19 +54,36 @@ struct Command {
     run: fn(Vec<String>) -> ExitCode,
 }
 
-fn command_options(name: &str) -> (&'static [&'static str], &'static [&'static str]) {
+fn command_options(
+    name: &str,
+) -> (
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+) {
     match name {
         "callees" | "callers" | "compare" | "describe" | "impact" | "inspect" | "lint" | "refs"
-        | "report" | "tree" | "validate" => (&[], &["--json"]),
-        "export" => (&["-o"], &["--allow-lossy"]),
-        "import" => (&["--output", "-o", "--mxrs-workspace"], &[]),
-        "javagen" => (&["--project-root"], &[]),
-        "new" => (&["--output", "-o", "--version", "--mxrs-workspace"], &[]),
-        "oql" => (&["--dialect"], &["--json"]),
-        "package" => (&["--web", "--output", "-o"], &[]),
-        "search" => (&["--limit"], &["--json"]),
-        "translate-oql" => (&["--dialect"], &[]),
-        _ => (&[], &[]),
+        | "report" | "tree" | "validate" => (&[], &["--json"], &[]),
+        "export" => (&["-o"], &["--allow-lossy"], &[]),
+        "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
+        "javagen" => (&["--project-root"], &[], &[]),
+        "new" => (
+            &["--output", "-o", "--version", "--mxrs-workspace"],
+            &[],
+            &[],
+        ),
+        "oql" => (&["--dialect"], &["--json"], &[]),
+        "package" => (&["--web", "--output", "-o"], &[], &[]),
+        "search" => (&["--limit"], &["--json"], &[]),
+        "translate-oql" => (&["--dialect"], &[], &[]),
+        "page" => (&["--target"], &["--dry-run", "--json"], &["--role"]),
+        "consumed-rest" | "entity" | "enumeration" | "java-action" | "module" | "nanoflow"
+        | "published-rest" | "security" | "use-case" => {
+            (&["--target"], &["--dry-run", "--json"], &[])
+        }
+        "scaffold" => (&["--target"], &[], &[]),
+        "project" => (&[], &["--json"], &[]),
+        _ => (&[], &[], &[]),
     }
 }
 
@@ -82,26 +99,38 @@ commands! {
     "callees", "<file.mpr> <artifact> [--json]", "List distinct directly called artifacts", run_callees;
     "callers", "<file.mpr> <artifact> [--json]", "List distinct direct callers", run_callers;
     "compare", "<left.mpr> <right.mpr> [--json]", "Compare structural model snapshots", run_compare;
+    "consumed-rest", "new <Module.Client> [--target DIR] [--dry-run] [--json]", "Scaffold a consumed REST adapter microflow", run_consumed_rest;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "dump-unit", "<file.mpr> <unit_id>", "Dump native unit bytes", run_dump_unit;
+    "entity", "new <Module.Entity> [--target DIR] [--dry-run] [--json]", "Scaffold a domain entity declaration", run_entity;
+    "enumeration", "new <Module.Enumeration> [--target DIR] [--dry-run] [--json]", "Scaffold an enumeration declaration", run_enumeration;
     "export", "<file.mpr> [-o <out.rs>] [--allow-lossy]", "Export editable Rust declarations", run_export;
     "help", "[command]", "Show command usage", run_help;
     "impact", "<file.mpr> <artifact> [--json]", "Find transitive incoming dependencies", run_impact;
     "import", "<file.mpr> --output <directory> [--mxrs-workspace <path>]", "Import into a Cargo-native project", run_import;
     "inspect", "<file.mpr> [--json]", "Show a structural model snapshot", run_inspect;
+    "java-action", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Scaffold a Java Action adapter microflow", run_java_action;
     "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
+    "module", "new <Module> [--target DIR] [--dry-run] [--json]", "Scaffold an editable module declaration layer", run_module;
     "modules", "<file.mpr>", "List module names", run_modules;
+    "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
     "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
     "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
+    "page", "new <Module.Page> [--role Module.Role] [--target DIR] [--dry-run] [--json]", "Scaffold a page declaration and its module layout", run_page;
+    "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
+    "published-rest", "new <Module.Handler> [--target DIR] [--dry-run] [--json]", "Scaffold a published REST handler microflow", run_published_rest;
     "refs", "<file.mpr> <artifact> [--json]", "Show incoming and outgoing references", run_refs;
     "report", "<file.mpr> [--json]", "Summarize explicit-reference lint and module dependencies", run_report;
+    "scaffold", "<list|destroy> [<kind:name>] [--target DIR]", "List generators or remove a registered scaffold", run_scaffold;
     "search", "<file.mpr> <query> [--limit N] [--json]", "Search artifact names and documentation", run_semantic_search;
+    "security", "init <Module> [--target DIR] [--dry-run] [--json]", "Scaffold module roles and project security", run_security;
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
     "translate-oql", "<query> [--dialect postgresql|sql_server|ansi]", "Translate the supported safe OQL subset", run_translate_oql;
     "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
     "units", "<file.mpr>", "List native units and storage metadata", run_units;
+    "use-case", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold an application use-case microflow", run_use_case;
     "validate", "<file.mpr> [--json]", "Check storage-format integrity", run_validate;
     "verify-package", "<archive.tar>", "Verify archive paths and content hashes", run_verify_package;
 }
@@ -204,6 +233,97 @@ fn run_new(mut args: Vec<String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Every scaffold command shares one shape: parse, generate, render, and
+/// surface a typed `mxrs-scaffold` error verbatim. Wrapping that once keeps
+/// the twelve entry points below free of duplicated error plumbing.
+fn reported(outcome: Result<(), String>) -> ExitCode {
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_entity(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Entity,
+        args,
+    ))
+}
+
+fn run_enumeration(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Enumeration,
+        args,
+    ))
+}
+
+fn run_use_case(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::UseCase,
+        args,
+    ))
+}
+
+fn run_nanoflow(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Nanoflow,
+        args,
+    ))
+}
+
+fn run_page(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Page,
+        args,
+    ))
+}
+
+fn run_published_rest(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::PublishedRest,
+        args,
+    ))
+}
+
+fn run_consumed_rest(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::ConsumedRest,
+        args,
+    ))
+}
+
+fn run_java_action(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::JavaAction,
+        args,
+    ))
+}
+
+fn run_security(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Security,
+        args,
+    ))
+}
+
+fn run_module(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Module,
+        args,
+    ))
+}
+
+fn run_scaffold(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::registry_command(args))
+}
+
+fn run_project(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::project_command(args))
 }
 
 fn semantic_index(path: &str) -> Result<mxrs_semantic::SemanticIndex, String> {

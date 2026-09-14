@@ -1,6 +1,20 @@
-//! Transactional scaffolding for new Cargo-native Mendix applications.
+//! Transactional scaffolding for Cargo-native Mendix applications: whole new
+//! projects ([`generate_project`]) and individual artifacts added to an
+//! existing one ([`artifact::scaffold_artifact`], the mxrs counterpart of
+//! mxrb's `mxrb entity new`/`mxrb page new`/… generators).
 
 use std::path::{Path, PathBuf};
+
+pub mod artifact;
+pub mod registry;
+mod templates;
+mod transaction;
+
+pub use artifact::{
+    ArtifactKind, ArtifactScaffold, ProjectInspection, SCAFFOLD_COMMANDS, ScaffoldCommand,
+    ScaffoldOutcome, inspect_project, scaffold_artifact,
+};
+pub use registry::RegisteredScaffold;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScaffoldError {
@@ -18,6 +32,34 @@ pub enum ScaffoldError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{0}: not a Cargo-native MXRS project (run `mxrs new` or `mxrs import` first)")]
+    ProjectNotFound(String),
+    #[error("{0}: module not found (run `mxrs module new <Module>` first)")]
+    ModuleNotFound(String),
+    #[error("{0}: module already exists")]
+    ModuleExists(String),
+    #[error("{0}: file already exists")]
+    FileExists(String),
+    #[error("{0}: aggregator not found")]
+    AggregatorNotFound(String),
+    #[error("{0}: build() does not end in a shape this scaffold can extend")]
+    UnrecognizedProjectBuild(String),
+    #[error("{label} name must be a Mendix identifier: {value}")]
+    InvalidIdentifier { label: &'static str, value: String },
+    #[error("name must be qualified as Module.Artifact: {0}")]
+    UnqualifiedName(String),
+    #[error("entity name is reserved by Mendix: {0}")]
+    ReservedEntityName(String),
+    #[error("{0} has no Rust module spelling; rename the artifact")]
+    UnsupportedArtifactName(String),
+    #[error("invalid scaffold registry: {0}")]
+    RegistryInvalid(String),
+    #[error("scaffold not registered: {0}")]
+    ScaffoldNotRegistered(String),
+    #[error("refusing to remove a changed or missing scaffold file: {0}")]
+    ScaffoldFileChanged(String),
+    #[error("unsafe scaffold path: {0}")]
+    UnsafeScaffoldPath(String),
 }
 
 pub type Result<T> = std::result::Result<T, ScaffoldError>;
@@ -230,8 +272,17 @@ fn package_name(name: &str) -> String {
     if output.starts_with(|character: char| character.is_ascii_digit()) {
         output.insert_str(0, "app-");
     }
-    if matches!(
-        output.as_str(),
+    if is_rust_keyword(&output) {
+        output.insert_str(0, "app-");
+    }
+    output
+}
+
+/// Shared by [`package_name`] and `artifact`'s Rust module naming: both have
+/// to avoid emitting a bare keyword where an identifier is required.
+pub(crate) fn is_rust_keyword(value: &str) -> bool {
+    matches!(
+        value,
         "as" | "async"
             | "await"
             | "break"
@@ -282,10 +333,7 @@ fn package_name(name: &str) -> String {
             | "unsized"
             | "virtual"
             | "yield"
-    ) {
-        output.insert_str(0, "app-");
-    }
-    output
+    )
 }
 
 fn escape_rust_string(value: &str) -> String {
@@ -296,7 +344,7 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("a string is always serializable")
 }
 
-fn io_error(path: &Path, source: std::io::Error) -> ScaffoldError {
+pub(crate) fn io_error(path: &Path, source: std::io::Error) -> ScaffoldError {
     ScaffoldError::Io {
         path: path.display().to_string(),
         source,

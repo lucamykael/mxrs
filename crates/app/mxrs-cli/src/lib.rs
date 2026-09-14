@@ -24,9 +24,21 @@
 //! `units` here since `mxrs inspect` already means the structural summary
 //! above, a more useful default for that name). See `browse`'s module doc.
 
+//! **Artifact scaffolding** (`entity`/`enumeration`/`use-case`/`page`/
+//! `nanoflow`/`published-rest`/`consumed-rest`/`java-action`/`security`/
+//! `module`/`scaffold`/`project`) ports mxrb's source generators, which write
+//! declaration source into a project rather than touching an `.mpr`. See
+//! `scaffold`'s module doc for the contract kept and `mxrs-scaffold`'s
+//! `artifact` module for what necessarily differs between generating Ruby that
+//! is evaluated at run time and Rust that has to compile. mxrb's `constant`
+//! and `scheduled-event` generators have no counterpart here: `mxrs-ir` has no
+//! constant or scheduled-event declaration, so their templates could only
+//! produce source that does not build.
+
 pub mod arguments;
 pub mod browse;
 pub mod cargo_project;
 pub mod compare;
 pub mod inspect;
+pub mod scaffold;
 pub mod validate;

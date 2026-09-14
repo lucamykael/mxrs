@@ -1024,7 +1024,9 @@ dependencies = [
 name = "mxrs-scaffold"
 version = "0.1.0"
 dependencies = [
+ "mxrs-model",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]

@@ -47,7 +47,26 @@ cargo run -p xtask -- coverage-gate target/coverage.json --require-complete
 
 The command inventory currently covers MXRB's 76 top-level commands, not an
 exhaustive list of Studio Pro capabilities. All 76 still need complete
-command-contract evidence: 30 have partial equivalents and 46 are absent.
+command-contract evidence: 42 have partial equivalents and 34 are absent.
+
+MXRB's model-authoring generators write Ruby source into a project; the MXRS
+equivalents write Rust declarations into `src/domain/modules/`. Because the
+generated content differs by construction, no differential oracle can compare
+it, and those rows stay partial rather than verified however many tests pass.
+What is proven is narrower and stated as such: a project scaffolded with
+`module`/`entity`/`enumeration`/`use-case`/`nanoflow`/`page`/`published-rest`/
+`consumed-rest`/`java-action`/`security` compiles with real Cargo, runs, and
+the declarations reach the written `.mpr`; the argument grammar, rendering,
+dry-run and registry behavior are covered by CLI tests. Nothing here
+establishes that Studio Pro accepts the result.
+
+`constant` and `scheduled-event` remain absent on purpose. Their MXRB
+templates emit `constant`/`scheduled_event` declarations, and `mxrs-ir` has no
+`ConstantDecl` or `ScheduledEventDecl` for them to compile against —
+`mxrs-writer` persists neither `Constants$Constant` nor
+`ScheduledEvents$ScheduledEvent`. A scaffold that emitted those calls anyway
+would break `cargo check` for the user's whole project, so the commands are
+not registered at all.
 
 ## Official fresh-project acceptance
 

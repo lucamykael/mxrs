@@ -1,0 +1,724 @@
+//! Artifact scaffolds for an existing Cargo-native project — the mxrs
+//! equivalent of mxrb's `Scaffold::Generator`/`Scaffold::Recipes`
+//! (`lib/mxrb/scaffold/{generator,recipes}.rb`).
+//!
+//! **What is the same as mxrb**: one file per artifact, never overwriting an
+//! existing file, aggregators connected automatically, the whole set published
+//! atomically, every created file recorded so `scaffold destroy` removes
+//! exactly what was generated, and `--dry-run` reporting the same paths
+//! without writing.
+//!
+//! **What is necessarily different**: mxrb scaffolds Ruby into
+//! `modules/<Module>/<layer>/<family>/`, evaluated at runtime by `project.rb`.
+//! mxrs scaffolds Rust into `src/domain/modules/<module>/<family>/`, compiled
+//! by `cargo`. Two consequences follow from that and are not stylistic:
+//!
+//! 1. Rust module paths must be identifiers, so directories are snake_cased
+//!    (`src/domain/modules/sales`, not `.../Sales`). The Mendix name stays
+//!    verbatim inside the generated declaration and in the registry key.
+//! 2. Aggregators cannot be "a list of files to evaluate". Each one exposes an
+//!    `apply` function plus a `const` table of function pointers, so adding an
+//!    artifact is a two-line edit (`pub mod x;` and one table entry) with no
+//!    ambiguity about where a line goes.
+//!
+//! Wiring into `build()` recognizes the two shapes mxrs itself generates (the
+//! `mxrs new` scaffold and the `mxrs import` layout). Anything else fails with
+//! [`ScaffoldError::UnrecognizedProjectBuild`] naming the file rather than
+//! guessing where a call belongs in source the user restructured.
+
+use std::path::{Path, PathBuf};
+
+use crate::templates::{DECLARATIONS_LIST, DECLARE, FAMILIES_LIST, MODULES_LIST, snake_case};
+use crate::transaction::Transaction;
+use crate::{Result, ScaffoldError, io_error, registry, templates};
+
+/// Placeholder name on the scaffolded `ApplicationLayout` that scaffolded
+/// pages attach their widgets to. Matches the `mxrs new` project scaffold.
+const LAYOUT_PARAMETER: &str = "Main";
+
+const RESERVED_ENTITY_NAMES: &[&str] = &["Owner", "ChangedBy", "CreatedDate", "ChangedDate"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactKind {
+    Entity,
+    Enumeration,
+    UseCase,
+    Page,
+    Nanoflow,
+    PublishedRest,
+    ConsumedRest,
+    JavaAction,
+    Security,
+    Module,
+}
+
+/// One scaffold command as `mxrs scaffold list` prints it. `destination` is
+/// the directory the command writes into, relative to the project root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScaffoldCommand {
+    pub name: &'static str,
+    pub action: &'static str,
+    pub argument: &'static str,
+    pub summary: &'static str,
+    pub destination: &'static str,
+    pub kind: ArtifactKind,
+}
+
+/// Only commands that actually generate something are listed: advertising a
+/// generator mxrs does not have would be a promise `scaffold list` cannot keep.
+pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
+    ScaffoldCommand {
+        name: "consumed-rest",
+        action: "new",
+        argument: "<Module.Client>",
+        summary: "Create a consumed REST adapter microflow",
+        destination: "src/domain/modules/<module>/integrations",
+        kind: ArtifactKind::ConsumedRest,
+    },
+    ScaffoldCommand {
+        name: "entity",
+        action: "new",
+        argument: "<Module.Entity>",
+        summary: "Create a domain entity declaration",
+        destination: "src/domain/modules/<module>/entities",
+        kind: ArtifactKind::Entity,
+    },
+    ScaffoldCommand {
+        name: "enumeration",
+        action: "new",
+        argument: "<Module.Enumeration>",
+        summary: "Create an enumeration declaration",
+        destination: "src/domain/modules/<module>/enumerations",
+        kind: ArtifactKind::Enumeration,
+    },
+    ScaffoldCommand {
+        name: "java-action",
+        action: "new",
+        argument: "<Module.Adapter>",
+        summary: "Create a Java Action adapter microflow",
+        destination: "src/domain/modules/<module>/actions",
+        kind: ArtifactKind::JavaAction,
+    },
+    ScaffoldCommand {
+        name: "module",
+        action: "new",
+        argument: "<Module>",
+        summary: "Create an editable module declaration layer",
+        destination: "src/domain/modules/<module>",
+        kind: ArtifactKind::Module,
+    },
+    ScaffoldCommand {
+        name: "nanoflow",
+        action: "new",
+        argument: "<Module.Flow>",
+        summary: "Create a client nanoflow declaration",
+        destination: "src/domain/modules/<module>/client_actions",
+        kind: ArtifactKind::Nanoflow,
+    },
+    ScaffoldCommand {
+        name: "page",
+        action: "new",
+        argument: "<Module.Page>",
+        summary: "Create a page declaration and its module layout",
+        destination: "src/domain/modules/<module>/pages",
+        kind: ArtifactKind::Page,
+    },
+    ScaffoldCommand {
+        name: "published-rest",
+        action: "new",
+        argument: "<Module.Handler>",
+        summary: "Create a published REST handler microflow",
+        destination: "src/domain/modules/<module>/endpoints",
+        kind: ArtifactKind::PublishedRest,
+    },
+    ScaffoldCommand {
+        name: "security",
+        action: "init",
+        argument: "<Module>",
+        summary: "Create module roles and project security",
+        destination: "src/domain/modules/<module>/security",
+        kind: ArtifactKind::Security,
+    },
+    ScaffoldCommand {
+        name: "use-case",
+        action: "new",
+        argument: "<Module.Flow>",
+        summary: "Create an application use-case microflow",
+        destination: "src/domain/modules/<module>/use_cases",
+        kind: ArtifactKind::UseCase,
+    },
+];
+
+impl ArtifactKind {
+    /// Registry key prefix, matching mxrb's `"#{@kind}:#{@name}"` where the
+    /// kind is the command name with dashes turned into underscores.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Entity => "entity",
+            Self::Enumeration => "enumeration",
+            Self::UseCase => "use_case",
+            Self::Page => "page",
+            Self::Nanoflow => "nanoflow",
+            Self::PublishedRest => "published_rest",
+            Self::ConsumedRest => "consumed_rest",
+            Self::JavaAction => "java_action",
+            Self::Security => "security",
+            Self::Module => "module",
+        }
+    }
+
+    fn family(self) -> &'static str {
+        match self {
+            Self::Entity => "entities",
+            Self::Enumeration => "enumerations",
+            Self::UseCase => "use_cases",
+            Self::Page => "pages",
+            Self::Nanoflow => "client_actions",
+            Self::PublishedRest => "endpoints",
+            Self::ConsumedRest => "integrations",
+            Self::JavaAction => "actions",
+            Self::Security | Self::Module => "security",
+        }
+    }
+
+    /// `Security` and `Module` name a module, every other kind names an
+    /// artifact inside one — the same split mxrb draws between its `init`
+    /// commands and its `new` commands.
+    fn names_a_module(self) -> bool {
+        matches!(self, Self::Security | Self::Module)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactScaffold {
+    pub kind: ArtifactKind,
+    /// `Module.Artifact`, or `Module` for [`ArtifactKind::Security`] and
+    /// [`ArtifactKind::Module`].
+    pub name: String,
+    pub target: PathBuf,
+    pub dry_run: bool,
+    /// Module roles a scaffolded page is restricted to (`--role`, repeatable).
+    pub page_roles: Vec<String>,
+}
+
+impl ArtifactScaffold {
+    pub fn new(kind: ArtifactKind, name: impl Into<String>, target: impl Into<PathBuf>) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            target: target.into(),
+            dry_run: false,
+            page_roles: vec![],
+        }
+    }
+
+    pub fn dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    pub fn page_roles(mut self, roles: Vec<String>) -> Self {
+        self.page_roles = roles;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScaffoldOutcome {
+    pub kind: &'static str,
+    pub name: String,
+    pub dry_run: bool,
+    pub files: Vec<PathBuf>,
+    pub updated: Vec<PathBuf>,
+}
+
+pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> {
+    let root =
+        std::path::absolute(&options.target).map_err(|error| io_error(&options.target, error))?;
+    require_project(&root)?;
+    let mut transaction = Transaction::default();
+    if options.kind.names_a_module() {
+        let module_name = identifier(&options.name, "module")?;
+        match options.kind {
+            ArtifactKind::Module => create_module_layer(&mut transaction, &root, module_name)?,
+            _ => create_module_security(&mut transaction, &root, module_name)?,
+        }
+    } else {
+        let (module_name, artifact_name) = qualified_name(options.kind, &options.name)?;
+        create_artifact(&mut transaction, &root, options, module_name, artifact_name)?;
+    }
+
+    let mut files = transaction.created().to_vec();
+    let updated = transaction.updated().to_vec();
+    if !options.dry_run {
+        let key = format!("{}:{}", options.kind.as_str(), options.name);
+        let recorded = files.clone();
+        let registry_path = registry::stage(&mut transaction, &root, &key, &recorded)?;
+        files.retain(|file| file != &registry_path);
+        transaction.commit()?;
+    }
+    Ok(ScaffoldOutcome {
+        kind: options.kind.as_str(),
+        name: options.name.clone(),
+        dry_run: options.dry_run,
+        files,
+        updated,
+    })
+}
+
+/// Facts about a Cargo-native project workspace, for `mxrs project inspect`.
+/// `modules` lists the snake-cased Rust directories under
+/// `src/domain/modules`; the verbatim Mendix names appear in
+/// `registered_scaffolds` as `module:<Name>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectInspection {
+    pub root: PathBuf,
+    pub manifest: bool,
+    pub domain_module: bool,
+    pub declared_version: Option<String>,
+    pub modules: Vec<String>,
+    pub mprs: Vec<PathBuf>,
+    pub registered_scaffolds: Vec<String>,
+}
+
+pub fn inspect_project(target: impl AsRef<Path>) -> Result<ProjectInspection> {
+    let target = target.as_ref();
+    let root = std::path::absolute(target).map_err(|error| io_error(target, error))?;
+    let mut mprs = Vec::new();
+    for directory in [root.clone(), root.join("build")] {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.map_err(|error| io_error(&directory, error))?.path();
+            if path.extension().is_some_and(|extension| extension == "mpr") {
+                mprs.push(path);
+            }
+        }
+    }
+    mprs.sort();
+    let mut modules = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root.join("src/domain/modules")) {
+        for entry in entries {
+            let path = entry
+                .map_err(|error| io_error(&root.join("src/domain/modules"), error))?
+                .path();
+            if path.join("mod.rs").is_file()
+                && let Some(name) = path.file_name().and_then(|name| name.to_str())
+            {
+                modules.push(name.to_string());
+            }
+        }
+    }
+    modules.sort();
+    Ok(ProjectInspection {
+        manifest: root.join("Cargo.toml").is_file(),
+        domain_module: root.join("src/domain/mod.rs").is_file(),
+        declared_version: declared_version(&root)?,
+        modules,
+        mprs,
+        registered_scaffolds: registry::entries(&root)?
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect(),
+        root,
+    })
+}
+
+/// Reads the Mendix version an imported project records in `mxrs.toml`, then
+/// falls back to the `#[mxrs::application(version = "…")]` attribute the
+/// `mxrs new` scaffold emits. Returns `None` rather than a guess when neither
+/// is present.
+fn declared_version(root: &Path) -> Result<Option<String>> {
+    let manifest = root.join("mxrs.toml");
+    if let Some(text) = read_optional(&manifest)?
+        && let Some(version) = text
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("mendix_version"))
+            .filter_map(|value| value.trim_start().strip_prefix('='))
+            .find_map(|value| quoted(value.trim()))
+    {
+        return Ok(Some(version));
+    }
+    let Some(text) = read_optional(&root.join("src/lib.rs"))? else {
+        return Ok(None);
+    };
+    Ok(text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("#[mxrs::application(version ="))
+        .find_map(|value| quoted(value.trim())))
+}
+
+fn quoted(value: &str) -> Option<String> {
+    let rest = value.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn read_optional(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn require_project(root: &Path) -> Result<()> {
+    for relative in ["Cargo.toml", "src/domain/mod.rs"] {
+        if !root.join(relative).is_file() {
+            return Err(ScaffoldError::ProjectNotFound(
+                root.join(relative).display().to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn create_module_layer(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+) -> Result<()> {
+    let directory = snake_case(module_name);
+    let aggregator = root.join(format!("src/domain/modules/{directory}/mod.rs"));
+    if aggregator.is_file() {
+        return Err(ScaffoldError::ModuleExists(
+            aggregator.display().to_string(),
+        ));
+    }
+    connect_modules_aggregator(transaction, root)?;
+    transaction.create(&aggregator, templates::module_aggregator(module_name))?;
+    let modules = root.join("src/domain/modules/mod.rs");
+    let stem = rust_module_path(&directory)?;
+    declare_child_module(transaction, &modules, &directory)?;
+    append_list_entry(
+        transaction,
+        &modules,
+        MODULES_LIST,
+        &format!("{stem}::apply"),
+    )
+}
+
+fn create_module_security(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+) -> Result<()> {
+    require_module(root, module_name)?;
+    create_family_file(
+        transaction,
+        root,
+        module_name,
+        ArtifactKind::Security,
+        "module_roles",
+        templates::module_roles(module_name),
+    )?;
+    let security = root.join("src/domain/security/mod.rs");
+    if transaction.content(&security)?.is_none() {
+        transaction.create(&security, templates::project_security(module_name))?;
+        declare_child_module(transaction, &root.join("src/domain/mod.rs"), "security")?;
+        connect_build(transaction, root, "security::apply(&mut project);")?;
+    }
+    Ok(())
+}
+
+fn create_artifact(
+    transaction: &mut Transaction,
+    root: &Path,
+    options: &ArtifactScaffold,
+    module_name: &str,
+    artifact_name: &str,
+) -> Result<()> {
+    require_module(root, module_name)?;
+    if options.kind == ArtifactKind::Page {
+        ensure_module_layout(transaction, root, module_name)?;
+    }
+    let source = match options.kind {
+        ArtifactKind::Entity => templates::entity(module_name, artifact_name),
+        ArtifactKind::Enumeration => templates::enumeration(module_name, artifact_name),
+        ArtifactKind::UseCase => templates::use_case(module_name, artifact_name),
+        ArtifactKind::Nanoflow => templates::nanoflow(module_name, artifact_name),
+        ArtifactKind::PublishedRest => templates::published_rest(module_name, artifact_name),
+        ArtifactKind::ConsumedRest => templates::consumed_rest(module_name, artifact_name),
+        ArtifactKind::JavaAction => templates::java_action(module_name, artifact_name),
+        ArtifactKind::Page => templates::page(
+            module_name,
+            artifact_name,
+            LAYOUT_PARAMETER,
+            &options.page_roles,
+        ),
+        ArtifactKind::Security | ArtifactKind::Module => unreachable!("handled by the caller"),
+    };
+    create_family_file(
+        transaction,
+        root,
+        module_name,
+        options.kind,
+        &snake_case(artifact_name),
+        source,
+    )
+}
+
+/// mxrb's `ensure_presentation` creates the module's `ApplicationLayout`
+/// before a page that references it. Ported for pages only: the mxrs family
+/// directories are flat, so a nanoflow has no layout dependency to satisfy.
+fn ensure_module_layout(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+) -> Result<()> {
+    let family = root.join(format!(
+        "src/domain/modules/{}/layouts/mod.rs",
+        snake_case(module_name)
+    ));
+    if transaction.content(&family)?.is_some() {
+        return Ok(());
+    }
+    connect_family(transaction, root, module_name, "layouts")?;
+    let file = family.with_file_name("application_layout.rs");
+    transaction.create(&file, templates::layouts(module_name, LAYOUT_PARAMETER))?;
+    declare_child_module(transaction, &family, "application_layout")?;
+    append_list_entry(
+        transaction,
+        &family,
+        DECLARATIONS_LIST,
+        &format!("application_layout::{DECLARE}"),
+    )
+}
+
+fn create_family_file(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    kind: ArtifactKind,
+    stem: &str,
+    source: String,
+) -> Result<()> {
+    let family = kind.family();
+    connect_family(transaction, root, module_name, family)?;
+    let aggregator = root.join(format!(
+        "src/domain/modules/{}/{family}/mod.rs",
+        snake_case(module_name)
+    ));
+    let path = aggregator.with_file_name(format!("{stem}.rs"));
+    let rust_path = rust_module_path(stem)?;
+    transaction.create(&path, source)?;
+    declare_child_module(transaction, &aggregator, stem)?;
+    append_list_entry(
+        transaction,
+        &aggregator,
+        DECLARATIONS_LIST,
+        &format!("{rust_path}::{DECLARE}"),
+    )
+}
+
+fn connect_family(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    family: &str,
+) -> Result<()> {
+    let directory = snake_case(module_name);
+    let aggregator = root.join(format!("src/domain/modules/{directory}/{family}/mod.rs"));
+    if transaction.content(&aggregator)?.is_some() {
+        return Ok(());
+    }
+    transaction.create(
+        &aggregator,
+        templates::family_aggregator(module_name, family),
+    )?;
+    let module = root.join(format!("src/domain/modules/{directory}/mod.rs"));
+    declare_child_module(transaction, &module, family)?;
+    append_list_entry(
+        transaction,
+        &module,
+        FAMILIES_LIST,
+        &format!("{family}::apply"),
+    )
+}
+
+fn connect_modules_aggregator(transaction: &mut Transaction, root: &Path) -> Result<()> {
+    let modules = root.join("src/domain/modules/mod.rs");
+    if transaction.content(&modules)?.is_some() {
+        return Ok(());
+    }
+    transaction.create(&modules, templates::modules_aggregator())?;
+    declare_child_module(transaction, &root.join("src/domain/mod.rs"), "modules")?;
+    connect_build(transaction, root, "modules::apply(&mut project);")
+}
+
+const IMPORTED_BUILD_TAIL: &str = "\n    project\n}\n";
+const FRESH_BUILD_TAIL: &str = "\n    project.build()\n}\n";
+
+/// Adds one `apply` call to `src/domain/mod.rs`'s `build()`. Both recognized
+/// tails are shapes mxrs itself generates; anything else is reported instead
+/// of being rewritten, because a wrong guess here silently changes what the
+/// next `cargo mxrs build` writes into the model.
+fn connect_build(transaction: &mut Transaction, root: &Path, call: &str) -> Result<()> {
+    let path = root.join("src/domain/mod.rs");
+    let source = transaction
+        .content(&path)?
+        .ok_or_else(|| ScaffoldError::ProjectNotFound(path.display().to_string()))?;
+    if source.contains(&format!("\n    {call}\n")) {
+        return Ok(());
+    }
+    let updated = if let Some(head) = source.strip_suffix(IMPORTED_BUILD_TAIL) {
+        format!("{head}\n    {call}{IMPORTED_BUILD_TAIL}")
+    } else if let Some(head) = source.strip_suffix(FRESH_BUILD_TAIL) {
+        format!("{head}\n    let mut project = project.build();\n    {call}{IMPORTED_BUILD_TAIL}")
+    } else {
+        return Err(ScaffoldError::UnrecognizedProjectBuild(
+            path.display().to_string(),
+        ));
+    };
+    transaction.write(&path, updated)
+}
+
+fn declare_child_module(
+    transaction: &mut Transaction,
+    aggregator: &Path,
+    stem: &str,
+) -> Result<()> {
+    let source = transaction
+        .content(aggregator)?
+        .ok_or_else(|| ScaffoldError::AggregatorNotFound(aggregator.display().to_string()))?;
+    let declaration = format!("pub mod {};", rust_module_path(stem)?);
+    if source.lines().any(|line| line.trim() == declaration) {
+        return Ok(());
+    }
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    match lines.iter().rposition(|line| line.starts_with("pub mod ")) {
+        Some(position) => lines.insert(position + 1, declaration),
+        None => {
+            let position = header_end(&lines);
+            lines.splice(position..position, [declaration, String::new()]);
+        }
+    }
+    transaction.write(aggregator, join(&lines))
+}
+
+/// The first line after the `//!` header and the blank line following it —
+/// where a `pub mod` declaration goes in a file that has none yet.
+fn header_end(lines: &[String]) -> usize {
+    let mut position = 0;
+    while lines
+        .get(position)
+        .is_some_and(|line| line.starts_with("//!"))
+    {
+        position += 1;
+    }
+    if position > 0 && lines.get(position).is_some_and(|line| line.is_empty()) {
+        position += 1;
+    }
+    position
+}
+
+/// Rewrites the whole table instead of splicing a line into an assumed shape.
+/// `cargo fmt` collapses a short slice onto one line, and a scaffold that only
+/// understood the shape it had originally emitted would start failing the
+/// first time a user formatted their project.
+fn append_list_entry(
+    transaction: &mut Transaction,
+    aggregator: &Path,
+    list: &str,
+    entry: &str,
+) -> Result<()> {
+    let missing = || ScaffoldError::AggregatorNotFound(aggregator.display().to_string());
+    let source = transaction.content(aggregator)?.ok_or_else(missing)?;
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with(&format!("const {list}:")))
+        .ok_or_else(missing)?;
+    let end = lines
+        .iter()
+        .skip(start)
+        .position(|line| line.trim_end().ends_with("];"))
+        .map(|offset| start + offset)
+        .ok_or_else(missing)?;
+    let declaration = lines[start..=end].join("\n");
+    let (head, body) = declaration.split_once("= &[").ok_or_else(missing)?;
+    let mut entries = body
+        .trim_end()
+        .strip_suffix("];")
+        .ok_or_else(missing)?
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if entries.iter().any(|existing| existing == entry) {
+        return Ok(());
+    }
+    entries.push(entry.to_string());
+    let mut replacement = vec![format!("{head}= &[")];
+    replacement.extend(entries.into_iter().map(|entry| format!("    {entry},")));
+    replacement.push("];".to_string());
+    lines.splice(start..=end, replacement);
+    transaction.write(aggregator, join(&lines))
+}
+
+fn join(lines: &[String]) -> String {
+    let mut source = lines.join("\n");
+    source.push('\n');
+    source
+}
+
+fn require_module(root: &Path, module_name: &str) -> Result<()> {
+    let aggregator = root.join(format!(
+        "src/domain/modules/{}/mod.rs",
+        snake_case(module_name)
+    ));
+    if aggregator.is_file() {
+        return Ok(());
+    }
+    Err(ScaffoldError::ModuleNotFound(
+        aggregator.display().to_string(),
+    ))
+}
+
+fn qualified_name(kind: ArtifactKind, name: &str) -> Result<(&str, &str)> {
+    let Some((module_name, artifact_name)) = name.split_once('.') else {
+        return Err(ScaffoldError::UnqualifiedName(name.to_string()));
+    };
+    let module_name = identifier(module_name, "module")?;
+    let artifact_name = identifier(artifact_name, "artifact")?;
+    if kind == ArtifactKind::Entity && RESERVED_ENTITY_NAMES.contains(&artifact_name) {
+        return Err(ScaffoldError::ReservedEntityName(artifact_name.to_string()));
+    }
+    Ok((module_name, artifact_name))
+}
+
+fn identifier<'a>(value: &'a str, label: &'static str) -> Result<&'a str> {
+    let valid = value
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic())
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_');
+    if valid {
+        Ok(value)
+    } else {
+        Err(ScaffoldError::InvalidIdentifier {
+            label,
+            value: value.to_string(),
+        })
+    }
+}
+
+/// Mendix names that collapse onto a Rust keyword are emitted as raw
+/// identifiers (`pub mod r#type;`), which keeps the file name equal to the
+/// snake-cased Mendix name. The four keywords Rust refuses to raw-escape have
+/// no faithful spelling, so they are reported rather than renamed behind the
+/// user's back.
+fn rust_module_path(stem: &str) -> Result<String> {
+    if matches!(stem, "crate" | "self" | "super" | "Self") {
+        return Err(ScaffoldError::UnsupportedArtifactName(stem.to_string()));
+    }
+    Ok(if crate::is_rust_keyword(stem) {
+        format!("r#{stem}")
+    } else {
+        stem.to_string()
+    })
+}

@@ -182,3 +182,100 @@ pub struct ProjectDecl {
     /// declared profile collection authoritative.
     pub navigation: Option<NavigationDecl>,
 }
+
+impl ProjectDecl {
+    /// Folds `declared` into the module of the same name, or appends it when
+    /// the project has no such module yet.
+    ///
+    /// Exists so a project's declarations can be split across several source
+    /// files without any of them having to restate the module's other
+    /// artifacts, and so a declaration layer added on top of an imported
+    /// project extends that module instead of declaring a second one under the
+    /// same name — which the writer would then synchronize twice.
+    ///
+    /// `roles` replaces instead of appending: `Some` is authoritative for
+    /// module security (see [`ModuleDecl::roles`]), so appending would let a
+    /// declaration that deliberately empties the role set keep the roles it
+    /// means to drop. A merge that declares no roles leaves the existing value
+    /// untouched rather than resetting it to `None`.
+    pub fn merge_module(&mut self, declared: ModuleDecl) {
+        let Some(target) = self
+            .modules
+            .iter_mut()
+            .find(|module| module.name == declared.name)
+        else {
+            self.modules.push(declared);
+            return;
+        };
+        target.entities.extend(declared.entities);
+        target.enumerations.extend(declared.enumerations);
+        target.microflows.extend(declared.microflows);
+        target.nanoflows.extend(declared.nanoflows);
+        target.pages.extend(declared.pages);
+        target.layouts.extend(declared.layouts);
+        if let Some(roles) = declared.roles {
+            target.roles = Some(roles);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ModuleRoleDecl;
+
+    fn module(name: &str) -> ModuleDecl {
+        ModuleDecl {
+            name: name.to_string(),
+            ..ModuleDecl::default()
+        }
+    }
+
+    #[test]
+    fn merging_appends_artifacts_of_a_known_module_and_pushes_an_unknown_one() {
+        let mut project = ProjectDecl {
+            mendix_version: "11.12.1".into(),
+            modules: vec![module("Sales")],
+            security: None,
+            navigation: None,
+        };
+        project.modules[0].entities.push(EntityDecl::new("Order"));
+        let mut declared = module("Sales");
+        declared.entities.push(EntityDecl::new("Invoice"));
+        declared
+            .enumerations
+            .push(EnumerationDecl::new("PaymentStatus"));
+        project.merge_module(declared);
+        assert_eq!(project.modules.len(), 1);
+        let names = project.modules[0]
+            .entities
+            .iter()
+            .map(|entity| entity.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Order", "Invoice"]);
+        assert_eq!(project.modules[0].enumerations.len(), 1);
+        project.merge_module(module("Billing"));
+        assert_eq!(project.modules.len(), 2);
+        assert_eq!(project.modules[1].name, "Billing");
+    }
+
+    #[test]
+    fn merging_replaces_declared_roles_but_never_clears_undeclared_ones() {
+        let mut project = ProjectDecl {
+            mendix_version: "11.12.1".into(),
+            modules: vec![module("Sales")],
+            security: None,
+            navigation: None,
+        };
+        project.modules[0].roles = Some(vec![ModuleRoleDecl::new("User")]);
+        project.merge_module(module("Sales"));
+        assert_eq!(
+            project.modules[0].roles.as_ref().map(|roles| roles.len()),
+            Some(1)
+        );
+        let mut declared = module("Sales");
+        declared.roles = Some(vec![]);
+        project.merge_module(declared);
+        assert_eq!(project.modules[0].roles.as_deref(), Some(&[][..]));
+    }
+}

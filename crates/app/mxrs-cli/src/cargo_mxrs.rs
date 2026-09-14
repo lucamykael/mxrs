@@ -68,7 +68,7 @@ fn main() -> ExitCode {
         Some("package") => (&["--mpr", "--web", "--output", "-o"], &[]),
         _ => (&[], &[]),
     };
-    if let Err(error) = validate_options(&args[1..], values, flags) {
+    if let Err(error) = validate_options(&args[1..], values, flags, &[]) {
         eprintln!("[mxrs] error: {error}");
         return ExitCode::FAILURE;
     }
