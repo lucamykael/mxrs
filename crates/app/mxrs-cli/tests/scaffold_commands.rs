@@ -127,6 +127,50 @@ fn functional_test_scaffold_is_a_valid_plan_and_never_overwrites() {
 }
 
 #[test]
+fn quality_integration_and_ci_scaffolds_emit_consumable_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = project(directory.path());
+    assert!(
+        scaffold(&root, &["module", "new", "Sales"])
+            .status
+            .success()
+    );
+    assert!(
+        scaffold(&root, &["validation", "new", "Sales.ValidateOrder"])
+            .status
+            .success()
+    );
+    assert!(
+        scaffold(&root, &["integration", "new", "Sales.SyncOrders"])
+            .status
+            .success()
+    );
+    assert!(
+        root.join("src/domain/modules/sales/validations/validate_order.rs")
+            .is_file()
+    );
+    assert!(
+        root.join("src/domain/modules/sales/integrations/sync_orders.rs")
+            .is_file()
+    );
+
+    assert!(
+        scaffold(&root, &["evaluation", "new", "Architecture"])
+            .status
+            .success()
+    );
+    let evaluation = root.join("evaluations/architecture.json");
+    let definition: Value =
+        serde_json::from_str(&std::fs::read_to_string(evaluation).unwrap()).unwrap();
+    assert_eq!(definition["checks"].as_array().unwrap().len(), 2);
+
+    assert!(scaffold(&root, &["ci", "init", "github"]).status.success());
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/mxrs.yml")).unwrap();
+    assert!(workflow.contains("cargo clippy --workspace --all-targets -- -D warnings"));
+    assert!(!scaffold(&root, &["ci", "init", "gitlab"]).status.success());
+}
+
+#[test]
 fn a_wrong_action_word_or_missing_project_fails_without_writing_anything() {
     let directory = tempfile::tempdir().unwrap();
     let root = project(directory.path());

@@ -84,6 +84,34 @@ pub(crate) fn use_case(module_name: &str, name: &str) -> String {
     )
 }
 
+pub(crate) fn validation(module_name: &str, name: &str) -> String {
+    flow(
+        module_name,
+        name,
+        "microflow",
+        "Application validation",
+        String::new(),
+    )
+}
+
+pub(crate) fn integration(module_name: &str, name: &str) -> String {
+    flow(
+        module_name,
+        name,
+        "microflow",
+        "Infrastructure integration adapter",
+        String::new(),
+    )
+}
+
+pub(crate) fn evaluation(_name: &str) -> String {
+    "{\n  \"checks\": [\n    { \"type\": \"no_call_cycles\" },\n    { \"type\": \"no_missing_internal_references\" }\n  ]\n}\n".to_string()
+}
+
+pub(crate) fn github_workflow() -> String {
+    "name: MXRS\n\non:\n  push:\n  pull_request:\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: dtolnay/rust-toolchain@stable\n        with:\n          components: rustfmt, clippy\n      - run: cargo fmt --all -- --check\n      - run: cargo clippy --workspace --all-targets -- -D warnings\n      - run: cargo test --workspace --all-targets\n".to_string()
+}
+
 pub(crate) fn nanoflow(module_name: &str, name: &str) -> String {
     flow(
         module_name,

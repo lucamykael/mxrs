@@ -270,6 +270,36 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs test --plan",
             "declarative JSON suite parsing plus exact microflow, parameter, hook and count-entity validation; runtime flow execution and reports are not ported",
         ),
+        "evaluate" => (
+            Status::Partial,
+            "mxrs evaluate",
+            "declarative JSON checks for artifacts, references, cycles, unresolved references and module dependency rules; arbitrary Ruby check blocks are intentionally not executed",
+        ),
+        "protocols" => (
+            Status::Partial,
+            "mxrs protocols",
+            "fail-closed offline audit using the evidence-backed connector registry; no connector protocol is implemented or executed",
+        ),
+        "evaluation" => (
+            Status::Partial,
+            "mxrs evaluation new",
+            "transactional JSON evaluation scaffold consumed by mxrs evaluate; arbitrary Ruby check blocks are intentionally absent",
+        ),
+        "validation" => (
+            Status::Partial,
+            "mxrs validation new",
+            "transactional Rust validation-microflow scaffold with compiled model reachability; no command-contract oracle",
+        ),
+        "integration" => (
+            Status::Partial,
+            "mxrs integration new",
+            "transactional Rust integration-adapter microflow scaffold with compiled model reachability; connector operations remain native",
+        ),
+        "ci" => (
+            Status::Partial,
+            "mxrs ci init github",
+            "transactional GitHub Actions workflow for fmt, clippy and the complete Cargo test suite; no hosted-run oracle",
+        ),
         "functional-test" => (
             Status::Partial,
             "mxrs functional-test new",

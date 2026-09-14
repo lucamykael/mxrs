@@ -102,6 +102,12 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
         "test",
         "functional-test",
         "functional-instrument",
+        "evaluate",
+        "evaluation",
+        "validation",
+        "integration",
+        "protocols",
+        "ci",
     ] {
         assert!(names.contains(required));
     }
@@ -443,6 +449,75 @@ fn preflight_audits_a_real_mpr_and_has_machine_readable_inventory() {
     assert_eq!(report["mendix_version"], "11.12.1");
     assert!(report["stats"]["units"].as_u64().unwrap() > 0);
     assert!(!cli(&["preflight", "/missing.mpr"]).status.success());
+}
+
+#[test]
+fn evaluation_runs_typed_checks_and_protocol_audit_fails_closed() {
+    let (directory, path) = fixture(false);
+    let definition = directory.path().join("evaluation.json");
+    std::fs::write(
+        &definition,
+        r#"{"checks":[{"type":"no_call_cycles"},{"type":"no_missing_internal_references"},{"type":"artifact","name":"Sales.Order","kind":"entity"},{"type":"reference","from":"Sales.Start","to":"Sales.Save","relation":"calls"},{"type":"artifact","name":"Sales.Missing","severity":"warning"}]}"#,
+    )
+    .unwrap();
+    let output = cli(&[
+        "evaluate",
+        path.to_str().unwrap(),
+        definition.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["passed"], true);
+    assert_eq!(result["score"], 80.0);
+
+    std::fs::write(
+        &definition,
+        r#"{"checks":[{"type":"artifact","name":"Sales.Missing"}]}"#,
+    )
+    .unwrap();
+    assert!(
+        !cli(&[
+            "evaluate",
+            path.to_str().unwrap(),
+            definition.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+
+    let output = query("protocols", &path, &["--json"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let audit: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(audit["connectors"].as_array().unwrap().is_empty());
+    assert!(
+        audit["unknown_marketplace_modules"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+    let sales = mpr
+        .all_units()
+        .unwrap()
+        .into_iter()
+        .find_map(|unit| {
+            let mut document = mpr.parse_contents(&unit).ok()?;
+            (document.get_str("$Type").ok() == Some("Projects$Module")
+                && document.get_str("Name").ok() == Some("Sales"))
+            .then(|| {
+                document.insert("FromAppStore", true);
+                document.insert("AppStoreGuid", "not-in-evidence-registry");
+                (unit.unit_id, document)
+            })
+        })
+        .unwrap();
+    mpr.update_unit(&sales.0, sales.1).unwrap();
+    drop(mpr);
+    let output = query("protocols", &path, &["--json"]);
+    let audit: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(audit["unknown_marketplace_modules"][0], "Sales");
 }
 
 #[test]

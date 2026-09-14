@@ -51,6 +51,10 @@ pub enum ArtifactKind {
     ConsumedRest,
     JavaAction,
     FunctionalTest,
+    Evaluation,
+    Validation,
+    Integration,
+    Ci,
     Repository,
     Security,
     Module,
@@ -72,6 +76,14 @@ pub struct ScaffoldCommand {
 /// generator mxrs does not have would be a promise `scaffold list` cannot keep.
 pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
     ScaffoldCommand {
+        name: "ci",
+        action: "init",
+        argument: "<github>",
+        summary: "Create a GitHub Actions workflow",
+        destination: ".github/workflows",
+        kind: ArtifactKind::Ci,
+    },
+    ScaffoldCommand {
         name: "consumed-rest",
         action: "new",
         argument: "<Module.Client>",
@@ -80,12 +92,28 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         kind: ArtifactKind::ConsumedRest,
     },
     ScaffoldCommand {
+        name: "evaluation",
+        action: "new",
+        argument: "<Name>",
+        summary: "Create declarative static model checks",
+        destination: "evaluations",
+        kind: ArtifactKind::Evaluation,
+    },
+    ScaffoldCommand {
         name: "constant",
         action: "new",
         argument: "<Module.Constant>",
         summary: "Create a string constant declaration",
         destination: "src/domain/modules/<module>/constants",
         kind: ArtifactKind::Constant,
+    },
+    ScaffoldCommand {
+        name: "integration",
+        action: "new",
+        argument: "<Module.Adapter>",
+        summary: "Create an integration adapter microflow",
+        destination: "src/domain/modules/<module>/integrations",
+        kind: ArtifactKind::Integration,
     },
     ScaffoldCommand {
         name: "entity",
@@ -176,6 +204,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         kind: ArtifactKind::Security,
     },
     ScaffoldCommand {
+        name: "validation",
+        action: "new",
+        argument: "<Module.Flow>",
+        summary: "Create an application validation microflow",
+        destination: "src/domain/modules/<module>/validations",
+        kind: ArtifactKind::Validation,
+    },
+    ScaffoldCommand {
         name: "use-case",
         action: "new",
         argument: "<Module.Flow>",
@@ -201,6 +237,10 @@ impl ArtifactKind {
             Self::ConsumedRest => "consumed_rest",
             Self::JavaAction => "java_action",
             Self::FunctionalTest => "functional_test",
+            Self::Evaluation => "evaluation",
+            Self::Validation => "validation",
+            Self::Integration => "integration",
+            Self::Ci => "ci",
             Self::Repository => "repository",
             Self::Security => "security",
             Self::Module => "module",
@@ -220,6 +260,10 @@ impl ArtifactKind {
             Self::ConsumedRest => "integrations",
             Self::JavaAction => "actions",
             Self::FunctionalTest => "functional_tests",
+            Self::Evaluation => "evaluations",
+            Self::Validation => "validations",
+            Self::Integration => "integrations",
+            Self::Ci => "ci",
             Self::Repository => "repositories",
             Self::Security | Self::Module => "security",
         }
@@ -336,6 +380,24 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
             .join("functional_tests")
             .join(format!("{}.json", snake_case(artifact_name)));
         transaction.create(path, templates::functional_test(module_name, artifact_name))?;
+    } else if options.kind == ArtifactKind::Evaluation {
+        let name = identifier(&options.name, "evaluation")?;
+        transaction.create(
+            root.join("evaluations")
+                .join(format!("{}.json", snake_case(name))),
+            templates::evaluation(name),
+        )?;
+    } else if options.kind == ArtifactKind::Ci {
+        if options.name != "github" {
+            return Err(ScaffoldError::InvalidIdentifier {
+                label: "CI provider (expected github)",
+                value: options.name.clone(),
+            });
+        }
+        transaction.create(
+            root.join(".github/workflows/mxrs.yml"),
+            templates::github_workflow(),
+        )?;
     } else if options.kind.names_a_module() {
         let module_name = identifier(&options.name, "module")?;
         match options.kind {
@@ -636,6 +698,9 @@ fn create_artifact(
         ArtifactKind::ConsumedRest => templates::consumed_rest(module_name, artifact_name),
         ArtifactKind::JavaAction => templates::java_action(module_name, artifact_name),
         ArtifactKind::FunctionalTest => unreachable!("handled by the caller"),
+        ArtifactKind::Evaluation | ArtifactKind::Ci => unreachable!("handled by the caller"),
+        ArtifactKind::Validation => templates::validation(module_name, artifact_name),
+        ArtifactKind::Integration => templates::integration(module_name, artifact_name),
         ArtifactKind::Repository => unreachable!("handled above"),
         ArtifactKind::Page => templates::page(
             module_name,

@@ -61,8 +61,10 @@ fn command_options(
     &'static [&'static str],
 ) {
     match name {
-        "callees" | "callers" | "compare" | "describe" | "impact" | "inspect" | "lint" | "refs"
-        | "preflight" | "report" | "tree" | "validate" => (&[], &["--json"], &[]),
+        "callees" | "callers" | "compare" | "describe" | "evaluate" | "impact" | "inspect"
+        | "lint" | "protocols" | "refs" | "preflight" | "report" | "tree" | "validate" => {
+            (&[], &["--json"], &[])
+        }
         "portability" => (
             &[],
             &["--json", "--require-typed", "--verify-round-trip"],
@@ -91,11 +93,10 @@ fn command_options(
             &["--dry-run", "--json"],
             &["--role"],
         ),
-        "constant" | "consumed-rest" | "entity" | "enumeration" | "functional-test"
-        | "java-action" | "module" | "nanoflow" | "published-rest" | "repository"
-        | "scheduled-event" | "security" | "use-case" => {
-            (&["--target"], &["--dry-run", "--json"], &[])
-        }
+        "ci" | "constant" | "consumed-rest" | "entity" | "enumeration" | "evaluation"
+        | "functional-test" | "integration" | "java-action" | "module" | "nanoflow"
+        | "published-rest" | "repository" | "scheduled-event" | "security" | "use-case"
+        | "validation" => (&["--target"], &["--dry-run", "--json"], &[]),
         "scaffold" => (&["--target"], &[], &[]),
         "rename" | "remove" | "move" => (&[], &["--apply", "--json"], &[]),
         "marketplace" => (
@@ -129,6 +130,7 @@ macro_rules! commands {
 // silently omit an implemented command.
 commands! {
     "cache", "<status|warm|clear> <file.mpr> [--json]", "Inspect or manage the semantic index cache", run_cache;
+    "ci", "init github [--target DIR] [--dry-run] [--json]", "Create a GitHub Actions workflow", run_ci;
     "callees", "<file.mpr> <artifact> [--json]", "List distinct directly called artifacts", run_callees;
     "callers", "<file.mpr> <artifact> [--json]", "List distinct direct callers", run_callers;
     "compare", "<left.mpr> <right.mpr> [--json]", "Compare structural model snapshots", run_compare;
@@ -141,6 +143,8 @@ commands! {
     "entity", "new <Module.Entity> [--target DIR] [--dry-run] [--json]", "Scaffold a domain entity declaration", run_entity;
     "enumeration", "new <Module.Enumeration> [--target DIR] [--dry-run] [--json]", "Scaffold an enumeration declaration", run_enumeration;
     "env", "[DIR] [--environment NAME] [--json]", "Inspect an environment profile without values", run_env;
+    "evaluate", "<file.mpr> <evaluation.json> [--json]", "Run declarative static model checks", run_evaluate;
+    "evaluation", "new <Name> [--target DIR] [--dry-run] [--json]", "Create declarative static model checks", run_evaluation;
     "export", "<file.mpr> [-o <out.rs>] [--allow-lossy]", "Export editable Rust declarations", run_export;
     "functional-test", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create a declarative runtime test suite", run_functional_test;
     "functional-instrument", "<writable.mpr> <suite.json> [--json]", "Instrument a disposable MPR with a functional test runner", run_functional_instrument;
@@ -148,6 +152,7 @@ commands! {
     "impact", "<file.mpr> <artifact> [--json]", "Find transitive incoming dependencies", run_impact;
     "import", "<file.mpr> --output <directory> [--mxrs-workspace <path>]", "Import into a Cargo-native project", run_import;
     "inspect", "<file.mpr> [--json]", "Show a structural model snapshot", run_inspect;
+    "integration", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Create an integration adapter microflow", run_integration;
     "java-action", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Scaffold a Java Action adapter microflow", run_java_action;
     "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
@@ -164,6 +169,7 @@ commands! {
     "portability", "<file.mpr> [--json] [--verify-round-trip] [--require-typed]", "Audit typed authoring versus lossless model preservation", run_portability;
     "page", "new <Module.Page> [--template NAME] [--chain CHAIN] [--role Module.Role] [--target DIR] [--dry-run] [--json] | templates [--json]", "Scaffold a page declaration, a page-led vertical slice, or list page templates", run_page;
     "preflight", "<file.mpr> [--json]", "Audit native compiler and runtime compatibility", run_preflight;
+    "protocols", "<file.mpr> [--json]", "Audit imported Marketplace protocol connectors", run_protocols;
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
     "published-rest", "new <Module.Handler> [--target DIR] [--dry-run] [--json]", "Scaffold a published REST handler microflow", run_published_rest;
     "refs", "<file.mpr> <artifact> [--json]", "Show incoming and outgoing references", run_refs;
@@ -184,6 +190,7 @@ commands! {
     "upgrade", "--mendix VERSION [--target DIR] [--apply] [--json]", "Preview or apply a Cargo-native project version upgrade", run_upgrade;
     "use-case", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold an application use-case microflow", run_use_case;
     "validate", "<file.mpr> [--json]", "Check storage-format integrity", run_validate;
+    "validation", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create an application validation microflow", run_validation;
     "verify-package", "<archive.tar>", "Verify archive paths and content hashes", run_verify_package;
 }
 
@@ -718,6 +725,34 @@ fn run_functional_test(args: Vec<String>) -> ExitCode {
     ))
 }
 
+fn run_evaluation(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Evaluation,
+        args,
+    ))
+}
+
+fn run_validation(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Validation,
+        args,
+    ))
+}
+
+fn run_integration(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Integration,
+        args,
+    ))
+}
+
+fn run_ci(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Ci,
+        args,
+    ))
+}
+
 fn run_functional_instrument(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let [project, definition] = args.as_slice() else {
@@ -906,6 +941,88 @@ fn run_preflight(mut args: Vec<String>) -> ExitCode {
             } else {
                 ExitCode::FAILURE
             }
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_evaluate(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let [project, definition] = args.as_slice() else {
+        eprintln!("Usage: mxrs evaluate <file.mpr> <evaluation.json> [--json]");
+        return ExitCode::FAILURE;
+    };
+    match mxrs_cli::evaluation::evaluate(project, definition) {
+        Ok(result) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else {
+                for check in &result.checks {
+                    let status = if check.passed {
+                        "pass"
+                    } else {
+                        match check.severity {
+                            mxrs_cli::evaluation::Severity::Error => "error",
+                            mxrs_cli::evaluation::Severity::Warning => "warning",
+                        }
+                    };
+                    println!("[{status}] {}: {}", check.name, check.message);
+                }
+                let passed = result.checks.iter().filter(|check| check.passed).count();
+                println!(
+                    "[mxrs] score {:.2}% ({passed}/{})",
+                    result.score,
+                    result.checks.len()
+                );
+            }
+            if result.passed {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_protocols(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let [path] = args.as_slice() else {
+        eprintln!("Usage: mxrs protocols <file.mpr> [--json]");
+        return ExitCode::FAILURE;
+    };
+    match mxrs_cli::protocols::audit(path) {
+        Ok(audit) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&audit).unwrap());
+            } else {
+                if audit.connectors.is_empty() {
+                    println!("No known protocol connectors found.");
+                }
+                for connector in &audit.connectors {
+                    println!(
+                        "{}\t{}\tmarketplace={}\tprotected={}",
+                        connector.protocol,
+                        connector.module_name,
+                        connector.metadata.marketplace_id,
+                        connector.protected
+                    );
+                }
+                if !audit.unknown_marketplace_modules.is_empty() {
+                    println!(
+                        "Unrecognized marketplace modules ({}): {}",
+                        audit.unknown_marketplace_modules.len(),
+                        audit.unknown_marketplace_modules.join(", ")
+                    );
+                }
+            }
+            ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!("[mxrs] error: {error}");

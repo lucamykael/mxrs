@@ -60,6 +60,8 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     scaffold(&root, ArtifactKind::Constant, "Sales.ApiEndpoint");
     scaffold(&root, ArtifactKind::ScheduledEvent, "Sales.SE_ExpireCarts");
     scaffold(&root, ArtifactKind::UseCase, "Sales.ACT_CreateOrder");
+    scaffold(&root, ArtifactKind::Validation, "Sales.VAL_Order");
+    scaffold(&root, ArtifactKind::Integration, "Sales.INT_Orders");
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
     scaffold(&root, ArtifactKind::PublishedRest, "Sales.HandleOrder");
     scaffold(&root, ArtifactKind::ConsumedRest, "Sales.FetchCatalog");
