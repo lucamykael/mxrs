@@ -21,13 +21,14 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
                                           \-> cargo run -> new .mpr
 ```
 
-An import writes typed domain source under `src/domain/`, stable identity
-bindings and public marker types under `src/infrastructure/`, and a complete generated unit snapshot
-under `model/imported/`. Mendix filesystem resources are copied into the
+An import writes typed domain source under `src/domain/`, checked public marker
+types under `src/infrastructure/`, and a complete generated unit snapshot under
+`model/imported/`. Stable identities and storage metadata stay in that data
+directory instead of being mirrored as noisy Rust constants. Mendix filesystem resources are copied into the
 editable `assets/` tree and materialized next to each built `.mpr`. The
 snapshot makes concepts without a friendly Rust
 representation lossless; rebuilding does not read or patch the original
-`.mpr`. Typed coverage can therefore replace opaque snapshot content
+`.mpr`. Typed coverage can therefore replace snapshot content
 incrementally without blocking a correct build.
 
 The crates are grouped by dependency layer under `crates/{io,model,authoring,
@@ -67,7 +68,9 @@ interpreter, offline synchronization, and semantic mutation plans remain
 follow-up layers.
 
 `mxrs-cli` (binary `mxrs`) exposes import/build inspection, packaging, OQL,
-semantic search/impact, and project scaffolding commands. Typed
+semantic search/impact, project scaffolding, compatibility preflight, MDA
+inspection, environment/cache diagnostics, Cargo-native upgrades, an isolated
+PostgreSQL workspace, and offline Team Server repository status. Typed
 domain import covers all attribute kinds plus documentation, length, date
 localization, required/unique validation, and association owner/storage/docs.
 Microflows and nanoflows can be authored and incrementally synchronized with
@@ -157,6 +160,22 @@ mxrs tree build/ExistingApp.mpr Sales
 mxrs lint build/ExistingApp.mpr --json
 mxrs report build/ExistingApp.mpr
 
+# Audit and prepare deployment inputs:
+mxrs preflight build/ExistingApp.mpr --json
+mxrs mda inspect build/ExistingApp.mda --json
+mxrs cache warm build/ExistingApp.mpr
+mxrs env . --environment production
+mxrs doctor .
+
+# Manage the partial, PostgreSQL-only Docker workspace:
+mxrs db up build/ExistingApp.mpr
+mxrs db status build/ExistingApp.mpr --json
+mxrs db down build/ExistingApp.mpr
+
+# Store only a pointer to a PAT and inspect an existing local repository:
+mxrs team-server login --pat-file ~/.config/mendix/team-server.pat
+mxrs team-server status .
+
 # Discover implemented commands and exact usage:
 mxrs --commands --json
 mxrs help import
@@ -188,7 +207,7 @@ behavioral oracle and requires a byte-identical round trip on both fixtures.
 
 `capability-matrix` reads MXRB's own command inventory and classifies every
 row as verified, partial, or missing. Its identity-based CI ratchet records 76
-commands: 0 verified, 30 partial, and 46 missing. Earlier claims of four
+commands: 0 verified, 58 partial, and 18 missing. Earlier claims of four
 verified commands lacked command-specific differential evidence and were
 corrected. "Partial" never means
 command parity; each row stays incomplete until its full observable contract
@@ -208,8 +227,9 @@ fresh outer and nested Cargo directories, includes every instrumented ELF
 (including generated applications), and retains profiles, source/object hashes
 and toolchain details. It does not delete old evidence. For limited `/tmp` space,
 use `MXRS_COVERAGE_TMPDIR="$PWD/target" bash xtask/coverage.sh`.
-The isolated baseline measured 82.74/82.28/81.66/66.13%
-(lines/functions/regions/branches), raising development floors to 82/82/81/66%;
+The gate prints the exact counts for the current source revision; record them
+with that commit instead of carrying percentages into a later revision.
+Development floors remain 82/82/81/66%.
 `--require-complete` requires exact covered/count equality for all four metrics.
 Release tags and manual readiness CI runs enforce that strict gate. Coverage
 must be measured from clean instrumented artifacts, with no source exclusions.

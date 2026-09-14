@@ -264,6 +264,55 @@ fn inspecting_reports_the_declared_version_modules_and_registered_scaffolds() {
 }
 
 #[test]
+fn upgrade_previews_then_transactionally_updates_a_generated_project() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = project(directory.path());
+    let command = |apply: bool| {
+        let mut args = vec![
+            "upgrade",
+            "--mendix",
+            "11.13.0",
+            "--target",
+            root.to_str().unwrap(),
+            "--json",
+        ];
+        if apply {
+            args.push("--apply");
+        }
+        cli(&args)
+    };
+    let preview = command(false);
+    assert!(preview.status.success(), "{:?}", preview.stderr);
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["applied"], false);
+    assert_eq!(preview["from"], "11.12.1");
+    assert!(
+        std::fs::read_to_string(root.join("src/lib.rs"))
+            .unwrap()
+            .contains("11.12.1")
+    );
+
+    let applied = command(true);
+    assert!(applied.status.success(), "{:?}", applied.stderr);
+    assert!(
+        std::fs::read_to_string(root.join("src/lib.rs"))
+            .unwrap()
+            .contains("11.13.0")
+    );
+    assert!(
+        !cli(&[
+            "upgrade",
+            "--mendix",
+            "bad",
+            "--target",
+            root.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+}
+
+#[test]
 fn the_constant_and_scheduled_event_generators_write_their_families_and_registry_keys() {
     let directory = tempfile::tempdir().unwrap();
     let root = project(directory.path());

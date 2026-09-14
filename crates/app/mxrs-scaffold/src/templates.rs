@@ -138,6 +138,25 @@ pub(crate) fn java_action(module_name: &str, name: &str) -> String {
     )
 }
 
+pub(crate) fn repository_port(module_name: &str, name: &str) -> String {
+    format!(
+        "//! Application repository port `{module_name}.{name}`.\n\
+         //!\n\
+         //! Add domain-specific operations here; infrastructure adapters depend\n\
+         //! on this contract, never the reverse.\n\n\
+         pub trait Port {{}}\n"
+    )
+}
+
+pub(crate) fn repository_adapter(module_name: &str, name: &str, stem: &str) -> String {
+    format!(
+        "//! Infrastructure adapter for `{module_name}.{name}`.\n\n\
+         #[derive(Debug, Default, Clone, Copy)]\n\
+         pub struct Adapter;\n\n\
+         impl crate::application::repositories::{stem}::Port for Adapter {{}}\n"
+    )
+}
+
 fn flow(
     module_name: &str,
     name: &str,

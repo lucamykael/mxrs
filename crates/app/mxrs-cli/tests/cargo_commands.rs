@@ -194,6 +194,26 @@ fn cargo_build_diff_and_package_execute_a_generated_application_without_node_or_
             assert_eq!(report["changes"], serde_json::json!([]));
         }
     }
+    for action in ["plan", "check"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mxrs"))
+            .args(["migrate", action])
+            .arg(&imported)
+            .arg("--json")
+            .env(
+                "CARGO_TARGET_DIR",
+                nested_cargo::target_dir(workspace.join("target")),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["clean"], true);
+        assert_eq!(report["changed"], serde_json::json!([]));
+    }
     let archive = directory.path().join("pipeline.tar");
     let output = run(&[
         "package",

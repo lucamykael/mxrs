@@ -50,6 +50,7 @@ pub enum ArtifactKind {
     PublishedRest,
     ConsumedRest,
     JavaAction,
+    Repository,
     Security,
     Module,
 }
@@ -142,6 +143,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         kind: ArtifactKind::PublishedRest,
     },
     ScaffoldCommand {
+        name: "repository",
+        action: "new",
+        argument: "<Module.Name>",
+        summary: "Create a repository port and infrastructure adapter",
+        destination: "src/{application,infrastructure}/repositories",
+        kind: ArtifactKind::Repository,
+    },
+    ScaffoldCommand {
         name: "scheduled-event",
         action: "new",
         argument: "<Module.Event>",
@@ -182,6 +191,7 @@ impl ArtifactKind {
             Self::PublishedRest => "published_rest",
             Self::ConsumedRest => "consumed_rest",
             Self::JavaAction => "java_action",
+            Self::Repository => "repository",
             Self::Security => "security",
             Self::Module => "module",
         }
@@ -199,6 +209,7 @@ impl ArtifactKind {
             Self::PublishedRest => "endpoints",
             Self::ConsumedRest => "integrations",
             Self::JavaAction => "actions",
+            Self::Repository => "repositories",
             Self::Security | Self::Module => "security",
         }
     }
@@ -594,6 +605,9 @@ fn create_artifact(
             return create_page_slice(transaction, root, options, module_name, artifact_name);
         }
     }
+    if options.kind == ArtifactKind::Repository {
+        return create_repository(transaction, root, module_name, artifact_name);
+    }
     let source = match options.kind {
         ArtifactKind::Entity => templates::entity(module_name, artifact_name),
         ArtifactKind::Enumeration => templates::enumeration(module_name, artifact_name),
@@ -604,6 +618,7 @@ fn create_artifact(
         ArtifactKind::PublishedRest => templates::published_rest(module_name, artifact_name),
         ArtifactKind::ConsumedRest => templates::consumed_rest(module_name, artifact_name),
         ArtifactKind::JavaAction => templates::java_action(module_name, artifact_name),
+        ArtifactKind::Repository => unreachable!("handled above"),
         ArtifactKind::Page => templates::page(
             module_name,
             artifact_name,
@@ -620,6 +635,68 @@ fn create_artifact(
         &snake_case(artifact_name),
         source,
     )
+}
+
+fn create_repository(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    artifact_name: &str,
+) -> Result<()> {
+    let stem = snake_case(artifact_name);
+    let port_root = root.join("src/application");
+    let port_family = port_root.join("repositories");
+    connect_plain_family(
+        transaction,
+        &root.join("src"),
+        "application",
+        "repositories",
+    )?;
+    let port = port_family.join(format!("{stem}.rs"));
+    transaction.create(
+        &port,
+        templates::repository_port(module_name, artifact_name),
+    )?;
+    declare_child_module(transaction, &port_family.join("mod.rs"), &stem)?;
+
+    let adapter_root = root.join("src/infrastructure");
+    let adapter_family = adapter_root.join("repositories");
+    connect_plain_family(
+        transaction,
+        &root.join("src"),
+        "infrastructure",
+        "repositories",
+    )?;
+    let implementation_stem = format!("{stem}_implementation");
+    let adapter = adapter_family.join(format!("{implementation_stem}.rs"));
+    transaction.create(
+        &adapter,
+        templates::repository_adapter(module_name, artifact_name, &stem),
+    )?;
+    declare_child_module(
+        transaction,
+        &adapter_family.join("mod.rs"),
+        &implementation_stem,
+    )
+}
+
+fn connect_plain_family(
+    transaction: &mut Transaction,
+    src: &Path,
+    layer: &str,
+    family: &str,
+) -> Result<()> {
+    let layer_module = src.join(layer).join("mod.rs");
+    if transaction.content(&layer_module)?.is_none() {
+        transaction.create(&layer_module, format!("//! `{layer}` layer.\n"))?;
+        declare_child_module(transaction, &src.join("lib.rs"), layer)?;
+    }
+    let family_module = src.join(layer).join(family).join("mod.rs");
+    if transaction.content(&family_module)?.is_none() {
+        transaction.create(&family_module, format!("//! `{family}` modules.\n"))?;
+        declare_child_module(transaction, &layer_module, family)?;
+    }
+    Ok(())
 }
 
 /// mxrb's `ensure_presentation` creates the module's `ApplicationLayout`

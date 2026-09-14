@@ -64,6 +64,7 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     scaffold(&root, ArtifactKind::PublishedRest, "Sales.HandleOrder");
     scaffold(&root, ArtifactKind::ConsumedRest, "Sales.FetchCatalog");
     scaffold(&root, ArtifactKind::JavaAction, "Sales.InvokeCheckout");
+    scaffold(&root, ArtifactKind::Repository, "Sales.Orders");
     scaffold(&root, ArtifactKind::Security, "Sales");
     scaffold_artifact(
         &ArtifactScaffold::new(ArtifactKind::Page, "Sales.OrderOverview", &root)
@@ -198,6 +199,38 @@ fn scaffolding_the_same_artifact_twice_changes_nothing_the_first_run_wrote() {
         ["entity:Sales.Invoice", "entity:Sales.Order", "module:Sales"]
     );
     assert!(inspection.manifest && inspection.domain_module);
+}
+
+#[test]
+fn repository_scaffold_separates_the_application_port_from_its_adapter() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    let files = scaffold(&root, ArtifactKind::Repository, "Sales.Orders");
+    assert!(
+        files
+            .iter()
+            .any(|path| path.ends_with("application/repositories/orders.rs"))
+    );
+    assert!(
+        files
+            .iter()
+            .any(|path| { path.ends_with("infrastructure/repositories/orders_implementation.rs") })
+    );
+    let port =
+        std::fs::read_to_string(root.join("src/application/repositories/orders.rs")).unwrap();
+    let adapter = std::fs::read_to_string(
+        root.join("src/infrastructure/repositories/orders_implementation.rs"),
+    )
+    .unwrap();
+    assert!(port.contains("pub trait Port"));
+    assert!(adapter.contains("impl crate::application::repositories::orders::Port"));
+    let output = cargo(&root, &["check", "--offline", "--quiet"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

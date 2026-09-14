@@ -11,19 +11,30 @@ pub fn validate_options(
     let mut index = 0;
     while index < arguments.len() {
         let argument = arguments[index].as_str();
-        let is_value = values.contains(&argument) || repeatable.contains(&argument);
-        if is_value || flags.contains(&argument) {
-            if !seen.insert(argument) && !repeatable.contains(&argument) {
-                return Err(format!("duplicate option {argument}"));
+        let (name, inline_value) = argument
+            .split_once('=')
+            .map_or((argument, None), |(name, value)| (name, Some(value)));
+        let is_value = values.contains(&name) || repeatable.contains(&name);
+        if is_value || flags.contains(&name) {
+            if !seen.insert(name) && !repeatable.contains(&name) {
+                return Err(format!("duplicate option {name}"));
             }
             if is_value {
-                if arguments
-                    .get(index + 1)
-                    .is_none_or(|value| value.is_empty() || value.starts_with('-'))
-                {
-                    return Err(format!("{argument} requires a value"));
+                if let Some(value) = inline_value {
+                    if value.is_empty() {
+                        return Err(format!("{name} requires a value"));
+                    }
+                } else {
+                    if arguments
+                        .get(index + 1)
+                        .is_none_or(|value| value.is_empty() || value.starts_with('-'))
+                    {
+                        return Err(format!("{name} requires a value"));
+                    }
+                    index += 1;
                 }
-                index += 1;
+            } else if inline_value.is_some() {
+                return Err(format!("flag {name} does not accept a value"));
             }
         } else if argument.starts_with('-') {
             return Err(format!(
@@ -38,7 +49,17 @@ pub fn validate_options(
 /// Missing values stay in the argument list so each command's strict arity
 /// check rejects them; an option cannot accidentally consume another option.
 pub fn take_value(arguments: &mut Vec<String>, flag: &str) -> Option<String> {
-    let position = arguments.iter().position(|argument| argument == flag)?;
+    let position = arguments.iter().position(|argument| {
+        argument == flag
+            || argument
+                .strip_prefix(flag)
+                .is_some_and(|suffix| suffix.starts_with('='))
+    })?;
+    if let Some(value) = arguments[position].strip_prefix(&format!("{flag}=")) {
+        let value = value.to_string();
+        arguments.remove(position);
+        return Some(value);
+    }
     let value = arguments.get(position + 1)?;
     if value.starts_with('-') {
         return None;
@@ -111,6 +132,15 @@ mod tests {
         assert!(validate_options(&repeated, &[], &[], &["--role"]).is_ok());
         assert!(validate_options(&repeated, &["--role"], &[], &[]).is_err());
         assert!(validate_options(&["--role".into()], &[], &[], &["--role"]).is_err());
+        assert!(
+            validate_options(
+                &["--role=A".into(), "--role=B".into()],
+                &[],
+                &[],
+                &["--role"]
+            )
+            .is_ok()
+        );
         let mut arguments = ["new", "Sales.Page", "--role", "A", "--role", "B"]
             .map(str::to_string)
             .to_vec();
@@ -127,6 +157,12 @@ mod tests {
         assert_eq!(take_value(&mut args, "--output").as_deref(), Some("path"));
         assert_eq!(args, ["before", "after"]);
         assert!(take_value(&mut args, "--output").is_none());
+
+        let mut inline = ["before", "--output=path", "after"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(take_value(&mut inline, "--output").as_deref(), Some("path"));
+        assert_eq!(inline, ["before", "after"]);
     }
 
     #[test]

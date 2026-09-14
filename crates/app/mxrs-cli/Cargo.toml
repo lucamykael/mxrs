@@ -20,6 +20,8 @@ path = "src/cargo_mxrs.rs"
 
 [dependencies]
 mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-compiler-flow = { path = "../../compiler/mxrs-compiler-flow" }
+mxrs-compiler-widgets = { path = "../../compiler/mxrs-compiler-widgets" }
 mxrs-exporter = { path = "../mxrs-exporter" }
 mxrs-javagen = { path = "../../compiler/mxrs-javagen" }
 mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
@@ -33,12 +35,14 @@ mxrs-refactor = { path = "../mxrs-refactor" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
 serde_json.workspace = true
+serde.workspace = true
 sha2 = "0.10"
 tempfile = "3.27.0"
 thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
-uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }

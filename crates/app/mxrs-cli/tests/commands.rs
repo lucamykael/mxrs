@@ -11,6 +11,22 @@ fn cli(args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn cli_with_env(args: &[&str], key: &str, value: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mxrs"))
+        .args(args)
+        .env(key, value)
+        .output()
+        .unwrap()
+}
+
+fn cli_with_envs(args: &[&str], environment: &[(&str, &std::ffi::OsStr)]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mxrs"))
+        .args(args)
+        .envs(environment.iter().copied())
+        .output()
+        .unwrap()
+}
+
 fn text(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
@@ -63,7 +79,7 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
             assert!(text(&output).contains(entry["usage"].as_str().unwrap()));
         }
         assert!(cli(&["help", name]).status.success());
-        if name != "help" {
+        if !matches!(name, "doctor" | "help" | "env") {
             assert!(
                 !cli(&[name]).status.success(),
                 "{name} accepted no arguments"
@@ -71,10 +87,358 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
         }
     }
     for required in [
-        "validate", "import", "export", "callees", "callers", "describe", "tree", "lint", "report",
+        "validate",
+        "import",
+        "export",
+        "callees",
+        "callers",
+        "describe",
+        "tree",
+        "lint",
+        "report",
+        "db",
+        "team-server",
     ] {
         assert!(names.contains(required));
     }
+}
+
+#[test]
+fn team_server_login_stores_only_a_pat_pointer_and_status_stays_offline() {
+    let directory = tempfile::tempdir().unwrap();
+    let pat = directory.path().join("pat");
+    std::fs::write(&pat, "secret-never-copied").unwrap();
+    let config = directory.path().join("config");
+    let output = cli_with_env(
+        &[
+            "team-server",
+            "login",
+            "--pat-file",
+            pat.to_str().unwrap(),
+            "--json",
+        ],
+        "XDG_CONFIG_HOME",
+        &config,
+    );
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let stored = std::fs::read_to_string(config.join("mxrs/credentials")).unwrap();
+    assert!(stored.contains(pat.to_str().unwrap()));
+    assert!(!stored.contains("secret-never-copied"));
+
+    let repository = directory.path().join("repository");
+    std::fs::create_dir(&repository).unwrap();
+    for arguments in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://git.api.mendix.com/12345678-1234-abcd-9876-1234567890ab.git",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let output = cli(&[
+        "team-server",
+        "status",
+        repository.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["repository_url"],
+        "https://git.api.mendix.com/12345678-1234-abcd-9876-1234567890ab.git"
+    );
+    assert!(!cli(&["team-server", "status", "/missing"]).status.success());
+}
+
+#[test]
+fn db_rejects_invalid_ports_and_invalid_projects_before_contacting_docker() {
+    for port in ["0", "65536", "invalid"] {
+        assert!(
+            !cli(&["db", "status", "/missing.mpr", "--port", port])
+                .status
+                .success()
+        );
+    }
+    assert!(!cli(&["db", "status", "/missing.mpr"]).status.success());
+    assert!(!cli(&["db", "sql", "/missing.mpr"]).status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn db_cli_runs_the_owned_lifecycle_without_putting_its_password_on_the_command_line() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, path) = fixture(false);
+    let binary_directory = directory.path().join("bin");
+    let fake_root = directory.path().join("fake-docker");
+    let state_root = directory.path().join("state");
+    std::fs::create_dir_all(&binary_directory).unwrap();
+    std::fs::create_dir_all(&fake_root).unwrap();
+    let docker = binary_directory.join("docker");
+    std::fs::write(
+        &docker,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$MXRS_FAKE_DOCKER_ROOT/trace"
+case "$1 ${2-}" in
+  "container inspect")
+    if [ -f "$MXRS_FAKE_DOCKER_ROOT/container" ]; then
+      printf 'true|%s|%s\n' "$(cat "$MXRS_FAKE_DOCKER_ROOT/key")" "$(cat "$MXRS_FAKE_DOCKER_ROOT/container")"
+    else
+      printf 'no such container\n' >&2
+      exit 1
+    fi ;;
+  "volume inspect")
+    if [ -f "$MXRS_FAKE_DOCKER_ROOT/volume" ]; then
+      printf 'true|%s|present\n' "$(cat "$MXRS_FAKE_DOCKER_ROOT/key")"
+    else
+      printf 'no such volume\n' >&2
+      exit 1
+    fi ;;
+  "volume create")
+    for argument in "$@"; do
+      case "$argument" in io.mxrs.project=*) printf '%s' "${argument#*=}" > "$MXRS_FAKE_DOCKER_ROOT/key" ;; esac
+    done
+    : > "$MXRS_FAKE_DOCKER_ROOT/volume"
+    printf 'volume\n' ;;
+  "volume rm")
+    rm "$MXRS_FAKE_DOCKER_ROOT/volume"
+    printf 'removed\n' ;;
+  "run --detach")
+    printf 'running' > "$MXRS_FAKE_DOCKER_ROOT/container"
+    printf 'container\n' ;;
+  "start "*)
+    printf 'running' > "$MXRS_FAKE_DOCKER_ROOT/container"
+    printf 'started\n' ;;
+  "stop "*)
+    printf 'exited' > "$MXRS_FAKE_DOCKER_ROOT/container"
+    printf 'stopped\n' ;;
+  "rm --force")
+    rm "$MXRS_FAKE_DOCKER_ROOT/container"
+    printf 'removed\n' ;;
+  *) printf 'unexpected fake Docker call: %s\n' "$*" >&2; exit 2 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut path_value = binary_directory.into_os_string();
+    path_value.push(":");
+    path_value.push(std::env::var_os("PATH").unwrap_or_default());
+    let environment = [
+        ("PATH", path_value.as_os_str()),
+        ("MXRS_STATE_DIR", state_root.as_os_str()),
+        ("MXRS_FAKE_DOCKER_ROOT", fake_root.as_os_str()),
+    ];
+    let run = |action: &str| {
+        cli_with_envs(
+            &[
+                "db",
+                action,
+                path.to_str().unwrap(),
+                "--port",
+                "55439",
+                "--json",
+            ],
+            &environment,
+        )
+    };
+    for (action, expected) in [("up", "running"), ("status", "running"), ("down", "exited")] {
+        let output = run(action);
+        assert!(output.status.success(), "{action}: {:?}", output.stderr);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["container_state"],
+            expected
+        );
+    }
+    for action in ["credentials", "url"] {
+        let output = run(action);
+        assert!(output.status.success(), "{action}: {:?}", output.stderr);
+    }
+    let secret = std::fs::read_to_string(
+        std::fs::read_dir(state_root.join("mxrs/db"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "password")
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !std::fs::read_to_string(fake_root.join("trace"))
+            .unwrap()
+            .contains(secret.trim())
+    );
+    let destroyed = run("destroy");
+    assert!(destroyed.status.success(), "{:?}", destroyed.stderr);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&destroyed.stdout).unwrap()["initialized"],
+        false
+    );
+}
+
+#[test]
+fn semantic_cache_cli_warms_hits_and_clears_outside_the_model() {
+    let (directory, path) = fixture(false);
+    let cache = directory.path().join("cache");
+    let run = |action: &str| {
+        cli_with_env(
+            &["cache", action, path.to_str().unwrap(), "--json"],
+            "MXRS_CACHE_DIR",
+            &cache,
+        )
+    };
+    let warm = run("warm");
+    assert!(warm.status.success(), "{:?}", warm.stderr);
+    let report: Value = serde_json::from_slice(&warm.stdout).unwrap();
+    assert_eq!(report["present"], true);
+    assert_eq!(report["hit"], true);
+    assert!(!path.with_extension("cache").exists());
+
+    let status = run("status");
+    assert!(status.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&status.stdout).unwrap()["hit"],
+        true
+    );
+    let clear = run("clear");
+    assert!(clear.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&clear.stdout).unwrap()["removed"],
+        1
+    );
+}
+
+fn write_mda(path: &Path, web: &[u8]) {
+    use std::io::Write;
+
+    let file = std::fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+    archive.start_file("model/metadata.json", options).unwrap();
+    archive
+        .write_all(br#"{"RuntimeVersion":"11.12.1","ProjectName":"CLI"}"#)
+        .unwrap();
+    archive.start_file("web/index.html", options).unwrap();
+    archive.write_all(web).unwrap();
+    archive.finish().unwrap();
+}
+
+#[test]
+fn mda_cli_inspects_metadata_and_compares_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = directory.path().join("left.mda");
+    let right = directory.path().join("right.mda");
+    write_mda(&left, b"left");
+    write_mda(&right, b"right");
+    let inspect = cli(&["mda", "inspect", left.to_str().unwrap(), "--json"]);
+    assert!(inspect.status.success(), "{:?}", inspect.stderr);
+    let report: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    assert_eq!(report["metadata"]["ProjectName"], "CLI");
+    assert_eq!(report["files"], 2);
+    let compare = cli(&[
+        "mda",
+        "compare",
+        left.to_str().unwrap(),
+        right.to_str().unwrap(),
+    ]);
+    assert!(compare.status.success(), "{:?}", compare.stderr);
+    assert!(text(&compare).contains("Changed\tweb/index.html"));
+    assert!(!cli(&["mda", "inspect", "/missing.mda"]).status.success());
+}
+
+#[test]
+fn env_layers_profiles_and_reports_only_key_names() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join(".env"), "BASE_SECRET=base-value\n").unwrap();
+    std::fs::create_dir_all(directory.path().join("config/environments")).unwrap();
+    std::fs::write(
+        directory.path().join("config/environments/qa.env"),
+        "QA_SECRET=qa-value\n",
+    )
+    .unwrap();
+    let output = cli(&[
+        "env",
+        directory.path().to_str().unwrap(),
+        "--environment=qa",
+        "--json",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["environment"], "qa");
+    assert!(
+        payload["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == "BASE_SECRET")
+    );
+    assert!(
+        payload["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == "QA_SECRET")
+    );
+    let stdout = text(&output);
+    assert!(!stdout.contains("base-value"));
+    assert!(!stdout.contains("qa-value"));
+    assert!(!cli(&["env", ".", "extra"]).status.success());
+    assert!(!cli(&["env", "--environment=../prod"]).status.success());
+}
+
+#[test]
+fn doctor_distinguishes_required_project_state_from_optional_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    for relative in ["Cargo.toml", "src/lib.rs", "src/domain/mod.rs"] {
+        let path = directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+    let output = cli(&["doctor", directory.path().to_str().unwrap(), "--json"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["valid"], true);
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| { check["name"] == "mpr" && check["status"] == "warning" })
+    );
+
+    std::fs::remove_file(directory.path().join("src/lib.rs")).unwrap();
+    assert!(
+        !cli(&["doctor", directory.path().to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(!cli(&["doctor", ".", "extra"]).status.success());
+}
+
+#[test]
+fn preflight_audits_a_real_mpr_and_has_machine_readable_inventory() {
+    let (_directory, path) = fixture(false);
+    let output = query("preflight", &path, &["--json"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["compatible"], true);
+    assert_eq!(report["mendix_version"], "11.12.1");
+    assert!(report["stats"]["units"].as_u64().unwrap() > 0);
+    assert!(!cli(&["preflight", "/missing.mpr"]).status.success());
 }
 
 #[test]
@@ -359,7 +723,7 @@ fn cargo_import_export_scaffold_and_java_generation_have_real_filesystem_effects
     assert!(!query("import", &path, &suffix).status.success());
     let export = query("export", &path, &[]);
     assert!(export.status.success());
-    assert!(text(&export).contains("Domain model only"));
+    assert!(text(&export).contains("Editable domain model declarations"));
     let output = query("export", &path, &["--allow-lossy"]);
     assert!(output.status.success(), "{:?}", output.stderr);
     assert!(text(&output).contains("Order"));

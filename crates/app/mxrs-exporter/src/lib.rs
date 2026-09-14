@@ -197,7 +197,6 @@ fn import_cargo_project_inner(
     let mut modules = project.modules()?;
     modules.sort_by(|left, right| left.name.cmp(&right.name));
     let gaps = round_trip_gaps(&modules);
-    let identity_source = render_identity_table(&modules);
     let (mut converted_pages, mut page_export) =
         page_export::convert_pages_for_version(&modules, &mendix_version);
     page_export::protect_referenced_page_elements(
@@ -259,7 +258,7 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "// Compatibility aliases used by generated macro expansions.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod domain;\npub mod infrastructure;\n\n/// Compatibility facade for projects imported before `generated` became\n/// the explicit infrastructure layer. New code should use `infrastructure`.\n#[deprecated(note = \"use crate::infrastructure\")]\npub mod generated {{\n    pub use crate::infrastructure::ids;\n    pub use crate::infrastructure::imported;\n    pub use crate::infrastructure::markers;\n}}\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
+            "// Required by the paths emitted inside the authoring macro.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod domain;\npub mod infrastructure;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
             rust_string(&manifest.mendix_version),
         ),
     )?;
@@ -292,18 +291,7 @@ fn import_cargo_project_inner(
     )?;
     write_text(
         &destination.join("src/infrastructure/mod.rs"),
-        "//! Generated integration boundary for imported Mendix state.\n\npub mod ids;\npub mod imported;\npub mod markers;\n",
-    )?;
-    write_text(
-        &destination.join("src/infrastructure/ids.rs"),
-        &format!(
-            "//! Stable identities retained from the imported project.\n\npub const PROJECT_ROOT: &str = {};\n\n{identity_source}",
-            rust_string(&manifest.root_id),
-        ),
-    )?;
-    write_text(
-        &destination.join("src/infrastructure/imported.rs"),
-        &render_imported_registry(&manifest),
+        "//! Generated marker types used for checked model references.\n\npub mod markers;\n",
     )?;
     write_text(
         &destination.join("src/infrastructure/markers.rs"),
@@ -357,30 +345,10 @@ fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
     source
 }
 
-/// Creates the editable flow composition layer. Imported flow graphs remain
-/// losslessly snapshot-backed until the user deliberately redeclares them;
-/// new typed declarations merge by module and are then upserted by the writer.
-fn render_flows_module(mendix_version: &str, modules: &[Module]) -> String {
-    let mut source = String::from(
-        "//! Cargo-native flow declarations.\n\
-         //!\n\
-         //! Imported flow graphs listed below remain losslessly backed by\n\
-         //! `model/imported` until deliberately redeclared here. This avoids\n\
-         //! pretending an incomplete graph decompiler is lossless.\n\n",
-    );
-    for module in modules {
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
-        for flow in &module.microflows {
-            if let Some(name) = &flow.name {
-                let _ = writeln!(source, "// snapshot-backed microflow: {module_name}.{name}");
-            }
-        }
-        for flow in &module.nanoflows {
-            if let Some(name) = &flow.name {
-                let _ = writeln!(source, "// snapshot-backed nanoflow: {module_name}.{name}");
-            }
-        }
-    }
+/// Creates the editable flow composition layer. New typed declarations merge
+/// by module and are then upserted by the writer.
+fn render_flows_module(mendix_version: &str, _modules: &[Module]) -> String {
+    let mut source = String::from("//! Editable Cargo-native flow declarations.\n");
     source.push_str(
         "\nfn declarations() -> ::mxrs_ir::ProjectDecl {\n\
              #[allow(unused_mut)]\n\
@@ -409,8 +377,7 @@ fn render_flows_module(mendix_version: &str, modules: &[Module]) -> String {
 
 fn render_security_module(modules: &[Module], document: Option<&mxrs_bson::Document>) -> String {
     let mut source = String::from(
-        "//! Cargo-native project and module security. Unknown native fields\n\
-         //! remain preserved by the imported snapshot and writer merge.\n\n\
+        "//! Editable Cargo-native project and module security.\n\n\
          pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n",
     );
     for module in modules {
@@ -507,8 +474,6 @@ fn render_security_module(modules: &[Module], document: Option<&mxrs_bson::Docum
             );
         }
         source.push_str("    project.security = Some(security);\n");
-    } else {
-        source.push_str("    // Project security remains snapshot-backed (unrecognized or absent security level).\n");
     }
     source.push_str("}\n");
     source
@@ -516,8 +481,7 @@ fn render_security_module(modules: &[Module], document: Option<&mxrs_bson::Docum
 
 fn render_navigation_module(navigation: &mxrs_model::Navigation) -> String {
     let mut source = String::from(
-        "//! Cargo-native navigation profiles. Unknown profile fields remain\n\
-         //! preserved by the imported snapshot and writer merge.\n\n\
+        "//! Editable Cargo-native navigation profiles.\n\n\
          pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
          project.navigation = Some(::mxrs_ir::NavigationDecl { profiles: vec![\n",
     );
@@ -778,7 +742,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated IDs, public marker types, and the lossless snapshot registry live under `src/infrastructure/`. `model/imported/` retains model concepts that are not typed yet.\n\n`src/domain/flows/mod.rs` is the opt-in source of truth for Cargo-native microflows and nanoflows. Imported graphs stay snapshot-backed until deliberately redeclared, so unsupported graph shapes are never silently approximated.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe initial typed domain projection reported {gaps} feature(s) still backed by the generated snapshot.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain lossless in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe import reported {gaps} feature(s) outside the editable typed projection.\n{pages_note}"
     )
 }
 
@@ -823,109 +787,6 @@ fn io_error(path: &Path, source: std::io::Error) -> ExportError {
         path: path.display().to_string(),
         source,
     }
-}
-
-fn render_identity_table(modules: &[Module]) -> String {
-    let mut identities = Vec::<(String, String)>::new();
-    for module in modules {
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
-        identities.push((module_name.to_string(), module.id.clone()));
-        if let Some(domain) = &module.domain_model {
-            if let Some(id) = &domain.id {
-                identities.push((format!("{module_name}.$domain"), id.clone()));
-            }
-            for entity in &domain.entities {
-                let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
-                let entity_path = format!("{module_name}.{entity_name}");
-                if let Some(id) = &entity.id {
-                    identities.push((entity_path.clone(), id.clone()));
-                }
-                for attribute in &entity.attributes {
-                    if let (Some(id), Some(name)) = (&attribute.id, &attribute.name) {
-                        identities.push((format!("{entity_path}.{name}"), id.clone()));
-                    }
-                }
-            }
-            for association in domain.all_associations() {
-                if let (Some(id), Some(name)) = (&association.id, &association.name) {
-                    identities.push((format!("{module_name}.{name}"), id.clone()));
-                }
-            }
-        }
-        for page in &module.pages {
-            if let (Some(id), Some(name)) = (&page.id, &page.name) {
-                identities.push((format!("{module_name}.page:{name}"), id.clone()));
-            }
-        }
-        for (kind, documents) in [
-            ("microflow", &module.microflows),
-            ("nanoflow", &module.nanoflows),
-            ("rule", &module.rules),
-        ] {
-            for document in documents {
-                if let (Some(id), Some(name)) = (&document.id, &document.name) {
-                    identities.push((format!("{module_name}.{kind}:{name}"), id.clone()));
-                }
-            }
-        }
-        for role in &module.module_roles {
-            if let (Some(id), Some(name)) = (&role.id, &role.name) {
-                identities.push((format!("{module_name}.role:{name}"), id.clone()));
-            }
-        }
-        for artifact in &module.artifact_units {
-            if let (Ok(id), Ok(kind)) = (artifact.get_str("$ID"), artifact.get_str("$Type")) {
-                let name = artifact.get_str("Name").unwrap_or("Unnamed");
-                identities.push((format!("{module_name}.{kind}:{name}"), id.to_string()));
-            }
-        }
-    }
-    identities.sort();
-    identities.dedup();
-
-    let mut source = String::from(
-        "/// Qualified model path to stable Mendix identity.\n\
-         pub const MODEL_IDS: &[(&str, &str)] = &[\n",
-    );
-    for (path, id) in identities {
-        let _ = writeln!(
-            source,
-            "    ({}, {}),",
-            rust_string(&path),
-            rust_string(&id)
-        );
-    }
-    source.push_str("];\n");
-    source
-}
-
-fn render_imported_registry(manifest: &mxrs_project::ImportedProjectManifest) -> String {
-    let mut source = String::from(
-        "//! Lossless model documents retained until they gain a friendly Rust representation.\n\
-         //! This registry is generated; edit the typed modules under `src/` instead.\n\n\
-         use mxrs::ImportedDocumentRef;\n\n\
-         pub const MANIFEST: &str = include_str!(\"../../model/imported/manifest.json\");\n\n\
-         pub const DOCUMENTS: &[ImportedDocumentRef] = &[\n",
-    );
-    for unit in &manifest.units {
-        let option = |value: Option<&str>| match value {
-            Some(value) => format!("Some({})", rust_string(value)),
-            None => "None".to_string(),
-        };
-        let _ = writeln!(
-            source,
-            "    ImportedDocumentRef {{ unit_id: {}, container_id: {}, containment_name: {}, native_type: {}, name: {}, qualified_name: {}, file: {} }},",
-            rust_string(&unit.unit_id),
-            rust_string(&unit.container_id),
-            rust_string(&unit.containment_name),
-            rust_string(&unit.native_type),
-            option(unit.name.as_deref()),
-            option(unit.qualified_name.as_deref()),
-            rust_string(&unit.file),
-        );
-    }
-    source.push_str("];\n");
-    source
 }
 
 fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
@@ -987,19 +848,7 @@ fn render(
         out,
         "//! back with `mxrs_writer::synchronize_project(path, &build())`."
     );
-    let _ = writeln!(
-        out,
-        "//! Domain model only (entities/attributes/associations) — see"
-    );
-    let _ = writeln!(
-        out,
-        "//! `mxrs-exporter`'s crate doc for what's not round-tripped yet"
-    );
-    let _ = writeln!(
-        out,
-        "//! (microflows, association Owner/StorageFormat, entity indexes/"
-    );
-    let _ = writeln!(out, "//! access rules/lifecycle).");
+    let _ = writeln!(out, "//! Editable domain model declarations.");
     let _ = writeln!(out, "//!");
     let _ = writeln!(
         out,
@@ -1628,14 +1477,8 @@ mod tests {
         assert!(entities_source.contains("required true;"));
         assert!(entities_source.contains("unique true;"));
         assert!(entities_source.contains("localize_date false;"));
-        let identities =
-            std::fs::read_to_string(generated.join("src/infrastructure/ids.rs")).unwrap();
-        assert!(identities.contains("Sales.Order.Number"));
-        assert!(identities.contains("Sales.microflow:ACT_Ping"));
-        let opaque =
-            std::fs::read_to_string(generated.join("src/infrastructure/imported.rs")).unwrap();
-        assert!(opaque.contains("Microflows$Microflow"));
-        assert!(opaque.contains("Some(\"ACT_Ping\")"));
+        assert!(!generated.join("src/infrastructure/ids.rs").exists());
+        assert!(!generated.join("src/infrastructure/imported.rs").exists());
         let markers =
             std::fs::read_to_string(generated.join("src/infrastructure/markers.rs")).unwrap();
         assert!(markers.contains("pub struct Order;"));
@@ -1644,7 +1487,7 @@ mod tests {
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_GetOrder"));
         assert!(markers.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
         let flows = std::fs::read_to_string(generated.join("src/domain/flows/mod.rs")).unwrap();
-        assert!(flows.contains("snapshot-backed microflow: Sales.ACT_Ping"));
+        assert!(!flows.contains("snapshot-backed"));
         assert!(flows.contains("target.nanoflows.extend(declared.nanoflows)"));
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
@@ -1655,7 +1498,7 @@ mod tests {
         assert!(navigation.contains("project.navigation = Some"));
         let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
         assert!(crate_root.contains("pub mod infrastructure;"));
-        assert!(crate_root.contains("pub mod generated"));
+        assert!(!crate_root.contains("pub mod generated"));
 
         std::fs::remove_file(&source_path).unwrap();
         std::fs::remove_dir_all(mxrs_mpr::format::contents_dir(&source_path)).unwrap();

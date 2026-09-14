@@ -6,7 +6,7 @@
 //! streamable, and deterministic without native compression dependencies.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,8 @@ pub enum PackageError {
     MissingFrontendAsset(String),
     #[error("package output cannot be inside its frontend input: {0}")]
     OutputInsideInput(String),
+    #[error("invalid MDA {path}: {reason}")]
+    InvalidMda { path: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, PackageError>;
@@ -96,6 +98,176 @@ pub struct PackageReport {
     pub archive_sha256: String,
     pub payload_files: usize,
     pub manifest: PackageManifest,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MdaEntry {
+    pub path: String,
+    pub size: u64,
+    pub crc32: u32,
+    pub sha256: Option<String>,
+    pub directory: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MdaInspection {
+    pub path: PathBuf,
+    pub metadata: serde_json::Value,
+    pub entries: Vec<MdaEntry>,
+    pub sha256: String,
+}
+
+impl MdaInspection {
+    pub fn files(&self) -> impl Iterator<Item = &MdaEntry> {
+        self.entries.iter().filter(|entry| !entry.directory)
+    }
+
+    pub fn roots(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.path.split('/').next())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MdaDifferenceStatus {
+    Added,
+    Removed,
+    Changed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MdaDifference {
+    pub path: String,
+    pub status: MdaDifferenceStatus,
+    pub left_sha256: Option<String>,
+    pub right_sha256: Option<String>,
+}
+
+/// Safely inventories a Mendix deployment archive. This is deliberately
+/// distinct from [`verify_package`]: an MDA is a ZIP with Mendix metadata,
+/// while an MXRS package is a deterministic ustar stream.
+pub fn inspect_mda(path: impl AsRef<Path>) -> Result<MdaInspection> {
+    let path = absolute(path.as_ref())?;
+    let file = std::fs::File::open(&path).map_err(|source| io_error(&path, source))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| invalid_mda(&path, error))?;
+    let mut entries = Vec::with_capacity(archive.len());
+    let mut metadata = None;
+    let mut seen = BTreeSet::new();
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| invalid_mda(&path, error))?;
+        let entry_path = safe_mda_path(file.name()).map_err(|reason| PackageError::InvalidMda {
+            path: path.display().to_string(),
+            reason,
+        })?;
+        if !seen.insert(entry_path.clone()) {
+            return Err(PackageError::InvalidMda {
+                path: path.display().to_string(),
+                reason: format!("duplicate entry {entry_path:?}"),
+            });
+        }
+        let directory = file.is_dir();
+        let digest = if directory {
+            None
+        } else {
+            let mut hasher = Sha256::new();
+            if entry_path == "model/metadata.json" {
+                let mut bytes = Vec::new();
+                std::io::copy(&mut file.by_ref(), &mut bytes)
+                    .map_err(|error| invalid_mda(&path, error))?;
+                hasher.update(&bytes);
+                metadata = Some(
+                    serde_json::from_slice(&bytes).map_err(|error| invalid_mda(&path, error))?,
+                );
+            } else {
+                std::io::copy(&mut file.by_ref(), &mut hasher)
+                    .map_err(|error| invalid_mda(&path, error))?;
+            }
+            Some(format!("{:x}", hasher.finalize()))
+        };
+        entries.push(MdaEntry {
+            path: entry_path,
+            size: file.size(),
+            crc32: file.crc32(),
+            sha256: digest,
+            directory,
+        });
+    }
+    let metadata = metadata.ok_or_else(|| PackageError::InvalidMda {
+        path: path.display().to_string(),
+        reason: "archive has no model/metadata.json".to_string(),
+    })?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let archive_bytes = std::fs::read(&path).map_err(|source| io_error(&path, source))?;
+    Ok(MdaInspection {
+        path,
+        metadata,
+        entries,
+        sha256: sha256(&archive_bytes),
+    })
+}
+
+pub fn compare_mda(left: impl AsRef<Path>, right: impl AsRef<Path>) -> Result<Vec<MdaDifference>> {
+    let left = inspect_mda(left)?;
+    let right = inspect_mda(right)?;
+    let left = left
+        .files()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let right = right
+        .files()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let paths = left
+        .keys()
+        .chain(right.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            let lhs = left.get(path);
+            let rhs = right.get(path);
+            let status = match (lhs, rhs) {
+                (None, Some(_)) => MdaDifferenceStatus::Added,
+                (Some(_), None) => MdaDifferenceStatus::Removed,
+                (Some(lhs), Some(rhs)) if lhs.sha256 != rhs.sha256 => MdaDifferenceStatus::Changed,
+                _ => return None,
+            };
+            Some(MdaDifference {
+                path: path.to_string(),
+                status,
+                left_sha256: lhs.and_then(|entry| entry.sha256.clone()),
+                right_sha256: rhs.and_then(|entry| entry.sha256.clone()),
+            })
+        })
+        .collect())
+}
+
+fn safe_mda_path(path: &str) -> std::result::Result<String, String> {
+    let normalized = path.replace('\\', "/");
+    if normalized.starts_with('/')
+        || normalized.is_empty()
+        || normalized
+            .split('/')
+            .any(|part| matches!(part, "" | "." | ".."))
+    {
+        return Err(format!("unsafe entry {path:?}"));
+    }
+    Ok(normalized)
+}
+
+fn invalid_mda(path: &Path, error: impl std::fmt::Display) -> PackageError {
+    PackageError::InvalidMda {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    }
 }
 
 /// Packages a validated MPR, its v2 content files, frontend, and project
@@ -580,6 +752,65 @@ fn io_error(path: &Path, source: std::io::Error) -> PackageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mda(path: &Path, files: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        archive.start_file("model/metadata.json", options).unwrap();
+        archive
+            .write_all(br#"{"RuntimeVersion":"11.12.1","ProjectName":"Shop"}"#)
+            .unwrap();
+        for (name, bytes) in files {
+            archive.start_file(*name, options).unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
+    #[test]
+    fn mda_inspection_and_comparison_are_content_based_and_path_safe() {
+        let directory = tempfile::tempdir().unwrap();
+        let left = directory.path().join("left.mda");
+        let right = directory.path().join("right.mda");
+        mda(
+            &left,
+            &[("web/index.html", b"left"), ("model/old.bin", b"old")],
+        );
+        mda(
+            &right,
+            &[("web/index.html", b"right"), ("model/new.bin", b"new")],
+        );
+        let inspection = inspect_mda(&left).unwrap();
+        assert_eq!(inspection.metadata["ProjectName"], "Shop");
+        assert_eq!(inspection.roots(), ["model", "web"]);
+        assert_eq!(inspection.files().count(), 3);
+        let differences = compare_mda(&left, &right).unwrap();
+        assert_eq!(
+            differences
+                .iter()
+                .map(|difference| (difference.path.as_str(), difference.status))
+                .collect::<Vec<_>>(),
+            [
+                ("model/new.bin", MdaDifferenceStatus::Added),
+                ("model/old.bin", MdaDifferenceStatus::Removed),
+                ("web/index.html", MdaDifferenceStatus::Changed),
+            ]
+        );
+
+        let unsafe_archive = directory.path().join("unsafe.mda");
+        mda(&unsafe_archive, &[("../secret", b"no")]);
+        assert!(matches!(
+            inspect_mda(unsafe_archive),
+            Err(PackageError::InvalidMda { .. })
+        ));
+        let absolute_archive = directory.path().join("absolute.mda");
+        mda(&absolute_archive, &[("/secret", b"no")]);
+        assert!(matches!(
+            inspect_mda(absolute_archive),
+            Err(PackageError::InvalidMda { .. })
+        ));
+    }
 
     fn fixture() -> (tempfile::TempDir, PackageOptions) {
         let directory = tempfile::tempdir().unwrap();

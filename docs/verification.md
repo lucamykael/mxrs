@@ -36,6 +36,12 @@ The HTTP integration tests open real local TCP listeners. A sandbox denying
 socket creation must not turn those failures into ignored tests: run the same
 tests with the required local-network permission.
 
+`noise-audit` covers the full Rust tree produced by `mxrs import` for every
+committed fixture and a generated project containing every public artifact
+scaffold. UUIDs, storage hashes/schema keys, raw unit/container identifiers,
+TODOs, and opacity markers fail the gate. Lossless import metadata remains
+under `model/imported/`; it is not duplicated into developer-facing Rust.
+
 The following readiness gates intentionally fail while work remains. They do
 not accept source exclusions, missing instrumentation, truncated inventories,
 rounded percentages, or a partial command implementation as complete:
@@ -47,7 +53,57 @@ cargo run -p xtask -- coverage-gate target/coverage.json --require-complete
 
 The command inventory currently covers MXRB's 76 top-level commands, not an
 exhaustive list of Studio Pro capabilities. All 76 still need complete
-command-contract evidence: 48 have partial equivalents and 28 are absent.
+command-contract evidence: 58 have partial equivalents and 18 are absent.
+
+## Runtime and deployment command increment
+
+The ten runtime/deployment rows now have deliberately partial MXRS surfaces:
+
+- `mda inspect/compare` safely inventories ZIP paths, requires Mendix
+  `model/metadata.json`, and compares content hashes. It does not build or run
+  an MDA.
+- `migrate check/plan` rebuilds a Cargo-native project offline and compares it
+  with the retained lossless import snapshot. It is a drift check, not a
+  Studio Pro database migration engine.
+- `preflight` audits storage plus the native page/layout, flow/code-action and
+  nanoflow compilers. Unsupported behavior is reported; it is not silently
+  treated as compatible.
+- `env` layers dotenv profiles as data, with process variables winning, and
+  reports keys and source files without printing values. It does not evaluate
+  shell syntax or interpolation.
+- `cache status/warm/clear` manages an external semantic-index cache keyed by
+  the absolute MPR path and invalidated by a native unit-content fingerprint.
+  Semantic CLI queries consume valid warmed entries; cache files never modify
+  the MPR.
+- `doctor` checks a Cargo-native project, its generated MPR when present, and
+  the local Cargo/Rust/Java/Docker executables. Optional Java/Docker absence is
+  a warning rather than a false project error.
+- `repository new` generates a transactional application port and
+  infrastructure adapter. It is Rust source and therefore cannot be compared
+  byte-for-byte with MXRB's Ruby generator.
+- `upgrade` previews by default and transactionally changes only generated
+  version markers under `--apply`; inconsistent source declarations fail
+  closed. It does not run Studio Pro's metamodel conversions.
+- `db status/up/down/destroy/credentials/url` manages an isolated PostgreSQL
+  13 container and volume. Resources are loopback-only, project-keyed, labeled,
+  and ownership-checked before mutation; state and the generated password live
+  outside the project in mode-0600 files, and the password is passed to Docker
+  through a mounted file rather than a command-line value. A real local smoke
+  test on 2026-09-14 completed `up -> status -> down -> destroy` and left no
+  container or volume. Mendix Runtime boot, schema synchronization, SQL/shell,
+  plan/workload/index analysis, and stale-runtime replacement are not ported.
+- `team-server login/status` stores only a pointer to a user-managed PAT file
+  and validates local repositories against the official HTTPS host before
+  showing Git status. Projects/info/branches/commits APIs and clone/fetch/pull/
+  push are not ported, so this increment makes no Team Server network request.
+
+These rows are `Partial`, not `Verified`: the observable contracts are smaller
+than MXRB's, and no command-level differential oracle covers them.
+
+`coverage-gate` prints exact covered, total, and uncovered counts for every
+metric. Record those counts with their commit; do not carry a percentage into a
+new source revision. Passing the development gate does not pass the exact-100%
+readiness gate.
 
 MXRB's model-authoring generators write Ruby source into a project; the MXRS
 equivalents write Rust declarations into `src/domain/modules/`. Because the

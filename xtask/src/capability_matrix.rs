@@ -193,6 +193,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "cargo bench",
             "library benches, no CLI parity",
         ),
+        "cache" => (
+            Status::Partial,
+            "mxrs cache status/warm/clear",
+            "external derivative cache with source-fingerprint invalidation, atomic writes and semantic-query consumption; full CLI oracle missing",
+        ),
         "callees" | "callers" | "describe" | "refs" => (
             Status::Partial,
             "mxrs callees/callers/describe/refs",
@@ -238,7 +243,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "module" => (
             Status::Partial,
             "mxrs module new",
-            "module declaration layer; MXRB's marketplace search/add subcommands need a live Mendix Marketplace and .mpk installer, with no offline oracle to port against",
+            "module declaration layer; Marketplace dependency resolution and uninstall remain separate gaps",
         ),
         "scaffold" => (
             Status::Partial,
@@ -249,6 +254,16 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             Status::Partial,
             "mxrs project inspect",
             "workspace inventory; MXRB has no other project subcommand",
+        ),
+        "preflight" => (
+            Status::Partial,
+            "mxrs preflight",
+            "read-only MPR, page/layout, flow/code-action and nanoflow compatibility audit; private-corpus and CLI oracles remain incomplete",
+        ),
+        "repository" => (
+            Status::Partial,
+            "mxrs repository new",
+            "transactional Cargo-native application port plus infrastructure adapter scaffold; generated Rust differs from MXRB Ruby",
         ),
         // Named rather than left to the catch-all: these two were the model
         // authoring commands blocked on a missing declaration surface rather
@@ -269,6 +284,21 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "diff" => (Status::Partial, "cargo mxrs diff", "typed project diff"),
         "export" => (Status::Partial, "mxrs export", "typed Rust export"),
+        "env" => (
+            Status::Partial,
+            "mxrs env",
+            "safe layered dotenv/profile inspection with value-free output; full CLI oracle missing",
+        ),
+        "doctor" => (
+            Status::Partial,
+            "mxrs doctor",
+            "Cargo-native project, MPR and local toolchain diagnostics; full CLI oracle missing",
+        ),
+        "db" => (
+            Status::Partial,
+            "mxrs db status/up/down/destroy/credentials/url",
+            "owned, labeled, loopback-only PostgreSQL Docker workspace with private external state; Mendix Runtime boot, schema sync, SQL tooling and workload analysis are not ported",
+        ),
         "find" | "search" => (
             Status::Partial,
             "mxrs search",
@@ -329,6 +359,26 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             Status::Partial,
             "mxrs marketplace search/show/versions/download/install",
             "official Content API client plus .mpk module install, both verified against the live API and a real published package; dependency resolution and uninstall are not ported",
+        ),
+        "mda" => (
+            Status::Partial,
+            "mxrs mda inspect/compare",
+            "safe ZIP inventory, Mendix metadata parsing and content-hash comparison; full CLI oracle missing",
+        ),
+        "migrate" => (
+            Status::Partial,
+            "mxrs migrate check/plan",
+            "offline Cargo-native rebuild versus lossless imported snapshot with drift-sensitive check exit status; full CLI oracle missing",
+        ),
+        "upgrade" => (
+            Status::Partial,
+            "mxrs upgrade",
+            "transactional preview/apply updates only generated Cargo-native version markers and rejects inconsistent declarations; full CLI oracle missing",
+        ),
+        "team-server" => (
+            Status::Partial,
+            "mxrs team-server login/status",
+            "private PAT-file pointer configuration and validated offline Git status; remote APIs and mutating Git operations are not ported",
         ),
         // Semantic refactoring. All three preview by default and mutate only
         // under `--apply`, like MXRB's own; none has a command-contract

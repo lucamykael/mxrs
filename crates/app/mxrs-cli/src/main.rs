@@ -62,8 +62,12 @@ fn command_options(
 ) {
     match name {
         "callees" | "callers" | "compare" | "describe" | "impact" | "inspect" | "lint" | "refs"
-        | "report" | "tree" | "validate" => (&[], &["--json"], &[]),
+        | "preflight" | "report" | "tree" | "validate" => (&[], &["--json"], &[]),
+        "cache" => (&[], &["--json"], &[]),
+        "db" => (&["--port"], &["--json"], &[]),
+        "doctor" => (&[], &["--json"], &[]),
         "export" => (&["-o"], &["--allow-lossy"], &[]),
+        "env" => (&["--environment"], &["--json"], &[]),
         "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
         "javagen" => (&["--project-root"], &[], &[]),
         "new" => (
@@ -81,9 +85,8 @@ fn command_options(
             &["--role"],
         ),
         "constant" | "consumed-rest" | "entity" | "enumeration" | "java-action" | "module"
-        | "nanoflow" | "published-rest" | "scheduled-event" | "security" | "use-case" => {
-            (&["--target"], &["--dry-run", "--json"], &[])
-        }
+        | "nanoflow" | "published-rest" | "repository" | "scheduled-event" | "security"
+        | "use-case" => (&["--target"], &["--dry-run", "--json"], &[]),
         "scaffold" => (&["--target"], &[], &[]),
         "rename" | "remove" | "move" => (&[], &["--apply", "--json"], &[]),
         "marketplace" => (
@@ -98,7 +101,11 @@ fn command_options(
             &["--json", "--apply", "--allow-model-upgrade"],
             &[],
         ),
+        "mda" => (&[], &["--json"], &[]),
+        "migrate" => (&[], &["--json"], &[]),
         "project" => (&[], &["--json"], &[]),
+        "team-server" => (&["--pat-file"], &["--json"], &[]),
+        "upgrade" => (&["--mendix", "--target"], &["--apply", "--json"], &[]),
         _ => (&[], &[], &[]),
     }
 }
@@ -112,15 +119,19 @@ macro_rules! commands {
 // Dispatch and discovery share a registry: help cannot advertise a stub or
 // silently omit an implemented command.
 commands! {
+    "cache", "<status|warm|clear> <file.mpr> [--json]", "Inspect or manage the semantic index cache", run_cache;
     "callees", "<file.mpr> <artifact> [--json]", "List distinct directly called artifacts", run_callees;
     "callers", "<file.mpr> <artifact> [--json]", "List distinct direct callers", run_callers;
     "compare", "<left.mpr> <right.mpr> [--json]", "Compare structural model snapshots", run_compare;
     "constant", "new <Module.Constant> [--target DIR] [--dry-run] [--json]", "Scaffold a string constant declaration", run_constant;
     "consumed-rest", "new <Module.Client> [--target DIR] [--dry-run] [--json]", "Scaffold a consumed REST adapter microflow", run_consumed_rest;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
+    "db", "<status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]", "Manage an isolated PostgreSQL workspace", run_db;
+    "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
     "dump-unit", "<file.mpr> <unit_id>", "Dump native unit bytes", run_dump_unit;
     "entity", "new <Module.Entity> [--target DIR] [--dry-run] [--json]", "Scaffold a domain entity declaration", run_entity;
     "enumeration", "new <Module.Enumeration> [--target DIR] [--dry-run] [--json]", "Scaffold an enumeration declaration", run_enumeration;
+    "env", "[DIR] [--environment NAME] [--json]", "Inspect an environment profile without values", run_env;
     "export", "<file.mpr> [-o <out.rs>] [--allow-lossy]", "Export editable Rust declarations", run_export;
     "help", "[command]", "Show command usage", run_help;
     "impact", "<file.mpr> <artifact> [--json]", "Find transitive incoming dependencies", run_impact;
@@ -131,6 +142,8 @@ commands! {
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
     "module", "new <Module> [--target DIR] [--dry-run] [--json]", "Scaffold an editable module declaration layer", run_module;
     "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json] | install <package.mpk> <file.mpr> [--target-root DIR] [--allow-model-upgrade] [--apply] [--json]", "Search, download, or install official Marketplace content", run_marketplace;
+    "mda", "<inspect|compare> ...", "Inspect or compare Mendix deployment archives", run_mda;
+    "migrate", "<check|plan> [DIR] [--json]", "Compare a Cargo-native build with its imported MPR snapshot", run_migrate;
     "modules", "<file.mpr>", "List module names", run_modules;
     "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a same-module unit move", run_move;
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
@@ -138,11 +151,13 @@ commands! {
     "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
     "page", "new <Module.Page> [--template NAME] [--chain CHAIN] [--role Module.Role] [--target DIR] [--dry-run] [--json] | templates [--json]", "Scaffold a page declaration, a page-led vertical slice, or list page templates", run_page;
+    "preflight", "<file.mpr> [--json]", "Audit native compiler and runtime compatibility", run_preflight;
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
     "published-rest", "new <Module.Handler> [--target DIR] [--dry-run] [--json]", "Scaffold a published REST handler microflow", run_published_rest;
     "refs", "<file.mpr> <artifact> [--json]", "Show incoming and outgoing references", run_refs;
     "remove", "<file.mpr> <qualified-name> [--apply] [--json]", "Preview or apply a reference-safe removal", run_remove;
     "rename", "<file.mpr> <old-name> <new-name> [--apply] [--json]", "Preview or apply a model-wide rename", run_rename;
+    "repository", "new <Module.Name> [--target DIR] [--dry-run] [--json]", "Scaffold a repository port and infrastructure adapter", run_repository;
     "report", "<file.mpr> [--json]", "Summarize explicit-reference lint and module dependencies", run_report;
     "scaffold", "<list|destroy> [<kind:name>] [--target DIR]", "List generators or remove a registered scaffold", run_scaffold;
     "scheduled-event", "new <Module.Event> [--target DIR] [--dry-run] [--json]", "Scaffold a scheduled event and its handler microflow", run_scheduled_event;
@@ -150,11 +165,163 @@ commands! {
     "security", "init <Module> [--target DIR] [--dry-run] [--json]", "Scaffold module roles and project security", run_security;
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
     "translate-oql", "<query> [--dialect postgresql|sql_server|ansi]", "Translate the supported safe OQL subset", run_translate_oql;
+    "team-server", "login --pat-file FILE [--json] | status DIR [--json]", "Configure a PAT pointer or inspect a local Team Server repository", run_team_server;
     "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
     "units", "<file.mpr>", "List native units and storage metadata", run_units;
+    "upgrade", "--mendix VERSION [--target DIR] [--apply] [--json]", "Preview or apply a Cargo-native project version upgrade", run_upgrade;
     "use-case", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold an application use-case microflow", run_use_case;
     "validate", "<file.mpr> [--json]", "Check storage-format integrity", run_validate;
     "verify-package", "<archive.tar>", "Verify archive paths and content hashes", run_verify_package;
+}
+
+fn run_db(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let port = match take_value(&mut args, "--port")
+        .as_deref()
+        .unwrap_or("55432")
+        .parse::<u16>()
+    {
+        Ok(port) if port > 0 => port,
+        _ => {
+            eprintln!("[mxrs] error: --port requires an integer from 1 to 65535");
+            return ExitCode::FAILURE;
+        }
+    };
+    if args.len() != 2
+        || !matches!(
+            args[0].as_str(),
+            "status" | "up" | "down" | "destroy" | "credentials" | "url"
+        )
+    {
+        eprintln!(
+            "Usage: mxrs db <status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]"
+        );
+        return ExitCode::FAILURE;
+    }
+    let workspace = match mxrs_cli::database::DatabaseWorkspace::open(&args[1], port) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let action = args[0].as_str();
+    if matches!(action, "credentials" | "url") {
+        return match workspace.credentials() {
+            Ok(credentials) => {
+                if action == "url" {
+                    println!("{}", credentials.url);
+                } else if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&credentials)
+                            .expect("database credentials are serializable")
+                    );
+                } else {
+                    println!("Host     : {}", credentials.host);
+                    println!("Port     : {}", credentials.port);
+                    println!("Database : {}", credentials.database);
+                    println!("Username : {}", credentials.username);
+                    println!("Password : {}", credentials.password);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let result = match action {
+        "status" => workspace.status(),
+        "up" => workspace.up(),
+        "down" => workspace.down(),
+        "destroy" => workspace.destroy(),
+        _ => unreachable!("validated above"),
+    };
+    match result {
+        Ok(status) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&status).expect("database status is serializable")
+                );
+            } else {
+                println!("Source      : {}", status.source.display());
+                println!("Container   : {}", status.container);
+                println!("Volume      : {}", status.volume);
+                println!("Image       : {}", status.image);
+                println!("Port        : {}", status.port);
+                println!("Initialized : {}", status.initialized);
+                println!("State       : {}", status.container_state);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_team_server(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let pat_file = take_value(&mut args, "--pat-file");
+    match args.as_slice() {
+        [action] if action == "login" && pat_file.is_some() => {
+            match mxrs_cli::team_server::Credentials::default()
+                .configure_pat_file(pat_file.expect("validated above"))
+            {
+                Ok(report) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&report)
+                                .expect("login report is serializable")
+                        );
+                    } else {
+                        println!(
+                            "[mxrs] configured {} to reference {}",
+                            report.credentials_file.display(),
+                            report.pat_file.display()
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        [action, root] if action == "status" && pat_file.is_none() => {
+            match mxrs_cli::team_server::status(root) {
+                Ok(report) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&report)
+                                .expect("repository status is serializable")
+                        );
+                    } else {
+                        println!("Repository : {}", report.root.display());
+                        println!("Remote     : {}", report.repository_url);
+                        print!("{}", report.status);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        _ => {
+            eprintln!("Usage: mxrs team-server login --pat-file FILE [--json]");
+            eprintln!("       mxrs team-server status DIR [--json]");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn usage() {
@@ -288,6 +455,181 @@ fn run_marketplace(args: Vec<String>) -> ExitCode {
     mxrs_cli::marketplace::run(args)
 }
 
+fn run_mda(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let result = match args.as_slice() {
+        [action, path] if action == "inspect" => mxrs_packager::inspect_mda(path).map(|report| {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "path": report.path,
+                        "sha256": report.sha256,
+                        "roots": report.roots(),
+                        "files": report.files().count(),
+                        "metadata": report.metadata,
+                    }))
+                    .expect("MDA inspection is serializable")
+                );
+            } else {
+                println!(
+                    "Runtime       : {}",
+                    report.metadata["RuntimeVersion"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                );
+                println!(
+                    "Project       : {}",
+                    report.metadata["ProjectName"].as_str().unwrap_or("unknown")
+                );
+                println!("Files         : {}", report.files().count());
+                println!("Roots         : {}", report.roots().join(", "));
+                println!("SHA-256       : {}", report.sha256);
+            }
+        }),
+        [action, left, right] if action == "compare" && !json => {
+            mxrs_packager::compare_mda(left, right).map(|differences| {
+                for difference in &differences {
+                    println!("{:?}\t{}", difference.status, difference.path);
+                }
+                println!("[mxrs] {} difference(s)", differences.len());
+            })
+        }
+        _ => {
+            eprintln!("Usage: mxrs mda inspect <file.mda> [--json]");
+            eprintln!("       mxrs mda compare <left.mda> <right.mda>");
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_migrate(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.is_empty() || args.len() > 2 || !matches!(args[0].as_str(), "check" | "plan") {
+        eprintln!("Usage: mxrs migrate <check|plan> [DIR] [--json]");
+        return ExitCode::FAILURE;
+    }
+    let action = args.remove(0);
+    let root = args
+        .first()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let manifest = root.join("Cargo.toml");
+    let snapshot = root.join("model/imported");
+    match mxrs_cli::cargo_project::diff(manifest, snapshot, false, true) {
+        Ok(result) => {
+            let clean = result.is_identical();
+            if json {
+                let changes = |operation| {
+                    result
+                        .changes
+                        .iter()
+                        .filter(|change| change.operation == operation)
+                        .map(|change| {
+                            serde_json::json!({
+                                "path": change.path,
+                                "before": change.before,
+                                "after": change.after,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "clean": clean,
+                        "added": changes(mxrs_cli::compare::Operation::Added),
+                        "removed": changes(mxrs_cli::compare::Operation::Removed),
+                        "changed": changes(mxrs_cli::compare::Operation::Changed),
+                    }))
+                    .expect("migration plan is serializable")
+                );
+            } else {
+                let count = |operation| {
+                    result
+                        .changes
+                        .iter()
+                        .filter(|change| change.operation == operation)
+                        .count()
+                };
+                println!("Added: {}", count(mxrs_cli::compare::Operation::Added));
+                println!("Removed: {}", count(mxrs_cli::compare::Operation::Removed));
+                println!("Changed: {}", count(mxrs_cli::compare::Operation::Changed));
+                println!(
+                    "[mxrs] {}",
+                    if clean {
+                        "No model drift"
+                    } else {
+                        "Model drift detected"
+                    }
+                );
+            }
+            if action == "check" && !clean {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_upgrade(mut args: Vec<String>) -> ExitCode {
+    let version = take_value(&mut args, "--mendix");
+    let target = take_value(&mut args, "--target").unwrap_or_else(|| ".".to_string());
+    let apply = take_flag(&mut args, "--apply");
+    let json = take_flag(&mut args, "--json");
+    let Some(version) = version else {
+        eprintln!("Usage: mxrs upgrade --mendix VERSION [--target DIR] [--apply] [--json]");
+        return ExitCode::FAILURE;
+    };
+    if !args.is_empty() {
+        eprintln!("Usage: mxrs upgrade --mendix VERSION [--target DIR] [--apply] [--json]");
+        return ExitCode::FAILURE;
+    }
+    match mxrs_scaffold::lifecycle::upgrade_project(target, &version, apply) {
+        Ok(report) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "root": report.root,
+                        "from": report.from,
+                        "to": report.to,
+                        "files": report.files,
+                        "applied": report.applied,
+                    }))
+                    .expect("upgrade report is serializable")
+                );
+            } else {
+                println!(
+                    "[mxrs] {} {}: {} -> {} ({} file(s))",
+                    if report.applied { "Updated" } else { "Preview" },
+                    report.root.display(),
+                    report.from,
+                    report.to,
+                    report.files.len()
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run_rename(args: Vec<String>) -> ExitCode {
     mxrs_cli::refactor::run_rename(args)
 }
@@ -370,6 +712,13 @@ fn run_module(args: Vec<String>) -> ExitCode {
     ))
 }
 
+fn run_repository(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Repository,
+        args,
+    ))
+}
+
 fn run_scaffold(args: Vec<String>) -> ExitCode {
     reported(mxrs_cli::scaffold::registry_command(args))
 }
@@ -378,9 +727,194 @@ fn run_project(args: Vec<String>) -> ExitCode {
     reported(mxrs_cli::scaffold::project_command(args))
 }
 
+fn run_env(mut args: Vec<String>) -> ExitCode {
+    let requested = take_value(&mut args, "--environment");
+    let json = take_flag(&mut args, "--json");
+    if args.len() > 1 {
+        eprintln!("Usage: mxrs env [DIR] [--environment NAME] [--json]");
+        return ExitCode::FAILURE;
+    }
+    let root = args.first().map_or_else(
+        || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        std::path::PathBuf::from,
+    );
+    match mxrs_cli::environment::EnvironmentProfile::load(&root, requested.as_deref()) {
+        Ok(profile) => {
+            if json {
+                let payload = serde_json::json!({
+                    "environment": profile.environment,
+                    "requested": profile.requested,
+                    "root": profile.root,
+                    "sources": profile.sources,
+                    "keys": profile.keys().collect::<Vec<_>>(),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload)
+                        .expect("environment profile is serializable")
+                );
+            } else {
+                println!("Environment : {}", profile.environment);
+                println!("Root        : {}", profile.root.display());
+                for source in &profile.sources {
+                    println!("Source      : {}", source.display());
+                }
+                println!(
+                    "Keys        : {}",
+                    profile.keys().collect::<Vec<_>>().join(", ")
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_doctor(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.len() > 1 {
+        eprintln!("Usage: mxrs doctor [DIR] [--json]");
+        return ExitCode::FAILURE;
+    }
+    let root = args.first().map_or_else(
+        || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        std::path::PathBuf::from,
+    );
+    let report = mxrs_cli::doctor::diagnose(root);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("doctor report is serializable")
+        );
+    } else {
+        for check in &report.checks {
+            println!(
+                "[{}] {}: {}",
+                format!("{:?}", check.status).to_uppercase(),
+                check.name,
+                check.message
+            );
+        }
+        println!(
+            "[mxrs] {} error(s), {} warning(s)",
+            report.errors(),
+            report.warnings()
+        );
+    }
+    if report.valid {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn run_preflight(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.len() != 1 {
+        eprintln!("Usage: mxrs preflight <file.mpr> [--json]");
+        return ExitCode::FAILURE;
+    }
+    match mxrs_cli::preflight::analyze(&args[0]) {
+        Ok(report) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .expect("preflight report is serializable")
+                );
+            } else {
+                println!("Project : {}", report.path.display());
+                println!(
+                    "Mendix  : {}",
+                    report.mendix_version.as_deref().unwrap_or("unknown")
+                );
+                println!("Units   : {}", report.stats.units);
+                for finding in &report.findings {
+                    println!(
+                        "[{}] {} {} at {}: {}",
+                        format!("{:?}", finding.severity).to_uppercase(),
+                        finding.category,
+                        finding.artifact_type,
+                        finding.location,
+                        finding.message
+                    );
+                }
+                println!(
+                    "[mxrs] {} error(s), {} warning(s)",
+                    report.errors(),
+                    report.warnings()
+                );
+            }
+            if report.compatible {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn semantic_index(path: &str) -> Result<mxrs_semantic::SemanticIndex, String> {
     let project = mxrs_model::Project::open(path, true).map_err(|error| error.to_string())?;
-    mxrs_semantic::SemanticIndex::build(&project).map_err(|error| error.to_string())
+    mxrs_semantic::cache::cached_or_build(&project).map_err(|error| error.to_string())
+}
+
+fn run_cache(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    if args.len() != 2 || !matches!(args[0].as_str(), "status" | "warm" | "clear") {
+        eprintln!("Usage: mxrs cache <status|warm|clear> <file.mpr> [--json]");
+        return ExitCode::FAILURE;
+    }
+    let started = std::time::Instant::now();
+    let project = match mxrs_model::Project::open(&args[1], true) {
+        Ok(project) => project,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cache = mxrs_semantic::cache::SemanticCache::default();
+    let result = match args[0].as_str() {
+        "status" => cache.status(&project),
+        "warm" => cache.warm(&project),
+        "clear" => cache.clear(&project),
+        _ => unreachable!("validated above"),
+    };
+    match result {
+        Ok(info) => {
+            let elapsed = started.elapsed().as_secs_f64();
+            if json {
+                let mut payload = serde_json::to_value(&info).expect("cache info is serializable");
+                payload["elapsed_seconds"] = serde_json::json!(elapsed);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).expect("cache info is serializable")
+                );
+            } else {
+                println!("Present     : {}", info.present);
+                println!("Current hit : {}", info.hit);
+                println!("Entries     : {}", info.entries);
+                println!("Bytes       : {}", info.bytes);
+                println!("Fingerprint : {}", info.current_fingerprint);
+                if let Some(removed) = info.removed {
+                    println!("Removed     : {removed}");
+                }
+                println!("Elapsed     : {elapsed:.6}s");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_callers(args: Vec<String>) -> ExitCode {

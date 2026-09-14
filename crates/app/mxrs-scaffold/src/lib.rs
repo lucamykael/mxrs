@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod artifact;
+pub mod lifecycle;
 pub mod page_templates;
 pub mod registry;
 mod templates;
@@ -68,6 +69,10 @@ pub enum ScaffoldError {
     ScaffoldFileChanged(String),
     #[error("unsafe scaffold path: {0}")]
     UnsafeScaffoldPath(String),
+    #[error("Cargo-native project has no #[mxrs::application(version = \"…\")] declaration")]
+    MissingVersionDeclaration,
+    #[error("project version declarations disagree: {0:?}")]
+    VersionMismatch(Vec<String>),
 }
 
 pub type Result<T> = std::result::Result<T, ScaffoldError>;

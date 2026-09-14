@@ -20,12 +20,16 @@
 //!    sidecar-loading variant to separately name). A hit here means someone
 //!    added one of mxrb's escape hatches to the human-facing authoring API
 //!    — the exact regression D2 exists to prevent.
-//! 2. **Generated output** — `mxrs_exporter::export_project` is run against
-//!    every committed `xtask/fixtures/*` fixture, and the resulting Rust
-//!    source text is scanned for a UUID, a SHA-1/SHA-256 hex digest, or a
-//!    literal `"$ID"`/`"$Type"` string — the concrete artifacts a human
-//!    would actually have to read/edit if the exporter ever started leaking
-//!    storage internals into its output.
+//! 2. **Generated output** — both `mxrs_exporter::export_project` and the full
+//!    Cargo project produced by `mxrs import` are generated for every committed
+//!    `xtask/fixtures/*` fixture. Every emitted `.rs` file is scanned for raw
+//!    storage identifiers, hashes/schema keys, TODOs, or opacity markers. The
+//!    lossless snapshot remains data under `model/imported`; it must never be
+//!    mirrored into the Rust tree a developer reads and edits.
+//! 3. **Scaffold output** — one generated project receives every artifact
+//!    scaffold in the public catalog, then every resulting `.rs` file goes
+//!    through the same checks. Adding a generator cannot silently narrow the
+//!    gate back to import-only output.
 //!
 //! Deliberately **not** scanned: crates below the authoring surface
 //! (`mxrs-model`, `mxrs-writer`, `mxrs-mpr`, the compiler crates, …) —
@@ -73,6 +77,7 @@ pub fn noise_audit(workspace_root: &Path) -> Result<(), String> {
     let mut findings = Vec::new();
     findings.extend(audit_api_surface(workspace_root)?);
     findings.extend(audit_generated_fixtures(workspace_root)?);
+    findings.extend(audit_scaffolded_project(workspace_root)?);
 
     if findings.is_empty() {
         println!("[xtask] noise-audit: 0 finding(s)");
@@ -95,6 +100,55 @@ pub fn noise_audit(workspace_root: &Path) -> Result<(), String> {
         if categories.len() == 1 { "y" } else { "ies" }
     );
     Err("noise-audit found opacity in mxrs's authoring surface or generated output (see above) — see D2 in decisions/mxrs-rust-rewrite-plan.md".to_string())
+}
+
+fn audit_scaffolded_project(workspace_root: &Path) -> Result<Vec<Finding>, String> {
+    let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let project = scratch.path().join("generated-scaffolds");
+    let dependency = workspace_root.join("crates/app/mxrs");
+    let options = mxrs_scaffold::ProjectScaffold::new("Audit", "11.12.1", &project)
+        .dependency(mxrs_scaffold::MxrsDependency::Path(dependency));
+    mxrs_scaffold::generate_project(&options)
+        .map_err(|error| format!("cannot generate scaffold audit project: {error}"))?;
+    mxrs_scaffold::scaffold_artifact(&mxrs_scaffold::ArtifactScaffold::new(
+        mxrs_scaffold::ArtifactKind::Module,
+        "AuditModule",
+        &project,
+    ))
+    .map_err(|error| format!("cannot generate module for scaffold audit: {error}"))?;
+    for command in mxrs_scaffold::SCAFFOLD_COMMANDS {
+        if command.kind == mxrs_scaffold::ArtifactKind::Module {
+            continue;
+        }
+        let name = if command.kind == mxrs_scaffold::ArtifactKind::Security {
+            "AuditModule".to_string()
+        } else {
+            format!("AuditModule.Generated{}", pascal_case(command.name))
+        };
+        mxrs_scaffold::scaffold_artifact(&mxrs_scaffold::ArtifactScaffold::new(
+            command.kind,
+            name,
+            &project,
+        ))
+        .map_err(|error| format!("cannot audit {} scaffold: {error}", command.name))?;
+    }
+    scan_generated_tree(&project, "generated::scaffolds")
+}
+
+fn pascal_case(value: &str) -> String {
+    value
+        .split('-')
+        .map(|part| {
+            let mut characters = part.chars();
+            characters
+                .next()
+                .map(char::to_uppercase)
+                .into_iter()
+                .flatten()
+                .chain(characters)
+                .collect::<String>()
+        })
+        .collect()
 }
 
 fn audit_api_surface(workspace_root: &Path) -> Result<Vec<Finding>, String> {
@@ -133,6 +187,7 @@ fn audit_api_surface(workspace_root: &Path) -> Result<Vec<Finding>, String> {
 fn audit_generated_fixtures(workspace_root: &Path) -> Result<Vec<Finding>, String> {
     let mut findings = Vec::new();
     let fixtures_dir = workspace_root.join("xtask").join("fixtures");
+    let generated_root = tempfile::tempdir().map_err(|error| error.to_string())?;
     let entries = std::fs::read_dir(&fixtures_dir).map_err(|error| {
         format!(
             "cannot inspect required fixtures {}: {error}",
@@ -175,11 +230,50 @@ fn audit_generated_fixtures(workspace_root: &Path) -> Result<Vec<Finding>, Strin
                 excerpt,
             });
         }
+        let destination = generated_root.path().join(entry.file_name());
+        mxrs_exporter::import_cargo_project(&mpr_path, &destination, Some(workspace_root))
+            .map_err(|error| {
+                format!(
+                    "cannot audit imported Cargo project for {}: {error}",
+                    mpr_path.display()
+                )
+            })?;
+        findings.extend(scan_generated_tree(&destination, &label)?);
     }
     if inspected == 0 {
         return Err(
             "no exported fixtures were audited; missing evidence cannot pass noise-audit".into(),
         );
+    }
+    Ok(findings)
+}
+
+fn scan_generated_tree(root: &Path, label: &str) -> Result<Vec<Finding>, String> {
+    let mut findings = Vec::new();
+    for path in rust_files(&root.join("src"))? {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let location = format!("{label}::{relative}");
+        let source = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        for (identifier, line, excerpt) in scan_identifiers(&source) {
+            findings.push(Finding {
+                category: identifier,
+                location: location.clone(),
+                line,
+                excerpt,
+            });
+        }
+        for (category, line, excerpt) in scan_opaque_text(&source) {
+            findings.push(Finding {
+                category,
+                location: location.clone(),
+                line,
+                excerpt,
+            });
+        }
     }
     Ok(findings)
 }
@@ -219,7 +313,8 @@ fn contains_word(line: &str, word: &str) -> bool {
 
 /// Catches the concrete artifacts a human would have to read if generated
 /// output ever leaked storage internals: a UUID, a SHA-1/SHA-256 hex
-/// digest, or a literal `$ID`/`$Type` BSON key — the same three text
+/// digest, a literal `$ID`/`$Type` BSON key, or a marker that asks the user to
+/// reason about an intentionally incomplete/opaque projection — the first three
 /// patterns `public_source_audit.rb`'s `TEXT_PATTERNS` flags (its
 /// `sidecar_reference` pattern has no mxrs equivalent yet — the sidecar
 /// design in D2 isn't built, so there is no `.mxrs/` path convention to
@@ -235,6 +330,13 @@ fn scan_opaque_text(text: &str) -> Vec<(&'static str, usize, String)> {
         }
         if line.contains("\"$ID\"") || line.contains("\"$Type\"") {
             hits.push(("storage_schema", idx + 1, line.trim().to_string()));
+        }
+        let lowercase = line.to_ascii_lowercase();
+        if lowercase.contains("snapshot-backed") || lowercase.contains("opaque") {
+            hits.push(("opacity_marker", idx + 1, line.trim().to_string()));
+        }
+        if lowercase.contains("todo") {
+            hits.push(("todo_marker", idx + 1, line.trim().to_string()));
         }
     }
     hits
@@ -325,6 +427,18 @@ fn find_mpr_file(dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask lives directly under the workspace root")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn every_generated_rust_tree_is_clear_of_storage_and_opacity_markers() {
+        noise_audit(&workspace_root()).unwrap();
+    }
+
     #[test]
     fn banned_identifiers_match_whole_words_and_keep_exact_source_lines() {
         let hits = scan_identifiers(
@@ -390,6 +504,17 @@ mod tests {
                 .map(|(category, line, _)| (*category, *line))
                 .collect::<Vec<_>>(),
             vec![("digest", 2), ("storage_schema", 3), ("storage_schema", 4)]
+        );
+        let hits = scan_opaque_text("// snapshot-backed flow\n// TODO: opaque page\n");
+        assert_eq!(
+            hits.iter()
+                .map(|(category, line, _)| (*category, *line))
+                .collect::<Vec<_>>(),
+            vec![
+                ("opacity_marker", 1),
+                ("opacity_marker", 2),
+                ("todo_marker", 2),
+            ]
         );
     }
 

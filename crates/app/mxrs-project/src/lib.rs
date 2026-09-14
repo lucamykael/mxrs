@@ -81,20 +81,6 @@ pub struct ImportedUnit {
     pub file: String,
 }
 
-/// Compile-time entry emitted into an imported application's generated Rust
-/// registry. The `.mxdoc` remains the lossless payload; this metadata makes
-/// every opaque document discoverable without parsing the snapshot manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ImportedDocumentRef {
-    pub unit_id: &'static str,
-    pub container_id: &'static str,
-    pub containment_name: &'static str,
-    pub native_type: &'static str,
-    pub name: Option<&'static str>,
-    pub qualified_name: Option<&'static str>,
-    pub file: &'static str,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportedProjectManifest {
     pub snapshot_version: u32,

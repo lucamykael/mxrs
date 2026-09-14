@@ -11,7 +11,6 @@ description = "Client for the official Mendix Marketplace Content API: search pu
 workspace = true
 
 [dependencies]
-mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
 # A .mpk is a zip holding an .mpr plus assets, and package.xml is namespaced
 # XML. Neither is safe to parse by hand; both dependencies are confined to

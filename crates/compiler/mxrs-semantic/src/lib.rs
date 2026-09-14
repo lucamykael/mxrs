@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod analysis;
+pub mod cache;
 pub use analysis::{Analysis, CallCycle, ModuleDependency};
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +30,14 @@ pub enum SemanticError {
     Ambiguous(String),
     #[error("unknown Mendix artifact {0:?}")]
     Unknown(String),
+    #[error("cannot access semantic cache {path}: {source}")]
+    CacheIo {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid semantic cache {path}: {reason}")]
+    InvalidCache { path: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, SemanticError>;

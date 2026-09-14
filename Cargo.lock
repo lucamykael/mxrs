@@ -744,6 +744,8 @@ name = "mxrs-cli"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-compiler-flow",
+ "mxrs-compiler-widgets",
  "mxrs-dsl",
  "mxrs-exporter",
  "mxrs-ir",
@@ -759,11 +761,13 @@ dependencies = [
  "mxrs-scaffold",
  "mxrs-semantic",
  "mxrs-writer",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -1027,6 +1031,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "zip",
 ]
 
 [[package]]
@@ -2105,6 +2110,7 @@ dependencies = [
  "mxrs-bson",
  "mxrs-exporter",
  "mxrs-mpr",
+ "mxrs-scaffold",
  "mxrs-schema",
  "serde",
  "serde_json",

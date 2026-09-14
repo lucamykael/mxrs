@@ -100,3 +100,21 @@ fn invalid_command_arguments_exit_without_a_rust_panic() {
         assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
     }
 }
+
+#[test]
+fn noise_audit_checks_the_real_generated_project_and_scaffold_surfaces() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask lives directly under the workspace root");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("noise-audit")
+        .current_dir(workspace)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("noise-audit: 0 finding(s)"));
+}
