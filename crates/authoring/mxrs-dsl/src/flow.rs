@@ -1,6 +1,81 @@
 use mxrs_expr::{Expr, ListVar, MemberAssignment, MxBool, RenderExpr, TypedRenderExpr, Var};
+use mxrs_ir::declaration::ModuleDecl;
 use mxrs_ir::flow::{Activity, MicroflowCallMapping, MicroflowDecl};
 use mxrs_ir::{EntityMarker, MicroflowMarker, MicroflowRef, Ref};
+
+/// A module facet that can declare only server-side microflows.
+///
+/// Use it through [`crate::ProjectBuilder::microflow_module`] when keeping
+/// application orchestration separate from domain and presentation source.
+pub struct MicroflowModuleBuilder {
+    name: String,
+    flows: Vec<MicroflowDecl>,
+}
+
+impl MicroflowModuleBuilder {
+    pub(crate) fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            flows: Vec::new(),
+        }
+    }
+
+    pub fn microflow(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        let mut builder = FlowBuilder::new(name);
+        configure(&mut builder);
+        self.flows.push(builder.into_decl());
+        self
+    }
+
+    pub(crate) fn into_decl(self) -> ModuleDecl {
+        ModuleDecl {
+            name: self.name,
+            microflows: self.flows,
+            ..ModuleDecl::default()
+        }
+    }
+}
+
+/// A module facet that can declare only client-side nanoflows.
+///
+/// Its deliberately narrow API prevents a presentation file from silently
+/// creating a server flow, or the reverse.
+pub struct NanoflowModuleBuilder {
+    name: String,
+    flows: Vec<MicroflowDecl>,
+}
+
+impl NanoflowModuleBuilder {
+    pub(crate) fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            flows: Vec::new(),
+        }
+    }
+
+    pub fn nanoflow(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        let mut builder = FlowBuilder::new(name);
+        configure(&mut builder);
+        self.flows.push(builder.into_decl());
+        self
+    }
+
+    pub(crate) fn into_decl(self) -> ModuleDecl {
+        ModuleDecl {
+            name: self.name,
+            nanoflows: self.flows,
+            ..ModuleDecl::default()
+        }
+    }
+}
 
 pub struct CallArgument {
     parameter: String,

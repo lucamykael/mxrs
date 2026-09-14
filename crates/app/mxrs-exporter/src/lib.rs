@@ -22,7 +22,8 @@
 //!   documentation), constants (type, value, documentation and client
 //!   exposure), regular expressions (pattern, visibility and exclusion), and
 //!   scheduled events (legacy cadence, modern schedule, start instant and
-//!   execution policy) are emitted into `src/domain/documents/mod.rs`. Imported
+//!   execution policy), and standalone menus are emitted into
+//!   `src/domain/documents/mod.rs`. Imported
 //!   fields outside that IR are retained by the writer. `portability
 //!   --verify-round-trip` checks these documents by identity, containment
 //!   and raw BSON bytes.
@@ -57,7 +58,7 @@
 //!
 //! `import_cargo_project` also detects pages built entirely from
 //! `mxrs-dsl`'s native/structural widget vocabulary, emits them as real
-//! `pub fn` builders in `src/domain/pages/mod.rs`, and wires each one into
+//! `pub fn` builders in `src/presentation/pages/mod.rs`, and wires each one into
 //! `build()` — see `page_export`'s doc comment for the widget vocabulary
 //! detected and what remains snapshot-preserved.
 
@@ -149,7 +150,7 @@ pub struct CargoProjectImport {
     pub imported_assets: usize,
     pub typed_round_trip_gaps: Vec<RoundTripGap>,
     /// Pages detected as buildable from `mxrs-dsl`'s native/structural
-    /// widget vocabulary, emitted into `src/domain/pages/mod.rs` and wired into
+    /// widget vocabulary, emitted into `src/presentation/pages/mod.rs` and wired into
     /// `build()` — see `page_export`'s doc comment for what still stays
     /// opaque.
     pub page_export: PageExportReport,
@@ -229,8 +230,11 @@ fn import_cargo_project_inner(
     )?;
     let pages_module_source = page_export::render_pages_module(&converted_pages);
     let entities_source = render(&mendix_version, &modules, &[]);
-    let domain_source = render_domain_module(&converted_pages);
-    let flows_source = render_flows_module(&mendix_version, &modules);
+    let domain_source = render_domain_module();
+    let application_source = render_application_module();
+    let presentation_source = render_presentation_module(&converted_pages);
+    let microflows_source = render_microflows_module(&mendix_version, &modules);
+    let nanoflows_source = render_nanoflows_module(&mendix_version, &modules);
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
         (document.get_str("$Type").ok() == Some("Security$ProjectSecurity")).then_some(document)
@@ -256,15 +260,29 @@ fn import_cargo_project_inner(
     let entities_directory = domain_directory.join("entities");
     std::fs::create_dir_all(&entities_directory)
         .map_err(|source| io_error(&entities_directory, source))?;
-    let flows_directory = domain_directory.join("flows");
-    std::fs::create_dir_all(&flows_directory)
-        .map_err(|source| io_error(&flows_directory, source))?;
+    let domain_modules_directory = domain_directory.join("modules");
+    std::fs::create_dir_all(&domain_modules_directory)
+        .map_err(|source| io_error(&domain_modules_directory, source))?;
+    let application_directory = destination.join("src/application");
+    let microflows_directory = application_directory.join("microflows");
+    std::fs::create_dir_all(&microflows_directory)
+        .map_err(|source| io_error(&microflows_directory, source))?;
+    let application_modules_directory = application_directory.join("modules");
+    std::fs::create_dir_all(&application_modules_directory)
+        .map_err(|source| io_error(&application_modules_directory, source))?;
+    let presentation_directory = destination.join("src/presentation");
+    let nanoflows_directory = presentation_directory.join("nanoflows");
+    std::fs::create_dir_all(&nanoflows_directory)
+        .map_err(|source| io_error(&nanoflows_directory, source))?;
+    let navigation_directory = presentation_directory.join("navigation");
+    std::fs::create_dir_all(&navigation_directory)
+        .map_err(|source| io_error(&navigation_directory, source))?;
+    let presentation_modules_directory = presentation_directory.join("modules");
+    std::fs::create_dir_all(&presentation_modules_directory)
+        .map_err(|source| io_error(&presentation_modules_directory, source))?;
     let security_directory = domain_directory.join("security");
     std::fs::create_dir_all(&security_directory)
         .map_err(|source| io_error(&security_directory, source))?;
-    let navigation_directory = domain_directory.join("navigation");
-    std::fs::create_dir_all(&navigation_directory)
-        .map_err(|source| io_error(&navigation_directory, source))?;
     let documents_directory = domain_directory.join("documents");
     std::fs::create_dir_all(&documents_directory)
         .map_err(|source| io_error(&documents_directory, source))?;
@@ -284,34 +302,61 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "// Required by the paths emitted inside the authoring macro.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod domain;\npub mod infrastructure;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
+            "// Required by the paths emitted inside the authoring macro.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    let mut project = application::build();\n    presentation::apply(&mut project);\n    project\n}}\n\n#[mxrs::application(version = {}, project = crate::build)]\npub struct Application;\n",
             rust_string(&manifest.mendix_version),
         ),
     )?;
     write_text(&destination.join("src/domain/mod.rs"), &domain_source)?;
     write_text(
+        &destination.join("src/domain/modules/mod.rs"),
+        &render_scaffold_modules_module(),
+    )?;
+    write_text(
+        &destination.join("src/application/mod.rs"),
+        &application_source,
+    )?;
+    write_text(
+        &destination.join("src/presentation/mod.rs"),
+        &presentation_source,
+    )?;
+    write_text(
         &destination.join("src/domain/entities/mod.rs"),
         &entities_source,
     )?;
-    write_text(&destination.join("src/domain/flows/mod.rs"), &flows_source)?;
+    write_text(
+        &destination.join("src/application/microflows/mod.rs"),
+        &microflows_source,
+    )?;
+    write_text(
+        &destination.join("src/application/modules/mod.rs"),
+        &render_scaffold_modules_module(),
+    )?;
+    write_text(
+        &destination.join("src/presentation/nanoflows/mod.rs"),
+        &nanoflows_source,
+    )?;
     write_text(
         &destination.join("src/domain/security/mod.rs"),
         &security_source,
     )?;
     write_text(
-        &destination.join("src/domain/navigation/mod.rs"),
+        &destination.join("src/presentation/navigation/mod.rs"),
         &navigation_source,
+    )?;
+    write_text(
+        &destination.join("src/presentation/modules/mod.rs"),
+        &render_scaffold_modules_module(),
     )?;
     write_text(
         &destination.join("src/domain/documents/mod.rs"),
         &documents_source,
     )?;
     if let Some(pages_module_source) = &pages_module_source {
-        let pages_directory = domain_directory.join("pages");
+        let pages_directory = presentation_directory.join("pages");
         std::fs::create_dir_all(&pages_directory)
             .map_err(|source| io_error(&pages_directory, source))?;
         write_text(
-            &destination.join("src/domain/pages/mod.rs"),
+            &destination.join("src/presentation/pages/mod.rs"),
             pages_module_source,
         )?;
     }
@@ -346,24 +391,49 @@ fn import_cargo_project_inner(
     })
 }
 
-/// Composes editable domain concepts without coupling the entity projection
-/// to page source files. New concept families (flows, security, navigation)
-/// can join this module as peers without flattening the generated project.
-fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
+/// Builds the server-independent model. Runtime orchestration is applied by
+/// `src/application/mod.rs`; UI behavior is applied by
+/// `src/presentation/mod.rs`.
+fn render_domain_module() -> String {
+    "//! Editable model declarations shared by server and client code.\n\n\
+     pub mod documents;\n\
+     pub mod entities;\n\
+     pub mod modules;\n\
+     pub mod security;\n\n\
+     pub fn build() -> ::mxrs_ir::ProjectDecl {\n\
+         let mut project = entities::build();\n\
+         documents::apply(&mut project);\n\
+         modules::apply(&mut project);\n\
+         security::apply(&mut project);\n\
+         project\n\
+     }\n"
+    .to_string()
+}
+
+fn render_application_module() -> String {
+    "//! Server-side application orchestration.\n\n\
+     pub mod microflows;\n\
+     pub mod modules;\n\n\
+     pub fn build() -> ::mxrs_ir::ProjectDecl {\n\
+         let mut project = crate::domain::build();\n\
+         microflows::apply(&mut project);\n\
+         modules::apply(&mut project);\n\
+         project\n\
+     }\n"
+    .to_string()
+}
+
+fn render_presentation_module(pages: &[page_export::ConvertedPage]) -> String {
     let mut source = String::from(
-        "//! Editable Cargo-native Mendix concepts, grouped by concept family.\n\n\
-         pub mod entities;\n\
-         pub mod documents;\n\
-         pub mod flows;\n\
-         pub mod navigation;\n\
-         pub mod security;\n",
+        "//! Client-side UI declarations and orchestration.\n\n\
+         pub mod nanoflows;\n\
+         pub mod navigation;\n",
     );
+    source.push_str("pub mod modules;\n");
     if !pages.is_empty() {
         source.push_str("pub mod pages;\n");
     }
-    source.push_str(
-        "\npub fn build() -> ::mxrs_ir::ProjectDecl {\n    let mut project = entities::build();\n",
-    );
+    source.push_str("\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n");
     for page in pages {
         let _ = writeln!(
             source,
@@ -372,9 +442,20 @@ fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
         );
     }
     source.push_str(
-        "    documents::apply(&mut project);\n    flows::apply(&mut project);\n    security::apply(&mut project);\n    navigation::apply(&mut project);\n    project\n}\n",
+        "    nanoflows::apply(project);\n    navigation::apply(project);\n    modules::apply(project);\n}\n",
     );
     source
+}
+
+fn render_scaffold_modules_module() -> String {
+    "//! Scaffolded Mendix modules composed into this architectural layer.\n\n\
+     pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+         for declare in MODULES {\n\
+             declare(project);\n\
+         }\n\
+     }\n\n\
+     const MODULES: &[fn(&mut ::mxrs_ir::ProjectDecl)] = &[];\n"
+        .to_string()
 }
 
 #[derive(Debug)]
@@ -1658,30 +1739,51 @@ fn constant_environment_variable(module: &str, name: &str) -> String {
     result.trim_end_matches('_').to_string()
 }
 
-/// Creates the editable flow composition layer. New typed declarations merge
-/// by module and are then upserted by the writer.
-fn render_flows_module(mendix_version: &str, _modules: &[Module]) -> String {
-    let mut source = String::from("//! Editable Cargo-native flow declarations.\n");
+/// Creates the editable server-flow composition layer. New typed declarations
+/// merge by module and are then upserted by the writer.
+fn render_microflows_module(mendix_version: &str, _modules: &[Module]) -> String {
+    render_flow_module(
+        mendix_version,
+        "server-side microflow",
+        "microflow_module",
+        "microflow",
+    )
+}
+
+/// Creates the editable client-flow composition layer independently from the
+/// server path, so generated source cannot blur their runtime boundary.
+fn render_nanoflows_module(mendix_version: &str, _modules: &[Module]) -> String {
+    render_flow_module(
+        mendix_version,
+        "client-side nanoflow",
+        "nanoflow_module",
+        "nanoflow",
+    )
+}
+
+fn render_flow_module(
+    mendix_version: &str,
+    description: &str,
+    module_method: &str,
+    builder_method: &str,
+) -> String {
+    let mut source = format!("//! Editable Cargo-native {description} declarations.\n");
     source.push_str(
         "\nfn declarations() -> ::mxrs_ir::ProjectDecl {\n\
              #[allow(unused_mut)]\n\
              let mut project = ::mxrs_dsl::ProjectBuilder::new(",
     );
     source.push_str(&rust_string(mendix_version));
+    let _ = writeln!(
+        source,
+        ");\n    // Add `project.{module_method}(..., |module| module.{builder_method}(...))` declarations here."
+    );
     source.push_str(
-        ");\n\
-             // Add `project.module(..., |module| module.microflow(...))` or\n\
-             // `module.nanoflow(...)` declarations here.\n\
-             project.build()\n\
+        "    project.build()\n\
          }\n\n\
          pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
              for declared in declarations().modules {\n\
-                 if let Some(target) = project.modules.iter_mut().find(|module| module.name == declared.name) {\n\
-                     target.microflows.extend(declared.microflows);\n\
-                     target.nanoflows.extend(declared.nanoflows);\n\
-                 } else {\n\
-                     project.modules.push(declared);\n\
-                 }\n\
+                 project.merge_module(declared);\n\
              }\n\
          }\n",
     );
@@ -2095,7 +2197,7 @@ fn build_binary_source(crate_name: &str, project_name: &str) -> String {
 fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportReport) -> String {
     let pages_note = if page_export.typed_candidates > 0 {
         format!(
-            "\n`src/domain/pages/mod.rs` defines {} page(s) this import detected as buildable from\nmxrs-dsl's native/structural widget vocabulary (out of {} page(s) total) — wired into\n`build()` automatically by `src/domain/mod.rs`.\n",
+            "\n`src/presentation/pages/mod.rs` defines {} page(s) this import detected as buildable from\nmxrs-dsl's native/structural widget vocabulary (out of {} page(s) total) — wired into\n`build()` automatically by `src/presentation/mod.rs`.\n",
             page_export.typed_candidates,
             page_export.typed_candidates + page_export.opaque,
         )
@@ -2103,7 +2205,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. `src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable model concepts live under `src/domain/`; server orchestration under `src/application/`; pages, navigation, and client orchestration under `src/presentation/`; generated public marker types under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. `src/application/microflows/mod.rs` is the source of truth for new server-side microflows; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -2254,7 +2356,7 @@ fn render(
         let _ = writeln!(out, "//!");
         let _ = writeln!(
             out,
-            "//! Also wires every page `src/domain/pages/mod.rs` defines into its"
+            "//! Also wires every page `src/presentation/pages/mod.rs` defines into its"
         );
         let _ = writeln!(out, "//! module — see `pages`' own header comment and");
         let _ = writeln!(out, "//! `mxrs-exporter::page_export`'s crate doc.");
@@ -2521,6 +2623,81 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    /// The layered import is only worth its extra directories if every layer
+    /// stays ignorant of the ones outside it, so assert the dependency
+    /// direction directly on the rendered source rather than only through the
+    /// end-to-end import test.
+    #[test]
+    fn generated_layers_point_dependencies_inward() {
+        let domain = render_domain_module();
+        assert!(!domain.contains("crate::application"));
+        assert!(!domain.contains("crate::presentation"));
+        for outer in [
+            "pub mod microflows;",
+            "pub mod nanoflows;",
+            "pub mod navigation;",
+            "pub mod pages;",
+        ] {
+            assert!(!domain.contains(outer), "domain must not declare {outer}");
+        }
+
+        // The application layer composes the domain and stops there: applying
+        // presentation from here is what made the first attempt at this split
+        // depend outward.
+        let application = render_application_module();
+        assert!(application.contains("crate::domain::build()"));
+        assert!(application.contains("microflows::apply(&mut project);"));
+        assert!(!application.contains("crate::presentation"));
+        assert!(!application.contains("pub mod nanoflows;"));
+        assert!(!application.contains("pub mod pages;"));
+
+        let presentation = render_presentation_module(&[]);
+        assert!(presentation.contains("pub mod nanoflows;"));
+        assert!(presentation.contains("pub mod navigation;"));
+        // Presentation contributes through `apply`, never through its own
+        // `build`, so the crate root stays the single composition root.
+        assert!(presentation.contains("pub fn apply(project: &mut ::mxrs_ir::ProjectDecl)"));
+        assert!(!presentation.contains("pub fn build()"));
+        assert!(!presentation.contains("crate::application"));
+        // No page module is written when the import found nothing buildable,
+        // so the layer must not declare one either.
+        assert!(!presentation.contains("pub mod pages;"));
+        assert!(!presentation.contains("pub mod microflows;"));
+
+        // Every layer carries the aggregator `mxrs add` wires scaffolded
+        // modules into, so a scaffold never has to invent one.
+        for layer in [&domain, &application, &presentation] {
+            assert!(layer.contains("pub mod modules;"));
+        }
+    }
+
+    /// Each flow module may only reach the builder facet of its own runtime
+    /// side, and merges through `merge_module` so nothing a declaration
+    /// carries is dropped on the way into an existing module.
+    #[test]
+    fn generated_flow_modules_use_the_typed_facet_of_their_own_runtime_side() {
+        let microflows = render_microflows_module("11.12.1", &[]);
+        assert!(
+            microflows.contains("project.microflow_module(..., |module| module.microflow(...))")
+        );
+        assert!(microflows.contains("project.merge_module(declared);"));
+        assert!(!microflows.contains("nanoflow"));
+
+        let nanoflows = render_nanoflows_module("11.12.1", &[]);
+        assert!(nanoflows.contains("project.nanoflow_module(..., |module| module.nanoflow(...))"));
+        assert!(nanoflows.contains("project.merge_module(declared);"));
+        assert!(!nanoflows.contains("microflow"));
+
+        // The hand-rolled upsert this replaced extended one family and pushed
+        // the whole module in the other branch, so a flow declared on the
+        // wrong side was kept or dropped depending on whether the module
+        // already existed.
+        for source in [&microflows, &nanoflows] {
+            assert!(!source.contains("project.modules.push(declared)"));
+            assert!(!source.contains(".extend(declared."));
+        }
+    }
 
     #[test]
     fn cargo_package_names_are_valid_and_stable() {
@@ -2996,19 +3173,34 @@ mod tests {
         assert!(generated.join("src/domain/mod.rs").is_file());
         assert!(generated.join("src/domain/entities/mod.rs").is_file());
         assert!(generated.join("src/domain/documents/mod.rs").is_file());
-        assert!(generated.join("src/domain/flows/mod.rs").is_file());
         assert!(generated.join("src/domain/security/mod.rs").is_file());
-        assert!(generated.join("src/domain/navigation/mod.rs").is_file());
+        assert!(generated.join("src/application/mod.rs").is_file());
+        assert!(
+            generated
+                .join("src/application/microflows/mod.rs")
+                .is_file()
+        );
+        assert!(generated.join("src/presentation/mod.rs").is_file());
+        assert!(
+            generated
+                .join("src/presentation/nanoflows/mod.rs")
+                .is_file()
+        );
+        assert!(
+            generated
+                .join("src/presentation/navigation/mod.rs")
+                .is_file()
+        );
         assert!(generated.join("src/infrastructure/mod.rs").is_file());
         assert!(!generated.join("src/generated").exists());
         assert!(generated.join("model/imported/manifest.json").is_file());
         // The pages module is real, *compiled* Rust source, wired into
-        // `build()` from `src/domain/mod.rs` (see `page_export`'s doc
+        // `build()` from `src/presentation/mod.rs` (see `page_export`'s doc
         // comment) — the `cargo check`/`cargo run` calls below, plus the
         // rebuilt-project assertions further down, prove it actually
         // contributes to the output `.mpr`, not just that it parses.
         let pages_source =
-            std::fs::read_to_string(generated.join("src/domain/pages/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/presentation/pages/mod.rs")).unwrap();
         assert!(pages_source.contains("pub fn home"));
         assert!(pages_source.contains("w.text_with(\"Welcome\""));
         assert!(pages_source.contains("w.name("));
@@ -3023,15 +3215,19 @@ mod tests {
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(domain_source.contains("pub mod entities;"));
         assert!(domain_source.contains("pub mod documents;"));
-        assert!(domain_source.contains("pub mod flows;"));
         assert!(domain_source.contains("pub mod security;"));
-        assert!(domain_source.contains("pub mod navigation;"));
-        assert!(domain_source.contains("flows::apply(&mut project);"));
         assert!(domain_source.contains("documents::apply(&mut project);"));
         assert!(domain_source.contains("security::apply(&mut project);"));
-        assert!(domain_source.contains("navigation::apply(&mut project);"));
-        assert!(domain_source.contains("pub mod pages;"));
-        assert!(domain_source.contains("pages::home()"));
+        let application_source =
+            std::fs::read_to_string(generated.join("src/application/mod.rs")).unwrap();
+        assert!(application_source.contains("microflows::apply(&mut project);"));
+        assert!(!application_source.contains("crate::presentation"));
+        let presentation_source =
+            std::fs::read_to_string(generated.join("src/presentation/mod.rs")).unwrap();
+        assert!(presentation_source.contains("nanoflows::apply(project);"));
+        assert!(presentation_source.contains("navigation::apply(project);"));
+        assert!(presentation_source.contains("pub mod pages;"));
+        assert!(presentation_source.contains("pages::home()"));
         let entities_source =
             std::fs::read_to_string(generated.join("src/domain/entities/mod.rs")).unwrap();
         assert!(
@@ -3060,9 +3256,17 @@ mod tests {
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_Ping"));
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_GetOrder"));
         assert!(markers.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
-        let flows = std::fs::read_to_string(generated.join("src/domain/flows/mod.rs")).unwrap();
-        assert!(!flows.contains("snapshot-backed"));
-        assert!(flows.contains("target.nanoflows.extend(declared.nanoflows)"));
+        let microflows =
+            std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
+        assert!(!microflows.contains("snapshot-backed"));
+        assert!(microflows.contains("project.microflow_module("));
+        assert!(microflows.contains("project.merge_module(declared);"));
+        assert!(!microflows.contains("nanoflow"));
+        let nanoflows =
+            std::fs::read_to_string(generated.join("src/presentation/nanoflows/mod.rs")).unwrap();
+        assert!(nanoflows.contains("project.nanoflow_module("));
+        assert!(nanoflows.contains("project.merge_module(declared);"));
+        assert!(!nanoflows.contains("microflow"));
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
         assert!(security.contains("ProjectSecurityDecl {"));
@@ -3070,12 +3274,43 @@ mod tests {
         assert!(security.contains("minimum_length: 12"));
         assert!(security.contains("user_roles: vec!"));
         let navigation =
-            std::fs::read_to_string(generated.join("src/domain/navigation/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/presentation/navigation/mod.rs")).unwrap();
         assert!(navigation.contains("project.navigation = Some"));
         assert!(navigation.contains("NavigationIconDecl::Code(57369)"));
         let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
         assert!(crate_root.contains("pub mod infrastructure;"));
         assert!(!crate_root.contains("pub mod generated"));
+        // The crate root is the only composition root: it names every layer,
+        // applies presentation on top of the application build, and points
+        // `#[mxrs::application]` at itself rather than at `domain::build`.
+        assert!(crate_root.contains("pub mod application;"));
+        assert!(crate_root.contains("pub mod domain;"));
+        assert!(crate_root.contains("pub mod presentation;"));
+        assert!(crate_root.contains("pub fn build() -> ::mxrs_ir::ProjectDecl"));
+        assert!(crate_root.contains("let mut project = application::build();"));
+        assert!(crate_root.contains("presentation::apply(&mut project);"));
+        assert!(crate_root.contains("project = crate::build"));
+        // Every layer ships the aggregator `mxrs add` wires scaffolded modules
+        // into, so a later scaffold never has to invent one.
+        for relative in [
+            "src/domain/modules/mod.rs",
+            "src/application/modules/mod.rs",
+            "src/presentation/modules/mod.rs",
+        ] {
+            assert!(generated.join(relative).is_file(), "{relative} is missing");
+        }
+        assert!(domain_source.contains("pub mod modules;"));
+        assert!(application_source.contains("modules::apply(&mut project);"));
+        assert!(presentation_source.contains("modules::apply(project);"));
+        // The pre-split layout must not survive alongside the layered one:
+        // two homes for the same concept is exactly the ambiguity the split
+        // exists to remove.
+        assert!(!generated.join("src/domain/flows").exists());
+        assert!(!generated.join("src/domain/navigation").exists());
+        assert!(!generated.join("src/domain/pages").exists());
+        assert!(!domain_source.contains("pub mod navigation;"));
+        assert!(!domain_source.contains("pub mod pages;"));
+        assert!(!domain_source.contains("pub mod flows;"));
 
         let format_check = Command::new("cargo")
             .args(["fmt", "--manifest-path"])

@@ -208,15 +208,42 @@ fn project_files(
         (
             "src/lib.rs",
             format!(
-                "mod domain;\n\n#[mxrs::application(version = {version})]\npub struct Application;\n"
+                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut project = application::build();\n    presentation::apply(&mut project);\n    project\n}}\n\n#[mxrs::application(version = {version}, project = crate::build)]\npub struct Application;\n"
             ),
         ),
         (
             "src/domain/mod.rs",
             format!(
-                "pub fn build() -> mxrs::ProjectDecl {{\n    let mut project = mxrs::ProjectBuilder::new({version});\n    project.module(\"Main\", |module| {{\n        module.layout(\"ApplicationLayout\", |layout| {{\n            layout.placeholder(\"Main\");\n        }});\n        module.page(\"Home\", |page| {{\n            page.layout(\"Main.ApplicationLayout\", \"Main\");\n            page.text(\"Welcome to {}\");\n        }});\n    }});\n    project.navigation(|navigation| {{\n        navigation.profile(\"Responsive\", |profile| {{\n            profile.home_page(\"Main.Home\");\n        }});\n    }});\n    project.build()\n}}\n",
+                "pub mod modules;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut builder = mxrs::ProjectBuilder::new({version});\n    builder.module(\"Main\", |_module| {{}});\n    let mut project = builder.build();\n    modules::apply(&mut project);\n    project\n}}\n"
+            ),
+        ),
+        (
+            "src/domain/modules/mod.rs",
+            templates::modules_aggregator(),
+        ),
+        (
+            "src/application/mod.rs",
+            "pub mod modules;\n\npub fn build() -> mxrs::ProjectDecl {\n    let mut project = crate::domain::build();\n    modules::apply(&mut project);\n    project\n}\n"
+                .to_string(),
+        ),
+        (
+            "src/application/modules/mod.rs",
+            templates::modules_aggregator(),
+        ),
+        (
+            "src/presentation/mod.rs",
+            format!(
+                "pub mod modules;\n\npub fn apply(project: &mut mxrs::ProjectDecl) {{\n    let mut builder = mxrs::ProjectBuilder::new(project.mendix_version.clone());\n    builder.module(\"Main\", |module| {{\n        module.layout(\"ApplicationLayout\", |layout| {{\n            layout.placeholder(\"Main\");\n        }});\n        module.page(\"Home\", |page| {{\n            page.layout(\"Main.ApplicationLayout\", \"Main\");\n            page.text(\"Welcome to {}\");\n        }});\n    }});\n    builder.navigation(|navigation| {{\n        navigation.profile(\"Responsive\", |profile| {{\n            profile.home_page(\"Main.Home\");\n        }});\n    }});\n    let presentation = builder.build();\n    for module in presentation.modules {{\n        project.merge_module(module);\n    }}\n    project.navigation = presentation.navigation;\n    modules::apply(project);\n}}\n",
                 escape_rust_string(&options.name)
             ),
+        ),
+        (
+            "src/presentation/modules/mod.rs",
+            templates::modules_aggregator(),
+        ),
+        (
+            "src/infrastructure/mod.rs",
+            "//! Outbound adapters and generated platform integration.\n".to_string(),
         ),
         (
             "src/main.rs",
@@ -469,8 +496,13 @@ mod tests {
         let main = std::fs::read_to_string(destination.join("src/main.rs")).unwrap();
         assert!(main.contains("build/escape-app.mpr"));
         assert!(!main.contains("../"));
+        // The display name reaches generated source through the page text the
+        // presentation layer declares, not through `src/domain/mod.rs`.
+        let presentation =
+            std::fs::read_to_string(destination.join("src/presentation/mod.rs")).unwrap();
+        assert!(presentation.contains("Welcome to ../../Escape / App"));
         let domain = std::fs::read_to_string(destination.join("src/domain/mod.rs")).unwrap();
-        assert!(domain.contains("Welcome to ../../Escape / App"));
+        assert!(!domain.contains("Welcome to"));
         assert_eq!(package_name("日本語"), "mendix-app");
         for name in ["async", "type", "self", "gen"] {
             assert_eq!(package_name(name), format!("app-{name}"));
@@ -506,6 +538,57 @@ mod tests {
         );
     }
 
+    /// `mxrs new` and `mxrs import` have to agree on the layered shape, or a
+    /// scaffolded project and an imported one would need different `mxrs add`
+    /// wiring. The compile check elsewhere in this suite would still pass if
+    /// `application::build` reached outward into `presentation`, so assert the
+    /// dependency direction and the module visibility on the source itself —
+    /// this mirrors `mxrs-exporter`'s `generated_layers_point_dependencies_inward`.
+    #[test]
+    fn a_fresh_project_exposes_every_layer_and_points_dependencies_inward() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("demo");
+        generate_project(&ProjectScaffold::new("Demo", "11.12.1", &destination)).unwrap();
+
+        let crate_root = std::fs::read_to_string(destination.join("src/lib.rs")).unwrap();
+        for layer in ["application", "domain", "infrastructure", "presentation"] {
+            assert!(
+                crate_root.contains(&format!("pub mod {layer};")),
+                "{layer} is not a public top-level module: {crate_root}"
+            );
+        }
+        // The crate root is the single composition root, and the attribute
+        // enters the model through it rather than through `domain::build`.
+        assert!(crate_root.contains("pub fn build() -> mxrs::ProjectDecl"));
+        assert!(crate_root.contains("let mut project = application::build();"));
+        assert!(crate_root.contains("presentation::apply(&mut project);"));
+        assert!(crate_root.contains("project = crate::build"));
+
+        let domain = std::fs::read_to_string(destination.join("src/domain/mod.rs")).unwrap();
+        assert!(!domain.contains("crate::application"));
+        assert!(!domain.contains("crate::presentation"));
+
+        // Applying presentation from the application layer is the outward
+        // dependency this layout exists to avoid.
+        let application =
+            std::fs::read_to_string(destination.join("src/application/mod.rs")).unwrap();
+        assert!(application.contains("crate::domain::build()"));
+        assert!(!application.contains("crate::presentation"));
+
+        let presentation =
+            std::fs::read_to_string(destination.join("src/presentation/mod.rs")).unwrap();
+        assert!(presentation.contains("pub fn apply(project: &mut mxrs::ProjectDecl)"));
+        assert!(!presentation.contains("pub fn build()"));
+        assert!(!presentation.contains("crate::application"));
+
+        // Every layer carries the aggregator `mxrs add` wires modules into.
+        for layer in ["domain", "application", "presentation"] {
+            let source =
+                std::fs::read_to_string(destination.join(format!("src/{layer}/mod.rs"))).unwrap();
+            assert!(source.contains("pub mod modules;"), "{layer}: {source}");
+        }
+    }
+
     #[test]
     fn scaffold_is_complete_and_never_overwrites() {
         let directory = tempfile::tempdir().unwrap();
@@ -517,8 +600,30 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(report.package_name, "order-portal");
-        assert_eq!(report.files, 6);
-        assert!(destination.join("src/domain/mod.rs").is_file());
+        // A bare count would not notice a layer going missing, so name every
+        // file `mxrs new` owes a fresh project: each architectural layer, its
+        // scaffolded-module aggregator, and the crate plumbing around them.
+        let expected = [
+            ".gitignore",
+            "Cargo.toml",
+            "README.md",
+            "src/application/mod.rs",
+            "src/application/modules/mod.rs",
+            "src/domain/mod.rs",
+            "src/domain/modules/mod.rs",
+            "src/infrastructure/mod.rs",
+            "src/lib.rs",
+            "src/main.rs",
+            "src/presentation/mod.rs",
+            "src/presentation/modules/mod.rs",
+        ];
+        for relative in expected {
+            assert!(
+                destination.join(relative).is_file(),
+                "{relative} is missing from a fresh scaffold"
+            );
+        }
+        assert_eq!(report.files, expected.len());
         assert!(matches!(
             generate_project(&ProjectScaffold::new(
                 "Order Portal",

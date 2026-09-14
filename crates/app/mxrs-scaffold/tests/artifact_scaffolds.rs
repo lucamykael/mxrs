@@ -338,6 +338,11 @@ fn names_and_projects_that_cannot_be_scaffolded_are_reported_not_guessed() {
         Err(ScaffoldError::ProjectNotFound(_))
     ));
 
+    // `mxrs new` now pre-wires `src/domain/modules/mod.rs`, so the guard that
+    // refuses to guess how to edit an unrecognized `build()` is only reachable
+    // for source generated before the layering split. Reproduce that shape
+    // rather than dropping the guard from the suite.
+    std::fs::remove_dir_all(root.join("src/domain/modules")).unwrap();
     std::fs::write(
         root.join("src/domain/mod.rs"),
         "pub fn build() -> mxrs::ProjectDecl { unimplemented!() }\n",
@@ -348,6 +353,165 @@ fn names_and_projects_that_cannot_be_scaffolded_are_reported_not_guessed() {
         Err(ScaffoldError::UnrecognizedProjectBuild(_))
     ));
     assert!(!root.join("src/domain/modules").exists());
+}
+
+/// Every layered artifact family must land in the layer its catalog entry
+/// advertises. A destination that drifted from the code would send a page into
+/// `src/domain/` — the exact mixing the layering increment exists to remove —
+/// and `mxrs add --help` would then describe a path that does not exist.
+///
+/// Driven off `SCAFFOLD_COMMANDS` rather than a hand-written list, so a command
+/// added later cannot quietly opt out of the check: every entry that advertises
+/// a path under `src/` is scaffolded and verified.
+#[test]
+fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+
+    let mut checked = 0;
+    for (index, command) in mxrs_scaffold::SCAFFOLD_COMMANDS.iter().enumerate() {
+        let advertised = command.destination;
+        // `ci`, `evaluation` and `functional-test` write outside the layered
+        // source tree, so "which layer" is not a question they answer.
+        if !advertised.starts_with("src/") {
+            continue;
+        }
+        // A `<Module>` argument names a module rather than an artifact inside
+        // one; `module` must name a fresh one, the rest target `Sales`.
+        let name = match (command.kind, command.argument) {
+            (ArtifactKind::Module, _) => format!("Module{index}"),
+            (_, "<Module>") => "Sales".to_string(),
+            _ => format!("Sales.Artifact{index}"),
+        };
+        let files = scaffold(&root, command.kind, &name);
+        checked += 1;
+
+        // `repository` is the one deliberately two-layer artifact: its port
+        // lives in `application` and its adapter in `infrastructure`.
+        let layers: Vec<&str> = if advertised.contains('{') {
+            vec!["src/application", "src/infrastructure"]
+        } else {
+            vec![&advertised[..advertised[4..].find('/').unwrap() + 4]]
+        };
+        for layer in &layers {
+            assert!(
+                files
+                    .iter()
+                    .any(|file| file.to_string_lossy().contains(layer)),
+                "{name} wrote nothing under {layer}; catalog advertises {advertised}"
+            );
+        }
+        // Application and presentation artifacts must never leak back into the
+        // domain tree, which is what the pre-split catalog did.
+        if !layers.contains(&"src/domain") {
+            assert!(
+                !files
+                    .iter()
+                    .any(|file| file.to_string_lossy().contains("src/domain/modules")),
+                "{name} wrote into src/domain/modules despite {advertised}"
+            );
+        }
+    }
+    // Guards against the loop silently degenerating if `destination` spellings
+    // ever change shape.
+    assert_eq!(checked, 15);
+}
+
+/// A project generated before the layering split has no `src/application/` or
+/// `src/presentation/` tree. Scaffolding into it must fail closed and name the
+/// aggregator it cannot find, rather than inventing a layer around it.
+#[test]
+fn scaffolding_a_layer_a_pre_split_project_lacks_fails_closed() {
+    for (layer, kind, name) in [
+        (
+            "application",
+            ArtifactKind::UseCase,
+            "Sales.ACT_CreateOrder",
+        ),
+        (
+            "presentation",
+            ArtifactKind::Nanoflow,
+            "Sales.NAN_RefreshOrder",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = application(directory.path());
+        scaffold(&root, ArtifactKind::Module, "Sales");
+        std::fs::remove_dir_all(root.join(format!("src/{layer}"))).unwrap();
+        assert!(
+            matches!(
+                scaffold_artifact(&ArtifactScaffold::new(kind, name, &root)),
+                Err(ScaffoldError::AggregatorNotFound(_))
+            ),
+            "{layer}"
+        );
+        assert!(!root.join(format!("src/{layer}")).exists());
+    }
+}
+
+/// Both generators pre-write every layer's `modules` aggregator *and* its
+/// `apply` call, so the code that splices that call back in is only reached for
+/// a project whose layer has been edited by hand. Each layer has its own
+/// expected tail there, and a wrong one reports `UnrecognizedProjectBuild` on
+/// source mxrs itself emitted — a refusal the user cannot act on. Reproduce
+/// that shape per layer and require the rewiring to still build.
+#[test]
+fn a_hand_removed_layer_apply_call_is_spliced_back_instead_of_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    let calls = [
+        ("domain", "modules::apply(&mut project);"),
+        ("application", "modules::apply(&mut project);"),
+        ("presentation", "modules::apply(project);"),
+    ];
+    for (layer, call) in calls {
+        let path = root.join(format!("src/{layer}/mod.rs"));
+        let source = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, source.replace(&format!("    {call}\n"), "")).unwrap();
+        std::fs::remove_dir_all(root.join(format!("src/{layer}/modules"))).unwrap();
+    }
+
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    scaffold(&root, ArtifactKind::Entity, "Sales.Order");
+    scaffold(&root, ArtifactKind::UseCase, "Sales.ACT_CreateOrder");
+    scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
+
+    for (layer, call) in calls {
+        let source = std::fs::read_to_string(root.join(format!("src/{layer}/mod.rs"))).unwrap();
+        assert!(source.contains("pub mod modules;"), "{layer}: {source}");
+        // Exactly one call, not one per scaffolded artifact.
+        assert_eq!(source.matches(call).count(), 1, "{layer}: {source}");
+    }
+
+    let output = cargo(
+        &root,
+        &["run", "--offline", "--quiet", "--", "build/Rewired.mpr"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let project = mxrs_model::Project::open(root.join("build/Rewired.mpr"), true).unwrap();
+    let module = project
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|module| module.name.as_deref() == Some("Sales"))
+        .expect("the rewired module reached the model");
+    assert!(
+        module
+            .microflows
+            .iter()
+            .any(|flow| flow.name.as_deref() == Some("ACT_CreateOrder"))
+    );
+    assert!(
+        module
+            .nanoflows
+            .iter()
+            .any(|flow| flow.name.as_deref() == Some("NAN_RefreshOrder"))
+    );
 }
 
 /// The only claim worth making about a generated vertical slice: the project

@@ -2036,7 +2036,7 @@ fn run_import(mut args: Vec<String>) -> ExitCode {
     }
     if imported.page_export.typed_candidates > 0 {
         println!(
-            "[mxrs] {} page(s) detected as buildable from mxrs-dsl's native widget vocabulary; see src/domain/pages/mod.rs",
+            "[mxrs] {} page(s) detected as buildable from mxrs-dsl's native widget vocabulary; see src/presentation/pages/mod.rs",
             imported.page_export.typed_candidates
         );
     }

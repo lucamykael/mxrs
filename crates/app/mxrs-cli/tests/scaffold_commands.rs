@@ -145,14 +145,17 @@ fn quality_integration_and_ci_scaffolds_emit_consumable_files() {
             .status
             .success()
     );
+    // Validations and integrations are server-side use cases, so they land in
+    // the application layer rather than next to the model declarations.
     assert!(
-        root.join("src/domain/modules/sales/validations/validate_order.rs")
+        root.join("src/application/modules/sales/validations/validate_order.rs")
             .is_file()
     );
     assert!(
-        root.join("src/domain/modules/sales/integrations/sync_orders.rs")
+        root.join("src/application/modules/sales/integrations/sync_orders.rs")
             .is_file()
     );
+    assert!(!root.join("src/domain/modules/sales/validations").exists());
 
     assert!(
         scaffold(&root, &["evaluation", "new", "Architecture"])
@@ -193,7 +196,11 @@ fn a_wrong_action_word_or_missing_project_fails_without_writing_anything() {
         let output = scaffold(&root, &arguments);
         assert!(!output.status.success(), "{arguments:?}");
     }
-    assert!(!root.join("src/domain/modules").exists());
+    // `mxrs new` ships an empty `modules` aggregator in every layer, so the
+    // evidence that nothing was written is the absence of the module itself.
+    for layer in ["domain", "application", "presentation"] {
+        assert!(!root.join(format!("src/{layer}/modules/sales")).exists());
+    }
     let outside = cli(&[
         "entity",
         "new",
@@ -260,9 +267,11 @@ fn a_dry_run_renders_the_json_document_without_touching_the_project() {
     let written: Value = serde_json::from_slice(&written.stdout).unwrap();
     assert_eq!(written["files"], document["files"]);
     assert!(
-        std::fs::read_to_string(root.join("src/domain/modules/sales/pages/order_overview.rs"))
-            .unwrap()
-            .contains("page.allow_role(\"Sales.User\");")
+        std::fs::read_to_string(
+            root.join("src/presentation/modules/sales/pages/order_overview.rs")
+        )
+        .unwrap()
+        .contains("page.allow_role(\"Sales.User\");")
     );
 }
 
@@ -410,7 +419,7 @@ fn the_constant_and_scheduled_event_generators_write_their_families_and_registry
 
     let event = scaffold(&root, &["scheduled-event", "new", "Sales.SE_ExpireCarts"]);
     assert!(event.status.success(), "{:?}", event.stderr);
-    let path = root.join("src/domain/modules/sales/jobs/se_expire_carts.rs");
+    let path = root.join("src/application/modules/sales/jobs/se_expire_carts.rs");
     assert!(text(&event).contains(&format!("  create  {}", path.display())));
     // Event and handler land in one file under one name, as in mxrb's
     // "scheduled event and handler" template.
@@ -467,7 +476,7 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     );
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown page chain"));
-    assert!(!root.join("src/domain/modules/sales/pages").exists());
+    assert!(!root.join("src/presentation/modules/sales/pages").exists());
 
     let output = scaffold(
         &root,
@@ -482,18 +491,21 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     assert!(output.status.success(), "{:?}", output.stderr);
     let rendered = text(&output);
     // The default chain template is data-backed, so the slice is the entity,
-    // its loader, both refresh flows and the page.
-    for relative in [
-        "entities/order_overview.rs",
-        "use_cases/act_load_order_overview.rs",
-        "use_cases/act_refresh_order_overview.rs",
-        "client_actions/nan_refresh_order_overview.rs",
-        "pages/order_overview.rs",
+    // its loader, both refresh flows and the page — and the slice now spans
+    // three layers instead of landing entirely under `src/domain/`.
+    for (layer, relative) in [
+        ("domain", "entities/order_overview.rs"),
+        ("application", "use_cases/act_load_order_overview.rs"),
+        ("application", "use_cases/act_refresh_order_overview.rs"),
+        ("presentation", "nanoflows/nan_refresh_order_overview.rs"),
+        ("presentation", "pages/order_overview.rs"),
     ] {
-        let path = root.join("src/domain/modules/sales").join(relative);
+        let path = root
+            .join(format!("src/{layer}/modules/sales"))
+            .join(relative);
         assert!(
             rendered.contains(&format!("  create  {}", path.display())),
-            "{relative}: {rendered}"
+            "{layer}/{relative}: {rendered}"
         );
     }
     assert!(text(&scaffold(&root, &["scaffold", "list"])).contains("page:Sales.OrderOverview"));

@@ -21,15 +21,16 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
                                           \-> cargo run -> new .mpr
 ```
 
-An import writes typed domain source under `src/domain/`, checked public marker
-types under `src/infrastructure/`, and a complete generated unit snapshot under
-`model/imported/`. Stable identities and storage metadata stay in that data
-directory instead of being mirrored as noisy Rust constants. Mendix filesystem resources are copied into the
-editable `assets/` tree and materialized next to each built `.mpr`. The
-snapshot makes concepts without a friendly Rust
-representation lossless; rebuilding does not read or patch the original
-`.mpr`. Typed coverage can therefore replace snapshot content
-incrementally without blocking a correct build.
+An import writes model declarations under `src/domain/`, server-side use cases
+and microflows under `src/application/`, pages, navigation, and client-side
+nanoflows under `src/presentation/`, and outbound/generated adapters under
+`src/infrastructure/`. A complete unit snapshot stays under `model/imported/`.
+Stable identities and storage metadata remain data instead of noisy Rust
+constants. Mendix filesystem resources are copied into the editable `assets/`
+tree and materialized next to each built `.mpr`. The snapshot makes concepts
+without a friendly Rust representation lossless; rebuilding does not read or
+patch the original `.mpr`. Typed coverage can therefore replace snapshot
+content incrementally without blocking a correct build.
 
 The crates are grouped by dependency layer under `crates/{io,model,authoring,
 writer,compiler,app}/`; package names and public APIs are unchanged. See
@@ -74,11 +75,13 @@ PostgreSQL workspace, and offline Team Server repository status. Typed
 domain import covers all attribute kinds plus documentation, length, date
 localization, required/unique validation, and association owner/storage/docs.
 Microflows and nanoflows can be authored and incrementally synchronized with
-stable identities; imported graph shapes not yet decompiled remain complete
-in the snapshot and are listed in `src/domain/flows/mod.rs`. Project/module
-security and modern navigation profiles are imported into typed
-`src/domain/{security,navigation}/` modules. Their writers validate role and
-target invariants, preserve native fields outside the typed surface, and keep
+stable identities. Imported graph shapes not yet decompiled remain complete
+in the snapshot; new server flows live in
+`src/application/microflows/mod.rs`, while client flows live in
+`src/presentation/nanoflows/mod.rs`. Project/module security is imported into
+`src/domain/security/`, and modern navigation into
+`src/presentation/navigation/`. Their writers validate role and target
+invariants, preserve native fields outside the typed surface, and keep
 existing identities. Unknown documents remain complete in the snapshot.
 Pages have a typed front end too — see below.
 
@@ -102,7 +105,8 @@ DatePicker/DropDown widgets, and name/class authoring for Data Grid 2,
 Gallery, and ComboBox through `mxrs-pluggable`. All compile through
 `mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms codec.
 `mxrs import` detects the lossless structural subset, renders real builders
-into `src/domain/pages/mod.rs`, and wires them into `build()` automatically.
+into `src/presentation/pages/mod.rs`, and wires them into the composition root
+automatically.
 Data-bound widgets, flow-calling buttons, empty official pluggable shells,
 page metadata, object page parameters, and context-inherited DataViews import
 to typed builders when every reference can be proven. Configured pluggable

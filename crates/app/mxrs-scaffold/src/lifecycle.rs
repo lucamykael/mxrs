@@ -57,6 +57,12 @@ pub fn upgrade_project(
     for relative in [
         "src/domain/mod.rs",
         "src/domain/entities/mod.rs",
+        "src/domain/documents/mod.rs",
+        "src/application/microflows/mod.rs",
+        "src/presentation/nanoflows/mod.rs",
+        // Kept for projects imported before the application/presentation
+        // split. Upgrade is deliberately backward compatible with generated
+        // source already under version control.
         "src/domain/flows/mod.rs",
     ] {
         let path = root.join(relative);
@@ -94,13 +100,15 @@ fn validate_version(version: &str) -> Result<()> {
 }
 
 fn application_version(source: &str) -> Option<String> {
-    source.lines().find_map(|line| {
-        let value = line
-            .trim()
-            .strip_prefix("#[mxrs::application(version =")?
-            .trim();
-        quoted(value)
-    })
+    source.lines().find_map(application_version_on_line)
+}
+
+fn application_version_on_line(line: &str) -> Option<String> {
+    let value = line
+        .trim()
+        .strip_prefix("#[mxrs::application(version =")?
+        .trim();
+    quoted(value)
 }
 
 fn manifest_version(path: &Path) -> Result<Option<String>> {
@@ -121,14 +129,21 @@ fn quoted(value: &str) -> Option<String> {
 }
 
 fn replace_application_version(source: &str, from: &str, to: &str) -> Option<String> {
-    let needle = format!("#[mxrs::application(version = \"{from}\")]");
-    source.contains(&needle).then(|| {
-        source.replacen(
-            &needle,
-            &format!("#[mxrs::application(version = \"{to}\")]"),
-            1,
-        )
-    })
+    let needle = format!("version = \"{from}\"");
+    let replacement = format!("version = \"{to}\"");
+    let mut replaced = false;
+    let updated = source
+        .split_inclusive('\n')
+        .map(|line| {
+            if !replaced && application_version_on_line(line).as_deref() == Some(from) {
+                replaced = true;
+                line.replacen(&needle, &replacement, 1)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    replaced.then_some(updated)
 }
 
 fn replace_manifest_version(source: &str, from: &str, to: &str) -> String {
@@ -170,10 +185,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("app");
         crate::generate_project(&crate::ProjectScaffold::new("App", "11.12.1", &root)).unwrap();
+        // A version-shaped literal that is *not* a `ProjectBuilder::new`
+        // argument must survive the upgrade untouched.
         let domain = root.join("src/domain/mod.rs");
         let source = std::fs::read_to_string(&domain)
             .unwrap()
-            .replace("Welcome to App", "literal 11.12.1 must stay");
+            .replace("\"Main\"", "\"literal 11.12.1 must stay\"");
         std::fs::write(&domain, source).unwrap();
 
         let preview = upgrade_project(&root, "11.13.0", false).unwrap();
@@ -215,6 +232,146 @@ mod tests {
             upgrade_project(&root, "11.13.0", false),
             Err(ScaffoldError::VersionMismatch(_))
         ));
+    }
+
+    /// Both generators now declare `project = crate::build` next to the
+    /// version. Upgrading must still find and rewrite the version without
+    /// disturbing the composition root the attribute names, and must keep
+    /// working for a project that names a deeper entry point by hand.
+    #[test]
+    fn application_attribute_keeps_its_project_entry_point_across_an_upgrade() {
+        for entry_point in ["crate::build", "crate::application::build"] {
+            let source = format!(
+                "#[mxrs::application(version = \"11.12.1\", project = {entry_point})]\npub struct Application;\n"
+            );
+            assert_eq!(application_version(&source).as_deref(), Some("11.12.1"));
+            assert_eq!(
+                replace_application_version(&source, "11.12.1", "11.13.0").as_deref(),
+                Some(
+                    format!(
+                        "#[mxrs::application(version = \"11.13.0\", project = {entry_point})]\npub struct Application;\n"
+                    )
+                    .as_str()
+                )
+            );
+        }
+    }
+
+    /// The version-only attribute `mxrs new` emitted before the layering
+    /// increment must keep upgrading, since it is still what every project
+    /// already under version control declares.
+    #[test]
+    fn version_only_application_attribute_still_upgrades() {
+        let source = "#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n";
+        assert_eq!(application_version(source).as_deref(), Some("11.12.1"));
+        assert_eq!(
+            replace_application_version(source, "11.12.1", "11.13.0").as_deref(),
+            Some("#[mxrs::application(version = \"11.13.0\")]\npub struct Application;\n")
+        );
+    }
+
+    /// The layered layout and the pre-split one both exist in the wild, so an
+    /// upgrade has to rewrite whichever flow modules a project actually has
+    /// and leave the version literal alone everywhere else.
+    #[test]
+    fn upgrade_rewrites_layered_and_pre_split_flow_modules() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("app");
+        let builder = "fn declarations() {\n    ::mxrs_dsl::ProjectBuilder::new(\"11.12.1\");\n}\n";
+        for (relative, body) in [
+            ("Cargo.toml", "[package]\nname = \"app\"\n"),
+            (
+                "src/lib.rs",
+                concat!(
+                    "#[mxrs::application(version = \"11.12.1\", ",
+                    "project = crate::build)]\npub struct Application;\n"
+                ),
+            ),
+            ("src/domain/mod.rs", "pub fn build() {}\n"),
+            ("src/application/microflows/mod.rs", builder),
+            ("src/presentation/nanoflows/mod.rs", builder),
+            ("src/domain/flows/mod.rs", builder),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+        }
+
+        let report = upgrade_project(&root, "11.13.0", true).unwrap();
+        assert_eq!(report.from, "11.12.1");
+        // `src/domain/mod.rs` carries no version literal, so it is not an
+        // update — the transaction reports only the four files it rewrote.
+        assert_eq!(report.files.len(), 4);
+        for relative in [
+            "src/application/microflows/mod.rs",
+            "src/presentation/nanoflows/mod.rs",
+            "src/domain/flows/mod.rs",
+        ] {
+            let source = std::fs::read_to_string(root.join(relative)).unwrap();
+            assert!(
+                source.contains("ProjectBuilder::new(\"11.13.0\")"),
+                "{relative} kept the old version"
+            );
+        }
+        let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert!(library.contains("version = \"11.13.0\""));
+        assert!(library.contains("project = crate::build"));
+    }
+
+    /// `src/domain/documents/mod.rs` opens its `declarations()` with the same
+    /// `ProjectBuilder::new("<version>")` call the flow modules use, so leaving
+    /// it out of the upgrade would strand one generated file on the old version
+    /// while its siblings moved — a difference nothing else in the project
+    /// would surface.
+    #[test]
+    fn upgrade_rewrites_the_imported_documents_module_too() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("app");
+        let documents = concat!(
+            "//! Editable Cargo-native enumerations, constants, regular expressions, ",
+            "scheduled events, and menus.\n\n",
+            "fn declarations() -> ::mxrs_ir::ProjectDecl {\n",
+            "    let mut project = ::mxrs_dsl::ProjectBuilder::new(\"11.12.1\");\n",
+            "    project.module(\"Sales\", |module| {\n",
+            "        module.constant(\"ReleaseNote\", |constant| {\n",
+            // A version-shaped literal that is not a builder argument must
+            // survive, the same way it does in `src/domain/mod.rs`.
+            "            constant.value(\"pinned to 11.12.1\");\n",
+            "        });\n",
+            "    });\n",
+            "    project.build()\n}\n",
+        );
+        for (relative, body) in [
+            ("Cargo.toml", "[package]\nname = \"app\"\n"),
+            (
+                "src/lib.rs",
+                concat!(
+                    "#[mxrs::application(version = \"11.12.1\", ",
+                    "project = crate::build)]\npub struct Application;\n"
+                ),
+            ),
+            ("src/domain/mod.rs", "pub fn build() {}\n"),
+            ("src/domain/documents/mod.rs", documents),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+        }
+
+        let report = upgrade_project(&root, "11.13.0", true).unwrap();
+        assert_eq!(report.from, "11.12.1");
+        assert!(
+            report
+                .files
+                .iter()
+                .any(|file| file.ends_with("src/domain/documents/mod.rs")),
+            "the documents module was not reported as updated: {:?}",
+            report.files
+        );
+        let updated = std::fs::read_to_string(root.join("src/domain/documents/mod.rs")).unwrap();
+        assert!(updated.contains("ProjectBuilder::new(\"11.13.0\")"));
+        assert!(!updated.contains("ProjectBuilder::new(\"11.12.1\")"));
+        assert!(updated.contains("pinned to 11.12.1"));
     }
 
     #[test]

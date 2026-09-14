@@ -629,7 +629,7 @@ pub(crate) fn page_chain_nanoflow(
     let markers = flow_marker(module_name, &name, "NanoflowMarker");
     let (note, body) = if calls_microflow {
         let action_path = format!(
-            "crate::domain::modules::{}::use_cases::act_refresh_{}::markers::ACT_Refresh{feature}",
+            "crate::application::modules::{}::use_cases::act_refresh_{}::markers::ACT_Refresh{feature}",
             snake_case(module_name),
             snake_case(feature)
         );
@@ -799,7 +799,7 @@ fn form_vertical_body(
     refresh: Option<RefreshAction>,
 ) -> String {
     let loader = format!(
-        "crate::domain::modules::{}::use_cases::act_load_{}::markers::ACT_Load{name}",
+        "crate::application::modules::{}::use_cases::act_load_{}::markers::ACT_Load{name}",
         snake_case(module_name),
         snake_case(name)
     );
@@ -847,14 +847,14 @@ fn refresh_button(
     let call = match refresh {
         RefreshAction::Microflow => format!(
             "b.call_microflow(::mxrs::MicroflowRef::<\
-             crate::domain::modules::{}::use_cases::act_refresh_{}::markers::ACT_Refresh{name}\
+             crate::application::modules::{}::use_cases::act_refresh_{}::markers::ACT_Refresh{name}\
              >::new());",
             snake_case(module_name),
             snake_case(name)
         ),
         RefreshAction::Nanoflow => format!(
             "b.call_nanoflow(::mxrs::NanoflowRef::<\
-             crate::domain::modules::{}::client_actions::nan_refresh_{}::markers::NAN_Refresh{name}\
+             crate::presentation::modules::{}::nanoflows::nan_refresh_{}::markers::NAN_Refresh{name}\
              >::new());",
             snake_case(module_name),
             snake_case(name)

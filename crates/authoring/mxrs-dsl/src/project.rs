@@ -1,5 +1,6 @@
 use mxrs_ir::declaration::ProjectDecl;
 
+use crate::flow::{MicroflowModuleBuilder, NanoflowModuleBuilder};
 use crate::module::ModuleBuilder;
 use crate::navigation::NavigationBuilder;
 use crate::security::SecurityBuilder;
@@ -27,6 +28,30 @@ impl ProjectBuilder {
         configure: impl FnOnce(&mut ModuleBuilder),
     ) -> &mut Self {
         let mut builder = ModuleBuilder::new(name);
+        configure(&mut builder);
+        self.modules.push(builder.into_decl());
+        self
+    }
+
+    /// Declares only server-side microflows for one Mendix module.
+    pub fn microflow_module(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut MicroflowModuleBuilder),
+    ) -> &mut Self {
+        let mut builder = MicroflowModuleBuilder::new(name);
+        configure(&mut builder);
+        self.modules.push(builder.into_decl());
+        self
+    }
+
+    /// Declares only client-side nanoflows for one Mendix module.
+    pub fn nanoflow_module(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut NanoflowModuleBuilder),
+    ) -> &mut Self {
+        let mut builder = NanoflowModuleBuilder::new(name);
         configure(&mut builder);
         self.modules.push(builder.into_decl());
         self

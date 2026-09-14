@@ -67,7 +67,7 @@ pub use access::AccessRuleBuilder;
 pub use constant::ConstantBuilder;
 pub use entity::EntityBuilder;
 pub use enumeration::EnumerationBuilder;
-pub use flow::{CallArgument, FlowBuilder};
+pub use flow::{CallArgument, FlowBuilder, MicroflowModuleBuilder, NanoflowModuleBuilder};
 pub use menu::{MenuBuilder, MenuItemBuilder};
 pub use module::ModuleBuilder;
 pub use mxrs_expr::{

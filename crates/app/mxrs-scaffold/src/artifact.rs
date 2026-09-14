@@ -10,7 +10,8 @@
 //!
 //! **What is necessarily different**: mxrb scaffolds Ruby into
 //! `modules/<Module>/<layer>/<family>/`, evaluated at runtime by `project.rb`.
-//! mxrs scaffolds Rust into `src/domain/modules/<module>/<family>/`, compiled
+//! mxrs scaffolds Rust into
+//! `src/{domain,application,presentation}/modules/<module>/<family>/`, compiled
 //! by `cargo`. Two consequences follow from that and are not stylistic:
 //!
 //! 1. Rust module paths must be identifiers, so directories are snake_cased
@@ -88,7 +89,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Client>",
         summary: "Create a consumed REST adapter microflow",
-        destination: "src/domain/modules/<module>/integrations",
+        destination: "src/application/modules/<module>/integrations",
         kind: ArtifactKind::ConsumedRest,
     },
     ScaffoldCommand {
@@ -112,7 +113,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Adapter>",
         summary: "Create an integration adapter microflow",
-        destination: "src/domain/modules/<module>/integrations",
+        destination: "src/application/modules/<module>/integrations",
         kind: ArtifactKind::Integration,
     },
     ScaffoldCommand {
@@ -144,7 +145,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Adapter>",
         summary: "Create a Java Action adapter microflow",
-        destination: "src/domain/modules/<module>/actions",
+        destination: "src/application/modules/<module>/actions",
         kind: ArtifactKind::JavaAction,
     },
     ScaffoldCommand {
@@ -160,7 +161,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create a client nanoflow declaration",
-        destination: "src/domain/modules/<module>/client_actions",
+        destination: "src/presentation/modules/<module>/nanoflows",
         kind: ArtifactKind::Nanoflow,
     },
     ScaffoldCommand {
@@ -168,7 +169,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Page>",
         summary: "Create a page declaration and its module layout",
-        destination: "src/domain/modules/<module>/pages",
+        destination: "src/presentation/modules/<module>/pages",
         kind: ArtifactKind::Page,
     },
     ScaffoldCommand {
@@ -176,7 +177,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Handler>",
         summary: "Create a published REST handler microflow",
-        destination: "src/domain/modules/<module>/endpoints",
+        destination: "src/application/modules/<module>/endpoints",
         kind: ArtifactKind::PublishedRest,
     },
     ScaffoldCommand {
@@ -192,7 +193,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Event>",
         summary: "Create a scheduled event and its handler microflow",
-        destination: "src/domain/modules/<module>/jobs",
+        destination: "src/application/modules/<module>/jobs",
         kind: ArtifactKind::ScheduledEvent,
     },
     ScaffoldCommand {
@@ -208,7 +209,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application validation microflow",
-        destination: "src/domain/modules/<module>/validations",
+        destination: "src/application/modules/<module>/validations",
         kind: ArtifactKind::Validation,
     },
     ScaffoldCommand {
@@ -216,7 +217,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application use-case microflow",
-        destination: "src/domain/modules/<module>/use_cases",
+        destination: "src/application/modules/<module>/use_cases",
         kind: ArtifactKind::UseCase,
     },
 ];
@@ -255,7 +256,7 @@ impl ArtifactKind {
             Self::ScheduledEvent => "jobs",
             Self::UseCase => "use_cases",
             Self::Page => "pages",
-            Self::Nanoflow => "client_actions",
+            Self::Nanoflow => "nanoflows",
             Self::PublishedRest => "endpoints",
             Self::ConsumedRest => "integrations",
             Self::JavaAction => "actions",
@@ -266,6 +267,25 @@ impl ArtifactKind {
             Self::Ci => "ci",
             Self::Repository => "repositories",
             Self::Security | Self::Module => "security",
+        }
+    }
+
+    fn layer(self) -> &'static str {
+        match self {
+            Self::Entity | Self::Enumeration | Self::Constant | Self::Security | Self::Module => {
+                "domain"
+            }
+            Self::Page | Self::Nanoflow => "presentation",
+            Self::ScheduledEvent
+            | Self::UseCase
+            | Self::PublishedRest
+            | Self::ConsumedRest
+            | Self::JavaAction
+            | Self::Validation
+            | Self::Integration => "application",
+            Self::FunctionalTest | Self::Evaluation | Self::Ci | Self::Repository => {
+                unreachable!("artifact is handled outside layered module families")
+            }
         }
     }
 
@@ -547,7 +567,7 @@ fn create_module_layer(
             aggregator.display().to_string(),
         ));
     }
-    connect_modules_aggregator(transaction, root)?;
+    connect_modules_aggregator(transaction, root, "domain")?;
     transaction.create(&aggregator, templates::module_aggregator(module_name))?;
     let modules = root.join("src/domain/modules/mod.rs");
     let stem = rust_module_path(&directory)?;
@@ -791,13 +811,19 @@ fn ensure_module_layout(
     module_name: &str,
 ) -> Result<()> {
     let family = root.join(format!(
-        "src/domain/modules/{}/layouts/mod.rs",
+        "src/presentation/modules/{}/layouts/mod.rs",
         snake_case(module_name)
     ));
     if transaction.content(&family)?.is_some() {
         return Ok(());
     }
-    connect_family(transaction, root, module_name, "layouts")?;
+    connect_family(
+        transaction,
+        root,
+        module_name,
+        ArtifactKind::Page,
+        "layouts",
+    )?;
     let file = family.with_file_name("application_layout.rs");
     transaction.create(&file, templates::layouts(module_name, LAYOUT_PARAMETER))?;
     declare_child_module(transaction, &family, "application_layout")?;
@@ -818,9 +844,10 @@ fn create_family_file(
     source: String,
 ) -> Result<()> {
     let family = kind.family();
-    connect_family(transaction, root, module_name, family)?;
+    let layer = kind.layer();
+    connect_family(transaction, root, module_name, kind, family)?;
     let aggregator = root.join(format!(
-        "src/domain/modules/{}/{family}/mod.rs",
+        "src/{layer}/modules/{}/{family}/mod.rs",
         snake_case(module_name)
     ));
     let path = aggregator.with_file_name(format!("{stem}.rs"));
@@ -839,10 +866,26 @@ fn connect_family(
     transaction: &mut Transaction,
     root: &Path,
     module_name: &str,
+    kind: ArtifactKind,
     family: &str,
 ) -> Result<()> {
+    let layer = kind.layer();
     let directory = snake_case(module_name);
-    let aggregator = root.join(format!("src/domain/modules/{directory}/{family}/mod.rs"));
+    let module = root.join(format!("src/{layer}/modules/{directory}/mod.rs"));
+    if transaction.content(&module)?.is_none() {
+        connect_modules_aggregator(transaction, root, layer)?;
+        transaction.create(&module, templates::module_aggregator(module_name))?;
+        let modules = root.join(format!("src/{layer}/modules/mod.rs"));
+        let stem = rust_module_path(&directory)?;
+        declare_child_module(transaction, &modules, &directory)?;
+        append_list_entry(
+            transaction,
+            &modules,
+            MODULES_LIST,
+            &format!("{stem}::apply"),
+        )?;
+    }
+    let aggregator = root.join(format!("src/{layer}/modules/{directory}/{family}/mod.rs"));
     if transaction.content(&aggregator)?.is_some() {
         return Ok(());
     }
@@ -850,7 +893,6 @@ fn connect_family(
         &aggregator,
         templates::family_aggregator(module_name, family),
     )?;
-    let module = root.join(format!("src/domain/modules/{directory}/mod.rs"));
     declare_child_module(transaction, &module, family)?;
     append_list_entry(
         transaction,
@@ -860,14 +902,34 @@ fn connect_family(
     )
 }
 
-fn connect_modules_aggregator(transaction: &mut Transaction, root: &Path) -> Result<()> {
-    let modules = root.join("src/domain/modules/mod.rs");
+fn connect_modules_aggregator(
+    transaction: &mut Transaction,
+    root: &Path,
+    layer: &str,
+) -> Result<()> {
+    let modules = root.join(format!("src/{layer}/modules/mod.rs"));
     if transaction.content(&modules)?.is_some() {
         return Ok(());
     }
     transaction.create(&modules, templates::modules_aggregator())?;
-    declare_child_module(transaction, &root.join("src/domain/mod.rs"), "modules")?;
-    connect_build(transaction, root, "modules::apply(&mut project);")
+    let layer_module = root.join(format!("src/{layer}/mod.rs"));
+    declare_child_module(transaction, &layer_module, "modules")?;
+    match layer {
+        "domain" => connect_build(transaction, root, "modules::apply(&mut project);"),
+        "application" => connect_layer_apply(
+            transaction,
+            &layer_module,
+            "modules::apply(&mut project);",
+            IMPORTED_BUILD_TAIL,
+        ),
+        "presentation" => connect_layer_apply(
+            transaction,
+            &layer_module,
+            "modules::apply(project);",
+            "\n}\n",
+        ),
+        _ => unreachable!("known generated source layer"),
+    }
 }
 
 const IMPORTED_BUILD_TAIL: &str = "\n    project\n}\n";
@@ -895,6 +957,26 @@ fn connect_build(transaction: &mut Transaction, root: &Path, call: &str) -> Resu
         ));
     };
     transaction.write(&path, updated)
+}
+
+fn connect_layer_apply(
+    transaction: &mut Transaction,
+    path: &Path,
+    call: &str,
+    tail: &str,
+) -> Result<()> {
+    let source = transaction
+        .content(path)?
+        .ok_or_else(|| ScaffoldError::ProjectNotFound(path.display().to_string()))?;
+    if source.contains(&format!("\n    {call}\n")) {
+        return Ok(());
+    }
+    let Some(head) = source.strip_suffix(tail) else {
+        return Err(ScaffoldError::UnrecognizedProjectBuild(
+            path.display().to_string(),
+        ));
+    };
+    transaction.write(path, format!("{head}\n    {call}{tail}"))
 }
 
 fn declare_child_module(
