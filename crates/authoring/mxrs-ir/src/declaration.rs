@@ -244,10 +244,12 @@ pub struct ConstantDecl {
     pub name: String,
     pub documentation: String,
     pub constant_type: ConstantType,
-    /// Persisted verbatim as `DefaultValue`. Not validated against
-    /// `constant_type`: mxrb does not validate it either, and inventing a
-    /// stricter contract here would make the two disagree.
-    pub value: String,
+    /// `Some` is persisted verbatim as `DefaultValue`. `None` preserves an
+    /// imported value, allowing generated projects to keep credentials in
+    /// the lossless model snapshot instead of copying them into Rust source.
+    /// Values are not validated against `constant_type`: Mendix persists all
+    /// five supported kinds as strings.
+    pub value: Option<String>,
     pub exposed_to_client: bool,
 }
 
@@ -257,7 +259,7 @@ impl ConstantDecl {
             name: name.into(),
             documentation: String::new(),
             constant_type,
-            value: String::new(),
+            value: Some(String::new()),
             exposed_to_client: false,
         }
     }

@@ -101,10 +101,22 @@ fn module_summary(module: &Module) -> Value {
     pages.sort_by(|a, b| a.name.cmp(&b.name));
     let mut menus: Vec<&Menu> = module.menus.iter().collect();
     menus.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut microflows: Vec<&Microflow> = module.microflows.iter().collect();
-    microflows.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut nanoflows: Vec<&Microflow> = module.nanoflows.iter().collect();
-    nanoflows.sort_by(|a, b| a.name.cmp(&b.name));
+    // Studio Pro projects can contain duplicate flow names. Sorting only by
+    // name makes their relative order depend on SQLite row order, producing
+    // hundreds of false changes after a byte-preserving restore. The
+    // normalized body is the stable semantic tie-breaker.
+    let mut microflows = module
+        .microflows
+        .iter()
+        .map(flow_summary)
+        .collect::<Vec<_>>();
+    microflows.sort_by_key(Value::to_string);
+    let mut nanoflows = module
+        .nanoflows
+        .iter()
+        .map(flow_summary)
+        .collect::<Vec<_>>();
+    nanoflows.sort_by_key(Value::to_string);
 
     json!({
         "name": module.name,
@@ -112,8 +124,8 @@ fn module_summary(module: &Module) -> Value {
         "associations": associations.iter().map(|a| association_summary(a)).collect::<Vec<_>>(),
         "pages": pages.iter().map(|p| page_summary(p)).collect::<Vec<_>>(),
         "menus": menus.iter().map(|m| menu_summary(m)).collect::<Vec<_>>(),
-        "microflows": microflows.iter().map(|f| flow_summary(f)).collect::<Vec<_>>(),
-        "nanoflows": nanoflows.iter().map(|f| flow_summary(f)).collect::<Vec<_>>(),
+        "microflows": microflows,
+        "nanoflows": nanoflows,
     })
 }
 
@@ -1101,6 +1113,44 @@ mod tests {
         assert!(
             result.is_identical(),
             "unexpected changes: {:?}",
+            result.changes
+        );
+    }
+
+    #[test]
+    fn duplicate_flow_names_are_compared_by_normalized_body_not_row_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("Left.mpr");
+        let right = dir.path().join("Right.mpr");
+        write_fixture(&left, |_module| {});
+        write_fixture(&right, |_module| {});
+
+        let add_duplicates = |path: &Path, documentation: [&str; 2]| {
+            let mut mpr = mxrs_mpr::MprFile::open(path, false).unwrap();
+            let module_id = mpr.units_by_containment("Modules").unwrap()[0]
+                .unit_id
+                .clone();
+            for value in documentation {
+                mpr.insert_unit(
+                    &module_id,
+                    "Documents",
+                    mxrs_bson::doc! {
+                        "$Type": "Microflows$Microflow",
+                        "Name": "Duplicate",
+                        "Documentation": value,
+                    },
+                    None,
+                )
+                .unwrap();
+            }
+        };
+        add_duplicates(&left, ["first", "second"]);
+        add_duplicates(&right, ["second", "first"]);
+
+        let result = compare(&left, &right).unwrap();
+        assert!(
+            result.is_identical(),
+            "duplicate names produced false changes: {:?}",
             result.changes
         );
     }

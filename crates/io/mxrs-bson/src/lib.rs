@@ -24,7 +24,9 @@ pub mod id;
 
 pub use array::{ParsedArray, build_array, parse_array};
 pub use containment::containment_to_type;
-pub use document::{BINARY_UUID_KEYS, parse, serialize, storage_hash, storage_value};
+pub use document::{
+    BINARY_UUID_KEYS, parse, serialize, storage_hash, storage_value, top_level_string,
+};
 pub use error::{BsonCodecError, Result};
 pub use extjson::{Restored, restore_extended_json};
 pub use guid::{blob_to_uuid, looks_like_uuid, uuid_to_blob};

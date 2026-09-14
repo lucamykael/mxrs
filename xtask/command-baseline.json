@@ -45,7 +45,7 @@
   "oql": "partial",
   "pack": "partial",
   "page": "partial",
-  "portability": "missing",
+  "portability": "partial",
   "portable": "partial",
   "preflight": "partial",
   "presentation": "missing",

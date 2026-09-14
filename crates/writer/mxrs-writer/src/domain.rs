@@ -179,6 +179,17 @@ pub fn synchronize_domain_associations(
         .iter()
         .filter_map(|e| entity_ids.get(&e.name).map(String::as_str))
         .collect();
+    let mut declared_names = HashSet::new();
+    for entity in entities {
+        for association in &entity.associations {
+            if !declared_names.insert(association.name.clone()) {
+                return Err(WriterError::DuplicateAssociation {
+                    module_name: module_name.to_string(),
+                    name: association.name.clone(),
+                });
+            }
+        }
+    }
 
     let associations_key = native_key(&doc, "associations", "Associations");
     let cross_key = native_key(&doc, "crossAssociations", "CrossAssociations");
@@ -203,31 +214,36 @@ pub fn synchronize_domain_associations(
             _ => false,
         }
     };
+    let preserve_unmodeled_external = |item: &Bson| -> bool {
+        let Bson::Document(document) = item else {
+            return false;
+        };
+        let association = Association::from_bson(document);
+        let Some(name) = association.name.as_deref() else {
+            return false;
+        };
+        let Some(target) = association.to_entity_id.as_deref() else {
+            return false;
+        };
+        !declared_names.contains(name) && target.contains('.') && !known_entities.contains(target)
+    };
     let mut new_local: Vec<Bson> = local_raw
         .items
         .into_iter()
-        .filter(|b| !is_owned(b))
+        .filter(|item| !is_owned(item) || preserve_unmodeled_external(item))
         .collect();
     let mut new_cross: Vec<Bson> = cross_raw
         .items
         .into_iter()
-        .filter(|b| !is_owned(b))
+        .filter(|item| !is_owned(item) || preserve_unmodeled_external(item))
         .collect();
 
-    let mut declared_names: HashSet<String> = HashSet::new();
     for entity in entities {
         let from_id = entity_ids
             .get(&entity.name)
             .expect("validated present above")
             .clone();
         for assoc in &entity.associations {
-            if !declared_names.insert(assoc.name.clone()) {
-                return Err(WriterError::DuplicateAssociation {
-                    module_name: module_name.to_string(),
-                    name: assoc.name.clone(),
-                });
-            }
-
             let prior = previous_by_name.get(&assoc.name);
             let built = resolve_association(
                 assoc,
@@ -621,6 +637,14 @@ fn reconcile_attribute_doc(
                 ("value", "Value"),
             ] {
                 let output_key = native_key(prev, lower, upper);
+                if lower == "value"
+                    && decl.default_value.is_none()
+                    && prev.get_document(output_key).ok().is_none_or(|value| {
+                        !value.contains_key("defaultValue") && !value.contains_key("DefaultValue")
+                    })
+                {
+                    continue;
+                }
                 let generated_key = native_key(&generated, lower, upper);
                 if let Some(mut value) = generated.get(generated_key).cloned() {
                     if matches!(lower, "type" | "value")
@@ -1031,5 +1055,34 @@ fn rights_name(rights: MemberRights) -> &'static str {
         MemberRights::None => "None",
         MemberRights::ReadOnly => "ReadOnly",
         MemberRights::ReadWrite => "ReadWrite",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_imported_attribute_default_is_not_materialized_as_an_empty_string() {
+        let declaration = AttributeDecl::new("TabIndex", AttributeType::Integer);
+        let mut previous = model_attribute(&declaration, None, None).to_bson();
+        previous
+            .get_document_mut("value")
+            .unwrap()
+            .remove("defaultValue");
+
+        let output = reconcile_attribute_doc(
+            &declaration,
+            Some(&previous),
+            "Sales.Order.TabIndex",
+            ProjectIdentity::for_project("Defaults"),
+        );
+
+        assert!(
+            !output
+                .get_document("value")
+                .unwrap()
+                .contains_key("defaultValue")
+        );
     }
 }

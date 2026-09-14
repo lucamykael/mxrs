@@ -38,6 +38,15 @@ pub fn parse(bytes: &[u8]) -> Result<Document> {
     Ok(Document::from_reader(bytes)?)
 }
 
+/// Reads a string field from the root BSON document without materializing
+/// nested arrays or documents. This is intended for routing large Mendix
+/// units by `$Type`/`Name`; callers that need any nested value should use
+/// [`parse`] instead.
+pub fn top_level_string<'a>(bytes: &'a [u8], key: &str) -> Result<Option<&'a str>> {
+    let raw = bson::RawDocument::from_bytes(bytes)?;
+    Ok(raw.get(key)?.and_then(|value| value.as_str()))
+}
+
 /// Serializes a [`Document`] to raw BSON bytes.
 pub fn serialize(doc: &Document) -> Result<Vec<u8>> {
     Ok(doc.to_vec()?)
@@ -124,6 +133,22 @@ mod tests {
         let bytes = serialize(&original).unwrap();
         let parsed = parse(&bytes).unwrap();
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn reads_top_level_strings_without_decoding_nested_documents() {
+        let bytes = serialize(&doc! {
+            "$Type": "Forms$Page",
+            "Name": "Home",
+            "Nested": { "Name": "not the root name" },
+        })
+        .unwrap();
+        assert_eq!(
+            top_level_string(&bytes, "$Type").unwrap(),
+            Some("Forms$Page")
+        );
+        assert_eq!(top_level_string(&bytes, "Name").unwrap(), Some("Home"));
+        assert_eq!(top_level_string(&bytes, "Missing").unwrap(), None);
     }
 
     #[test]

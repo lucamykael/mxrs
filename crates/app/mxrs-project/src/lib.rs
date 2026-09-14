@@ -306,9 +306,7 @@ pub fn replace_imported_project(
     let staging = parent.join(format!(".mxrs-build-{}-{sequence}", std::process::id()));
     let fresh_directory = staging.join("fresh");
     let previous_directory = staging.join("previous");
-    std::fs::create_dir_all(&fresh_directory).map_err(|error| io_error(&fresh_directory, error))?;
-    std::fs::create_dir_all(&previous_directory)
-        .map_err(|error| io_error(&previous_directory, error))?;
+    prepare_build_staging(&staging, &fresh_directory, &previous_directory)?;
     let file_name = output.file_name().unwrap_or_default();
     let fresh_output = fresh_directory.join(file_name);
     if let Err(error) = rebuild_imported_project(snapshot, &fresh_output, declaration) {
@@ -347,6 +345,24 @@ pub fn replace_imported_project(
     }
     std::fs::remove_dir_all(&staging).map_err(|error| io_error(&staging, error))?;
     Ok(output)
+}
+
+fn prepare_build_staging(
+    staging: &Path,
+    fresh_directory: &Path,
+    previous_directory: &Path,
+) -> Result<()> {
+    // An interrupted build can leave this process-scoped path behind. At
+    // sequence allocation time no live build in this process can own it, so
+    // clearing it is both safe and necessary for retryability (PID reuse is
+    // common in containers).
+    if staging.exists() {
+        std::fs::remove_dir_all(staging).map_err(|error| io_error(staging, error))?;
+    }
+    std::fs::create_dir_all(fresh_directory).map_err(|error| io_error(fresh_directory, error))?;
+    std::fs::create_dir_all(previous_directory)
+        .map_err(|error| io_error(previous_directory, error))?;
+    Ok(())
 }
 
 fn restore(
@@ -655,5 +671,21 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".mxrs-build-"))
         );
+    }
+
+    #[test]
+    fn build_retry_replaces_a_stale_process_staging_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let staging = directory.path().join(".mxrs-build-stale");
+        let fresh = staging.join("fresh");
+        let previous = staging.join("previous");
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("interrupted.mpr"), "partial").unwrap();
+
+        prepare_build_staging(&staging, &fresh, &previous).unwrap();
+
+        assert!(fresh.is_dir());
+        assert!(previous.is_dir());
+        assert!(!fresh.join("interrupted.mpr").exists());
     }
 }

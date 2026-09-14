@@ -56,6 +56,7 @@ impl UserRoleDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSecurityDecl {
     pub level: SecurityLevel,
+    pub check_security: bool,
     pub admin_user_role: String,
     pub guest_user_role: Option<String>,
     pub sign_in_microflow: Option<String>,
@@ -72,6 +73,7 @@ impl Default for ProjectSecurityDecl {
             .push("System.Administrator".to_string());
         Self {
             level: SecurityLevel::CheckNothing,
+            check_security: true,
             admin_user_role: "Administrator".to_string(),
             guest_user_role: None,
             sign_in_microflow: None,
@@ -79,6 +81,12 @@ impl Default for ProjectSecurityDecl {
             password_policy: PasswordPolicyDecl::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavigationIconDecl {
+    Glyph(String),
+    Code(i64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +100,7 @@ pub struct NavigationItemDecl {
     pub caption: std::collections::BTreeMap<String, String>,
     pub page: Option<String>,
     pub microflow: Option<String>,
-    pub icon: Option<String>,
+    pub icon: Option<NavigationIconDecl>,
     pub items: Vec<NavigationItemDecl>,
 }
 

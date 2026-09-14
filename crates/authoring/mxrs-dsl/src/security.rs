@@ -20,6 +20,11 @@ impl SecurityBuilder {
         self
     }
 
+    pub fn check_security(&mut self, value: bool) -> &mut Self {
+        self.declaration.check_security = value;
+        self
+    }
+
     pub fn admin_role(&mut self, name: impl Into<String>) -> &mut Self {
         self.declaration.admin_user_role = name.into();
         self

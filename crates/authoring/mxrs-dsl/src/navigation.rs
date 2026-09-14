@@ -139,7 +139,12 @@ impl NavigationItemBuilder {
         self
     }
     pub fn icon(&mut self, code: impl Into<String>) -> &mut Self {
-        self.declaration.icon = Some(code.into());
+        self.declaration.icon = Some(mxrs_ir::NavigationIconDecl::Glyph(code.into()));
+        self
+    }
+
+    pub fn icon_code(&mut self, code: i64) -> &mut Self {
+        self.declaration.icon = Some(mxrs_ir::NavigationIconDecl::Code(code));
         self
     }
 

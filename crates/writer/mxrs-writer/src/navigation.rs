@@ -216,14 +216,17 @@ fn menu_item_document(
         ),
     );
     match &item.icon {
-        Some(code) => {
+        Some(icon_declaration) => {
             let mut icon = previous
                 .and_then(|value| value.get_document("Icon").ok())
                 .cloned()
                 .unwrap_or_default();
             stable_nested_id(&mut icon, identity, &format!("{key}:icon"));
             icon.insert("$Type", "Forms$GlyphIcon");
-            icon.insert("Code", code.clone());
+            match icon_declaration {
+                mxrs_ir::NavigationIconDecl::Glyph(code) => icon.insert("Code", code.clone()),
+                mxrs_ir::NavigationIconDecl::Code(code) => icon.insert("Code", *code),
+            };
             document.insert("Icon", icon);
         }
         None => {
@@ -492,9 +495,16 @@ fn navigation_targets(mpr: &MprFile) -> Result<(HashSet<String>, HashSet<String>
     let mut module_names = HashMap::<String, String>::new();
     for unit in &units {
         containers.insert(unit.unit_id.clone(), unit.container_id.clone());
-        let document = mpr.parse_contents(unit)?;
-        if document.get_str("$Type").ok() == Some("Projects$Module")
-            && let Ok(name) = document.get_str("Name")
+        if unit.containment_name != "Modules" {
+            continue;
+        }
+        let Some(bytes) = mpr.content_bytes(unit)? else {
+            continue;
+        };
+        if matches!(
+            mxrs_bson::top_level_string(&bytes, "$Type")?,
+            Some("Projects$Module" | "Projects$ModuleImpl")
+        ) && let Some(name) = mxrs_bson::top_level_string(&bytes, "Name")?
         {
             module_names.insert(unit.unit_id.clone(), name.to_string());
         }
@@ -503,22 +513,28 @@ fn navigation_targets(mpr: &MprFile) -> Result<(HashSet<String>, HashSet<String>
     let mut pages = HashSet::new();
     let mut microflows = HashSet::new();
     for unit in &units {
-        let document = mpr.parse_contents(unit)?;
-        let target = match document.get_str("$Type").ok() {
+        if unit.containment_name != "Documents" {
+            continue;
+        }
+        let Some(bytes) = mpr.content_bytes(unit)? else {
+            continue;
+        };
+        let target = match mxrs_bson::top_level_string(&bytes, "$Type")? {
             Some("Forms$Page") | Some("Pages$Page") => &mut pages,
             Some("Microflows$Microflow") => &mut microflows,
             _ => continue,
         };
         target.insert(unit.unit_id.clone());
-        if let Some(id) = document.get("$ID").and_then(mxrs_bson::extract_id) {
-            target.insert(id);
-        }
-        let Ok(name) = document.get_str("Name") else {
+        let Some(name) = mxrs_bson::top_level_string(&bytes, "Name")? else {
             continue;
         };
         target.insert(name.to_string());
         let mut parent = Some(unit.container_id.as_str());
+        let mut visited = HashSet::new();
         while let Some(id) = parent {
+            if !visited.insert(id) {
+                break;
+            }
             if let Some(module) = module_names.get(id) {
                 target.insert(format!("{module}.{name}"));
                 break;
@@ -530,7 +546,11 @@ fn navigation_targets(mpr: &MprFile) -> Result<(HashSet<String>, HashSet<String>
 }
 
 fn project_role_names(mpr: &MprFile) -> Result<HashSet<String>> {
-    for unit in mpr.all_units()? {
+    let root_id = mpr
+        .root_unit()?
+        .ok_or(crate::WriterError::MissingRootUnit)?
+        .unit_id;
+    for unit in mpr.children_of(&root_id)? {
         let document = mpr.parse_contents(&unit)?;
         if document.get_str("$Type").ok() == Some("Security$ProjectSecurity") {
             let mut roles = HashSet::new();
@@ -544,4 +564,32 @@ fn project_role_names(mpr: &MprFile) -> Result<HashSet<String>> {
         }
     }
     Ok(HashSet::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_discovery_stops_at_a_self_parented_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("NavigationTargets.mpr");
+        let project = mxrs_dsl::ProjectBuilder::new("11.12.1").build();
+        crate::write_project(&path, &project).unwrap();
+        let mut mpr = MprFile::open(&path, false).unwrap();
+        let root_id = mpr.root_unit().unwrap().unwrap().unit_id;
+        mpr.insert_unit(
+            &root_id,
+            "Documents",
+            doc! {
+                "$Type": "Microflows$Microflow",
+                "Name": "RootLevelFlow",
+            },
+            None,
+        )
+        .unwrap();
+
+        let (_, microflows) = navigation_targets(&mpr).unwrap();
+        assert!(microflows.contains("RootLevelFlow"));
+    }
 }

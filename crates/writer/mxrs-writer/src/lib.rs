@@ -48,4 +48,4 @@ pub mod scaffold;
 mod security;
 
 pub use error::{Result, WriterError};
-pub use project::{synchronize_project, write_project};
+pub use project::{synchronize_project, synchronize_project_documents, write_project};

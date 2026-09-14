@@ -338,11 +338,15 @@ fn bson_value(value: &Bson) -> Value {
 }
 
 fn navigation_value(item: &NavigationItem, pages: &HashMap<String, String>) -> Value {
+    let icon = item.icon.as_ref().map(|icon| match icon {
+        mxrs_model::navigation::NavigationIcon::Glyph(value) => Value::String(value.clone()),
+        mxrs_model::navigation::NavigationIcon::Code(value) => Value::Number((*value).into()),
+    });
     json!({
         "caption": item.caption.values().next().cloned().unwrap_or_default(),
         "page": resolve_page(item.page.as_deref(), pages),
         "microflow": item.microflow,
-        "icon": item.icon,
+        "icon": icon,
         "items": item.items.iter().map(|child| navigation_value(child, pages)).collect::<Vec<_>>(),
     })
 }

@@ -15,14 +15,21 @@
 //! `export_project_lossy` retains the original best-effort behavior for source
 //! inspection, but its output must be reviewed before write-back.
 //!
-//! **First-slice scope, loud not silent about what's outside it**:
+//! **Current typed projection, explicit about what's outside it**:
 //!
-//! - **Domain model only** — entities, attributes, associations. Not
-//!   microflows: reconstructing structured `create`/`change`/`if`/`call`
+//! - **Domain model** — entities, attributes, associations.
+//! - **Documents** — enumerations (values, localized captions and
+//!   documentation) and constants (type, value, documentation and client
+//!   exposure) are emitted into `src/domain/documents/mod.rs`. Imported
+//!   fields outside that IR are retained by the writer. `portability
+//!   --verify-round-trip` checks these documents by identity, containment
+//!   and raw BSON bytes.
+//! - **Not existing flow graphs** — reconstructing structured
+//!   `create`/`change`/`if`/`call`
 //!   statements from a microflow's persisted activity *graph* (arbitrary
 //!   branching, not just the linear-plus-one-decision shape a hand-written
 //!   `project! {}` body produces) is a real decompiler, out of scope for
-//!   this pass. Concretely safe consequence: an exported source file
+//!   the current projection. Concretely safe consequence: imported source
 //!   declares no microflows for any module, and
 //!   `mxrs-writer::synchronize_project` never deletes anything absent from
 //!   what it's given (see its own doc comment) — so writing an exported
@@ -46,11 +53,11 @@
 //! declarations, so exported source is self-contained without a second
 //! schema manifest or a generated marker module.
 //!
-//! `import_cargo_project` additionally detects pages built entirely from
+//! `import_cargo_project` also detects pages built entirely from
 //! `mxrs-dsl`'s native/structural widget vocabulary, emits them as real
 //! `pub fn` builders in `src/domain/pages/mod.rs`, and wires each one into
 //! `build()` — see `page_export`'s doc comment for the widget vocabulary
-//! detected and what still stays opaque.
+//! detected and what remains snapshot-preserved.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -66,7 +73,12 @@ use mxrs_model::{Association, Module, Project};
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
 mod page_export;
+mod portability;
 pub use page_export::PageExportReport;
+pub use portability::{
+    DocumentRoundTripReport, PortabilityFamily, PortabilityReport, PortabilityStatus,
+    PortabilitySummary, audit_portability, verify_editable_document_round_trip,
+};
 
 /// One model feature the generated `project! {}` source cannot faithfully
 /// represent yet. Paths use Mendix qualified names so the user can resolve
@@ -86,6 +98,9 @@ pub enum ExportError {
     Project(#[from] mxrs_project::ProjectError),
 
     #[error(transparent)]
+    Writer(#[from] mxrs_writer::WriterError),
+
+    #[error(transparent)]
     Typegen(#[from] mxrs_typegen::TypegenError),
 
     #[error("cannot write {path}: {source}")]
@@ -97,6 +112,9 @@ pub enum ExportError {
 
     #[error("Cargo project destination {0} already exists")]
     DestinationExists(String),
+
+    #[error("cannot format generated Cargo project at {path}: {detail}")]
+    Formatting { path: String, detail: String },
 
     #[error(
         "refusing a lossy Rust export; {0} unsupported model feature(s) would not round-trip (pass --allow-lossy only if this is intentional)"
@@ -110,8 +128,10 @@ impl ExportError {
             ExportError::Lossy(_, gaps) => gaps,
             ExportError::Model(_)
             | ExportError::Project(_)
+            | ExportError::Writer(_)
             | ExportError::Typegen(_)
             | ExportError::Io { .. }
+            | ExportError::Formatting { .. }
             | ExportError::DestinationExists(_) => &[],
         }
     }
@@ -215,6 +235,7 @@ fn import_cargo_project_inner(
     });
     let security_source = render_security_module(&modules, security_document.as_ref());
     let navigation_source = render_navigation_module(&project.navigation()?);
+    let (documents_source, _) = render_documents_module(&project, &mendix_version)?;
     let markers_source = mxrs_typegen::generate(&marker_manifest(&modules))?;
     drop(project);
 
@@ -242,6 +263,9 @@ fn import_cargo_project_inner(
     let navigation_directory = domain_directory.join("navigation");
     std::fs::create_dir_all(&navigation_directory)
         .map_err(|source| io_error(&navigation_directory, source))?;
+    let documents_directory = domain_directory.join("documents");
+    std::fs::create_dir_all(&documents_directory)
+        .map_err(|source| io_error(&documents_directory, source))?;
 
     write_text(
         &destination.join("Cargo.toml"),
@@ -276,6 +300,10 @@ fn import_cargo_project_inner(
         &destination.join("src/domain/navigation/mod.rs"),
         &navigation_source,
     )?;
+    write_text(
+        &destination.join("src/domain/documents/mod.rs"),
+        &documents_source,
+    )?;
     if let Some(pages_module_source) = &pages_module_source {
         let pages_directory = domain_directory.join("pages");
         std::fs::create_dir_all(&pages_directory)
@@ -297,6 +325,7 @@ fn import_cargo_project_inner(
         &destination.join("src/infrastructure/markers.rs"),
         &markers_source,
     )?;
+    format_generated_cargo_project(destination)?;
     write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
     write_text(
         &destination.join("README.md"),
@@ -322,6 +351,7 @@ fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
     let mut source = String::from(
         "//! Editable Cargo-native Mendix concepts, grouped by concept family.\n\n\
          pub mod entities;\n\
+         pub mod documents;\n\
          pub mod flows;\n\
          pub mod navigation;\n\
          pub mod security;\n",
@@ -340,9 +370,409 @@ fn render_domain_module(pages: &[page_export::ConvertedPage]) -> String {
         );
     }
     source.push_str(
-        "    flows::apply(&mut project);\n    security::apply(&mut project);\n    navigation::apply(&mut project);\n    project\n}\n",
+        "    documents::apply(&mut project);\n    flows::apply(&mut project);\n    security::apply(&mut project);\n    navigation::apply(&mut project);\n    project\n}\n",
     );
     source
+}
+
+#[derive(Debug)]
+enum EditableDocument {
+    Enumeration {
+        module: String,
+        name: String,
+        documentation: String,
+        values: Vec<(String, Vec<(String, String)>)>,
+    },
+    Constant {
+        module: String,
+        name: String,
+        documentation: String,
+        value_type: &'static str,
+        value: Option<String>,
+        exposed_to_client: bool,
+    },
+}
+
+fn render_documents_module(
+    project: &Project,
+    mendix_version: &str,
+) -> Result<(String, HashMap<&'static str, usize>)> {
+    let mut declarations = collect_editable_documents(project)?;
+    declarations
+        .sort_by(|left, right| editable_document_key(left).cmp(&editable_document_key(right)));
+    let mut editable_counts = HashMap::new();
+    for declaration in &declarations {
+        let native_type = match declaration {
+            EditableDocument::Enumeration { .. } => "Enumerations$Enumeration",
+            EditableDocument::Constant { .. } => "Constants$Constant",
+        };
+        *editable_counts.entry(native_type).or_default() += 1;
+    }
+
+    let mut source = String::from(
+        "//! Editable Cargo-native enumerations and constants.\n\n\
+         fn declarations() -> ::mxrs_ir::ProjectDecl {\n\
+             let mut project = ::mxrs_dsl::ProjectBuilder::new(",
+    );
+    source.push_str(&rust_string(mendix_version));
+    source.push_str(");\n");
+    let mut current_module = None::<String>;
+    for declaration in declarations {
+        let module = editable_document_module(&declaration);
+        if current_module.as_deref() != Some(module) {
+            if current_module.is_some() {
+                source.push_str("    });\n");
+            }
+            let _ = writeln!(
+                source,
+                "    project.module({}, |module| {{",
+                rust_string(module)
+            );
+            current_module = Some(module.to_string());
+        }
+        render_editable_document_body(&mut source, declaration);
+    }
+    if current_module.is_some() {
+        source.push_str("    });\n");
+    }
+    source.push_str(
+        "    project.build()\n}\n\n\
+         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+             for declared in declarations().modules {\n\
+                 if let Some(target) = project.modules.iter_mut().find(|module| module.name == declared.name) {\n\
+                     target.enumerations.extend(declared.enumerations);\n\
+                     target.constants.extend(declared.constants);\n\
+                 } else {\n\
+                     project.modules.push(declared);\n\
+                 }\n\
+             }\n\
+         }\n",
+    );
+    Ok((source, editable_counts))
+}
+
+fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>> {
+    let units = project.all_units()?;
+    let module_by_id = project
+        .modules()?
+        .into_iter()
+        .filter_map(|module| Some((module.id, module.name?)))
+        .collect::<HashMap<_, _>>();
+    let parent_by_id = units
+        .iter()
+        .map(|unit| (unit.unit_id.clone(), unit.container_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut declarations = Vec::new();
+    for unit in &units {
+        let document = project
+            .mpr()
+            .parse_contents(unit)
+            .map_err(mxrs_model::ModelError::from)?;
+        let Some(module) = owning_module(&unit.container_id, &parent_by_id, &module_by_id) else {
+            continue;
+        };
+        match document.get_str("$Type").ok() {
+            Some("Enumerations$Enumeration") => {
+                let Some(name) = document.get_str("Name").ok().map(str::to_string) else {
+                    continue;
+                };
+                let Some(values) = document
+                    .get_array("Values")
+                    .ok()
+                    .map(|values| mxrs_bson::parse_array(Some(values)))
+                    .and_then(|values| {
+                        values
+                            .items
+                            .into_iter()
+                            .map(|value| value.as_document().cloned())
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .and_then(|values| {
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                let name = value.get_str("Name").ok()?.to_string();
+                                let caption = value.get_document("Caption").ok()?;
+                                let captions = caption
+                                    .get_array("Items")
+                                    .ok()
+                                    .map(|items| mxrs_bson::parse_array(Some(items)))?
+                                    .items
+                                    .into_iter()
+                                    .map(|translation| {
+                                        let translation = translation.as_document()?;
+                                        Some((
+                                            translation.get_str("LanguageCode").ok()?.to_string(),
+                                            translation.get_str("Text").ok()?.to_string(),
+                                        ))
+                                    })
+                                    .collect::<Option<Vec<_>>>()?;
+                                Some((name, captions))
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                else {
+                    continue;
+                };
+                declarations.push(EditableDocument::Enumeration {
+                    module,
+                    name,
+                    documentation: document
+                        .get_str("Documentation")
+                        .unwrap_or_default()
+                        .to_string(),
+                    values,
+                });
+            }
+            Some("Constants$Constant") => {
+                let Some(name) = document.get_str("Name").ok().map(str::to_string) else {
+                    continue;
+                };
+                let Some(value_type) = document
+                    .get_document("Type")
+                    .ok()
+                    .and_then(|kind| kind.get_str("$Type").ok())
+                    .and_then(constant_type_variant)
+                else {
+                    continue;
+                };
+                let value = (!sensitive_constant_name(&name)).then(|| {
+                    document
+                        .get_str("DefaultValue")
+                        .unwrap_or_default()
+                        .to_string()
+                });
+                declarations.push(EditableDocument::Constant {
+                    module,
+                    name,
+                    documentation: document
+                        .get_str("Documentation")
+                        .unwrap_or_default()
+                        .to_string(),
+                    value_type,
+                    value,
+                    exposed_to_client: document.get_bool("ExposedToClient").unwrap_or(false),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(declarations)
+}
+
+fn render_editable_document_body(source: &mut String, declaration: EditableDocument) {
+    match declaration {
+        EditableDocument::Enumeration {
+            module: _,
+            name,
+            documentation,
+            values,
+        } => {
+            let _ = writeln!(
+                source,
+                "        module.enumeration({}, |enumeration| {{",
+                rust_string(&name)
+            );
+            if !documentation.is_empty() {
+                let _ = writeln!(
+                    source,
+                    "            enumeration.documentation({});",
+                    rust_string(&documentation)
+                );
+            }
+            for (name, captions) in values {
+                let _ = writeln!(
+                    source,
+                    "            enumeration.value({}).captions = vec![{}];",
+                    rust_string(&name),
+                    captions
+                        .iter()
+                        .map(|(language, text)| format!(
+                            "({}.to_string(), {}.to_string())",
+                            rust_string(language),
+                            rust_string(text)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            source.push_str("        });\n");
+        }
+        EditableDocument::Constant {
+            module,
+            name,
+            documentation,
+            value_type,
+            value,
+            exposed_to_client,
+        } => {
+            let _ = writeln!(
+                source,
+                "        module.constant({}, |constant| {{",
+                rust_string(&name)
+            );
+            if !documentation.is_empty() {
+                let _ = writeln!(
+                    source,
+                    "            constant.documentation({});",
+                    rust_string(&documentation)
+                );
+            }
+            let _ = writeln!(
+                source,
+                "            constant.value_type(::mxrs_ir::ConstantType::{value_type});"
+            );
+            match value {
+                Some(value) => {
+                    let _ = writeln!(
+                        source,
+                        "            constant.value({});",
+                        rust_string(&value)
+                    );
+                }
+                None => {
+                    let variable = constant_environment_variable(&module, &name);
+                    let _ = writeln!(
+                        source,
+                        "            constant.value_from_env({});",
+                        rust_string(&variable)
+                    );
+                }
+            }
+            if exposed_to_client {
+                source.push_str("            constant.exposed_to_client(true);\n");
+            }
+            source.push_str("        });\n");
+        }
+    }
+}
+
+fn editable_document_module(document: &EditableDocument) -> &str {
+    match document {
+        EditableDocument::Enumeration { module, .. }
+        | EditableDocument::Constant { module, .. } => module,
+    }
+}
+
+fn editable_document_key(document: &EditableDocument) -> (&str, u8, &str) {
+    match document {
+        EditableDocument::Enumeration { module, name, .. } => (module, 0, name),
+        EditableDocument::Constant { module, name, .. } => (module, 1, name),
+    }
+}
+
+fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDecl> {
+    let mut modules = std::collections::BTreeMap::<String, mxrs_ir::ModuleDecl>::new();
+    for document in collect_editable_documents(project)? {
+        let module_name = match &document {
+            EditableDocument::Enumeration { module, .. }
+            | EditableDocument::Constant { module, .. } => module.clone(),
+        };
+        let module = modules
+            .entry(module_name.clone())
+            .or_insert_with(|| mxrs_ir::ModuleDecl {
+                name: module_name,
+                ..mxrs_ir::ModuleDecl::default()
+            });
+        match document {
+            EditableDocument::Enumeration {
+                name,
+                documentation,
+                values,
+                ..
+            } => module.enumerations.push(mxrs_ir::EnumerationDecl {
+                name,
+                documentation,
+                values: values
+                    .into_iter()
+                    .map(|(name, captions)| mxrs_ir::EnumerationValueDecl { name, captions })
+                    .collect(),
+            }),
+            EditableDocument::Constant {
+                name,
+                documentation,
+                value_type,
+                value,
+                exposed_to_client,
+                ..
+            } => module.constants.push(mxrs_ir::ConstantDecl {
+                name,
+                documentation,
+                constant_type: match value_type {
+                    "String" => mxrs_ir::ConstantType::String,
+                    "Integer" => mxrs_ir::ConstantType::Integer,
+                    "Boolean" => mxrs_ir::ConstantType::Boolean,
+                    "Decimal" => mxrs_ir::ConstantType::Decimal,
+                    "DateTime" => mxrs_ir::ConstantType::DateTime,
+                    _ => unreachable!("constant_type_variant returns a closed set"),
+                },
+                value,
+                exposed_to_client,
+            }),
+        }
+    }
+    Ok(mxrs_ir::ProjectDecl {
+        mendix_version: project.mendix_version()?.unwrap_or_default(),
+        modules: modules.into_values().collect(),
+        security: None,
+        navigation: None,
+    })
+}
+
+fn owning_module<'a>(
+    container: &'a str,
+    parents: &'a HashMap<String, String>,
+    modules: &'a HashMap<String, String>,
+) -> Option<String> {
+    let mut current = container;
+    for _ in 0..64 {
+        if let Some(name) = modules.get(current) {
+            return Some(name.clone());
+        }
+        let parent = parents.get(current)?;
+        if parent == current {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
+fn constant_type_variant(native_type: &str) -> Option<&'static str> {
+    match native_type {
+        "DataTypes$StringType" => Some("String"),
+        "DataTypes$IntegerType" => Some("Integer"),
+        "DataTypes$BooleanType" => Some("Boolean"),
+        "DataTypes$DecimalType" => Some("Decimal"),
+        "DataTypes$DateTimeType" => Some("DateTime"),
+        _ => None,
+    }
+}
+
+fn sensitive_constant_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace(['-', '_'], "");
+    [
+        "token",
+        "password",
+        "secret",
+        "credential",
+        "apikey",
+        "privatekey",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn constant_environment_variable(module: &str, name: &str) -> String {
+    let mut result = String::from("MXRS_");
+    for character in format!("{module}_{name}").chars() {
+        if character.is_ascii_alphanumeric() {
+            result.push(character.to_ascii_uppercase());
+        } else if !result.ends_with('_') {
+            result.push('_');
+        }
+    }
+    result.trim_end_matches('_').to_string()
 }
 
 /// Creates the editable flow composition layer. New typed declarations merge
@@ -418,27 +848,29 @@ fn render_security_module(modules: &[Module], document: Option<&mxrs_bson::Docum
             .get_str("SignInMicroflow")
             .ok()
             .filter(|name| !name.is_empty());
-        source.push_str("    let mut security = ::mxrs_ir::ProjectSecurityDecl::default();\n");
+        source.push_str("    let security = ::mxrs_ir::ProjectSecurityDecl {\n");
+        let _ = writeln!(source, "        level: ::mxrs_ir::SecurityLevel::{level},");
         let _ = writeln!(
             source,
-            "    security.level = ::mxrs_ir::SecurityLevel::{level};"
+            "        check_security: {},",
+            document.get_bool("CheckSecurity").unwrap_or(true)
         );
         let _ = writeln!(
             source,
-            "    security.admin_user_role = {}.to_string();",
+            "        admin_user_role: {}.to_string(),",
             rust_string(admin_role)
         );
         let _ = writeln!(
             source,
-            "    security.guest_user_role = {};",
+            "        guest_user_role: {},",
             rust_option_string(guest_role)
         );
         let _ = writeln!(
             source,
-            "    security.sign_in_microflow = {};",
+            "        sign_in_microflow: {},",
             rust_option_string(sign_in)
         );
-        source.push_str("    security.user_roles = vec![\n");
+        source.push_str("        user_roles: vec![\n");
         let mut roles = bson_documents(document, "UserRoles");
         roles.sort_by(|left, right| {
             left.get_str("Name")
@@ -462,17 +894,25 @@ fn render_security_module(modules: &[Module], document: Option<&mxrs_bson::Docum
                 rust_string_vec(&module_roles),
             );
         }
-        source.push_str("    ];\n");
-        if let Ok(policy) = document.get_document("PasswordPolicySettings") {
-            let _ = writeln!(
-                source,
-                "    security.password_policy = ::mxrs_ir::PasswordPolicyDecl {{ minimum_length: {}, require_digit: {}, require_mixed_case: {}, require_symbol: {} }};",
-                policy.get_i32("MinimumLength").unwrap_or(6),
-                policy.get_bool("RequireDigit").unwrap_or(true),
-                policy.get_bool("RequireMixedCase").unwrap_or(true),
-                policy.get_bool("RequireSymbol").unwrap_or(false),
-            );
-        }
+        source.push_str("        ],\n");
+        let policy = document.get_document("PasswordPolicySettings").ok();
+        let _ = writeln!(
+            source,
+            "        password_policy: ::mxrs_ir::PasswordPolicyDecl {{ minimum_length: {}, require_digit: {}, require_mixed_case: {}, require_symbol: {} }},",
+            policy
+                .and_then(|policy| bson_integer(policy.get("MinimumLength")))
+                .unwrap_or(6),
+            policy
+                .and_then(|policy| policy.get_bool("RequireDigit").ok())
+                .unwrap_or(true),
+            policy
+                .and_then(|policy| policy.get_bool("RequireMixedCase").ok())
+                .unwrap_or(true),
+            policy
+                .and_then(|policy| policy.get_bool("RequireSymbol").ok())
+                .unwrap_or(false),
+        );
+        source.push_str("    };\n");
         source.push_str("    project.security = Some(security);\n");
     }
     source.push_str("}\n");
@@ -529,7 +969,7 @@ fn render_navigation_item(
         rust_btree_map(&item.caption),
         rust_option_string(item.page.as_deref()),
         rust_option_string(item.microflow.as_deref()),
-        rust_option_string(item.icon.as_deref()),
+        rust_option_navigation_icon(item.icon.as_ref()),
     );
     for child in &item.items {
         render_navigation_item(source, child, depth + 1);
@@ -553,6 +993,27 @@ fn rust_btree_map(values: &std::collections::BTreeMap<String, String>) -> String
         .collect::<Vec<_>>()
         .join(", ");
     format!("::std::collections::BTreeMap::from([{entries}])")
+}
+
+fn rust_option_navigation_icon(icon: Option<&mxrs_model::navigation::NavigationIcon>) -> String {
+    match icon {
+        Some(mxrs_model::navigation::NavigationIcon::Glyph(value)) => format!(
+            "Some(::mxrs_ir::NavigationIconDecl::Glyph({}.to_string()))",
+            rust_string(value)
+        ),
+        Some(mxrs_model::navigation::NavigationIcon::Code(value)) => {
+            format!("Some(::mxrs_ir::NavigationIconDecl::Code({value}))")
+        }
+        None => "None".to_string(),
+    }
+}
+
+fn bson_integer(value: Option<&mxrs_bson::Bson>) -> Option<i32> {
+    match value {
+        Some(mxrs_bson::Bson::Int32(value)) => Some(*value),
+        Some(mxrs_bson::Bson::Int64(value)) => i32::try_from(*value).ok(),
+        _ => None,
+    }
 }
 
 fn render_security_level(value: Option<&str>) -> Option<&'static str> {
@@ -614,11 +1075,14 @@ fn marker_manifest(modules: &[Module]) -> mxrs_typegen::Manifest {
     use mxrs_typegen::{AssociationManifest, EntityManifest, ModuleManifest};
 
     let mut qualified_by_id = HashMap::<&str, String>::new();
+    let mut qualified_entities = std::collections::HashSet::new();
     for module in modules {
         let module_name = module.name.as_deref().unwrap_or("Unnamed");
         for entity in module.entities() {
             if let (Some(id), Some(name)) = (entity.id.as_deref(), entity.name.as_deref()) {
-                qualified_by_id.insert(id, format!("{module_name}.{name}"));
+                let qualified = format!("{module_name}.{name}");
+                qualified_entities.insert(qualified.clone());
+                qualified_by_id.insert(id, qualified);
             }
         }
     }
@@ -640,7 +1104,8 @@ fn marker_manifest(modules: &[Module]) -> mxrs_typegen::Manifest {
                 } else {
                     qualified_by_id.get(target).cloned()
                 };
-                let Some(target) = target else {
+                let Some(target) = target.filter(|target| qualified_entities.contains(target))
+                else {
                     continue;
                 };
                 associations_by_entity
@@ -677,6 +1142,8 @@ fn marker_manifest(modules: &[Module]) -> mxrs_typegen::Manifest {
                         .and_then(|id| associations_by_entity.remove(id))
                         .unwrap_or_default();
                     associations.sort_by(|left, right| left.name.cmp(&right.name));
+                    associations.dedup_by(|left, right| left.name == right.name);
+                    associations.retain(|association| !attributes.contains(&association.name));
                     Some(EntityManifest {
                         name,
                         attributes,
@@ -686,18 +1153,29 @@ fn marker_manifest(modules: &[Module]) -> mxrs_typegen::Manifest {
                 .collect::<Vec<_>>();
             entities.sort_by(|left, right| left.name.cmp(&right.name));
 
+            let entity_names = entities
+                .iter()
+                .map(|entity| entity.name.as_str())
+                .collect::<std::collections::HashSet<_>>();
+
             let mut microflows = module
                 .microflows
                 .iter()
                 .filter_map(|flow| flow.name.clone())
                 .collect::<Vec<_>>();
             microflows.sort();
+            microflows.dedup();
+            microflows.retain(|name| !entity_names.contains(name.as_str()));
             let mut nanoflows = module
                 .nanoflows
                 .iter()
                 .filter_map(|flow| flow.name.clone())
                 .collect::<Vec<_>>();
             nanoflows.sort();
+            nanoflows.dedup();
+            nanoflows.retain(|name| {
+                !entity_names.contains(name.as_str()) && microflows.binary_search(name).is_err()
+            });
 
             ModuleManifest {
                 name: module.name.clone().unwrap_or_else(|| "Unnamed".to_string()),
@@ -742,7 +1220,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain lossless in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe import reported {gaps} feature(s) outside the editable typed projection.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable concepts live under `src/domain/`; generated public marker types live under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations and constants. `src/domain/flows/mod.rs` is the source of truth for Cargo-native microflows and nanoflows added after import. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -782,6 +1260,33 @@ fn write_text(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).map_err(|source| io_error(path, source))
 }
 
+fn format_generated_cargo_project(destination: &Path) -> Result<()> {
+    let manifest = destination.join("Cargo.toml");
+    let output = std::process::Command::new("cargo")
+        .args(["fmt", "--manifest-path"])
+        .arg(&manifest)
+        .current_dir(destination)
+        .output()
+        .map_err(|source| io_error(&manifest, source))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        output.status.to_string()
+    };
+    Err(ExportError::Formatting {
+        path: destination.display().to_string(),
+        detail,
+    })
+}
+
 fn io_error(path: &Path, source: std::io::Error) -> ExportError {
     ExportError::Io {
         path: path.display().to_string(),
@@ -818,7 +1323,10 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
             let name = association.name.as_deref().unwrap_or("Unnamed");
             let path = format!("{module_name}.{name}");
             let target_resolves = association.to_entity_id.as_deref().is_some_and(|target| {
-                target.contains('.') || entity_qualified_name_by_id.contains_key(target)
+                entity_qualified_name_by_id.contains_key(target)
+                    || entity_qualified_name_by_id
+                        .values()
+                        .any(|qualified_name| qualified_name == target)
             });
             if !target_resolves {
                 gaps.push(RoundTripGap {
@@ -976,7 +1484,6 @@ fn render_entity(
                 let default = attribute
                     .default_value
                     .as_deref()
-                    .filter(|v| !v.is_empty())
                     .map(|v| format!(" = {v:?}"))
                     .unwrap_or_default();
                 let name = sanitize_ident(attribute_name);
@@ -1032,17 +1539,17 @@ fn render_entity(
     for association in sorted_associations {
         let assoc_name = association.name.as_deref().unwrap_or("Unnamed");
         let target = association.to_entity_id.as_deref().and_then(|id_or_name| {
-            if id_or_name.contains('.') {
-                Some(id_or_name.to_string())
-            } else {
-                entity_qualified_name_by_id.get(id_or_name).cloned()
-            }
+            entity_qualified_name_by_id
+                .get(id_or_name)
+                .cloned()
+                .or_else(|| {
+                    entity_qualified_name_by_id
+                        .values()
+                        .find(|qualified_name| qualified_name.as_str() == id_or_name)
+                        .cloned()
+                })
         });
         let Some(target) = target else {
-            let _ = writeln!(
-                out,
-                "                // TODO: association {assoc_name:?} has an unresolvable target, skipped"
-            );
             continue;
         };
         let target_path = target
@@ -1373,6 +1880,23 @@ mod tests {
                 number.unique = true;
                 entity.datetime("SubmittedAt").localize_date = Some(false);
             });
+            module.enumeration("Status", |enumeration| {
+                enumeration.documentation("Order lifecycle");
+                enumeration.value("Open").captions = vec![
+                    ("en_US".to_string(), "Open".to_string()),
+                    ("pt_BR".to_string(), "Aberto".to_string()),
+                ];
+            });
+            module.constant("MaximumOrders", |constant| {
+                constant
+                    .documentation("Limit")
+                    .value_type(mxrs_ir::ConstantType::Integer)
+                    .value("25")
+                    .exposed_to_client(true);
+            });
+            module.constant("ApiToken", |constant| {
+                constant.value("super-secret-value");
+            });
             module.microflow("ACT_Ping", |_flow| {});
             module.microflow("ACT_GetOrder", |flow| {
                 let order = flow.create_object(
@@ -1422,6 +1946,20 @@ mod tests {
                 });
             });
         });
+        builder.security(|security| {
+            security
+                .check_security(false)
+                .password_policy(|policy| policy.minimum_length = 12);
+        });
+        builder.navigation(|navigation| {
+            navigation.profile("Responsive", |profile| {
+                profile
+                    .home_microflow("Sales.ACT_Ping")
+                    .item("Orders", |item| {
+                        item.icon_code(57369).microflow("Sales.ACT_Ping");
+                    });
+            });
+        });
         mxrs_writer::write_project(&source_path, &builder.build()).unwrap();
 
         let imported = import_cargo_project(&source_path, &generated, Some(workspace)).unwrap();
@@ -1433,6 +1971,7 @@ mod tests {
         assert!(generated.join("src/lib.rs").is_file());
         assert!(generated.join("src/domain/mod.rs").is_file());
         assert!(generated.join("src/domain/entities/mod.rs").is_file());
+        assert!(generated.join("src/domain/documents/mod.rs").is_file());
         assert!(generated.join("src/domain/flows/mod.rs").is_file());
         assert!(generated.join("src/domain/security/mod.rs").is_file());
         assert!(generated.join("src/domain/navigation/mod.rs").is_file());
@@ -1459,10 +1998,12 @@ mod tests {
         assert!(pages_source.contains("p.combo_box"));
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(domain_source.contains("pub mod entities;"));
+        assert!(domain_source.contains("pub mod documents;"));
         assert!(domain_source.contains("pub mod flows;"));
         assert!(domain_source.contains("pub mod security;"));
         assert!(domain_source.contains("pub mod navigation;"));
         assert!(domain_source.contains("flows::apply(&mut project);"));
+        assert!(domain_source.contains("documents::apply(&mut project);"));
         assert!(domain_source.contains("security::apply(&mut project);"));
         assert!(domain_source.contains("navigation::apply(&mut project);"));
         assert!(domain_source.contains("pub mod pages;"));
@@ -1477,6 +2018,15 @@ mod tests {
         assert!(entities_source.contains("required true;"));
         assert!(entities_source.contains("unique true;"));
         assert!(entities_source.contains("localize_date false;"));
+        let documents =
+            std::fs::read_to_string(generated.join("src/domain/documents/mod.rs")).unwrap();
+        assert!(documents.contains("module.enumeration(\"Status\""));
+        assert!(documents.contains("(\"pt_BR\".to_string(), \"Aberto\".to_string())"));
+        assert!(documents.contains("module.constant(\"MaximumOrders\""));
+        assert!(documents.contains("ConstantType::Integer"));
+        assert!(documents.contains("constant.exposed_to_client(true)"));
+        assert!(documents.contains("constant.value_from_env(\"MXRS_SALES_APITOKEN\")"));
+        assert!(!documents.contains("super-secret-value"));
         assert!(!generated.join("src/infrastructure/ids.rs").exists());
         assert!(!generated.join("src/infrastructure/imported.rs").exists());
         let markers =
@@ -1491,14 +2041,25 @@ mod tests {
         assert!(flows.contains("target.nanoflows.extend(declared.nanoflows)"));
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
-        assert!(security.contains("ProjectSecurityDecl::default()"));
-        assert!(security.contains("security.user_roles = vec!"));
+        assert!(security.contains("ProjectSecurityDecl {"));
+        assert!(security.contains("check_security: false,"));
+        assert!(security.contains("minimum_length: 12"));
+        assert!(security.contains("user_roles: vec!"));
         let navigation =
             std::fs::read_to_string(generated.join("src/domain/navigation/mod.rs")).unwrap();
         assert!(navigation.contains("project.navigation = Some"));
+        assert!(navigation.contains("NavigationIconDecl::Code(57369)"));
         let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
         assert!(crate_root.contains("pub mod infrastructure;"));
         assert!(!crate_root.contains("pub mod generated"));
+
+        let format_check = Command::new("cargo")
+            .args(["fmt", "--manifest-path"])
+            .arg(generated.join("Cargo.toml"))
+            .args(["--", "--check"])
+            .status()
+            .unwrap();
+        assert!(format_check.success());
 
         std::fs::remove_file(&source_path).unwrap();
         std::fs::remove_dir_all(mxrs_mpr::format::contents_dir(&source_path)).unwrap();
@@ -1522,10 +2083,42 @@ mod tests {
         assert!(build.success());
 
         let rebuilt = mxrs_mpr::MprFile::open(&output, true).unwrap();
-        assert!(rebuilt.all_units().unwrap().into_iter().any(|unit| {
-            let document = rebuilt.parse_contents(&unit).unwrap();
+        let documents = rebuilt
+            .all_units()
+            .unwrap()
+            .into_iter()
+            .map(|unit| rebuilt.parse_contents(&unit).unwrap())
+            .collect::<Vec<_>>();
+        assert!(documents.iter().any(|document| {
             document.get_str("$Type").ok() == Some("Microflows$Microflow")
                 && document.get_str("Name").ok() == Some("ACT_Ping")
+        }));
+        assert!(documents.iter().any(|document| {
+            document.get_str("$Type").ok() == Some("Constants$Constant")
+                && document.get_str("Name").ok() == Some("ApiToken")
+                && document.get_str("DefaultValue").ok() == Some("super-secret-value")
+        }));
+        let security = documents
+            .iter()
+            .find(|document| document.get_str("$Type").ok() == Some("Security$ProjectSecurity"))
+            .unwrap();
+        assert!(!security.get_bool("CheckSecurity").unwrap());
+        assert_eq!(
+            security
+                .get_document("PasswordPolicySettings")
+                .unwrap()
+                .get_i64("MinimumLength")
+                .unwrap(),
+            12
+        );
+        assert!(documents.iter().any(|document| {
+            document.get_str("$Type").ok() == Some("Enumerations$Enumeration")
+                && document.get_str("Name").ok() == Some("Status")
+        }));
+        assert!(documents.iter().any(|document| {
+            document.get_str("$Type").ok() == Some("Constants$Constant")
+                && document.get_str("Name").ok() == Some("MaximumOrders")
+                && document.get_str("DefaultValue").ok() == Some("25")
         }));
         drop(rebuilt);
         let rebuilt = Project::open(&output, true).unwrap();

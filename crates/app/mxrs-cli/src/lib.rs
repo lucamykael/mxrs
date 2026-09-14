@@ -23,6 +23,11 @@
 //! the same purpose (`bin/mxrb`'s own command is named `inspect`; renamed
 //! `units` here since `mxrs inspect` already means the structural summary
 //! above, a more useful default for that name). See `browse`'s module doc.
+//!
+//! **`portability`** keeps lossless storage and typed authoring as separate
+//! claims. It inventories every native unit type, counts the declarations
+//! proved reproducible by the Rust exporter, and names the units that still
+//! need `model/imported` for exact preservation.
 
 //! **Artifact scaffolding** (`entity`/`enumeration`/`use-case`/`page`/
 //! `nanoflow`/`published-rest`/`consumed-rest`/`java-action`/`security`/

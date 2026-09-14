@@ -185,6 +185,46 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
     Ok(())
 }
 
+/// Applies only enumeration and constant declarations to an imported model.
+///
+/// This narrow entry point is used by the portability verifier: it proves
+/// document-family round trips without rewriting unrelated domain, security,
+/// navigation, page, or flow units. Modules must already exist because this
+/// operation verifies an import rather than scaffolding new application
+/// structure.
+pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()> {
+    let mut mpr = MprFile::open(path, false)?;
+    let root_id = mpr
+        .root_unit()?
+        .ok_or(WriterError::MissingRootUnit)?
+        .unit_id;
+    let identity = ProjectIdentity::from_project_root(&root_id)?;
+    let existing_modules_by_name = existing_module_ids_by_name(&mpr, &root_id)?;
+    for declaration in &project.modules {
+        if declaration.enumerations.is_empty() && declaration.constants.is_empty() {
+            continue;
+        }
+        let module_id = existing_modules_by_name
+            .get(&declaration.name)
+            .ok_or_else(|| WriterError::MissingModuleUnit(declaration.name.clone()))?;
+        documents::synchronize_enumerations_with_identity(
+            &mut mpr,
+            module_id,
+            &declaration.name,
+            &declaration.enumerations,
+            identity,
+        )?;
+        documents::synchronize_constants_with_identity(
+            &mut mpr,
+            module_id,
+            &declaration.name,
+            &declaration.constants,
+            identity,
+        )?;
+    }
+    Ok(())
+}
+
 fn known_entities(project: &ProjectDecl) -> HashSet<String> {
     project
         .modules

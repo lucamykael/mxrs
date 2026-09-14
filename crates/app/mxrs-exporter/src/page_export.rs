@@ -81,7 +81,14 @@ pub struct ConvertedPage {
     pub module_name: String,
     pub function_name: String,
     pub decl: PageDecl,
+    source_type: String,
     flow_return_entities: HashMap<String, String>,
+}
+
+impl ConvertedPage {
+    pub(crate) fn source_type(&self) -> &str {
+        &self.source_type
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +200,11 @@ pub fn convert_pages_for_version(
                     pages.push(ConvertedPage {
                         module_name: module_name.clone(),
                         function_name: to_snake_case(&decl.name),
+                        source_type: page
+                            .raw_document()
+                            .get_str("$Type")
+                            .unwrap_or("Forms$Page")
+                            .to_string(),
                         flow_return_entities: context
                             .flows
                             .iter()
@@ -1903,6 +1915,7 @@ mod tests {
         let source = render_page_function(&ConvertedPage {
             module_name: "Sales".into(),
             function_name: "order_edit".into(),
+            source_type: "Forms$Page".into(),
             decl,
             flow_return_entities: HashMap::new(),
         });
@@ -1940,6 +1953,7 @@ mod tests {
         let source = render_page_function(&ConvertedPage {
             module_name: "Sales".into(),
             function_name: "order_form".into(),
+            source_type: "Forms$Page".into(),
             decl,
             flow_return_entities: HashMap::new(),
         });
@@ -2033,6 +2047,7 @@ mod tests {
         let converted = ConvertedPage {
             module_name: "Sales".into(),
             function_name: "order_detail".into(),
+            source_type: "Forms$Page".into(),
             flow_return_entities: HashMap::from([(
                 "Sales.ACT_GetOrder".into(),
                 "Sales.Order".into(),
@@ -2084,6 +2099,7 @@ mod tests {
         let source = render_page_function(&ConvertedPage {
             module_name: "Sales".into(),
             function_name: "order_edit".into(),
+            source_type: "Forms$Page".into(),
             flow_return_entities: HashMap::new(),
             decl,
         });

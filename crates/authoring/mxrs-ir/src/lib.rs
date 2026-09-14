@@ -15,8 +15,8 @@ pub mod markers;
 pub mod page;
 
 pub use application::{
-    ModuleRoleDecl, NavigationDecl, NavigationItemDecl, NavigationProfileDecl, PasswordPolicyDecl,
-    ProjectSecurityDecl, RoleHomeDecl, SecurityLevel, UserRoleDecl,
+    ModuleRoleDecl, NavigationDecl, NavigationIconDecl, NavigationItemDecl, NavigationProfileDecl,
+    PasswordPolicyDecl, ProjectSecurityDecl, RoleHomeDecl, SecurityLevel, UserRoleDecl,
 };
 pub use declaration::{
     AccessMemberKind, AccessRuleDecl, AssociationDecl, AssociationOwner, AssociationStorage,

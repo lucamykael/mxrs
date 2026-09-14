@@ -63,6 +63,11 @@ fn command_options(
     match name {
         "callees" | "callers" | "compare" | "describe" | "impact" | "inspect" | "lint" | "refs"
         | "preflight" | "report" | "tree" | "validate" => (&[], &["--json"], &[]),
+        "portability" => (
+            &[],
+            &["--json", "--require-typed", "--verify-round-trip"],
+            &[],
+        ),
         "cache" => (&[], &["--json"], &[]),
         "db" => (&["--port"], &["--json"], &[]),
         "doctor" => (&[], &["--json"], &[]),
@@ -150,6 +155,7 @@ commands! {
     "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
     "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
+    "portability", "<file.mpr> [--json] [--verify-round-trip] [--require-typed]", "Audit typed authoring versus lossless model preservation", run_portability;
     "page", "new <Module.Page> [--template NAME] [--chain CHAIN] [--role Module.Role] [--target DIR] [--dry-run] [--json] | templates [--json]", "Scaffold a page declaration, a page-led vertical slice, or list page templates", run_page;
     "preflight", "<file.mpr> [--json]", "Audit native compiler and runtime compatibility", run_preflight;
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
@@ -858,6 +864,104 @@ fn run_preflight(mut args: Vec<String>) -> ExitCode {
             eprintln!("[mxrs] error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn run_portability(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let require_typed = take_flag(&mut args, "--require-typed");
+    let verify_round_trip = take_flag(&mut args, "--verify-round-trip");
+    let [path] = args.as_slice() else {
+        eprintln!(
+            "Usage: mxrs portability <file.mpr> [--json] [--verify-round-trip] [--require-typed]"
+        );
+        return ExitCode::FAILURE;
+    };
+    let report = match mxrs_exporter::audit_portability(path) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let verification = if verify_round_trip {
+        match mxrs_exporter::verify_editable_document_round_trip(path) {
+            Ok(verification) => Some(verification),
+            Err(error) => {
+                eprintln!("[mxrs] error: round-trip verification failed: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+    if json {
+        let output = match &verification {
+            Some(verification) => serde_json::json!({
+                "portability": report,
+                "round_trip": verification,
+            }),
+            None => serde_json::to_value(&report).expect("portability report is serializable"),
+        };
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    } else {
+        println!("Project       : {}", report.path.display());
+        println!(
+            "Version       : {}",
+            report.mendix_version.as_deref().unwrap_or("")
+        );
+        println!(
+            "Model lossless: {}",
+            if report.model_lossless { "yes" } else { "no" }
+        );
+        println!(
+            "Fully typed   : {}",
+            if report.fully_typed { "yes" } else { "no" }
+        );
+        println!(
+            "Units         : {} typed, {} partial, {} preserved ({} total)",
+            report.summary.typed_units,
+            report.summary.partial_units,
+            report.summary.preserved_units,
+            report.summary.total_units
+        );
+        println!(
+            "Typed export gaps: {}",
+            report.summary.typed_round_trip_gaps
+        );
+        println!();
+        println!("STATUS\tTYPED\tPARTIAL\tPRESERVED\tTYPE");
+        for family in &report.families {
+            println!(
+                "{:?}\t{}\t{}\t{}\t{}",
+                family.status, family.typed, family.partial, family.preserved, family.native_type
+            );
+        }
+        if let Some(verification) = &verification {
+            println!();
+            println!(
+                "Round trip    : {} of {} editable document(s) byte-identical",
+                verification.byte_identical_units, verification.candidate_units
+            );
+            for failure in &verification.failures {
+                println!("[FAIL] {failure}");
+            }
+        }
+    }
+    if verification
+        .as_ref()
+        .is_some_and(|verification| !verification.passed)
+    {
+        eprintln!("[mxrs] error: editable document round trip is not lossless");
+        ExitCode::FAILURE
+    } else if require_typed && !report.fully_typed {
+        eprintln!(
+            "[mxrs] error: {} partial and {} preserved unit(s) still require model/imported",
+            report.summary.partial_units, report.summary.preserved_units
+        );
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

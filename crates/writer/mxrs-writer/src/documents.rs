@@ -21,10 +21,10 @@
 //! principle already used for attribute/association reconciliation in
 //! `domain.rs`).
 //!
-//! Deliberately doesn't look inside `Folders` containers (mirrors
-//! `collect_documents`'s recursion in mxrb): mxrs-writer itself never
-//! creates folders, so every `Documents` unit it's responsible for is a
-//! direct child of the module.
+//! Imported enumerations and constants may live under arbitrarily nested
+//! `Projects$Folder` units. Their lookup therefore walks the containment
+//! tree and preserves the original unit ID and container when applying an
+//! editable declaration.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -310,19 +310,10 @@ pub(crate) fn synchronize_enumerations_with_identity(
     enumerations: &[EnumerationDecl],
     identity: ProjectIdentity,
 ) -> Result<()> {
-    let existing_by_name: HashMap<String, (String, Document)> = mpr
-        .children_of(module_id)?
-        .into_iter()
-        .filter(|unit| unit.containment_name == "Documents")
-        .filter_map(|unit| {
-            let document = mpr.parse_contents(&unit).ok()?;
-            if document.get_str("$Type").ok()? != "Enumerations$Enumeration" {
-                return None;
-            }
-            let name = document.get_str("Name").ok()?.to_string();
-            Some((name, (unit.unit_id, document)))
-        })
-        .collect();
+    if enumerations.is_empty() {
+        return Ok(());
+    }
+    let existing_by_name = existing_documents_by_name(mpr, module_id, "Enumerations$Enumeration")?;
 
     for declaration in enumerations {
         let qualified_name = format!("{module_name}.{}", declaration.name);
@@ -380,17 +371,10 @@ fn enumeration_document(
             value_document.insert("$ID", value_id);
             value_document.insert("$Type", "Enumerations$EnumerationValue");
             value_document.insert("Name", value.name.clone());
-            value_document.insert(
-                "Image",
-                value_document.get_str("Image").unwrap_or("").to_string(),
-            );
-            value_document.insert(
-                "ExportLevel",
-                value_document
-                    .get_str("ExportLevel")
-                    .unwrap_or("Hidden")
-                    .to_string(),
-            );
+            if previous.is_none() {
+                value_document.insert("Image", "");
+                value_document.insert("ExportLevel", "Hidden");
+            }
             value_document.insert(
                 "Caption",
                 caption_document(value, &value_key, previous, identity),
@@ -404,14 +388,10 @@ fn enumeration_document(
     document.insert("$Type", "Enumerations$Enumeration");
     document.insert("Name", declaration.name.clone());
     document.insert("Documentation", declaration.documentation.clone());
-    document.insert("Excluded", document.get_bool("Excluded").unwrap_or(false));
-    document.insert(
-        "ExportLevel",
-        document
-            .get_str("ExportLevel")
-            .unwrap_or("Hidden")
-            .to_string(),
-    );
+    if existing.is_none() {
+        document.insert("Excluded", false);
+        document.insert("ExportLevel", "Hidden");
+    }
     document.insert("Values", build_array(values, existing_values.marker));
     document
 }
@@ -450,19 +430,19 @@ fn caption_document(
                 .unwrap_or_else(|| {
                     identity.artifact_id(ArtifactKind::Translation, &translation_key)
                 });
-            Bson::Document(doc! {
-                "$ID": translation_id,
-                "$Type": "Texts$Translation",
-                "LanguageCode": language.clone(),
-                "Text": text.clone(),
-            })
+            let mut translation = previous.cloned().unwrap_or_default();
+            translation.insert("$ID", translation_id);
+            translation.insert("$Type", "Texts$Translation");
+            translation.insert("LanguageCode", language.clone());
+            translation.insert("Text", text.clone());
+            Bson::Document(translation)
         })
         .collect();
-    doc! {
-        "$ID": caption_id,
-        "$Type": "Texts$Text",
-        "Items": build_array(translations, previous_items.marker),
-    }
+    let mut caption = previous.cloned().unwrap_or_default();
+    caption.insert("$ID", caption_id);
+    caption.insert("$Type", "Texts$Text");
+    caption.insert("Items", build_array(translations, previous_items.marker));
+    caption
 }
 
 /// Indexes a module's existing `Documents` units of one `$Type` by `Name`.
@@ -475,19 +455,28 @@ fn existing_documents_by_name(
     module_id: &str,
     document_type: &str,
 ) -> Result<HashMap<String, (String, Document)>> {
-    Ok(mpr
-        .children_of(module_id)?
-        .into_iter()
-        .filter(|unit| unit.containment_name == "Documents")
-        .filter_map(|unit| {
-            let document = mpr.parse_contents(&unit).ok()?;
-            if document.get_str("$Type").ok()? != document_type {
-                return None;
+    let mut documents = HashMap::new();
+    let mut pending = vec![module_id.to_string()];
+    let mut visited = HashSet::new();
+    while let Some(parent) = pending.pop() {
+        for unit in mpr.children_of(&parent)? {
+            if !visited.insert(unit.unit_id.clone()) {
+                continue;
             }
-            let name = document.get_str("Name").ok()?.to_string();
-            Some((name, (unit.unit_id, document)))
-        })
-        .collect())
+            pending.push(unit.unit_id.clone());
+            if unit.containment_name != "Documents" {
+                continue;
+            }
+            let document = mpr.parse_contents(&unit)?;
+            if document.get_str("$Type").ok() != Some(document_type) {
+                continue;
+            }
+            if let Ok(name) = document.get_str("Name") {
+                documents.insert(name.to_string(), (unit.unit_id, document));
+            }
+        }
+    }
+    Ok(documents)
 }
 
 /// Upserts `Constants$Constant` documents, mirroring `Writer#constant_doc`.
@@ -501,6 +490,9 @@ pub(crate) fn synchronize_constants_with_identity(
     constants: &[ConstantDecl],
     identity: ProjectIdentity,
 ) -> Result<()> {
+    if constants.is_empty() {
+        return Ok(());
+    }
     let existing_by_name = existing_documents_by_name(mpr, module_id, "Constants$Constant")?;
     let mut declared = HashSet::new();
     for declaration in constants {
@@ -553,23 +545,21 @@ fn constant_document(
     document.insert("$Type", "Constants$Constant");
     document.insert("Name", declaration.name.clone());
     document.insert("Documentation", declaration.documentation.clone());
-    document.insert("Excluded", document.get_bool("Excluded").unwrap_or(false));
-    document.insert(
-        "ExportLevel",
-        document
-            .get_str("ExportLevel")
-            .unwrap_or("Hidden")
-            .to_string(),
-    );
+    if existing.is_none() {
+        document.insert("Excluded", false);
+        document.insert("ExportLevel", "Hidden");
+    }
     document.insert("ExposedToClient", declaration.exposed_to_client);
-    document.insert(
-        "Type",
-        doc! {
-            "$ID": type_id,
-            "$Type": constant_type_name(declaration.constant_type),
-        },
-    );
-    document.insert("DefaultValue", declaration.value.clone());
+    let mut type_document = existing
+        .and_then(|document| document.get_document("Type").ok())
+        .cloned()
+        .unwrap_or_default();
+    type_document.insert("$ID", type_id);
+    type_document.insert("$Type", constant_type_name(declaration.constant_type));
+    document.insert("Type", type_document);
+    if let Some(value) = &declaration.value {
+        document.insert("DefaultValue", value.clone());
+    }
     document
 }
 

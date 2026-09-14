@@ -149,7 +149,7 @@ pub(crate) fn synchronize_project_security(
     document.insert("$ID", unit_id.clone());
     document.insert("$Type", "Security$ProjectSecurity");
     document.insert("SecurityLevel", security_level(declaration.level));
-    document.insert("CheckSecurity", true);
+    document.insert("CheckSecurity", declaration.check_security);
     document.insert("AdminUserName", "MxAdmin");
     document.insert("AdminPassword", "1");
     document.insert("AdminUserRole", declaration.admin_user_role.clone());
@@ -243,7 +243,11 @@ fn validate_project_security(mpr: &MprFile, declaration: &ProjectSecurityDecl) -
 
 fn demo_user_roles(mpr: &MprFile) -> Result<HashSet<String>> {
     let mut roles = HashSet::new();
-    for unit in mpr.all_units()? {
+    let root_id = mpr
+        .root_unit()?
+        .ok_or(WriterError::MissingRootUnit)?
+        .unit_id;
+    for unit in mpr.children_of(&root_id)? {
         let document = mpr.parse_contents(&unit)?;
         if document.get_str("$Type").ok() != Some("Security$ProjectSecurity") {
             continue;

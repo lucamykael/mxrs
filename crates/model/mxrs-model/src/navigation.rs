@@ -26,8 +26,14 @@ pub struct NavigationItem {
     pub caption: std::collections::BTreeMap<String, String>,
     pub page: Option<String>,
     pub microflow: Option<String>,
-    pub icon: Option<String>,
+    pub icon: Option<NavigationIcon>,
     pub items: Vec<NavigationItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavigationIcon {
+    Glyph(String),
+    Code(i64),
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +153,12 @@ fn navigation_item(doc: &Document) -> NavigationItem {
         page: get_doc_any(&action, &["FormSettings"]).and_then(|s| reference(&s, &["Form"])),
         microflow: get_doc_any(&action, &["MicroflowSettings"])
             .and_then(|s| reference(&s, &["Microflow"])),
-        icon: get_doc_any(doc, &["Icon"]).and_then(|i| get_str_any(&i, &["Code"])),
+        icon: get_doc_any(doc, &["Icon"]).and_then(|icon| match icon.get("Code") {
+            Some(mxrs_bson::Bson::String(value)) => Some(NavigationIcon::Glyph(value.clone())),
+            Some(mxrs_bson::Bson::Int32(value)) => Some(NavigationIcon::Code(i64::from(*value))),
+            Some(mxrs_bson::Bson::Int64(value)) => Some(NavigationIcon::Code(*value)),
+            _ => None,
+        }),
         items: docs_any(doc, &["Items"])
             .iter()
             .map(navigation_item)
@@ -185,5 +196,29 @@ mod tests {
         };
         let nav = Navigation::from_bson(Some(&raw));
         assert_eq!(nav.profiles[0].home_page.as_deref(), Some(page_id.as_str()));
+    }
+
+    #[test]
+    fn decodes_string_and_numeric_navigation_icons_without_collapsing_them() {
+        let raw = doc! {
+            "Profiles": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(doc! {
+                "Name": "Responsive",
+                "Menu": {
+                    "Items": mxrs_bson::build_array(vec![
+                        mxrs_bson::Bson::Document(doc! { "Icon": { "Code": "cart" } }),
+                        mxrs_bson::Bson::Document(doc! { "Icon": { "Code": 57369i64 } }),
+                    ], 2),
+                },
+            })], 3),
+        };
+        let nav = Navigation::from_bson(Some(&raw));
+        assert_eq!(
+            nav.profiles[0].menu_items[0].icon,
+            Some(NavigationIcon::Glyph("cart".to_string()))
+        );
+        assert_eq!(
+            nav.profiles[0].menu_items[1].icon,
+            Some(NavigationIcon::Code(57369))
+        );
     }
 }

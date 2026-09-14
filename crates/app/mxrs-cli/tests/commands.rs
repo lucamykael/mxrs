@@ -98,6 +98,7 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
         "report",
         "db",
         "team-server",
+        "portability",
     ] {
         assert!(names.contains(required));
     }
@@ -439,6 +440,42 @@ fn preflight_audits_a_real_mpr_and_has_machine_readable_inventory() {
     assert_eq!(report["mendix_version"], "11.12.1");
     assert!(report["stats"]["units"].as_u64().unwrap() > 0);
     assert!(!cli(&["preflight", "/missing.mpr"]).status.success());
+}
+
+#[test]
+fn portability_separates_exact_storage_from_typed_authoring_and_verifies_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("Portable.mpr");
+    let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+    builder.module("Sales", |module| {
+        module.enumeration("Status", |enumeration| {
+            enumeration.value("Open").captions = vec![("en_US".to_string(), "Open".to_string())];
+        });
+        module.constant("Limit", |constant| {
+            constant
+                .value_type(mxrs_ir::ConstantType::Integer)
+                .value("10");
+        });
+    });
+    mxrs_writer::write_project(&path, &builder.build()).unwrap();
+
+    let output = query("portability", &path, &["--verify-round-trip", "--json"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["portability"]["model_lossless"], true);
+    assert_eq!(report["portability"]["fully_typed"], false);
+    assert_eq!(report["round_trip"]["candidate_units"], 2);
+    assert_eq!(report["round_trip"]["byte_identical_units"], 2);
+    assert_eq!(report["round_trip"]["passed"], true);
+
+    let strict = query("portability", &path, &["--require-typed"]);
+    assert!(!strict.status.success());
+    assert!(
+        String::from_utf8(strict.stderr)
+            .unwrap()
+            .contains("still require model/imported")
+    );
+    assert!(!cli(&["portability", "/missing.mpr"]).status.success());
 }
 
 #[test]

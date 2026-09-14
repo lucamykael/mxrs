@@ -260,6 +260,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs preflight",
             "read-only MPR, page/layout, flow/code-action and nanoflow compatibility audit; private-corpus and CLI oracles remain incomplete",
         ),
+        "portability" => (
+            Status::Partial,
+            "mxrs portability",
+            "per-unit typed/partial/preserved inventory, fail-closed --require-typed gate, and byte-exact editable-document round-trip verification; not every native family has typed authoring yet",
+        ),
         "repository" => (
             Status::Partial,
             "mxrs repository new",
