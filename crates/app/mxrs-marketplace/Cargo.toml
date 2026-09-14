@@ -11,6 +11,12 @@ description = "Client for the official Mendix Marketplace Content API: search pu
 workspace = true
 
 [dependencies]
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
+# A .mpk is a zip holding an .mpr plus assets, and package.xml is namespaced
+# XML. Neither is safe to parse by hand; both dependencies are confined to
+# `package`.
+quick-xml = "0.38"
 serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
@@ -18,6 +24,12 @@ thiserror.workspace = true
 # module: nothing else here needs the network, and `Transport` keeps the API
 # logic testable without it.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+tempfile = "3.27.0"
 
 [dev-dependencies]
-tempfile = "3.27.0"
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
+zip = { version = "2", default-features = false, features = ["deflate"] }

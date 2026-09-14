@@ -287,11 +287,52 @@ Credential handling is the part worth stating explicitly:
   by the API layer, one hop at a time, re-checking the host each time, because
   both the initial `downloadUrl` and every `Location` are server-controlled.
 
-Not covered: installing a downloaded package into an `.mpr`. Unpacking the
-`.mpk`, merging its units, resolving the dependency graph, writing a lockfile
-and rolling back is what MXRB spreads across four files, and none of it is
-here. `module add` therefore remains unported, and `marketplace` is not
-verified: nothing compares its command contract against MXRB's execution.
+### Installing a package
+
+`mxrs marketplace install <package.mpk> <file.mpr>` imports a module package
+into an existing project. Like the refactoring commands it previews by default
+and writes only under `--apply`.
+
+What is proven: the genuine Community Commons `.mpk` — downloaded from the
+live Marketplace — installs into a project built by `cargo mxrs build`,
+placing 128 model units and 124 declared files, after which the project still
+reads back and lists the new module. The refusals and the rollback are covered
+by tests that build their own packages, so they need no network.
+
+Two writes happen at once and have to agree: model units go into the `.mpr`
+inside an `mxrs-mpr` transaction, and declared assets go onto the filesystem
+beside it with a backup of anything they replace. If the assets fail, the
+transaction has already rolled the units back and the backups are restored; a
+test asserts the restore by making the second asset's destination a directory
+after the first has been written.
+
+Refusals, all mirroring MXRB:
+
+- A module already present in the target, or a unit ID that collides with one,
+  is refused — installing over either would silently replace an unrelated
+  document.
+- A model-version difference is refused unless `--allow-model-upgrade` is
+  passed, and even then only forward: nothing here migrates a model. The real
+  Community Commons package targets Mendix 10.24.0 and hits exactly this when
+  installed into an 11.12.1 project.
+- A manifest declaring a different version from the model it ships is refused
+  as an inconsistent package.
+- Declared paths that are absolute, contain `..`, or point into `.git`,
+  `.mxrs`, `.mxrb`, `mprcontents` or a nested `.mpr` are refused. A package is
+  a file from the internet; its paths are untrusted input.
+
+Not covered: MXRB additionally resolves a dependency graph before installing
+and can uninstall, neither of which is here, so `module add` stays unported.
+`marketplace` is not verified either: nothing compares its command contract
+against MXRB's execution.
+
+One behaviour worth recording because it is invisible until it bites: a
+Mendix v2 `.mpr` keeps unit contents in a sibling `mprcontents/` directory,
+nested two levels deep. Published packages embed a self-contained v1 project,
+but a v2 package would be unopenable without that sidecar, so the extractor
+carries it along — implicitly, as part of the project. It is still refused as
+a *declared* asset path, because shipping a project's storage as an
+installable file would let a package overwrite the target's own units.
 
 ## Marketplace
 
@@ -324,8 +365,49 @@ Credential handling is the part worth stating explicitly:
   by the API layer, one hop at a time, re-checking the host each time, because
   both the initial `downloadUrl` and every `Location` are server-controlled.
 
-Not covered: installing a downloaded package into an `.mpr`. Unpacking the
-`.mpk`, merging its units, resolving the dependency graph, writing a lockfile
-and rolling back is what MXRB spreads across four files, and none of it is
-here. `module add` therefore remains unported, and `marketplace` is not
-verified: nothing compares its command contract against MXRB's execution.
+### Installing a package
+
+`mxrs marketplace install <package.mpk> <file.mpr>` imports a module package
+into an existing project. Like the refactoring commands it previews by default
+and writes only under `--apply`.
+
+What is proven: the genuine Community Commons `.mpk` — downloaded from the
+live Marketplace — installs into a project built by `cargo mxrs build`,
+placing 128 model units and 124 declared files, after which the project still
+reads back and lists the new module. The refusals and the rollback are covered
+by tests that build their own packages, so they need no network.
+
+Two writes happen at once and have to agree: model units go into the `.mpr`
+inside an `mxrs-mpr` transaction, and declared assets go onto the filesystem
+beside it with a backup of anything they replace. If the assets fail, the
+transaction has already rolled the units back and the backups are restored; a
+test asserts the restore by making the second asset's destination a directory
+after the first has been written.
+
+Refusals, all mirroring MXRB:
+
+- A module already present in the target, or a unit ID that collides with one,
+  is refused — installing over either would silently replace an unrelated
+  document.
+- A model-version difference is refused unless `--allow-model-upgrade` is
+  passed, and even then only forward: nothing here migrates a model. The real
+  Community Commons package targets Mendix 10.24.0 and hits exactly this when
+  installed into an 11.12.1 project.
+- A manifest declaring a different version from the model it ships is refused
+  as an inconsistent package.
+- Declared paths that are absolute, contain `..`, or point into `.git`,
+  `.mxrs`, `.mxrb`, `mprcontents` or a nested `.mpr` are refused. A package is
+  a file from the internet; its paths are untrusted input.
+
+Not covered: MXRB additionally resolves a dependency graph before installing
+and can uninstall, neither of which is here, so `module add` stays unported.
+`marketplace` is not verified either: nothing compares its command contract
+against MXRB's execution.
+
+One behaviour worth recording because it is invisible until it bites: a
+Mendix v2 `.mpr` keeps unit contents in a sibling `mprcontents/` directory,
+nested two levels deep. Published packages embed a self-contained v1 project,
+but a v2 package would be unopenable without that sidecar, so the extractor
+carries it along — implicitly, as part of the project. It is still refused as
+a *declared* asset path, because shipping a project's storage as an
+installable file would let a package overwrite the target's own units.

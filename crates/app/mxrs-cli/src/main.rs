@@ -87,8 +87,15 @@ fn command_options(
         "scaffold" => (&["--target"], &[], &[]),
         "rename" | "remove" | "move" => (&[], &["--apply", "--json"], &[]),
         "marketplace" => (
-            &["--version", "--mendix-version", "--output", "-o", "--limit"],
-            &["--json"],
+            &[
+                "--version",
+                "--mendix-version",
+                "--output",
+                "-o",
+                "--limit",
+                "--target-root",
+            ],
+            &["--json", "--apply", "--allow-model-upgrade"],
             &[],
         ),
         "project" => (&[], &["--json"], &[]),
@@ -123,7 +130,7 @@ commands! {
     "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
     "module", "new <Module> [--target DIR] [--dry-run] [--json]", "Scaffold an editable module declaration layer", run_module;
-    "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json]", "Search and download official Marketplace content", run_marketplace;
+    "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json] | install <package.mpk> <file.mpr> [--target-root DIR] [--allow-model-upgrade] [--apply] [--json]", "Search, download, or install official Marketplace content", run_marketplace;
     "modules", "<file.mpr>", "List module names", run_modules;
     "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a same-module unit move", run_move;
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;

@@ -628,6 +628,22 @@ fn marketplace_rejects_unknown_subcommands_and_wrong_arity_before_touching_crede
 }
 
 #[test]
+fn marketplace_install_needs_no_credential_and_previews_before_writing() {
+    // `install` works on a local .mpk, so unlike the other subcommands it must
+    // not demand a token. It still has to fail cleanly on missing inputs.
+    let output = marketplace(&[
+        "marketplace",
+        "install",
+        "/nonexistent.mpk",
+        "/nonexistent.mpr",
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("package not found"), "{stderr}");
+    assert!(!stderr.contains("no Mendix credential"), "{stderr}");
+}
+
+#[test]
 fn marketplace_is_discoverable_and_its_options_are_validated() {
     let listed = text(&cli(&["--commands"]));
     assert!(listed.contains("marketplace"), "{listed}");

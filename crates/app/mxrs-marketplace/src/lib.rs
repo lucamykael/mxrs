@@ -22,10 +22,14 @@ use std::path::Path;
 use serde::Deserialize;
 
 pub mod credentials;
+pub mod installer;
+pub mod package;
 mod transport;
 pub mod ureq_transport;
 
 pub use credentials::{Credentials, Pat};
+pub use installer::{InstallPlan, InstallReport, plan_install};
+pub use package::{ModulePackage, PackageDescriptor};
 pub use transport::{Download, Transport};
 
 const BASE_URL: &str = "https://marketplace-api.mendix.com/v1";
@@ -148,6 +152,75 @@ pub enum MarketplaceError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("package not found: {0}")]
+    PackageNotFound(String),
+
+    #[error("target .mpr not found: {0}")]
+    TargetNotFound(String),
+
+    #[error("target .mpr has no root unit")]
+    TargetHasNoRoot,
+
+    #[error("invalid Mendix module package {path}: {message}")]
+    InvalidPackage { path: String, message: String },
+
+    #[error("invalid module manifest: {message}")]
+    InvalidManifest { message: String },
+
+    #[error("unsupported Marketplace package type {0:?}; only modules can be installed")]
+    UnsupportedPackageType(String),
+
+    #[error("invalid module name in package: {0:?}")]
+    InvalidModuleName(String),
+
+    #[error("unsafe package path {0:?}: it would write outside the project")]
+    UnsafePackagePath(String),
+
+    #[error("protected package path {0:?}: a package may not write there")]
+    ProtectedPackagePath(String),
+
+    #[error("declared package file is missing from {path}: {file}")]
+    MissingPackageFile { path: String, file: String },
+
+    #[error("module {0:?} is absent from the package's own project")]
+    ModuleAbsentFromPackage(String),
+
+    #[error("module {0} is already installed in the target project")]
+    ModuleAlreadyInstalled(String),
+
+    #[error(
+        "unit {0} already exists in the target project; installing would replace an unrelated document"
+    )]
+    UnitIdCollision(String),
+
+    #[error(
+        "module manifest declares Mendix {declared} but its model is {actual}; the package is inconsistent"
+    )]
+    ManifestVersionMismatch { declared: String, actual: String },
+
+    // Fields are `package`/`project` rather than `source`/`target`: thiserror
+    // treats a field named `source` as the error cause.
+    #[error(
+        "module targets Mendix {package} and the project is {project}; this import performs no model migration (pass --allow-model-upgrade to import forward)"
+    )]
+    ModelVersionMismatch { package: String, project: String },
+
+    #[error("asset destination is a symbolic link: {0}")]
+    AssetIsSymlink(String),
+
+    #[error("asset destination is a directory: {0}")]
+    AssetIsDirectory(String),
+
+    #[error("cannot access {path}: {source}")]
+    PackageIo {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("MPR error: {0}")]
+    Mpr(#[from] mxrs_mpr::MprError),
 }
 
 pub type Result<T> = std::result::Result<T, MarketplaceError>;

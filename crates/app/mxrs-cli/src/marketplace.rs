@@ -6,19 +6,22 @@
 //! from a command-line argument: an argument lands in shell history and in
 //! every process listing on the machine.
 //!
-//! Installing a downloaded package into an `.mpr` is not here — see
-//! `mxrs-marketplace`'s crate doc for the boundary.
+//! `install` needs no credential: it works on a `.mpk` already on disk, so a
+//! package obtained any way at all can be installed. Like the refactoring
+//! commands it previews by default and writes only under `--apply`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use mxrs_marketplace::{
-    ContentApi, Credentials, MarketplaceError, Package, SearchQuery, ureq_transport::UreqTransport,
+    ContentApi, Credentials, MarketplaceError, Package, SearchQuery, plan_install,
+    ureq_transport::UreqTransport,
 };
 
 use crate::arguments::{take_flag, take_value};
 
-pub const USAGE: &str = "usage: mxrs marketplace <search|show|versions|download> [arguments]";
+pub const USAGE: &str =
+    "usage: mxrs marketplace <search|show|versions|download|install> [arguments]";
 
 pub fn run(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
@@ -26,6 +29,9 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
     let mendix_version = take_value(&mut args, "--mendix-version");
     let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
     let limit = take_value(&mut args, "--limit");
+    let apply = take_flag(&mut args, "--apply");
+    let allow_model_upgrade = take_flag(&mut args, "--allow-model-upgrade");
+    let target_root = take_value(&mut args, "--target-root");
 
     let Some((action, rest)) = args.split_first() else {
         eprintln!("[mxrs] error: {USAGE}");
@@ -41,6 +47,14 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
             version.as_deref(),
             mendix_version.as_deref(),
             output.as_deref(),
+            json,
+        ),
+        ("install", [package, mpr]) => install(
+            Path::new(package),
+            Path::new(mpr),
+            target_root.as_deref().map(Path::new),
+            allow_model_upgrade,
+            apply,
             json,
         ),
         _ => {
@@ -197,6 +211,63 @@ fn download(
             package.name(),
             package.version.version_number,
             destination.display()
+        );
+    }
+    Ok(())
+}
+
+fn install(
+    package: &Path,
+    mpr: &Path,
+    target_root: Option<&Path>,
+    allow_model_upgrade: bool,
+    apply: bool,
+    json: bool,
+) -> Result<(), MarketplaceError> {
+    let plan = plan_install(package, mpr, target_root, allow_model_upgrade)?;
+    let module_name = plan.module_name.clone();
+    let units = plan.units.len();
+    let files = plan.files.clone();
+    let overwrites = plan.overwrites();
+    let (source_version, target_version) =
+        (plan.source_version.clone(), plan.target_version.clone());
+    let report = if apply { Some(plan.apply()?) } else { None };
+
+    if json {
+        print_json(&serde_json::json!({
+            "module": module_name,
+            "applied": report.is_some(),
+            "units": units,
+            "sourceVersion": source_version,
+            "targetVersion": target_version,
+            "overwrites": overwrites,
+            "files": files
+                .iter()
+                .map(|(path, exists)| serde_json::json!({ "path": path, "overwrites": exists }))
+                .collect::<Vec<_>>(),
+        }));
+    } else {
+        println!("Module        : {module_name}");
+        println!(
+            "Model version : {} -> {}",
+            source_version.as_deref().unwrap_or("-"),
+            target_version.as_deref().unwrap_or("-")
+        );
+        println!("Model units   : {units}");
+        println!(
+            "Files         : {} ({overwrites} would be replaced)",
+            files.len()
+        );
+        for (path, exists) in &files {
+            println!("  {}  {path}", if *exists { "replace" } else { "create " });
+        }
+        println!(
+            "[mxrs] {}",
+            if report.is_some() {
+                "Installed"
+            } else {
+                "Install preview"
+            }
         );
     }
     Ok(())
