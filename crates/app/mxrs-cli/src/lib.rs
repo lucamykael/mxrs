@@ -30,15 +30,19 @@
 //! declaration source into a project rather than touching an `.mpr`. See
 //! `scaffold`'s module doc for the contract kept and `mxrs-scaffold`'s
 //! `artifact` module for what necessarily differs between generating Ruby that
-//! is evaluated at run time and Rust that has to compile. mxrb's `constant`
-//! and `scheduled-event` generators have no counterpart here: `mxrs-ir` has no
-//! constant or scheduled-event declaration, so their templates could only
-//! produce source that does not build.
+//! is evaluated at run time and Rust that has to compile.
+//!
+//! **Semantic refactoring** (`rename`/`remove`/`move`) ports mxrb's commands
+//! of the same names. Unlike the generators these mutate an `.mpr` directly,
+//! so they preview by default and write only under `--apply` — see
+//! `refactor`'s module doc and `mxrs-refactor`'s crate doc for what a rename
+//! can and cannot see.
 
 pub mod arguments;
 pub mod browse;
 pub mod cargo_project;
 pub mod compare;
 pub mod inspect;
+pub mod refactor;
 pub mod scaffold;
 pub mod validate;

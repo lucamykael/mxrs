@@ -325,6 +325,24 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs validate",
             "storage validation; scope differs",
         ),
+        // Semantic refactoring. All three preview by default and mutate only
+        // under `--apply`, like MXRB's own; none has a command-contract
+        // oracle, so none is verified.
+        "rename" => (
+            Status::Partial,
+            "mxrs rename",
+            "model-wide rename with a per-string preview; substitution-based like MXRB's, so it cannot see references in document types nobody models",
+        ),
+        "remove" => (
+            Status::Partial,
+            "mxrs remove",
+            "reference-checked removal, blocked by incoming references or child units as MXRB blocks it; modules/entities/attributes/associations refused as typed domain-model mutations",
+        ),
+        "move" => (
+            Status::Partial,
+            "mxrs move",
+            "same-module unit relocation; MXRB additionally composes a cross-module move out of move+rename, which this refuses rather than half-performs",
+        ),
         _ => (Status::Missing, "—", "no equivalent surface implemented"),
     }
 }
@@ -352,11 +370,16 @@ pub fn print_table(report: &Report) {
 mod tests {
     use super::*;
 
+    /// Stands in for "a command with no mxrs surface". Deliberately not a
+    /// real MXRB command: naming one here couples these tests to that
+    /// command's status, and they broke the day `rename` was implemented.
+    const UNIMPLEMENTED: &str = "notacommand";
+
     #[test]
     fn parses_and_classifies_command_inventory_without_counting_headers() {
-        let report = build(
-            "Available MXRB commands (3):\n\n  compare  Compare projects\n  validate  Validate project\n  rename  Rename artifact\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
-        )
+        let report = build(&format!(
+            "Available MXRB commands (3):\n\n  compare  Compare projects\n  validate  Validate project\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
+        ))
         .unwrap();
         assert_eq!(report.rows.len(), 3);
         assert_eq!(report.verified, 0);
@@ -407,13 +430,15 @@ mod tests {
 
     #[test]
     fn every_existing_command_is_individually_ratchet_checked() {
-        let report = build(&inventory(&["modules", "rename"])).unwrap();
-        assert!(check_baseline(&report, r#"{"modules":"partial","rename":"missing"}"#).is_ok());
-        assert!(check_baseline(&report, r#"{"modules":"missing","rename":"missing"}"#).is_ok());
-        let regression =
-            check_baseline(&report, r#"{"modules":"missing","rename":"partial"}"#).unwrap_err();
-        assert!(regression.contains("command regressed: rename"));
-        assert!(check_baseline(&report, r#"{"modules":"verified","rename":"missing"}"#).is_err());
+        let report = build(&inventory(&["modules", UNIMPLEMENTED])).unwrap();
+        let baseline = |modules: &str, other: &str| {
+            format!(r#"{{"modules":"{modules}","{UNIMPLEMENTED}":"{other}"}}"#)
+        };
+        assert!(check_baseline(&report, &baseline("partial", "missing")).is_ok());
+        assert!(check_baseline(&report, &baseline("missing", "missing")).is_ok());
+        let regression = check_baseline(&report, &baseline("missing", "partial")).unwrap_err();
+        assert!(regression.contains(&format!("command regressed: {UNIMPLEMENTED}")));
+        assert!(check_baseline(&report, &baseline("verified", "missing")).is_err());
         assert!(
             check_baseline(&report, r#"{"modules":"partial"}"#)
                 .unwrap_err()
@@ -422,7 +447,10 @@ mod tests {
         assert!(
             check_baseline(
                 &report,
-                r#"{"modules":"partial","rename":"missing","sql":"partial"}"#
+                &format!(
+                    r#"{{{}, "sql":"partial"}}"#,
+                    baseline("partial", "missing").trim_matches(['{', '}'])
+                )
             )
             .unwrap_err()
             .contains("disappeared")

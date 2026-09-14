@@ -28,6 +28,7 @@ mxrs-mpr = { path = "../../io/mxrs-mpr" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-oql = { path = "../../compiler/mxrs-oql" }
 mxrs-project = { path = "../mxrs-project" }
+mxrs-refactor = { path = "../mxrs-refactor" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
 serde_json.workspace = true

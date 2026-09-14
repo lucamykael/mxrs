@@ -3,8 +3,7 @@
 //! `when "sql"`/... cases, narrowed the same way the library crate is (see
 //! `lib.rs`'s doc comment for exactly what each command covers and what's
 //! not ported yet — many of the 76 audited MXRB commands depend on engines
-//! mxrs hasn't built yet, e.g. `db`/`run` need runtime orchestration and
-//! `rename`/`move` need semantic mutation planning).
+//! mxrs hasn't built yet, e.g. `db`/`run` need runtime orchestration).
 //! `inspect` has no `bin/mxrb` equivalent under that name — it's a new
 //! single-file front end onto `compare`'s existing snapshot machinery.
 
@@ -86,6 +85,7 @@ fn command_options(
             (&["--target"], &["--dry-run", "--json"], &[])
         }
         "scaffold" => (&["--target"], &[], &[]),
+        "rename" | "remove" | "move" => (&[], &["--apply", "--json"], &[]),
         "project" => (&[], &["--json"], &[]),
         _ => (&[], &[], &[]),
     }
@@ -119,6 +119,7 @@ commands! {
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
     "module", "new <Module> [--target DIR] [--dry-run] [--json]", "Scaffold an editable module declaration layer", run_module;
     "modules", "<file.mpr>", "List module names", run_modules;
+    "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a same-module unit move", run_move;
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
     "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
     "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
@@ -127,6 +128,8 @@ commands! {
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
     "published-rest", "new <Module.Handler> [--target DIR] [--dry-run] [--json]", "Scaffold a published REST handler microflow", run_published_rest;
     "refs", "<file.mpr> <artifact> [--json]", "Show incoming and outgoing references", run_refs;
+    "remove", "<file.mpr> <qualified-name> [--apply] [--json]", "Preview or apply a reference-safe removal", run_remove;
+    "rename", "<file.mpr> <old-name> <new-name> [--apply] [--json]", "Preview or apply a model-wide rename", run_rename;
     "report", "<file.mpr> [--json]", "Summarize explicit-reference lint and module dependencies", run_report;
     "scaffold", "<list|destroy> [<kind:name>] [--target DIR]", "List generators or remove a registered scaffold", run_scaffold;
     "scheduled-event", "new <Module.Event> [--target DIR] [--dry-run] [--json]", "Scaffold a scheduled event and its handler microflow", run_scheduled_event;
@@ -266,6 +269,18 @@ fn run_enumeration(args: Vec<String>) -> ExitCode {
         mxrs_scaffold::ArtifactKind::Enumeration,
         args,
     ))
+}
+
+fn run_rename(args: Vec<String>) -> ExitCode {
+    mxrs_cli::refactor::run_rename(args)
+}
+
+fn run_remove(args: Vec<String>) -> ExitCode {
+    mxrs_cli::refactor::run_remove(args)
+}
+
+fn run_move(args: Vec<String>) -> ExitCode {
+    mxrs_cli::refactor::run_move(args)
 }
 
 fn run_constant(args: Vec<String>) -> ExitCode {

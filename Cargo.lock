@@ -700,6 +700,7 @@ dependencies = [
  "mxrs-oql",
  "mxrs-packager",
  "mxrs-project",
+ "mxrs-refactor",
  "mxrs-scaffold",
  "mxrs-semantic",
  "mxrs-writer",
@@ -979,6 +980,23 @@ dependencies = [
  "mxrs-writer",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "mxrs-refactor"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-dsl",
+ "mxrs-expr",
+ "mxrs-ir",
+ "mxrs-model",
+ "mxrs-mpr",
+ "mxrs-semantic",
+ "mxrs-writer",
+ "serde",
  "tempfile",
  "thiserror",
 ]

@@ -1,0 +1,26 @@
+[package]
+name = "mxrs-refactor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Reference-safe model refactoring over an existing .mpr: model-wide rename, reference-checked removal, and same-project unit moves. Every operation produces an inspectable plan first and only mutates the file when applied, mirroring mxrb's rename/remove/move commands."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
+mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
+serde = { workspace = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-expr = { path = "../../authoring/mxrs-expr" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
+tempfile = "3.27.0"

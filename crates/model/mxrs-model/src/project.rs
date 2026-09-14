@@ -28,6 +28,13 @@ impl Project {
         &self.mpr
     }
 
+    /// Mutable access for the refactoring passes (`mxrs-refactor`), which
+    /// rewrite units in place. Reading stays the default: a caller that only
+    /// inspects the model should take `&Project` and never reach this.
+    pub fn mpr_mut(&mut self) -> &mut MprFile {
+        &mut self.mpr
+    }
+
     pub fn name(&self) -> Result<Option<String>> {
         let Some(root) = self.mpr.root_unit()? else {
             return Ok(None);

@@ -47,7 +47,7 @@ cargo run -p xtask -- coverage-gate target/coverage.json --require-complete
 
 The command inventory currently covers MXRB's 76 top-level commands, not an
 exhaustive list of Studio Pro capabilities. All 76 still need complete
-command-contract evidence: 44 have partial equivalents and 32 are absent.
+command-contract evidence: 47 have partial equivalents and 29 are absent.
 
 MXRB's model-authoring generators write Ruby source into a project; the MXRS
 equivalents write Rust declarations into `src/domain/modules/`. Because the
@@ -217,3 +217,41 @@ not measure browser requests, SQLite publication, or complete model flows.
 Known unsupported native page fields remain in the lossless snapshot. A page
 becomes typed only when recompilation preserves its native fields and identity
 references. That is loss prevention, not completion of its authoring support.
+
+## Semantic refactoring
+
+`rename`, `remove` and `move` mutate an `.mpr` directly rather than generating
+source, so they follow MXRB's safety contract rather than the generators':
+every command produces an inspectable plan, previews by default, and writes
+only under `--apply`, inside a transaction. The `.mpr` is opened read-only
+unless `--apply` was passed.
+
+What is proven: a rename applied to a real `.mpr` rewrites both the artifact's
+own declaration and the references to it, the old name is absent from every
+string in the resulting file, and documentation prose is left untouched; a
+removal is refused while any non-containment reference or child unit remains,
+and the refusal exits nonzero without deleting anything; a move reports its
+before/after containers and refuses a destination that would change the
+artifact's qualified name.
+
+Limits worth naming, because they are not obvious from the command names:
+
+- A rename is a **boundary-guarded textual substitution** over decoded BSON
+  strings, exactly as MXRB's is. It cannot distinguish a reference to
+  `Sales.Order` from the same text in a document type nobody models. Free-text
+  fields (`Documentation`, `Caption`, `Text`) are excluded so prose is not
+  rewritten; every other field holding the name is. The per-string preview
+  exists so this is auditable rather than trusted.
+- `remove` and `move` operate on whole storage units. Modules, entities,
+  attributes and associations are refused by name — they are parts of other
+  documents, and changing them is a typed domain-model mutation. MXRB refuses
+  the same set for the same reason.
+- MXRB composes a cross-module move out of a move plus a rename. This refuses
+  that case and names `rename` instead, rather than performing half of each.
+- `update` is MXRB's **gem self-updater**, not model tooling; it queries a
+  published release channel MXRS does not have. `design` is a theme/SCSS
+  subsystem, unrelated to refactoring despite sharing this group in the
+  backlog. Neither is implemented.
+
+None of the three is verified: nothing compares their command contract against
+MXRB's execution.

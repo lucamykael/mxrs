@@ -476,3 +476,102 @@ fn package_commands_build_verify_and_reject_corrupt_archives() {
             .success()
     );
 }
+
+#[test]
+fn renaming_previews_by_default_and_writes_only_under_apply() {
+    let (_directory, path) = fixture(false);
+    let file = path.to_str().unwrap();
+
+    let preview = cli(&["rename", file, "Sales.Save", "Persist"]);
+    assert!(preview.status.success(), "{:?}", preview.stderr);
+    let rendered = text(&preview);
+    assert!(rendered.contains("=> \"Persist\""), "{rendered}");
+    assert!(rendered.contains("[mxrs] Preview:"), "{rendered}");
+    // A preview must not have touched the file.
+    assert!(text(&cli(&["modules", file])).contains("Sales"));
+    assert!(text(&cli(&["describe", file, "Sales.Save"])).contains("Sales.Save"));
+
+    let applied = cli(&["rename", file, "Sales.Save", "Persist", "--apply"]);
+    assert!(applied.status.success(), "{:?}", applied.stderr);
+    assert!(text(&applied).contains("[mxrs] Renamed:"));
+    // The caller that referenced the old name now references the new one.
+    let callees = text(&cli(&["callees", file, "Sales.Start"]));
+    assert!(callees.contains("Sales.Persist"), "{callees}");
+    assert!(!callees.contains("Sales.Save"), "{callees}");
+    assert!(!cli(&["describe", file, "Sales.Save"]).status.success());
+}
+
+#[test]
+fn a_blocked_removal_exits_nonzero_and_a_safe_one_succeeds() {
+    let (_directory, path) = fixture(false);
+    let file = path.to_str().unwrap();
+
+    // `Sales.Save` is called by `Sales.Start`, so removing it would dangle.
+    let blocked = cli(&["remove", file, "Sales.Save"]);
+    assert!(!blocked.status.success());
+    let rendered = text(&blocked);
+    assert!(rendered.contains("[mxrs] Blocked removal"), "{rendered}");
+    assert!(rendered.contains("Sales.Start"), "{rendered}");
+
+    // Even with --apply, a blocked removal must not delete anything.
+    assert!(
+        !cli(&["remove", file, "Sales.Save", "--apply"])
+            .status
+            .success()
+    );
+    assert!(cli(&["describe", file, "Sales.Save"]).status.success());
+
+    let safe = cli(&["remove", file, "Sales.Unused"]);
+    assert!(safe.status.success(), "{:?}", safe.stderr);
+    assert!(text(&safe).contains("[mxrs] Safe removal preview"));
+    assert!(cli(&["describe", file, "Sales.Unused"]).status.success());
+
+    let applied = cli(&["remove", file, "Sales.Unused", "--apply"]);
+    assert!(applied.status.success(), "{:?}", applied.stderr);
+    assert!(text(&applied).contains("[mxrs] Removed"));
+    assert!(!cli(&["describe", file, "Sales.Unused"]).status.success());
+}
+
+#[test]
+fn refactoring_commands_render_json_and_reject_malformed_invocations() {
+    let (_directory, path) = fixture(false);
+    let file = path.to_str().unwrap();
+
+    let output = cli(&["rename", file, "Sales.Save", "Persist", "--json"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["target"], "Sales.Persist");
+    assert_eq!(document["applied"], false);
+    assert!(
+        document["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| {
+                change["before"] == "Sales.Save" && change["after"] == "Sales.Persist"
+            })
+    );
+
+    let output = cli(&["remove", file, "Sales.Save", "--json"]);
+    assert!(!output.status.success());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["safe"], false);
+    assert_eq!(document["artifact"]["kind"], "microflow");
+
+    let output = cli(&["move", file, "Sales.Save", "Sales", "--json"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["before_container"], document["after_container"]);
+
+    // Wrong arity and unknown artifacts are usage errors, not panics.
+    for arguments in [
+        vec!["rename", file, "Sales.Save"],
+        vec!["remove", file],
+        vec!["move", file, "Sales.Save"],
+        vec!["rename", file, "Sales.NoSuch", "Whatever"],
+    ] {
+        let output = cli(&arguments);
+        assert!(!output.status.success(), "{arguments:?} was accepted");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("[mxrs] error:"));
+    }
+}
