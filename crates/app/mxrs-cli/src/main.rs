@@ -68,6 +68,7 @@ fn command_options(
             &["--json", "--require-typed", "--verify-round-trip"],
             &[],
         ),
+        "test" => (&[], &["--json", "--plan"], &[]),
         "cache" => (&[], &["--json"], &[]),
         "db" => (&["--port"], &["--json"], &[]),
         "doctor" => (&[], &["--json"], &[]),
@@ -172,6 +173,7 @@ commands! {
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
     "translate-oql", "<query> [--dialect postgresql|sql_server|ansi]", "Translate the supported safe OQL subset", run_translate_oql;
     "team-server", "login --pat-file FILE [--json] | status DIR [--json]", "Configure a PAT pointer or inspect a local Team Server repository", run_team_server;
+    "test", "<file.mpr> <suite.json> --plan [--json]", "Validate a functional runtime test plan", run_test;
     "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
     "units", "<file.mpr>", "List native units and storage metadata", run_units;
     "upgrade", "--mendix VERSION [--target DIR] [--apply] [--json]", "Preview or apply a Cargo-native project version upgrade", run_upgrade;
@@ -859,6 +861,47 @@ fn run_preflight(mut args: Vec<String>) -> ExitCode {
             } else {
                 ExitCode::FAILURE
             }
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_test(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let plan_only = take_flag(&mut args, "--plan");
+    let [project, definition] = args.as_slice() else {
+        eprintln!("Usage: mxrs test <file.mpr> <suite.json> --plan [--json]");
+        return ExitCode::FAILURE;
+    };
+    if !plan_only {
+        eprintln!(
+            "[mxrs] error: functional flow execution is not implemented; use --plan to validate the suite"
+        );
+        return ExitCode::FAILURE;
+    }
+    match mxrs_cli::functional::plan(project, definition) {
+        Ok(plan) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&plan).expect("functional plan is serializable")
+                );
+            } else {
+                println!("Project   : {}", plan.project.display());
+                println!(
+                    "Mendix    : {}",
+                    plan.mendix_version.as_deref().unwrap_or("unknown")
+                );
+                println!("Tests     : {}", plan.tests.len());
+                for test in &plan.tests {
+                    println!("- {} -> {}", test.name, test.target);
+                }
+                println!("Execution : plan-only");
+            }
+            ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!("[mxrs] error: {error}");

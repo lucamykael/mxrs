@@ -99,6 +99,7 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
         "db",
         "team-server",
         "portability",
+        "test",
     ] {
         assert!(names.contains(required));
     }
@@ -476,6 +477,53 @@ fn portability_separates_exact_storage_from_typed_authoring_and_verifies_documen
             .contains("still require model/imported")
     );
     assert!(!cli(&["portability", "/missing.mpr"]).status.success());
+}
+
+#[test]
+fn functional_test_plan_validates_real_mpr_targets_and_refuses_fake_execution() {
+    let (directory, path) = fixture(false);
+    let suite = directory.path().join("functional.json");
+    std::fs::write(
+        &suite,
+        r#"{"tests":[{"name":"starts","call":"Sales.Start","expect":{"count":[{"entity":"Sales.Order","equals":0}]}}]}"#,
+    )
+    .unwrap();
+
+    let output = cli(&[
+        "test",
+        path.to_str().unwrap(),
+        suite.to_str().unwrap(),
+        "--plan",
+        "--json",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["execution_supported"], false);
+    assert_eq!(plan["tests"][0]["target"], "Sales.Start");
+
+    let execute = cli(&["test", path.to_str().unwrap(), suite.to_str().unwrap()]);
+    assert!(!execute.status.success());
+    assert!(
+        String::from_utf8(execute.stderr)
+            .unwrap()
+            .contains("not implemented")
+    );
+
+    std::fs::write(
+        &suite,
+        r#"{"tests":[{"name":"missing","call":"Sales.Missing"}]}"#,
+    )
+    .unwrap();
+    assert!(
+        !cli(&[
+            "test",
+            path.to_str().unwrap(),
+            suite.to_str().unwrap(),
+            "--plan"
+        ])
+        .status
+        .success()
+    );
 }
 
 #[test]

@@ -55,6 +55,7 @@ pub mod compare;
 pub mod database;
 pub mod doctor;
 pub mod environment;
+pub mod functional;
 pub mod inspect;
 pub mod marketplace;
 pub mod preflight;
