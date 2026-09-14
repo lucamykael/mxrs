@@ -227,8 +227,8 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "page" => (
             Status::Partial,
-            "mxrs page new",
-            "page and module layout scaffold with --role; MXRB's --chain slices and template catalog not ported",
+            "mxrs page new/templates",
+            "page scaffold with --role, --template and --chain vertical slices, plus the template catalog; MXRB additionally writes a navigation entry per page, which has no mxrs aggregator to write into",
         ),
         "security" => (
             Status::Partial,

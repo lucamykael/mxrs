@@ -78,6 +78,28 @@ limits are deliberate and worth naming rather than discovering later:
 Neither command is verified: the readback is MXRS reading its own writes, and
 no executable oracle yet compares either command's contract against MXRB's.
 
+`mxrs page` now carries MXRB's template catalog (`page templates`, the same
+four audited patterns) and its `--template`/`--chain` vertical slices. What is
+proven is that every catalogued template compiles on its own, and that a
+`page:nanoflow:microflow` chain produces a slice — backing entity, loader,
+refresh microflow, refresh nanoflow and the page — that compiles with real
+Cargo and whose artifacts all reach the written `.mpr`. Three gaps are
+deliberate:
+
+- MXRB also writes a navigation entry per generated page into
+  `app/navigation/responsive/`. MXRS has no navigation aggregator to write
+  into — `mxrs new` declares navigation inline in `build()` — so a chained
+  page is reachable by reference but is not linked into a menu.
+- MXRB's refresh microflow logs a message and its refresh nanoflow shows one.
+  `mxrs_ir::Activity` has neither activity, so those bodies are generated
+  empty rather than filled with an unrelated activity.
+- MXRB's `number_input` has no MXRS widget; a decimal attribute binds to a
+  `text_box`, which is what Mendix itself renders for one.
+
+Because a generated slice needs marker *types* rather than MXRB's strings, the
+templates emit hand-written markers in the same `Entity_Attribute` shape
+`mxrs-typegen` produces from a manifest.
+
 ## Official fresh-project acceptance
 
 On 2026-09-13, a new application authored with the current Rust scaffold and

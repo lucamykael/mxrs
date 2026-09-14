@@ -76,7 +76,11 @@ fn command_options(
         "package" => (&["--web", "--output", "-o"], &[], &[]),
         "search" => (&["--limit"], &["--json"], &[]),
         "translate-oql" => (&["--dialect"], &[], &[]),
-        "page" => (&["--target"], &["--dry-run", "--json"], &["--role"]),
+        "page" => (
+            &["--target", "--template", "--chain"],
+            &["--dry-run", "--json"],
+            &["--role"],
+        ),
         "constant" | "consumed-rest" | "entity" | "enumeration" | "java-action" | "module"
         | "nanoflow" | "published-rest" | "scheduled-event" | "security" | "use-case" => {
             (&["--target"], &["--dry-run", "--json"], &[])
@@ -119,7 +123,7 @@ commands! {
     "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
     "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
-    "page", "new <Module.Page> [--role Module.Role] [--target DIR] [--dry-run] [--json]", "Scaffold a page declaration and its module layout", run_page;
+    "page", "new <Module.Page> [--template NAME] [--chain CHAIN] [--role Module.Role] [--target DIR] [--dry-run] [--json] | templates [--json]", "Scaffold a page declaration, a page-led vertical slice, or list page templates", run_page;
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
     "published-rest", "new <Module.Handler> [--target DIR] [--dry-run] [--json]", "Scaffold a published REST handler microflow", run_published_rest;
     "refs", "<file.mpr> <artifact> [--json]", "Show incoming and outgoing references", run_refs;

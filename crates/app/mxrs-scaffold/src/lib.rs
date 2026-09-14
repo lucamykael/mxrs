@@ -6,14 +6,16 @@
 use std::path::{Path, PathBuf};
 
 pub mod artifact;
+pub mod page_templates;
 pub mod registry;
 mod templates;
 mod transaction;
 
 pub use artifact::{
-    ArtifactKind, ArtifactScaffold, ProjectInspection, SCAFFOLD_COMMANDS, ScaffoldCommand,
-    ScaffoldOutcome, inspect_project, scaffold_artifact,
+    ArtifactKind, ArtifactScaffold, PageChain, ProjectInspection, SCAFFOLD_COMMANDS,
+    ScaffoldCommand, ScaffoldOutcome, inspect_project, scaffold_artifact,
 };
+pub use page_templates::PageTemplate;
 pub use registry::RegisteredScaffold;
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +50,12 @@ pub enum ScaffoldError {
     InvalidIdentifier { label: &'static str, value: String },
     #[error("name must be qualified as Module.Artifact: {0}")]
     UnqualifiedName(String),
+    #[error("unknown page template: {0} (run `mxrs page templates` for the catalog)")]
+    UnknownPageTemplate(String),
+    #[error(
+        "unknown page chain: {0} (expected page:microflow, page:nanoflow or page:nanoflow:microflow)"
+    )]
+    UnknownPageChain(String),
     #[error("entity name is reserved by Mendix: {0}")]
     ReservedEntityName(String),
     #[error("{0} has no Rust module spelling; rename the artifact")]

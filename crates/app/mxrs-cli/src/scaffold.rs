@@ -19,8 +19,8 @@
 //! renders results.
 
 use mxrs_scaffold::{
-    ArtifactKind, ArtifactScaffold, ProjectInspection, SCAFFOLD_COMMANDS, ScaffoldOutcome,
-    inspect_project, registry, scaffold_artifact,
+    ArtifactKind, ArtifactScaffold, PageChain, ProjectInspection, SCAFFOLD_COMMANDS,
+    ScaffoldOutcome, inspect_project, page_templates, registry, scaffold_artifact,
 };
 
 use crate::arguments::{take_flag, take_value, take_values};
@@ -31,13 +31,18 @@ const BUILD_HINT: &str = "cargo mxrs build";
 /// generator catalog, `mxrs scaffold list`, and this parser cannot drift.
 pub fn usage(kind: ArtifactKind) -> String {
     let command = command(kind);
-    let roles = if kind == ArtifactKind::Page {
-        " [--role Module.Role]"
+    // `page` carries both its generator options and a second form for the
+    // template catalog, the way mxrb's own help states them on one line.
+    let (page_options, page_forms) = if kind == ArtifactKind::Page {
+        (
+            " [--template NAME] [--chain CHAIN] [--role Module.Role]",
+            " | templates [--json]",
+        )
     } else {
-        ""
+        ("", "")
     };
     format!(
-        "{} {} {}{roles} [--target DIR] [--dry-run] [--json]",
+        "{} {} {}{page_options} [--target DIR] [--dry-run] [--json]{page_forms}",
         command.name, command.action, command.argument
     )
 }
@@ -56,21 +61,70 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
     let dry_run = take_flag(&mut arguments, "--dry-run");
     let target = take_value(&mut arguments, "--target").unwrap_or_else(|| ".".to_string());
     let roles = take_values(&mut arguments, "--role");
+    let template = take_value(&mut arguments, "--template");
+    let chain = take_value(&mut arguments, "--chain");
     let expected = command(kind).action;
+    // `mxrs page templates` is the catalog, not a generator: it takes no name
+    // and none of the generator options.
+    if kind == ArtifactKind::Page
+        && arguments.first().is_some_and(|word| word == "templates")
+        && arguments.len() == 1
+        && !dry_run
+        && roles.is_empty()
+        && template.is_none()
+        && chain.is_none()
+    {
+        print_page_templates(json);
+        return Ok(());
+    }
+    let page_only = !roles.is_empty() || template.is_some() || chain.is_some();
     let [action, name] = arguments.as_slice() else {
         return Err(format!("usage: mxrs {}", usage(kind)));
     };
-    if action != expected || (!roles.is_empty() && kind != ArtifactKind::Page) {
+    if action != expected || (page_only && kind != ArtifactKind::Page) {
         return Err(format!("usage: mxrs {}", usage(kind)));
     }
+    let chain = chain
+        .map(|value| PageChain::parse(&value))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let outcome = scaffold_artifact(
         &ArtifactScaffold::new(kind, name, target)
             .dry_run(dry_run)
-            .page_roles(roles),
+            .page_roles(roles)
+            .page_template(template)
+            .page_chain(chain),
     )
     .map_err(|error| error.to_string())?;
     render(&outcome, json);
     Ok(())
+}
+
+fn print_page_templates(json: bool) {
+    if json {
+        let payload: Vec<_> = page_templates::grouped()
+            .into_iter()
+            .map(|(category, entries)| {
+                serde_json::json!({
+                    "category": category,
+                    "templates": entries
+                        .iter()
+                        .map(|entry| serde_json::json!({
+                            "name": entry.name,
+                            "description": entry.description,
+                            "data_backed": entry.data_backed,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("the template catalog is serializable")
+        );
+    } else {
+        println!("{}", page_templates::tree());
+    }
 }
 
 fn render(outcome: &ScaffoldOutcome, json: bool) {
@@ -207,7 +261,16 @@ mod tests {
         for command in SCAFFOLD_COMMANDS {
             let usage = usage(command.kind);
             assert!(usage.starts_with(&format!("{} {} ", command.name, command.action)));
-            assert!(usage.ends_with("[--target DIR] [--dry-run] [--json]"));
+            // Every generator ends on the shared option tail; `page` alone
+            // continues with a second form for its template catalog.
+            let generator_form = usage
+                .split_once(" | ")
+                .map_or(usage.as_str(), |(generator, _)| generator);
+            assert!(generator_form.ends_with("[--target DIR] [--dry-run] [--json]"));
+            assert_eq!(
+                usage.contains(" | templates [--json]"),
+                command.kind == ArtifactKind::Page
+            );
             assert_eq!(usage.contains("--role"), command.kind == ArtifactKind::Page);
         }
     }

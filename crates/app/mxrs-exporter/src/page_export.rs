@@ -586,13 +586,25 @@ fn try_convert_widget(
             }
             let action = match widget.events.as_slice() {
                 [] => ButtonAction::None,
+                // `close_page`, `save_changes` and `cancel_changes` share a
+                // shape: a targetless `kind: "action"` event. Recognizing all
+                // three keeps a page that merely commits its data view on the
+                // typed path instead of falling through to the lossless
+                // snapshot below.
                 [event]
                     if event.get_str("kind").ok() == Some("action")
-                        && event.get_str("handler").ok() == Some("close_page")
                         && event.get_str("event").ok() == Some("on_click")
-                        && only_keys(event, &["kind", "handler", "event"]) =>
+                        && only_keys(event, &["kind", "handler", "event"])
+                        && matches!(
+                            event.get_str("handler").ok(),
+                            Some("close_page" | "save_changes" | "cancel_changes")
+                        ) =>
                 {
-                    ButtonAction::ClosePage
+                    match event.get_str("handler").ok()? {
+                        "close_page" => ButtonAction::ClosePage,
+                        "save_changes" => ButtonAction::SaveChanges,
+                        _ => ButtonAction::CancelChanges,
+                    }
                 }
                 [event]
                     if event.get_str("event").ok() == Some("on_click")
@@ -1164,6 +1176,12 @@ fn render_widget(
                         out,
                         "{pad}    b.call_nanoflow(::mxrs_ir::markers::NanoflowRef::<{marker}>::new());"
                     );
+                }
+                ButtonAction::SaveChanges => {
+                    let _ = writeln!(out, "{pad}    b.save_changes();");
+                }
+                ButtonAction::CancelChanges => {
+                    let _ = writeln!(out, "{pad}    b.cancel_changes();");
                 }
             }
             let _ = writeln!(out, "{pad}}});");
@@ -1894,6 +1912,47 @@ mod tests {
         assert!(source.contains("p.popup(720, 480, true)"));
         assert!(source.contains("p.excluded(true)"));
         assert!(source.contains("p.export_level(\"API\")"));
+    }
+
+    #[test]
+    fn save_and_cancel_buttons_stay_typed_instead_of_falling_back_to_the_snapshot() {
+        // Built from raw documents rather than `bare_page`: that helper's
+        // `widget_to_bson` hardcodes `ClosePageClientAction` for every button,
+        // so it cannot express the actions under test.
+        fn action_button(name: &str, caption: &str, action_type: &str) -> Document {
+            mxrs_bson::doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "Forms$ActionButton",
+                "Name": name,
+                "Caption": caption,
+                "Action": { "$Type": action_type },
+            }
+        }
+        let page = page_from_documents(
+            "OrderForm",
+            vec![
+                action_button("save", "Save", "Forms$SaveChangesClientAction"),
+                action_button("cancel", "Cancel", "Forms$CancelChangesClientAction"),
+            ],
+        );
+
+        let decl = convert(&page).expect("targetless client actions are typed");
+        let source = render_page_function(&ConvertedPage {
+            module_name: "Sales".into(),
+            function_name: "order_form".into(),
+            decl,
+            flow_return_entities: HashMap::new(),
+        });
+        assert!(source.contains("b.save_changes();"), "{source}");
+        assert!(source.contains("b.cancel_changes();"), "{source}");
+
+        // An action this IR has no variant for must still go opaque rather
+        // than being quietly rendered as one of the two above.
+        let unsupported = page_from_documents(
+            "OrderList",
+            vec![action_button("del", "Delete", "Forms$DeleteClientAction")],
+        );
+        assert!(convert(&unsupported).is_none());
     }
 
     #[test]

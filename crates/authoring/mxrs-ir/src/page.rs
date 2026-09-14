@@ -74,6 +74,13 @@ pub enum ButtonAction {
     /// Qualified nanoflow name — see [`ButtonAction::CallMicroflow`]'s doc
     /// comment; the nanoflow equivalent, via `NanoflowRef`.
     CallNanoflow(String),
+    /// Commits the enclosing data view's object. Carries no target: the
+    /// action operates on whatever context the button sits in, which is why
+    /// it needs no marker the way the two call variants do.
+    SaveChanges,
+    /// Rolls the enclosing data view's object back to its last committed
+    /// state — [`ButtonAction::SaveChanges`]'s counterpart.
+    CancelChanges,
 }
 
 /// What a [`WidgetDecl::DataView`] fetches its context object from. Both

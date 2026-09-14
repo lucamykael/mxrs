@@ -296,3 +296,77 @@ fn the_constant_and_scheduled_event_generators_write_their_families_and_registry
     assert!(listed.contains("constant:Sales.ApiEndpoint"));
     assert!(listed.contains("scheduled_event:Sales.SE_ExpireCarts"));
 }
+
+#[test]
+fn the_page_template_catalog_renders_as_a_tree_and_as_json() {
+    let rendered = text(&cli(&["page", "templates"]));
+    assert!(rendered.starts_with("Page templates\n"));
+    assert!(rendered.contains("├── General\n"));
+    assert!(rendered.contains("└── form-vertical — DataView with vertical inputs and actions"));
+
+    let output = cli(&["page", "templates", "--json"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let catalog: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(catalog[0]["category"], "General");
+    assert_eq!(catalog[0]["templates"][0]["name"], "starter");
+    assert_eq!(catalog[0]["templates"][0]["data_backed"], false);
+    let forms = catalog.last().unwrap();
+    assert_eq!(forms["category"], "Forms");
+    assert_eq!(forms["templates"][0]["data_backed"], true);
+
+    // `templates` is a second form of the command, not a page name: it must
+    // not be combinable with the generator's own options.
+    assert!(
+        !cli(&["page", "templates", "--chain", "page:microflow"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = project(directory.path());
+    assert!(
+        scaffold(&root, &["module", "new", "Sales"])
+            .status
+            .success()
+    );
+
+    let bad = scaffold(
+        &root,
+        &["page", "new", "Sales.Broken", "--chain", "page:rest"],
+    );
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown page chain"));
+    assert!(!root.join("src/domain/modules/sales/pages").exists());
+
+    let output = scaffold(
+        &root,
+        &[
+            "page",
+            "new",
+            "Sales.OrderOverview",
+            "--chain",
+            "page:nanoflow:microflow",
+        ],
+    );
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let rendered = text(&output);
+    // The default chain template is data-backed, so the slice is the entity,
+    // its loader, both refresh flows and the page.
+    for relative in [
+        "entities/order_overview.rs",
+        "use_cases/act_load_order_overview.rs",
+        "use_cases/act_refresh_order_overview.rs",
+        "client_actions/nan_refresh_order_overview.rs",
+        "pages/order_overview.rs",
+    ] {
+        let path = root.join("src/domain/modules/sales").join(relative);
+        assert!(
+            rendered.contains(&format!("  create  {}", path.display())),
+            "{relative}: {rendered}"
+        );
+    }
+    assert!(text(&scaffold(&root, &["scaffold", "list"])).contains("page:Sales.OrderOverview"));
+}

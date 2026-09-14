@@ -525,6 +525,22 @@ impl ButtonBuilder {
         self
     }
 
+    /// Commits the object of the data view this button sits in. Takes no
+    /// marker because it has no target — the context is positional. Nothing
+    /// here checks that the button is actually inside a data view; that is
+    /// the same widget-tree validation gap the rest of this builder has.
+    pub fn save_changes(&mut self) -> &mut Self {
+        self.action = ButtonAction::SaveChanges;
+        self
+    }
+
+    /// See [`ButtonBuilder::save_changes`]; rolls the context object back
+    /// instead of committing it.
+    pub fn cancel_changes(&mut self) -> &mut Self {
+        self.action = ButtonAction::CancelChanges;
+        self
+    }
+
     fn into_decl(self) -> WidgetDecl {
         WidgetDecl::Button {
             name: self.name,

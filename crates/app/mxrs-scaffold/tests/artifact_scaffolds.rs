@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use mxrs_scaffold::{
-    ArtifactKind, ArtifactScaffold, MxrsDependency, ProjectScaffold, ScaffoldError,
+    ArtifactKind, ArtifactScaffold, MxrsDependency, PageChain, ProjectScaffold, ScaffoldError,
     generate_project, inspect_project, registry, scaffold_artifact,
 };
 
@@ -313,4 +313,134 @@ fn names_and_projects_that_cannot_be_scaffolded_are_reported_not_guessed() {
         Err(ScaffoldError::UnrecognizedProjectBuild(_))
     ));
     assert!(!root.join("src/domain/modules").exists());
+}
+
+/// The only claim worth making about a generated vertical slice: the project
+/// still compiles, and every artifact the chain promised reaches the `.mpr`.
+/// A template that merely produced plausible-looking Rust would pass a string
+/// assertion and fail here.
+#[test]
+fn a_page_chain_generates_a_slice_that_compiles_and_reaches_the_written_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::Page, "Sales.OrderOverview", &root)
+            .page_chain(Some(PageChain::NanoflowMicroflow)),
+    )
+    .unwrap();
+
+    let output = cargo(
+        &root,
+        &["run", "--offline", "--quiet", "--", "build/Sales.mpr"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let project = mxrs_model::Project::open(root.join("build/Sales.mpr"), true).unwrap();
+    let module = project
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|module| module.name.as_deref() == Some("Sales"))
+        .expect("the scaffolded module reached the model");
+    // The default chain template is data-backed, so the slice includes the
+    // backing entity and its loader alongside the two refresh flows.
+    let entities = module
+        .entities()
+        .iter()
+        .filter_map(|entity| entity.name.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(entities, ["OrderOverview"]);
+    let attributes = module.entities()[0]
+        .attributes
+        .iter()
+        .filter_map(|attribute| attribute.name.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(attributes, ["Reference", "Total", "Active"]);
+    let microflows = module
+        .microflows
+        .iter()
+        .filter_map(|flow| flow.name.as_deref())
+        .collect::<Vec<_>>();
+    for expected in ["ACT_LoadOrderOverview", "ACT_RefreshOrderOverview"] {
+        assert!(microflows.contains(&expected), "{expected}: {microflows:?}");
+    }
+    assert_eq!(
+        module
+            .nanoflows
+            .iter()
+            .filter_map(|flow| flow.name.as_deref())
+            .collect::<Vec<_>>(),
+        ["NAN_RefreshOrderOverview"]
+    );
+    assert_eq!(
+        module
+            .pages
+            .iter()
+            .filter_map(|page| page.name.as_deref())
+            .collect::<Vec<_>>(),
+        ["OrderOverview"]
+    );
+}
+
+#[test]
+fn every_catalogued_page_template_compiles_on_its_own() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    for template in mxrs_scaffold::page_templates::ENTRIES {
+        // One page per template, named after it so the generated slices do
+        // not collide.
+        let name = format!(
+            "Sales.{}Page",
+            template
+                .name
+                .split('-')
+                .map(|part| {
+                    let mut characters = part.chars();
+                    match characters.next() {
+                        Some(first) => first.to_ascii_uppercase().to_string() + characters.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<String>()
+        );
+        scaffold_artifact(
+            &ArtifactScaffold::new(ArtifactKind::Page, &name, &root)
+                .page_template(Some(template.name.to_string())),
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+
+    let output = cargo(&root, &["build", "--offline", "--quiet"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn an_unknown_template_or_chain_is_rejected_before_anything_is_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    assert!(matches!(
+        PageChain::parse("page:microflow:nanoflow"),
+        Err(ScaffoldError::UnknownPageChain(value)) if value == "page:microflow:nanoflow"
+    ));
+    let error = scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Broken", &root)
+            .page_template(Some("form-horizontal".into())),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ScaffoldError::UnknownPageTemplate(value) if value == "form-horizontal"
+    ));
+    assert!(!root.join("src/domain/modules/sales/pages").exists());
 }

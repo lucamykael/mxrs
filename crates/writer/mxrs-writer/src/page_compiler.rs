@@ -674,6 +674,11 @@ fn button_action_node(catalog: &Rc<Catalog>, action: &ButtonAction) -> Result<No
     match action {
         ButtonAction::None => Ok(Node::new("NoClientAction", catalog.clone())?),
         ButtonAction::ClosePage => Ok(Node::new("ClosePageClientAction", catalog.clone())?),
+        // Both carry no settings node: the catalog declares their properties
+        // (`syncAutomatically`/`closePage`) with defaults, so constructing the
+        // node is the whole action.
+        ButtonAction::SaveChanges => Ok(Node::new("SaveChangesClientAction", catalog.clone())?),
+        ButtonAction::CancelChanges => Ok(Node::new("CancelChangesClientAction", catalog.clone())?),
         ButtonAction::CallMicroflow(qualified_name) => {
             let mut settings = Node::new("MicroflowSettings", catalog.clone())?;
             settings.set(
@@ -921,6 +926,68 @@ mod tests {
         });
 
         let document = compile_page(&catalog, &decl).unwrap();
+        let codec = mxrs_forms::MprCodec::new(catalog);
+        let node = codec.decode(&document).unwrap();
+        let re_encoded = codec.encode(&node).unwrap();
+        let re_decoded = codec.decode(&re_encoded).unwrap();
+        assert_eq!(node, re_decoded);
+    }
+
+    #[test]
+    fn save_and_cancel_buttons_compile_to_the_native_client_actions_and_round_trip() {
+        let catalog = catalog();
+        let mut decl = PageDecl::new("OrderForm");
+        decl.layout = Some(LayoutRef::new("Atlas_Core.ApplicationLayout", "Main"));
+        decl.widgets.push(WidgetDecl::DataView {
+            name: None,
+            source: DataSourceDecl::Microflow("Sales.ACT_LoadOrder".into()),
+            children: vec![
+                WidgetDecl::Button {
+                    name: None,
+                    caption: "Save".into(),
+                    class: None,
+                    action: ButtonAction::SaveChanges,
+                },
+                WidgetDecl::Button {
+                    name: None,
+                    caption: "Cancel".into(),
+                    class: None,
+                    action: ButtonAction::CancelChanges,
+                },
+            ],
+        });
+
+        let document = compile_page(&catalog, &decl).unwrap();
+        let mut action_types = Vec::new();
+        fn collect(value: &mxrs_bson::Bson, out: &mut Vec<String>) {
+            if let mxrs_bson::Bson::Document(document) = value {
+                if let Ok(kind) = document.get_str("$Type")
+                    && kind.ends_with("ChangesClientAction")
+                {
+                    out.push(kind.to_string());
+                }
+                for (_, value) in document {
+                    collect(value, out);
+                }
+            } else if let mxrs_bson::Bson::Array(items) = value {
+                for item in items {
+                    collect(item, out);
+                }
+            }
+        }
+        collect(
+            &mxrs_bson::Bson::Document(document.clone()),
+            &mut action_types,
+        );
+        action_types.sort();
+        assert_eq!(
+            action_types,
+            [
+                "Forms$CancelChangesClientAction",
+                "Forms$SaveChangesClientAction"
+            ]
+        );
+
         let codec = mxrs_forms::MprCodec::new(catalog);
         let node = codec.decode(&document).unwrap();
         let re_encoded = codec.encode(&node).unwrap();

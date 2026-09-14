@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use crate::templates::{DECLARATIONS_LIST, DECLARE, FAMILIES_LIST, MODULES_LIST, snake_case};
 use crate::transaction::Transaction;
-use crate::{Result, ScaffoldError, io_error, registry, templates};
+use crate::{Result, ScaffoldError, io_error, page_templates, registry, templates};
 
 /// Placeholder name on the scaffolded `ApplicationLayout` that scaffolded
 /// pages attach their widgets to. Matches the `mxrs new` project scaffold.
@@ -211,6 +211,37 @@ impl ArtifactKind {
     }
 }
 
+/// The page-led vertical slices `mxrs page new --chain` generates, mirroring
+/// mxrb's `Generator::PAGE_CHAINS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageChain {
+    /// `page:microflow` — the page's Refresh button calls a microflow.
+    Microflow,
+    /// `page:nanoflow` — it calls a client nanoflow instead.
+    Nanoflow,
+    /// `page:nanoflow:microflow` — it calls a nanoflow that calls a microflow.
+    NanoflowMicroflow,
+}
+
+impl PageChain {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "page:microflow" => Ok(Self::Microflow),
+            "page:nanoflow" => Ok(Self::Nanoflow),
+            "page:nanoflow:microflow" => Ok(Self::NanoflowMicroflow),
+            other => Err(ScaffoldError::UnknownPageChain(other.to_string())),
+        }
+    }
+
+    fn has_microflow(self) -> bool {
+        matches!(self, Self::Microflow | Self::NanoflowMicroflow)
+    }
+
+    fn has_nanoflow(self) -> bool {
+        matches!(self, Self::Nanoflow | Self::NanoflowMicroflow)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ArtifactScaffold {
     pub kind: ArtifactKind,
@@ -221,6 +252,12 @@ pub struct ArtifactScaffold {
     pub dry_run: bool,
     /// Module roles a scaffolded page is restricted to (`--role`, repeatable).
     pub page_roles: Vec<String>,
+    /// Named page pattern (`--template`). `None` with no chain scaffolds the
+    /// minimal page; `None` with a chain uses
+    /// [`page_templates::DEFAULT_CHAIN_TEMPLATE`], as mxrb does.
+    pub page_template: Option<String>,
+    /// Page-led vertical slice to generate (`--chain`).
+    pub page_chain: Option<PageChain>,
 }
 
 impl ArtifactScaffold {
@@ -231,6 +268,8 @@ impl ArtifactScaffold {
             target: target.into(),
             dry_run: false,
             page_roles: vec![],
+            page_template: None,
+            page_chain: None,
         }
     }
 
@@ -241,6 +280,16 @@ impl ArtifactScaffold {
 
     pub fn page_roles(mut self, roles: Vec<String>) -> Self {
         self.page_roles = roles;
+        self
+    }
+
+    pub fn page_template(mut self, template: Option<String>) -> Self {
+        self.page_template = template;
+        self
+    }
+
+    pub fn page_chain(mut self, chain: Option<PageChain>) -> Self {
+        self.page_chain = chain;
         self
     }
 }
@@ -444,6 +493,93 @@ fn create_module_security(
     Ok(())
 }
 
+/// A `--template`/`--chain` page is not one file but a slice: optionally a
+/// backing entity and loader, the refresh flow(s) the chain names, and the
+/// page itself. Mirrors mxrb's `scaffold_templated_page`/`page_support_specs`
+/// with one deliberate omission: mxrb also writes a navigation entry per page
+/// into `app/navigation/responsive/`, and mxrs has no navigation aggregator to
+/// write into — its `mxrs new` scaffold declares navigation inline in
+/// `build()`. Appending to that by hand is the guessing this crate refuses to
+/// do elsewhere (see [`ScaffoldError::UnrecognizedProjectBuild`]), so the
+/// generated page is reachable by reference but not linked into a menu.
+fn create_page_slice(
+    transaction: &mut Transaction,
+    root: &Path,
+    options: &ArtifactScaffold,
+    module_name: &str,
+    artifact_name: &str,
+) -> Result<()> {
+    let chain = options.page_chain;
+    let template_name = options
+        .page_template
+        .clone()
+        .unwrap_or_else(|| page_templates::DEFAULT_CHAIN_TEMPLATE.to_string());
+    let template = page_templates::fetch(&template_name)?;
+    let stem = snake_case(artifact_name);
+
+    if template.data_backed {
+        create_family_file(
+            transaction,
+            root,
+            module_name,
+            ArtifactKind::Entity,
+            &stem,
+            templates::page_chain_entity(module_name, artifact_name),
+        )?;
+        create_family_file(
+            transaction,
+            root,
+            module_name,
+            ArtifactKind::UseCase,
+            &format!("act_load_{stem}"),
+            templates::page_chain_loader(module_name, artifact_name),
+        )?;
+    }
+    if chain.is_some_and(PageChain::has_microflow) {
+        create_family_file(
+            transaction,
+            root,
+            module_name,
+            ArtifactKind::UseCase,
+            &format!("act_refresh_{stem}"),
+            templates::page_chain_action(module_name, artifact_name),
+        )?;
+    }
+    if let Some(chain) = chain.filter(|chain| chain.has_nanoflow()) {
+        create_family_file(
+            transaction,
+            root,
+            module_name,
+            ArtifactKind::Nanoflow,
+            &format!("nan_refresh_{stem}"),
+            templates::page_chain_nanoflow(module_name, artifact_name, chain.has_microflow()),
+        )?;
+    }
+
+    let refresh = chain.map(|chain| {
+        if chain.has_nanoflow() {
+            templates::RefreshAction::Nanoflow
+        } else {
+            templates::RefreshAction::Microflow
+        }
+    });
+    create_family_file(
+        transaction,
+        root,
+        module_name,
+        ArtifactKind::Page,
+        &stem,
+        templates::page_from_template(
+            module_name,
+            artifact_name,
+            LAYOUT_PARAMETER,
+            template.name,
+            refresh,
+            &options.page_roles,
+        ),
+    )
+}
+
 fn create_artifact(
     transaction: &mut Transaction,
     root: &Path,
@@ -454,6 +590,9 @@ fn create_artifact(
     require_module(root, module_name)?;
     if options.kind == ArtifactKind::Page {
         ensure_module_layout(transaction, root, module_name)?;
+        if options.page_template.is_some() || options.page_chain.is_some() {
+            return create_page_slice(transaction, root, options, module_name, artifact_name);
+        }
     }
     let source = match options.kind {
         ArtifactKind::Entity => templates::entity(module_name, artifact_name),
