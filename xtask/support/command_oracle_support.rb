@@ -11,7 +11,7 @@ require 'json'
 # Shared harness, never shared expected results: every command supplies its
 # native fixtures, output comparison, and explicit normalization contract.
 class CommandOracle
-  attr_reader :checks, :mxrs, :mxrb
+  attr_reader :checks, :mxrs, :mxrb, :command
 
   def initialize(command, surface: command)
     @command, @surface = command, surface

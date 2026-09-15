@@ -61,10 +61,8 @@ fn command_options(
     &'static [&'static str],
 ) {
     match name {
-        "callees" | "callers" | "changelog" | "compare" | "describe" | "evaluate" | "impact"
-        | "inspect" | "lint" | "refs" | "preflight" | "report" | "tree" | "validate" => {
-            (&[], &["--json"], &[])
-        }
+        "callees" | "callers" | "changelog" | "describe" | "evaluate" | "impact" | "inspect"
+        | "lint" | "refs" | "preflight" | "report" | "tree" | "validate" => (&[], &["--json"], &[]),
         "portability" => (
             &[],
             &["--json", "--require-typed", "--verify-round-trip"],
@@ -77,7 +75,7 @@ fn command_options(
         "doctor" => (&[], &["--json"], &[]),
         "modules" => (&[], &["--json", "--names", "--no-progress"], &[]),
         "dump-unit" | "units" | "sql" => (&[], &["--no-progress"], &[]),
-        "protocols" => (&[], &["--json", "--no-progress"], &[]),
+        "protocols" | "compare" | "diff" => (&[], &["--json", "--no-progress"], &[]),
         "export" => (&["-o"], &[], &[]),
         "env" => (&["--environment"], &["--json"], &[]),
         "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
@@ -142,6 +140,7 @@ commands! {
     "consumed-rest", "new <Module.Client> [--target DIR] [--dry-run] [--json]", "Scaffold a consumed REST adapter microflow", run_consumed_rest;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "db", "<status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]", "Manage an isolated PostgreSQL workspace", run_db;
+    "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
     "dump-unit", "<file.mpr> <unit_id> [--no-progress]", "Dump native unit metadata and bytes", run_dump_unit;
     "entity", "new <Module.Entity> [--target DIR] [--dry-run] [--json]", "Scaffold a domain entity declaration", run_entity;
@@ -1819,10 +1818,19 @@ fn run_validate(mut args: Vec<String>) -> ExitCode {
     }
 }
 
-fn run_compare(mut args: Vec<String>) -> ExitCode {
+fn run_compare(args: Vec<String>) -> ExitCode {
+    run_comparison(args, false)
+}
+fn run_diff(args: Vec<String>) -> ExitCode {
+    run_comparison(args, true)
+}
+
+fn run_comparison(mut args: Vec<String>, tabular: bool) -> ExitCode {
+    let command = if tabular { "diff" } else { "compare" };
+    take_flag(&mut args, "--no-progress");
     let json = take_flag(&mut args, "--json");
     if args.len() != 2 {
-        eprintln!("[mxrs] error: usage: mxrs compare <left.mpr> <right.mpr> [--json]");
+        eprintln!("[mxrs] error: usage: mxrs {command} <left.mpr> <right.mpr> [--json]");
         return ExitCode::FAILURE;
     }
 
@@ -1841,7 +1849,7 @@ fn run_compare(mut args: Vec<String>) -> ExitCode {
             .map(|c| {
                 serde_json::json!({
                     "operation": format!("{:?}", c.operation),
-                    "path": c.path,
+                    "path": c.json_path(),
                     "before": c.before,
                     "after": c.after,
                 })
@@ -1851,13 +1859,16 @@ fn run_compare(mut args: Vec<String>) -> ExitCode {
             "{}",
             serde_json::json!({ "identical": result.is_identical(), "changes": changes })
         );
+    } else if tabular {
+        for change in &result.changes {
+            println!("{}", change.format_diff());
+        }
     } else if result.is_identical() {
         println!("[mxrs] OK");
     } else {
         for change in &result.changes {
-            println!("{}", change.format());
+            println!("[mxrs] diff: {}", change.format());
         }
-        println!("[mxrs] {} difference(s)", result.changes.len());
     }
 
     if result.is_identical() {

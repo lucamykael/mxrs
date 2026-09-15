@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 base64 = "0.22"
-bson = "3"
+bson = { version = "3", features = ["serde", "serde_json-1"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 sha2 = "0.10"
 thiserror.workspace = true

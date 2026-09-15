@@ -166,9 +166,9 @@ impl Status {
 fn classify(command: &str) -> (Status, &'static str, &'static str) {
     match command {
         "compare" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs compare",
-            "structural comparison tests; full CLI contract not differentially verified",
+            "native snapshots, ordered changes and CLI: xtask command-oracle compare; explicit mappings in docs/commands/compare.md",
         ),
         "dump-unit" => (
             Status::Verified,
@@ -337,7 +337,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs scheduled-event new",
             "scheduled event and handler scaffold plus a complete typed event/schedule IR covering all eight IntervalType values and four modern schedule shapes; command-contract oracle still missing",
         ),
-        "diff" => (Status::Partial, "cargo mxrs diff", "typed project diff"),
+        "diff" => (
+            Status::Verified,
+            "mxrs diff",
+            "native MPR change records and CLI: xtask command-oracle diff; docs/commands/diff.md",
+        ),
         "export" => (Status::Partial, "mxrs export", "typed Rust export"),
         "env" => (
             Status::Partial,
@@ -488,7 +492,7 @@ mod tests {
     #[test]
     fn parses_and_classifies_command_inventory_without_counting_headers() {
         let report = build(&format!(
-            "Available MXRB commands (3):\n\n  compare  Compare projects\n  validate  Validate project\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
+            "Available MXRB commands (3):\n\n  cache  Cache operations\n  validate  Validate project\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
         ))
         .unwrap();
         assert_eq!(report.rows.len(), 3);
@@ -579,7 +583,7 @@ mod tests {
 
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["compare", "describe", "tree", "cache"])).unwrap();
+        let report = build(&inventory(&["callers", "describe", "tree", "cache"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

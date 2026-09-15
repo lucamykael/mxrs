@@ -25,7 +25,9 @@ includes byte-for-byte CLI verification against MXRB.
 The read-command contracts now also cover [SQL](docs/commands/sql.md),
 [native inspection via `units`](docs/commands/inspect.md),
 [protocol audit](docs/commands/protocols.md), [MDA inspection/comparison](docs/commands/mda.md)
-and [Cargo workspace inspection](docs/commands/project.md). Each includes a
+[Cargo workspace inspection](docs/commands/project.md),
+[structural comparison](docs/commands/compare.md) and
+[MPR change records](docs/commands/diff.md). Each includes a
 repeatable MXRB CLI oracle and explicit presentation or language mappings.
 Protocol audit remains GUID-based and fail-closed; neither current registry
 contains evidenced recognition GUIDs.
@@ -296,9 +298,9 @@ workspace).
 
 `capability-matrix` reads MXRB's own command inventory and classifies every
 row as verified, partial, or missing. Its identity-based CI ratchet records 76
-commands: 0 verified, 58 partial, and 18 missing. Earlier claims of four
-verified commands lacked command-specific differential evidence and were
-corrected. "Partial" never means
+commands: 9 verified, 60 partial, and 7 missing. "Verified" refers to the
+documented command contract, including explicit mappings and restrictions;
+it does not establish full Studio Pro or runtime parity. "Partial" never means
 command parity; each row stays incomplete until its full observable contract
 has an executable oracle.
 

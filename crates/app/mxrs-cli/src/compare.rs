@@ -57,9 +57,9 @@ pub fn snapshot(path: impl AsRef<Path>) -> mxrs_model::Result<Value> {
         },
         "security": security_summary(&project)?,
         "navigation": navigation_summary(&project)?,
-        "design_assets": design_asset_summary(path),
+        "design_assets": design_asset_summary(path)?,
         "units": unit_summary(&project)?,
-        "modules": modules.iter().map(module_summary).collect::<Vec<_>>(),
+        "modules": modules.iter().map(module_summary).collect::<mxrs_model::Result<Vec<_>>>()?,
     }))
 }
 
@@ -76,7 +76,7 @@ fn unit_summary(project: &Project) -> mxrs_model::Result<Vec<Value>> {
                 .or_else(|_| doc.get_str("name"))
                 .unwrap_or_default()
                 .to_string();
-            Ok(json!({ "containment": u.containment_name, "type": ty, "name": name }))
+            Ok(json!({ "containment": u.containment_name, "container_root": false, "type": ty, "name": name }))
         })
         .collect::<mxrs_model::Result<Vec<_>>>()?;
     summary.sort_by(|a, b| {
@@ -92,7 +92,7 @@ fn unit_summary(project: &Project) -> mxrs_model::Result<Vec<Value>> {
     Ok(summary)
 }
 
-fn module_summary(module: &Module) -> Value {
+fn module_summary(module: &Module) -> mxrs_model::Result<Value> {
     let mut entities: Vec<&Entity> = module.entities().iter().collect();
     entities.sort_by(|a, b| a.name.cmp(&b.name));
     let mut associations: Vec<&Association> = module.associations();
@@ -110,23 +110,26 @@ fn module_summary(module: &Module) -> Value {
         .iter()
         .map(flow_summary)
         .collect::<Vec<_>>();
-    microflows.sort_by_key(Value::to_string);
+    microflows.sort_by_key(|flow| (name_of(flow), flow.to_string()));
     let mut nanoflows = module
         .nanoflows
         .iter()
         .map(flow_summary)
         .collect::<Vec<_>>();
-    nanoflows.sort_by_key(Value::to_string);
+    nanoflows.sort_by_key(|flow| (name_of(flow), flow.to_string()));
+    let mut roles: Vec<_> = module.module_roles.iter().collect();
+    roles.sort_by(|a, b| a.name.cmp(&b.name));
 
-    json!({
+    Ok(json!({
         "name": module.name,
-        "entities": entities.iter().map(|e| entity_summary(e)).collect::<Vec<_>>(),
+        "entities": entities.iter().map(|e| entity_summary(e)).collect::<mxrs_model::Result<Vec<_>>>()?,
         "associations": associations.iter().map(|a| association_summary(a)).collect::<Vec<_>>(),
         "pages": pages.iter().map(|p| page_summary(p)).collect::<Vec<_>>(),
         "menus": menus.iter().map(|m| menu_summary(m)).collect::<Vec<_>>(),
+        "module_roles": roles.iter().map(|role| json!({"id": role.id, "name": role.name, "description": role.description})).collect::<Vec<_>>(),
         "microflows": microflows,
         "nanoflows": nanoflows,
-    })
+    }))
 }
 
 fn page_summary(page: &Page) -> Value {
@@ -190,9 +193,9 @@ fn bson_to_json(value: &Bson) -> Value {
         Bson::Boolean(b) => Value::Bool(*b),
         Bson::Int32(i) => json!(i),
         Bson::Int64(i) => json!(i),
-        Bson::Double(d) => json!(d),
+        Bson::Double(d) => Bson::Double(*d).into_relaxed_extjson(),
         Bson::Null => Value::Null,
-        other => Value::String(format!("{other:?}")),
+        other => other.clone().into_relaxed_extjson(),
     }
 }
 
@@ -221,8 +224,8 @@ fn security_summary(project: &Project) -> mxrs_model::Result<Option<Value>> {
             let mut roles = string_list(&u, "UserRoles");
             roles.sort();
             json!({
-                "name": u.get_str("UserName").unwrap_or_default(),
-                "entity": u.get_str("Entity").unwrap_or_default(),
+                "name": u.get_str("UserName").ok(),
+                "entity": u.get_str("Entity").ok(),
                 "roles": roles,
                 "password_sha256": sha256_hex(u.get_str("Password").unwrap_or_default().as_bytes()),
             })
@@ -240,7 +243,7 @@ fn security_summary(project: &Project) -> mxrs_model::Result<Option<Value>> {
             let mut module_roles = string_list(&r, "ModuleRoles");
             module_roles.sort();
             json!({
-                "name": r.get_str("Name").unwrap_or_default(),
+                "name": r.get_str("Name").ok(),
                 "admin": r.get_bool("ManageAllRoles").unwrap_or(false),
                 "module_roles": module_roles,
             })
@@ -490,67 +493,171 @@ const ASSET_DIRECTORIES: &[&str] = &[
 /// (symlinks excluded, matching `compare.rb`'s own `!File.symlink?`) under
 /// each `ASSET_DIRECTORIES` entry, keyed by its path relative to the
 /// project root.
-fn design_asset_summary(mpr_path: &Path) -> Value {
+fn design_asset_summary(mpr_path: &Path) -> mxrs_mpr::Result<Value> {
     let root = mpr_path.parent().unwrap_or(Path::new("."));
     let mut assets: Vec<(String, String)> = Vec::new();
     for dir in ASSET_DIRECTORIES {
         let mut files = Vec::new();
-        collect_regular_files(&root.join(dir), &mut files);
+        collect_regular_files(&root.join(dir), &mut files)?;
         for file in files {
-            let Ok(bytes) = std::fs::read(&file) else {
-                continue;
-            };
+            let bytes = std::fs::read(&file).map_err(|error| asset_io_error(&file, error))?;
             let relative = file
                 .strip_prefix(root)
                 .unwrap_or(&file)
-                .to_string_lossy()
-                .replace('\\', "/");
+                .components()
+                .map(|component| {
+                    component
+                        .as_os_str()
+                        .to_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            asset_io_error(
+                                &file,
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "asset path is not valid UTF-8",
+                                ),
+                            )
+                        })
+                })
+                .collect::<std::io::Result<Vec<_>>>()?
+                .join("/");
             assets.push((relative, sha256_hex(&bytes)));
         }
     }
     assets.sort_by(|a, b| a.0.cmp(&b.0));
-    Value::Object(
+    Ok(Value::Object(
         assets
             .into_iter()
             .map(|(path, hash)| (path, Value::String(hash)))
             .collect(),
-    )
+    ))
 }
 
-fn collect_regular_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+fn asset_io_error(path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+fn collect_regular_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(asset_io_error(dir, error)),
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+    for entry in entries {
+        let path = entry.map_err(|error| asset_io_error(dir, error))?.path();
+        // Native glob ignores hidden entries and never descends into symlinks.
+        if path
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
+        {
             continue;
-        };
+        }
+        let meta =
+            std::fs::symlink_metadata(&path).map_err(|error| asset_io_error(&path, error))?;
         if meta.file_type().is_symlink() {
             continue;
         }
         if meta.is_dir() {
-            collect_regular_files(&path, out);
+            collect_regular_files(&path, out)?;
         } else if meta.is_file() {
             out.push(path);
         }
     }
+    Ok(())
 }
 
-fn entity_summary(entity: &Entity) -> Value {
+fn entity_summary(entity: &Entity) -> mxrs_model::Result<Value> {
     let mut attributes = entity.attributes.clone();
     attributes.sort_by(|a, b| a.name.cmp(&b.name));
-    json!({
+    Ok(json!({
         "name": entity.name,
         "documentation": entity.documentation,
         "persistable": entity.persistable,
-        "attributes": attributes.iter().map(|a| json!({
+        "generalization": generalization_summary(entity),
+        "access_rules": entity.access_rules.iter().map(|rule| json!({
+            "id": rule.id, "roles": rule.roles, "create": rule.create, "delete": rule.delete,
+            "documentation": rule.documentation, "default_rights": rule.default_rights,
+            "xpath": rule.xpath, "xpath_caption": rule.xpath_caption,
+            "members": rule.members.iter().map(|member| json!({
+                "id": member.id, "name": member.name, "reference": member.reference, "rights": member.rights,
+                "kind": match member.kind { mxrs_model::entity::AccessMemberKind::Attribute => "attribute", mxrs_model::entity::AccessMemberKind::Association => "association" },
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "attributes": attributes.iter().map(|a| -> mxrs_model::Result<Value> { Ok(json!({
             "name": a.name,
             "documentation": a.documentation,
-            "type": format!("{:?}", a.attribute_type),
-            "default": a.default_value,
-        })).collect::<Vec<_>>(),
+            "type": format!("{:?}", a.attribute_type).to_lowercase(),
+            "default": attribute_default(a)?,
+            "native_type": a.raw_type_doc.as_ref().map(|doc| normalize_flow_value(&Bson::Document(doc.clone()), &HashMap::new())),
+            "native_value": a.raw_value_doc.as_ref().map(|doc| normalize_flow_value(&Bson::Document(doc.clone()), &HashMap::new())),
+        })) }).collect::<mxrs_model::Result<Vec<_>>>()?,
+    }))
+}
+
+fn attribute_default(attribute: &mxrs_model::Attribute) -> mxrs_model::Result<String> {
+    let value = attribute.raw_value_doc.as_ref().and_then(|doc| {
+        doc.get("defaultValue")
+            .filter(|value| !matches!(value, Bson::Null | Bson::Boolean(false)))
+            .or_else(|| doc.get("DefaultValue"))
+    });
+    Ok(match value {
+        None | Some(Bson::Null) => String::new(),
+        Some(Bson::String(text)) => text.clone(),
+        Some(Bson::Boolean(value)) => value.to_string(),
+        Some(Bson::Int32(value)) => value.to_string(),
+        Some(Bson::Int64(value)) => value.to_string(),
+        Some(Bson::Double(value)) => native_float_string(*value),
+        Some(_) => {
+            return Err(mxrs_model::ModelError::InvalidStructure {
+                path: format!(
+                    "attribute {} default",
+                    attribute.name.as_deref().unwrap_or("(unnamed)")
+                ),
+                expected: "string, numeric, boolean or null default value",
+            });
+        }
     })
+}
+
+// Ruby's Float#to_s switches to scientific notation at exponents < -4 or
+// >= 15, keeps a decimal point and pads exponents to at least two digits.
+fn native_float_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".into();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-Infinity"
+        } else {
+            "Infinity"
+        }
+        .into();
+    }
+    let scientific = format!("{value:e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("scientific float has exponent");
+    let exponent: i32 = exponent.parse().expect("scientific exponent is numeric");
+    if !(-4..15).contains(&exponent) {
+        let decimal = if mantissa.contains('.') { "" } else { ".0" };
+        format!("{mantissa}{decimal}e{exponent:+03}")
+    } else {
+        format!("{value:?}")
+    }
+}
+
+fn generalization_summary(entity: &Entity) -> Value {
+    let mut result = json!({"Persistable": false, "HasCreatedDateAttr": false, "HasChangedDateAttr": false, "HasOwnerAttr": false, "HasChangedByAttr": false});
+    if let Some(generalization) = &entity.generalization {
+        let raw =
+            normalize_flow_value(&Bson::Document(generalization.raw.clone()), &HashMap::new());
+        result
+            .as_object_mut()
+            .unwrap()
+            .extend(raw.as_object().unwrap().clone());
+    }
+    result
 }
 
 fn association_summary(association: &Association) -> Value {
@@ -559,6 +666,7 @@ fn association_summary(association: &Association) -> Value {
         "type": format!("{:?}", association.association_type),
         "owner": format!("{:?}", association.owner),
         "storage_format": format!("{:?}", association.storage_format),
+        "delete_behavior": association.delete_behavior.as_ref().map(|doc| normalize_flow_value(&Bson::Document(doc.clone()), &HashMap::new())),
         "documentation": association.documentation,
     })
 }
@@ -586,17 +694,26 @@ fn flow_summary(flow: &Microflow) -> Value {
             })
         })
         .collect();
-    normalized_flows.sort_by_key(|v| v.to_string());
+    normalized_flows.sort_by_key(|edge| {
+        (
+            edge["origin"].to_string(),
+            edge["destination"].to_string(),
+            edge["error_handler"].to_string(),
+            edge["cases"].to_string(),
+        )
+    });
 
     let mut allowed_roles = flow.allowed_module_roles.clone();
     allowed_roles.sort();
     json!({
         "name": flow.name,
-        "return_type": flow.return_type,
+        "return_type": flow.return_type.as_deref().unwrap_or_default(),
         "allowed_roles": allowed_roles,
-        "parameters": flow.parameters.iter().map(|p| normalize_flow_value(&Bson::Document(p.clone()), &ids)).collect::<Vec<_>>(),
-        "objects": objects.iter().map(|o| normalize_flow_value(&Bson::Document((*o).clone()), &ids)).collect::<Vec<_>>(),
-        "flows": normalized_flows,
+        "parameters": flow.parameters.iter().map(|p| bson_to_json(&Bson::Document(p.clone()))).collect::<Vec<_>>(),
+        "body": {
+            "objects": objects.iter().map(|o| normalize_flow_value(&Bson::Document((*o).clone()), &ids)).collect::<Vec<_>>(),
+            "flows": normalized_flows,
+        },
     })
 }
 
@@ -770,15 +887,34 @@ fn normalize_flow_value(value: &Bson, ids: &HashMap<String, usize>) -> Value {
             Value::Object(map)
         }
         Bson::Array(items) => {
-            Value::Array(items.iter().map(|v| normalize_flow_value(v, ids)).collect())
+            let mut ordered: Vec<_> = items.iter().collect();
+            if ordered.iter().all(|value| {
+                value
+                    .as_document()
+                    .and_then(flow_id)
+                    .is_some_and(|id| ids.contains_key(&id))
+            }) {
+                ordered.sort_by_key(|value| {
+                    value
+                        .as_document()
+                        .and_then(flow_id)
+                        .and_then(|id| ids.get(&id).copied())
+                });
+            }
+            Value::Array(
+                ordered
+                    .into_iter()
+                    .map(|value| normalize_flow_value(value, ids))
+                    .collect(),
+            )
         }
         Bson::String(s) => Value::String(s.clone()),
         Bson::Boolean(b) => Value::Bool(*b),
         Bson::Int32(i) => json!(i),
         Bson::Int64(i) => json!(i),
-        Bson::Double(d) => json!(d),
+        Bson::Double(d) => Bson::Double(*d).into_relaxed_extjson(),
         Bson::Null => Value::Null,
-        other => Value::String(format!("{other:?}")),
+        other => other.clone().into_relaxed_extjson(),
     }
 }
 
@@ -795,22 +931,72 @@ pub struct Change {
     pub path: Vec<String>,
     pub before: Option<Value>,
     pub after: Option<Value>,
+    index_positions: Vec<usize>,
 }
 
 impl Change {
+    /// JSON paths retain numeric indices separately from literal numeric names.
+    pub fn json_path(&self) -> Vec<Value> {
+        self.path
+            .iter()
+            .enumerate()
+            .map(|(position, part)| {
+                if self.index_positions.contains(&position) {
+                    json!(
+                        part.parse::<usize>()
+                            .expect("array index generated by diff")
+                    )
+                } else {
+                    json!(part)
+                }
+            })
+            .collect()
+    }
+
     pub fn format(&self) -> String {
+        let path: Vec<_> = self
+            .path
+            .iter()
+            .enumerate()
+            .map(|(position, part)| {
+                if self.index_positions.contains(&position) {
+                    format!("[{part}]")
+                } else {
+                    part.clone()
+                }
+            })
+            .collect();
         format!(
             "{}: {} != {}",
-            self.path.join("."),
-            self.before
-                .as_ref()
-                .map(Value::to_string)
-                .unwrap_or_else(|| "nil".into()),
-            self.after
-                .as_ref()
-                .map(Value::to_string)
-                .unwrap_or_else(|| "nil".into()),
+            path.join("."),
+            format_change_value(&self.before),
+            format_change_value(&self.after)
         )
+    }
+
+    pub fn format_diff(&self) -> String {
+        let operation = match self.operation {
+            Operation::Added => "added",
+            Operation::Removed => "removed",
+            Operation::Changed => "changed",
+        };
+        format!(
+            "{operation}\t{}\t{}\t=>\t{}",
+            self.path.join("."),
+            format_change_value(&self.before),
+            format_change_value(&self.after)
+        )
+    }
+}
+
+fn format_change_value(value: &Option<Value>) -> String {
+    match value {
+        None => "nil".into(),
+        Some(value) => {
+            let mut canonical = value.clone();
+            canonical.sort_all_objects();
+            canonical.to_string()
+        }
     }
 }
 
@@ -838,11 +1024,53 @@ pub fn compare(
 
 pub fn diff(left: &Value, right: &Value) -> Vec<Change> {
     let mut path = Vec::new();
-    diff_values(left, right, &mut path)
+    diff_values(left, right, &mut path, &mut Vec::new())
 }
 
-fn diff_values(left: &Value, right: &Value, path: &mut Vec<String>) -> Vec<Change> {
+// Native Ruby compares numeric values, not their BSON/JSON integer-vs-double
+// representation. Avoid lossy integer-to-float conversion above 2^53.
+fn values_equal(left: &Value, right: &Value) -> bool {
     if left == right {
+        return true;
+    }
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            let (float, integer) = if left.is_f64() && !right.is_f64() {
+                (left, right)
+            } else if right.is_f64() && !left.is_f64() {
+                (right, left)
+            } else {
+                return false;
+            };
+            let float = float.as_f64().expect("floating JSON number");
+            let integer = integer
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| integer.as_u64().map(i128::from));
+            float.fract() == 0.0 && integer.is_some_and(|integer| float as i128 == integer)
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len() && left.iter().zip(right).all(|(a, b)| values_equal(a, b))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .get(key)
+                        .is_some_and(|other| values_equal(value, other))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn diff_values(
+    left: &Value,
+    right: &Value,
+    path: &mut Vec<String>,
+    indices: &mut Vec<usize>,
+) -> Vec<Change> {
+    if values_equal(left, right) {
         return vec![];
     }
 
@@ -858,6 +1086,7 @@ fn diff_values(left: &Value, right: &Value, path: &mut Vec<String>) -> Vec<Chang
                         l.get(k).unwrap_or(&Value::Null),
                         r.get(k).unwrap_or(&Value::Null),
                         path,
+                        indices,
                     );
                     path.pop();
                     result
@@ -865,19 +1094,22 @@ fn diff_values(left: &Value, right: &Value, path: &mut Vec<String>) -> Vec<Chang
                 .collect()
         }
         (Value::Array(l), Value::Array(r)) if named_array(l) && named_array(r) => {
-            diff_named_arrays(l, r, path)
+            diff_named_arrays(l, r, path, indices)
         }
         (Value::Array(l), Value::Array(r)) => {
             let max = l.len().max(r.len());
             (0..max)
                 .flat_map(|i| {
+                    indices.push(path.len());
                     path.push(i.to_string());
                     let result = diff_values(
                         l.get(i).unwrap_or(&Value::Null),
                         r.get(i).unwrap_or(&Value::Null),
                         path,
+                        indices,
                     );
                     path.pop();
+                    indices.pop();
                     result
                 })
                 .collect()
@@ -885,6 +1117,7 @@ fn diff_values(left: &Value, right: &Value, path: &mut Vec<String>) -> Vec<Chang
         _ => vec![Change {
             operation: change_operation(left, right),
             path: path.clone(),
+            index_positions: indices.clone(),
             before: (!left.is_null()).then(|| left.clone()),
             after: (!right.is_null()).then(|| right.clone()),
         }],
@@ -929,7 +1162,7 @@ fn same_except_name(a: &Value, b: &Value) -> bool {
             am2.remove("name");
             let mut bm2 = bm.clone();
             bm2.remove("name");
-            am2 == bm2
+            values_equal(&Value::Object(am2), &Value::Object(bm2))
         }
         _ => a == b,
     }
@@ -938,7 +1171,12 @@ fn same_except_name(a: &Value, b: &Value) -> bool {
 /// Ports `Mxrb::Compare::Comparator#diff_named_arrays`: matches items by
 /// `"name"` rather than position, with a same-content-except-name pass so a
 /// rename reports as one change instead of a spurious remove+add pair.
-fn diff_named_arrays(left: &[Value], right: &[Value], path: &mut Vec<String>) -> Vec<Change> {
+fn diff_named_arrays(
+    left: &[Value],
+    right: &[Value],
+    path: &mut Vec<String>,
+    indices: &mut Vec<usize>,
+) -> Vec<Change> {
     let mut left_by_name: Vec<(String, Value)> =
         left.iter().map(|v| (name_of(v), v.clone())).collect();
     let mut right_by_name: Vec<(String, Value)> =
@@ -965,11 +1203,13 @@ fn diff_named_arrays(left: &[Value], right: &[Value], path: &mut Vec<String>) ->
             .1
             .clone();
         path.push(name.clone());
-        changes.extend(diff_values(&l, &r, path));
+        changes.extend(diff_values(&l, &r, path, indices));
         path.pop();
     }
     left_by_name.retain(|(n, _)| !common_names.contains(n));
     right_by_name.retain(|(n, _)| !common_names.contains(n));
+    left_by_name.sort_by(|a, b| a.0.cmp(&b.0));
+    right_by_name.sort_by(|a, b| a.0.cmp(&b.0));
 
     let left_only_snapshot = left_by_name.clone();
     for (name, value) in &left_only_snapshot {
@@ -977,9 +1217,9 @@ fn diff_named_arrays(left: &[Value], right: &[Value], path: &mut Vec<String>) ->
             .iter()
             .position(|(_, rv)| same_except_name(value, rv))
         {
-            let (rname, rvalue) = right_by_name.remove(pos);
-            path.push(format!("{name} -> {rname}"));
-            changes.extend(diff_values(value, &rvalue, path));
+            let (_, rvalue) = right_by_name.remove(pos);
+            path.push(name.clone());
+            changes.extend(diff_values(value, &rvalue, path, indices));
             path.pop();
             left_by_name.retain(|(n, _)| n != name);
         }
@@ -988,13 +1228,13 @@ fn diff_named_arrays(left: &[Value], right: &[Value], path: &mut Vec<String>) ->
     left_by_name.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, value) in left_by_name {
         path.push(name);
-        changes.extend(diff_values(&value, &Value::Null, path));
+        changes.extend(diff_values(&value, &Value::Null, path, indices));
         path.pop();
     }
     right_by_name.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, value) in right_by_name {
         path.push(name);
-        changes.extend(diff_values(&Value::Null, &value, path));
+        changes.extend(diff_values(&Value::Null, &value, path, indices));
         path.pop();
     }
     changes

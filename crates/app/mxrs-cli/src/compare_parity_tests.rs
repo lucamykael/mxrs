@@ -509,3 +509,170 @@ fn undecodable_security_or_navigation_units_are_errors_not_missing_equal_snapsho
         assert!(compare(&left, &right).is_err());
     }
 }
+
+fn nested_document_mut<'a>(
+    document: &'a mut Document,
+    type_name: &str,
+) -> Option<&'a mut Document> {
+    if document.get_str("$Type").ok() == Some(type_name) {
+        return Some(document);
+    }
+    fn nested_value<'a>(value: &'a mut Bson, type_name: &str) -> Option<&'a mut Document> {
+        match value {
+            Bson::Document(document) => nested_document_mut(document, type_name),
+            Bson::Array(values) => values
+                .iter_mut()
+                .find_map(|value| nested_value(value, type_name)),
+            _ => None,
+        }
+    }
+    document
+        .iter_mut()
+        .find_map(|(_, value)| nested_value(value, type_name))
+}
+
+#[test]
+fn native_attribute_generalization_access_and_role_changes_cannot_compare_identical() {
+    for (unit_type, document_type, field, value, expected_path) in [
+        (
+            "DomainModels$DomainModel",
+            "DomainModels$StringAttributeType",
+            "Length",
+            Bson::Int32(333),
+            "native_type",
+        ),
+        (
+            "DomainModels$DomainModel",
+            "DomainModels$NoGeneralization",
+            "HasOwnerAttr",
+            Bson::Boolean(true),
+            "generalization",
+        ),
+        (
+            "DomainModels$DomainModel",
+            "DomainModels$AccessRule",
+            "XPathConstraint",
+            Bson::String("[Name != empty]".into()),
+            "access_rules",
+        ),
+        (
+            "Security$ModuleSecurity",
+            "Security$ModuleRole",
+            "Description",
+            Bson::String("Changed".into()),
+            "module_roles",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let left = directory.path().join("left/Project.mpr");
+        let right = directory.path().join("right/Project.mpr");
+        for path in [&left, &right] {
+            let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+            builder.module("Sales", |module| {
+                module.role("Reader", "Read data");
+                module.entity("Record", |entity| {
+                    entity.string("Name");
+                    entity.access_rule(["Sales.Reader"], |rule| {
+                        rule.allow_create(false);
+                    });
+                });
+            });
+            mxrs_writer::write_project(path, &builder.build()).unwrap();
+        }
+        assert!(compare(&left, &right).unwrap().is_identical());
+        edit_document(&right, unit_type, |document| {
+            let target = nested_document_mut(document, document_type).unwrap();
+            let field = if field == "Length" && target.contains_key("length") {
+                "length"
+            } else {
+                field
+            };
+            target.insert(field, value);
+        });
+        let result = compare(&left, &right).unwrap();
+        assert!(!result.is_identical(), "ignored {document_type}.{field}");
+        assert!(
+            result
+                .changes
+                .iter()
+                .any(|change| change.path.iter().any(|part| part == expected_path)),
+            "{:?}",
+            result.changes
+        );
+    }
+}
+
+#[test]
+fn asset_inventory_ignores_hidden_files_but_propagates_unreadable_paths() {
+    let (directory, left, right) = fixtures();
+    let theme = directory.path().join("right/theme");
+    std::fs::create_dir_all(theme.join(".hidden")).unwrap();
+    std::fs::write(theme.join(".hidden/ignored.css"), "hidden").unwrap();
+    assert!(compare(&left, &right).unwrap().is_identical());
+    std::fs::remove_dir_all(&theme).unwrap();
+    std::fs::write(&theme, "not a directory").unwrap();
+    assert!(compare(&left, &right).is_err());
+}
+
+#[test]
+fn rename_paths_keep_the_old_name_and_match_equal_candidates_in_name_order() {
+    let left = json!([{"name": "Zulu", "value": 1}, {"name": "Alpha", "value": 1}]);
+    let right = json!([{"name": "NewZulu", "value": 1}, {"name": "NewAlpha", "value": 1}]);
+    let changes = diff(&left, &right);
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].path, ["Alpha", "name"]);
+    assert_eq!(changes[0].after, Some(json!("NewAlpha")));
+    assert_eq!(changes[1].path, ["Zulu", "name"]);
+    assert_eq!(changes[1].after, Some(json!("NewZulu")));
+}
+
+#[test]
+fn structured_paths_distinguish_array_indices_from_numeric_names() {
+    let changes = diff(
+        &json!({"0": 1, "items": [{"value": 1}]}),
+        &json!({"0": 2, "items": [{"value": 2}]}),
+    );
+    assert_eq!(changes[0].json_path(), vec![json!("0")]);
+    assert_eq!(
+        changes[1].json_path(),
+        vec![json!("items"), json!(0), json!("value")]
+    );
+    assert_eq!(changes[1].format(), "items.[0].value: 1 != 2");
+    assert_eq!(changes[1].format_diff(), "changed\titems.0.value\t1\t=>\t2");
+}
+
+#[test]
+fn binary_and_nonfinite_values_have_lossless_structured_representations() {
+    let value = Bson::Binary(mxrs_bson::Binary {
+        subtype: mxrs_bson::BinarySubtype::Generic,
+        bytes: vec![0, 255, 128],
+    });
+    let normalized = normalize_flow_value(&value, &HashMap::new());
+    assert_eq!(
+        normalized,
+        json!({"$binary": {"base64": "AP+A", "subType": "00"}})
+    );
+    assert_eq!(
+        normalize_flow_value(&Bson::Double(f64::INFINITY), &HashMap::new()),
+        json!({"$numberDouble": "Infinity"})
+    );
+}
+
+#[test]
+fn numeric_comparison_matches_native_values_without_rounding_large_integers() {
+    assert!(diff(&json!({"n": 1}), &json!({"n": 1.0})).is_empty());
+    assert!(
+        diff(
+            &json!([{"name": "old", "value": 1}]),
+            &json!([{"name": "new", "value": 1.0}])
+        )
+        .iter()
+        .all(|change| change.path == ["old", "name"])
+    );
+    assert_eq!(
+        diff(&json!(9007199254740993_i64), &json!(9007199254740992.0_f64)).len(),
+        1
+    );
+    assert_eq!(diff(&json!(i64::MAX), &json!(i64::MAX as f64)).len(), 1);
+    assert_eq!(diff(&json!(true), &json!(1)).len(), 1);
+}
