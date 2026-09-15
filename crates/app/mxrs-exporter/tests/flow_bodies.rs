@@ -9,6 +9,287 @@ use std::process::Command;
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
 
+fn structured_fixture() -> mxrs_ir::ProjectDecl {
+    let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+    builder.module("Calls", |m| {
+        m.entity("Record", |e| {
+            e.string("Name");
+            e.boolean("Active");
+        });
+    });
+    let mut project = builder.build();
+    let mut flow = MicroflowDecl::new("Structured");
+    flow.parameters
+        .push(FlowParameterDecl::new("flag", Ty::Boolean));
+    flow.parameters.push(FlowParameterDecl::new(
+        "records",
+        Ty::List("Calls.Record".into()),
+    ));
+    flow.activities.push(Activity::Decision {
+        condition: "$flag".into(),
+        true_branch: vec![Activity::LoopOver {
+            list_variable: "records".into(),
+            iterator: "record".into(),
+            activities: vec![
+                Activity::WhileLoop {
+                    condition: "$record/Active".into(),
+                    activities: vec![Activity::Decision {
+                        condition: "true".into(),
+                        true_branch: vec![Activity::BreakLoop],
+                        false_branch: vec![Activity::ContinueLoop],
+                    }],
+                },
+                Activity::Decision {
+                    condition: "false".into(),
+                    true_branch: vec![Activity::BreakLoop],
+                    false_branch: vec![Activity::ChangeObject {
+                        variable: "record".into(),
+                        entity: "Calls.Record".into(),
+                        commit: false,
+                        members: vec![mxrs_ir::Member::attribute("Name", "'before'")],
+                    }],
+                },
+                Activity::ContinueLoop,
+            ],
+        }],
+        false_branch: vec![Activity::LoopOver {
+            list_variable: "records".into(),
+            iterator: "record".into(),
+            activities: vec![],
+        }],
+    });
+    flow.activities.push(Activity::WhileLoop {
+        condition: "false".into(),
+        activities: vec![],
+    });
+    flow.return_type = Some(Ty::Boolean);
+    flow.return_expression = Some("$flag".into());
+    project.modules[0].microflows.push(flow.clone());
+    flow.name = "ClientStructured".into();
+    project.modules[0].nanoflows.push(flow);
+    project
+}
+
+fn visit_documents(doc: &mut Document, edit: &mut impl FnMut(&mut Document)) {
+    edit(doc);
+    for (_, value) in doc.iter_mut() {
+        match value {
+            Bson::Document(child) => visit_documents(child, edit),
+            Bson::Array(items) => {
+                for child in items.iter_mut().filter_map(Bson::as_document_mut) {
+                    visit_documents(child, edit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn nested_decisions_and_loops_rebuild_exactly_and_edit_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_dir = dir.path().join("source");
+    std::fs::create_dir(&source_dir).unwrap();
+    let path = source_dir.join("Structured.mpr");
+    let generated = dir.path().join("generated");
+    let rebuilt = dir.path().join("Rebuilt.mpr");
+    mxrs_writer::write_project(&path, &structured_fixture()).unwrap();
+    for name in ["Structured", "ClientStructured"] {
+        customize(&path, name, |doc| {
+            visit_documents(doc, &mut |node| {
+                if node.contains_key("RelativeMiddlePoint") {
+                    node.insert("RelativeMiddlePoint", "731;492");
+                    node.insert("Caption", "Native caption");
+                }
+                if let Ok(objects) = node.get_array_mut("Objects") {
+                    objects[1..].reverse();
+                }
+            });
+            doc.get_array_mut("Flows").unwrap()[1..].reverse();
+        });
+    }
+    let before = flows(&path);
+    let report = mxrs_exporter::verify_editable_document_round_trip(&path).unwrap();
+    assert!(report.passed, "{:?}", report.failures);
+    assert_eq!(report.candidate_units, 2);
+    mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
+    let editable = generated.join("src/application/microflows/mod.rs");
+    let source = std::fs::read_to_string(&editable).unwrap();
+    for token in [
+        "flow.decision(",
+        "flow.loop_over(",
+        "flow.while_loop(",
+        "flow.break_loop()",
+        "flow.continue_loop()",
+        "Record_Active",
+    ] {
+        assert!(source.contains(token), "{token}\n{source}");
+    }
+    for forbidden in ["Expr::new", "$ID", "Bson", ".activities.push("] {
+        assert!(!source.contains(forbidden));
+    }
+    let lib = generated.join("src/lib.rs");
+    std::fs::write(
+        &lib,
+        format!(
+            "#![deny(warnings)]\n{}",
+            std::fs::read_to_string(&lib).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(source_dir).unwrap();
+    run(&generated, &rebuilt);
+    assert_eq!(flows(&rebuilt), before);
+    let edited = source
+        .replace("mxrs::string(\"before\")", "mxrs::string(\"after\")")
+        .replace("value_flag.clone(),", "mxrs::boolean(false),");
+    assert_ne!(source, edited);
+    std::fs::write(&editable, edited).unwrap();
+    run(&generated, &rebuilt);
+    let after = flows(&rebuilt);
+    assert_eq!(after["ClientStructured"], before["ClientStructured"]);
+    let mut expected = before["Structured"].3.clone();
+    visit_documents(&mut expected, &mut |doc| {
+        if doc.get_str("Value").ok() == Some("'before'") {
+            doc.insert("Value", "'after'");
+        }
+        if doc.get_str("Expression").ok() == Some("$flag") {
+            doc.insert("Expression", "false");
+        }
+    });
+    assert_eq!(after["Structured"].3, expected);
+    assert_eq!(after["Structured"].0, before["Structured"].0);
+    assert_eq!(after["Structured"].1, before["Structured"].1);
+}
+
+#[test]
+fn unsupported_control_semantics_and_out_of_scope_variables_stay_preserved() {
+    for mutation in [
+        "comparison",
+        "non-boolean",
+        "condition-option",
+        "error-handler",
+        "loop-option",
+        "unknown-loop",
+        "wrong-list",
+        "iterator-collision",
+        "iterator-leak",
+        "branch-return",
+        "break-outside",
+        "branch-local-leak",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Unsupported.mpr");
+        let mut project = structured_fixture();
+        let flow = &mut project.modules[0].microflows[0];
+        match mutation {
+            "iterator-leak" => {
+                flow.return_type = Some(Ty::Object("Calls.Record".into()));
+                flow.return_expression = Some("$record".into());
+            }
+            "break-outside" => {
+                flow.activities.push(Activity::BreakLoop);
+            }
+            "branch-return" => {
+                let Activity::Decision { true_branch, .. } = &mut flow.activities[0] else {
+                    unreachable!()
+                };
+                *true_branch = vec![Activity::ReturnValue {
+                    expression: "$flag".into(),
+                }];
+            }
+            "branch-local-leak" => {
+                let Activity::Decision { true_branch, .. } = &mut flow.activities[0] else {
+                    unreachable!()
+                };
+                true_branch.push(Activity::CreateList {
+                    variable: "local".into(),
+                    entity: "Calls.Record".into(),
+                });
+                flow.return_type = Some(Ty::List("Calls.Record".into()));
+                flow.return_expression = Some("$local".into());
+            }
+            _ => {}
+        }
+        // Raw graph lowering lets malformed native scope reach the importer;
+        // normal authored preflight may correctly reject these declarations.
+        mxrs_writer::write_project(&path, &structured_fixture()).unwrap();
+        customize(&path, "Structured", |doc| {
+            if matches!(
+                mutation,
+                "iterator-leak" | "break-outside" | "branch-return" | "branch-local-leak"
+            ) {
+                let (objects, edges) = mxrs_writer::flow_compiler::build_microflow_graph(
+                    &flow.activities,
+                    &[],
+                    flow.return_expression.as_deref(),
+                );
+                doc.get_document_mut("ObjectCollection").unwrap().insert(
+                    "Objects",
+                    mxrs_bson::build_array(objects.into_iter().map(Bson::Document).collect(), 2),
+                );
+                doc.insert(
+                    "Flows",
+                    mxrs_bson::build_array(edges.into_iter().map(Bson::Document).collect(), 2),
+                );
+                doc.insert(
+                    "MicroflowReturnType",
+                    mxrs_writer::flow_compiler::return_type_document(flow.return_type.as_ref())
+                        .unwrap(),
+                );
+            }
+            visit_documents(doc, &mut |node| match node.get_str("$Type").ok() {
+                Some("Microflows$ExpressionSplitCondition") => match mutation {
+                    "comparison" => {
+                        node.insert("Expression", "$flag = true");
+                    }
+                    "non-boolean" => {
+                        node.insert("Expression", "$records");
+                    }
+                    "condition-option" => {
+                        node.insert("FutureBehavior", true);
+                    }
+                    _ => {}
+                },
+                Some("Microflows$ExclusiveSplit") if mutation == "error-handler" => {
+                    node.insert("ErrorHandlingType", "CustomWithoutRollBack");
+                }
+                Some("Microflows$IterableList") => match mutation {
+                    "loop-option" => {
+                        node.insert("FutureBehavior", true);
+                    }
+                    "unknown-loop" => {
+                        node.insert("$Type", "Microflows$FutureLoop");
+                    }
+                    "wrong-list" => {
+                        node.insert("ListVariableName", "flag");
+                    }
+                    "iterator-collision" => {
+                        node.insert("VariableName", "flag");
+                    }
+                    _ => {}
+                },
+                _ => {}
+            });
+        });
+        let report = mxrs_exporter::audit_portability(&path).unwrap();
+        let family = report
+            .families
+            .iter()
+            .find(|f| f.native_type == "Microflows$Microflow")
+            .unwrap();
+        assert_eq!((family.partial, family.preserved), (0, 1), "{mutation}");
+        let generated = dir.path().join("generated");
+        mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
+        assert!(
+            !std::fs::read_to_string(generated.join("src/application/microflows/mod.rs"))
+                .unwrap()
+                .contains("\"Structured\""),
+            "{mutation}"
+        );
+    }
+}
+
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -189,7 +470,7 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
     let before = flows(&original);
     let report = mxrs_exporter::verify_editable_document_round_trip(&original).unwrap();
     assert!(report.passed, "{:?}", report.failures);
-    assert_eq!(report.candidate_units, 5);
+    assert_eq!(report.candidate_units, 6);
     mxrs_exporter::import_cargo_project(&original, &generated, Some(&workspace())).unwrap();
     let editable = generated.join("src/application/microflows/mod.rs");
     let source = std::fs::read_to_string(&editable).unwrap();
@@ -203,7 +484,7 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
     ] {
         assert!(source.contains(token), "{token}\n{source}");
     }
-    assert!(!source.contains("\"Branch\""));
+    assert!(source.contains("\"Branch\""));
     for forbidden in ["$ID", "Bson", "Expr::new", ".activities.push(", "777;333"] {
         assert!(!source.contains(forbidden));
     }
@@ -332,7 +613,7 @@ fn unsupported_graphs_and_action_options_are_reported_as_preserved() {
             .unwrap();
         assert_eq!(
             (family.partial, family.preserved),
-            (3, 2),
+            (4, 1),
             "{mutation}: {family:?}"
         );
         let generated = dir.path().join("generated");

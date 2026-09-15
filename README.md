@@ -136,9 +136,12 @@ counterpart is `flow.call_microflow_result::<MxObject<Order>>(target, "order",
 arguments)`. Before writing, the target must return that type; void results,
 unchecked captures, and duplicate variable names are rejected.
 
-Cargo import reconstructs supported linear microflows and nanoflows as typed
+Cargo import reconstructs supported structured microflows and nanoflows as typed
 builders: parameters, microflow calls, list creation, object create/change and
-commit/delete, and returns. Create/change assignments use typed attribute markers.
+commit/delete, decisions, list/while loops, loop break/continue and final returns.
+Branches and loop bodies can nest; variables remain local to their block.
+Conditions currently accept boolean literals, parameters/results and direct
+boolean attribute reads. Create/change assignments use typed attribute markers.
 Expressions cover typed variables, direct attribute reads and canonical string,
 boolean and numeric literals. Integer attribute reads can widen to Long through
 `into_long()`; narrowing is never inferred. Calculated/autonumber writes,
@@ -147,8 +150,8 @@ this projection. Attribute markers describe the imported schema; when changing
 a domain attribute type, update the matching `TypedAttributeMarker::Value` too.
 A rebuild without edits preserves the original bytes; edits with the same activity structure retain node identities,
 layout and native metadata. Structural edits rebuild the activity graph while
-retaining the flow identity. Decisions, loops, other activities and unsupported
-expressions/options remain in the imported model. `mxrs portability` reports
+retaining the flow identity. Branch returns, rescue paths, other activities and
+unsupported expressions/options remain in the imported model. `mxrs portability` reports
 these bodies as partial projections because native header and layout data still
 come from the imported model; `--verify-round-trip` includes projected flows.
 This reconstruction is part of Cargo import; standalone `export_project` keeps

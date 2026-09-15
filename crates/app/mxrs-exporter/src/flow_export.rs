@@ -1,4 +1,4 @@
-//! Reconstructs attested linear bodies as typed builder calls. Unsupported
+//! Reconstructs attested structured bodies as typed builder calls. Unsupported
 //! expressions, action options and graph shapes stay in the imported model.
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -9,7 +9,7 @@ use mxrs_ir::flow::FlowReturnType as Ty;
 use mxrs_ir::{Activity, FlowParameterDecl, MicroflowCallMapping, MicroflowDecl};
 use mxrs_model::attribute::AttributeType;
 use mxrs_model::{Microflow, Module, Project};
-use mxrs_writer::flow_graph::{documents, linear_nodes};
+use mxrs_writer::flow_graph::{Node, documents, structured_nodes};
 
 use crate::{Result, rust_string};
 
@@ -358,7 +358,7 @@ fn convert(
     entities: &HashSet<String>,
     attributes: &Attributes,
 ) -> Option<ConvertedFlow> {
-    let nodes = linear_nodes(doc)?;
+    let nodes = structured_nodes(doc)?;
     let model = Microflow::from_bson(doc);
     let mut declaration = MicroflowDecl::new(model.name.as_ref()?);
     declaration.documentation = model.documentation.clone();
@@ -422,7 +422,211 @@ fn convert(
         variables.insert(name, ty);
         declaration.parameters.push(parameter);
     }
-    for node in nodes.iter().skip(1).take(nodes.len().saturating_sub(2)) {
+    let converter = Converter {
+        targets,
+        entities,
+        attributes,
+    };
+    declaration.activities = converter.block(
+        &nodes[1..nodes.len().checked_sub(1)?],
+        &mut variables,
+        &mut source,
+        false,
+    )?;
+    let Node::Simple(end) = nodes.last()? else {
+        return None;
+    };
+    let returned = end.get_str("ReturnValue").ok()?;
+    let native_return = model.return_type_document.as_ref()?;
+    if native_return.get_str("$Type").ok()? == "DataTypes$VoidType" {
+        if !returned.is_empty() {
+            return None;
+        }
+    } else {
+        let ty = data_type(native_return)?;
+        tag(&ty, entities)?;
+        source.push(format!(
+            "flow.return_value({});",
+            expression(returned, &ty, &variables, attributes)?
+        ));
+        declaration.return_type = Some(ty);
+        declaration.return_expression = Some(returned.into());
+    }
+    if !mxrs_writer::flow_graph::preserves_body(doc, &declaration) {
+        return None;
+    }
+    Some(ConvertedFlow {
+        module: module.into(),
+        native_type: doc.get_str("$Type").ok()?.into(),
+        declaration,
+        source,
+    })
+}
+
+struct Converter<'a> {
+    targets: &'a HashMap<String, &'a Microflow>,
+    entities: &'a HashSet<String>,
+    attributes: &'a Attributes,
+}
+
+impl Converter<'_> {
+    fn block(
+        &self,
+        nodes: &[Node<'_>],
+        variables: &mut HashMap<String, Ty>,
+        source: &mut Vec<String>,
+        in_loop: bool,
+    ) -> Option<Vec<Activity>> {
+        nodes
+            .iter()
+            .map(|node| self.node(node, variables, source, in_loop))
+            .collect()
+    }
+
+    fn node(
+        &self,
+        node: &Node<'_>,
+        variables: &mut HashMap<String, Ty>,
+        source: &mut Vec<String>,
+        in_loop: bool,
+    ) -> Option<Activity> {
+        match node {
+            Node::Simple(doc) => match doc.get_str("$Type").ok()? {
+                "Microflows$ActionActivity" => self.action(doc, variables, source),
+                "Microflows$BreakEvent" | "Microflows$ContinueEvent" if in_loop => {
+                    let is_break = doc.get_str("$Type").ok()? == "Microflows$BreakEvent";
+                    source.push(format!(
+                        "flow.{}();",
+                        if is_break {
+                            "break_loop"
+                        } else {
+                            "continue_loop"
+                        }
+                    ));
+                    Some(if is_break {
+                        Activity::BreakLoop
+                    } else {
+                        Activity::ContinueLoop
+                    })
+                }
+                _ => None,
+            },
+            Node::Decision { split, yes, no, .. } => {
+                if split.get_str("ErrorHandlingType").ok()? != "Rollback" {
+                    return None;
+                }
+                let condition_doc = split.get_document("SplitCondition").ok()?;
+                if condition_doc.get_str("$Type").ok()? != "Microflows$ExpressionSplitCondition" {
+                    return None;
+                }
+                let condition = condition_doc.get_str("Expression").ok()?;
+                let rendered = expression(condition, &Ty::Boolean, variables, self.attributes)?;
+                let mut yes_source = Vec::new();
+                let mut no_source = Vec::new();
+                let true_branch =
+                    self.block(yes, &mut variables.clone(), &mut yes_source, in_loop)?;
+                let false_branch =
+                    self.block(no, &mut variables.clone(), &mut no_source, in_loop)?;
+                let activity = Activity::Decision {
+                    condition: condition.into(),
+                    true_branch,
+                    false_branch,
+                };
+                attest_control(split, &activity, "SplitCondition")?;
+                source.push(format!(
+                    "flow.decision({rendered}, {}",
+                    closure_start(&yes_source)
+                ));
+                source.extend(yes_source.into_iter().map(|line| format!("    {line}")));
+                source.push(format!("}}, {}", closure_start(&no_source)));
+                source.extend(no_source.into_iter().map(|line| format!("    {line}")));
+                source.push("});".into());
+                Some(activity)
+            }
+            Node::Loop { node, body } => {
+                if node.get_str("ErrorHandlingType").ok()? != "Rollback" {
+                    return None;
+                }
+                let native = node.get_document("LoopSource").ok()?;
+                let mut inner_variables = variables.clone();
+                let mut inner_source = Vec::new();
+                let (opening, mut activity) = match native.get_str("$Type").ok()? {
+                    "Microflows$IterableList" => {
+                        let list = native.get_str("ListVariableName").ok()?;
+                        let iterator = native.get_str("VariableName").ok()?;
+                        let Ty::List(entity) = variables.get(list)? else {
+                            return None;
+                        };
+                        let variable = binding(iterator)?;
+                        if inner_variables
+                            .insert(iterator.into(), Ty::Object(entity.clone()))
+                            .is_some()
+                        {
+                            return None;
+                        }
+                        inner_source.push(format!("let _ = &{variable};"));
+                        (
+                            format!(
+                                "flow.loop_over(&{}, {}, |flow, {variable}| {{",
+                                binding(list)?,
+                                rust_string(iterator)
+                            ),
+                            Activity::LoopOver {
+                                list_variable: list.into(),
+                                iterator: iterator.into(),
+                                activities: Vec::new(),
+                            },
+                        )
+                    }
+                    "Microflows$WhileLoopCondition" => {
+                        let condition = native.get_str("WhileExpression").ok()?;
+                        (
+                            format!(
+                                "flow.while_loop({}, |flow| {{",
+                                expression(condition, &Ty::Boolean, variables, self.attributes)?
+                            ),
+                            Activity::WhileLoop {
+                                condition: condition.into(),
+                                activities: Vec::new(),
+                            },
+                        )
+                    }
+                    _ => return None,
+                };
+                let activities = self.block(body, &mut inner_variables, &mut inner_source, true)?;
+                match &mut activity {
+                    Activity::LoopOver {
+                        activities: target, ..
+                    }
+                    | Activity::WhileLoop {
+                        activities: target, ..
+                    } => *target = activities,
+                    _ => unreachable!(),
+                }
+                attest_control(node, &activity, "LoopSource")?;
+                source.push(if body.is_empty() {
+                    opening.replace("|flow", "|_flow")
+                } else {
+                    opening
+                });
+                source.extend(inner_source.into_iter().map(|line| format!("    {line}")));
+                source.push("});".into());
+                Some(activity)
+            }
+        }
+    }
+
+    fn action(
+        &self,
+        node: &Document,
+        variables: &mut HashMap<String, Ty>,
+        source: &mut Vec<String>,
+    ) -> Option<Activity> {
+        let Self {
+            targets,
+            entities,
+            attributes,
+        } = self;
         let action = node.get_document("Action").ok()?;
         let activity = match action.get_str("$Type").ok()? {
             kind @ ("Microflows$CreateChangeAction" | "Microflows$ChangeAction") => {
@@ -469,7 +673,7 @@ fn convert(
                     rendered.push(format!(
                         "mxrs::attribute::<{}>({})",
                         attribute.marker,
-                        expression(value, &attribute.value_type, &variables, attributes)?
+                        expression(value, &attribute.value_type, variables, attributes)?
                     ));
                     members.push(Member::attribute(member, value));
                 }
@@ -524,7 +728,7 @@ fn convert(
                     rendered.push(format!(
                         "mxrs::CallArgument::new({}, {})",
                         rust_string(name),
-                        expression(value, ty, &variables, attributes)?
+                        expression(value, ty, variables, attributes)?
                     ));
                     mappings.push(MicroflowCallMapping {
                         parameter: parameter.into(),
@@ -623,33 +827,29 @@ fn convert(
         if !same_semantics(action, fresh.get(1)?.get_document("Action").ok()?) {
             return None;
         }
-        declaration.activities.push(activity);
+        Some(activity)
     }
-    let returned = nodes.last()?.get_str("ReturnValue").ok()?;
-    let native_return = model.return_type_document.as_ref()?;
-    if native_return.get_str("$Type").ok()? == "DataTypes$VoidType" {
-        if !returned.is_empty() {
-            return None;
-        }
+}
+
+fn closure_start(source: &[String]) -> &'static str {
+    if source.is_empty() {
+        "|_flow| {"
     } else {
-        let ty = data_type(native_return)?;
-        tag(&ty, entities)?;
-        source.push(format!(
-            "flow.return_value({});",
-            expression(returned, &ty, &variables, attributes)?
-        ));
-        declaration.return_type = Some(ty);
-        declaration.return_expression = Some(returned.into());
+        "|flow| {"
     }
-    if !mxrs_writer::flow_graph::preserves_linear_body(doc, &declaration) {
-        return None;
-    }
-    Some(ConvertedFlow {
-        module: module.into(),
-        native_type: doc.get_str("$Type").ok()?.into(),
-        declaration,
-        source,
-    })
+}
+
+fn attest_control(node: &Document, activity: &Activity, field: &str) -> Option<()> {
+    let (fresh, _) = mxrs_writer::flow_compiler::build_microflow_graph(
+        std::slice::from_ref(activity),
+        &[],
+        None,
+    );
+    same_semantics(
+        node.get_document(field).ok()?,
+        fresh.get(1)?.get_document(field).ok()?,
+    )
+    .then_some(())
 }
 
 fn same_semantics(old: &Document, fresh: &Document) -> bool {

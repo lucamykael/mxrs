@@ -173,3 +173,158 @@ fn member_identity_follows_its_name_across_reordering_removal_and_insertion() {
     assert_eq!(after["Calls.Record.Second"], old["Calls.Record.Second"]);
     assert_eq!(after["Calls.Record.Third"], current["Calls.Record.Third"]);
 }
+
+#[test]
+fn structured_traversal_rejects_ambiguous_edges_and_container_crossings() {
+    use mxrs_writer::flow_graph::{Node, structured_nodes};
+    let decision = Activity::Decision {
+        condition: "true".into(),
+        true_branch: vec![Activity::Commit {
+            variable: "a".into(),
+        }],
+        false_branch: vec![Activity::Commit {
+            variable: "b".into(),
+        }],
+    };
+    let (objects, edges) = mxrs_writer::flow_compiler::build_microflow_graph(
+        &[
+            decision.clone(),
+            Activity::WhileLoop {
+                condition: "false".into(),
+                activities: vec![decision],
+            },
+        ],
+        &[],
+        None,
+    );
+    let original = mxrs_bson::doc! {
+        "ObjectCollection": { "Objects": mxrs_bson::build_array(objects.into_iter().map(Bson::Document).collect(), 2) },
+        "Flows": mxrs_bson::build_array(edges.into_iter().map(Bson::Document).collect(), 2),
+    };
+    for mutation in [
+        "cross-container",
+        "duplicate-case",
+        "shared-branch",
+        "cycle",
+        "disconnected",
+        "duplicate-id",
+        "error-edge",
+        "unknown-case",
+        "duplicate-edge",
+        "merge-cycle",
+        "inner-parameter",
+    ] {
+        let mut doc = original.clone();
+        let nodes = structured_nodes(&doc).unwrap();
+        let Node::Decision {
+            split,
+            yes,
+            no,
+            merge,
+            ..
+        } = &nodes[1]
+        else {
+            panic!("decision")
+        };
+        let split_id = split.get("$ID").unwrap().clone();
+        let merge_id = merge.unwrap().get("$ID").unwrap().clone();
+        let Node::Simple(yes) = yes[0] else {
+            panic!("yes")
+        };
+        let Node::Simple(no) = no[0] else {
+            panic!("no")
+        };
+        let yes_id = yes.get("$ID").unwrap().clone();
+        let no_id = no.get("$ID").unwrap().clone();
+        let Node::Loop { body, node } = &nodes[2] else {
+            panic!("loop")
+        };
+        let loop_id = node.get("$ID").unwrap().clone();
+        let Node::Decision { split: inner, .. } = &body[0] else {
+            panic!("inner")
+        };
+        let inner_id = inner.get("$ID").unwrap().clone();
+        let edges = doc.get_array_mut("Flows").unwrap();
+        match mutation {
+            "disconnected" => edges.retain(|value| {
+                value
+                    .as_document()
+                    .is_none_or(|edge| edge.get("DestinationPointer") != Some(&yes_id))
+            }),
+            "duplicate-id" => {
+                edges[1].as_document_mut().unwrap().insert("$ID", split_id);
+            }
+            "duplicate-edge" => {
+                let mut edge = edges[1].as_document().unwrap().clone();
+                edge.insert("$ID", uuid::Uuid::new_v4().to_string());
+                edge.remove("Line");
+                edge.remove("CaseValues");
+                edges.push(Bson::Document(edge));
+            }
+            "merge-cycle" => {
+                let edge = edges
+                    .iter_mut()
+                    .filter_map(Bson::as_document_mut)
+                    .find(|e| e.get("OriginPointer") == Some(&merge_id))
+                    .unwrap();
+                edge.insert("DestinationPointer", split_id);
+            }
+            "inner-parameter" => {
+                let objects = doc
+                    .get_document_mut("ObjectCollection")
+                    .unwrap()
+                    .get_array_mut("Objects")
+                    .unwrap();
+                let inner = objects
+                    .iter_mut()
+                    .filter_map(Bson::as_document_mut)
+                    .find(|o| o.get("$ID") == Some(&loop_id))
+                    .unwrap()
+                    .get_document_mut("ObjectCollection")
+                    .unwrap()
+                    .get_array_mut("Objects")
+                    .unwrap();
+                inner.push(Bson::Document(mxrs_bson::doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$MicroflowParameter" }));
+            }
+            _ => {
+                let edge = edges
+                    .iter_mut()
+                    .filter_map(Bson::as_document_mut)
+                    .find(|e| {
+                        e.get("OriginPointer") == Some(&split_id)
+                            && e.get("DestinationPointer") == Some(&no_id)
+                    })
+                    .unwrap();
+                match mutation {
+                    "cross-container" => {
+                        edge.insert("DestinationPointer", inner_id);
+                    }
+                    "shared-branch" => {
+                        edge.insert("DestinationPointer", yes_id);
+                    }
+                    "cycle" => {
+                        edge.insert("DestinationPointer", split_id);
+                    }
+                    "error-edge" => {
+                        edge.insert("IsErrorHandler", true);
+                    }
+                    "duplicate-case" | "unknown-case" => {
+                        edge.get_array_mut("CaseValues").unwrap()[1]
+                            .as_document_mut()
+                            .unwrap()
+                            .insert(
+                                "Value",
+                                if mutation == "duplicate-case" {
+                                    "true"
+                                } else {
+                                    "unknown"
+                                },
+                            );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        assert!(structured_nodes(&doc).is_none(), "{mutation}");
+    }
+}

@@ -1,8 +1,11 @@
-//! Linear graph traversal and identity-preserving synchronization. Storage
+//! Structured graph traversal and identity-preserving synchronization. Storage
 //! order is independent of execution order; ambiguous graphs are rejected.
 use std::collections::{HashMap, HashSet};
 
 use mxrs_bson::{Bson, Document, extract_id};
+
+mod structured;
+pub use structured::{Node, structured_nodes};
 
 pub fn documents(value: &Bson) -> Option<Vec<&Document>> {
     let array = value.as_array()?;
@@ -122,32 +125,33 @@ fn unique_ids(value: &Bson, seen: &mut HashSet<String>) -> bool {
     }
 }
 
-/// Retains node/edge identities, layout and native metadata when the new body
-/// has the same linear activity kinds. Structural edits use normal lowering.
+/// Retains identities, layout and metadata for matching structured bodies.
+/// Structural edits use normal lowering.
 pub(crate) fn merge(previous: &Document, fresh: &Document) -> Option<Document> {
-    let old_nodes = linear_nodes(previous)?;
-    let new_nodes = linear_nodes(fresh)?;
-    if old_nodes.len() != new_nodes.len() {
+    let old_nodes = structured_nodes(previous)?;
+    let new_nodes = structured_nodes(fresh)?;
+    let mut pairs = Vec::new();
+    pair_nodes(&old_nodes, &new_nodes, &mut pairs)?;
+    let mapping: HashMap<_, _> = pairs
+        .iter()
+        .map(|(old, new)| Some((id(new)?, id(old)?)))
+        .collect::<Option<_>>()?;
+    if edge_keys(previous, None)? != edge_keys(fresh, Some(&mapping))? {
         return None;
     }
     let mut replacements = HashMap::new();
-    for (old, new) in old_nodes.into_iter().zip(new_nodes) {
-        if old.get_str("$Type").ok()? != new.get_str("$Type").ok()? {
-            return None;
-        }
+    for (old, new) in pairs {
         let mut merged = old.clone();
-        if let Ok(action) = new.get_document("Action") {
-            let prior = old.get_document("Action").ok()?;
-            if prior.get_str("$Type").ok()? != action.get_str("$Type").ok()? {
-                return None;
+        for field in ["Action", "SplitCondition", "LoopSource"] {
+            if let Some(value) = new.get(field) {
+                let prior = old.get(field)?;
+                if prior.as_document()?.get_str("$Type").ok()?
+                    != value.as_document()?.get_str("$Type").ok()?
+                {
+                    return None;
+                }
+                merged.insert(field, merge_value(prior, value));
             }
-            merged.insert(
-                "Action",
-                merge_value(
-                    &Bson::Document(prior.clone()),
-                    &Bson::Document(action.clone()),
-                ),
-            );
         }
         if let Some(value) = new.get("ReturnValue") {
             merged.insert("ReturnValue", value.clone());
@@ -155,16 +159,106 @@ pub(crate) fn merge(previous: &Document, fresh: &Document) -> Option<Document> {
         replacements.insert(id(old)?, merged);
     }
     let mut collection = previous.get_document("ObjectCollection").ok()?.clone();
-    let mut objects = collection.get_array("Objects").ok()?.clone();
-    for value in &mut objects {
+    replace_nodes(&mut collection, &mut replacements)?;
+    Some(collection)
+}
+
+fn pair_nodes<'a>(
+    old: &[Node<'a>],
+    new: &[Node<'a>],
+    pairs: &mut Vec<(&'a Document, &'a Document)>,
+) -> Option<()> {
+    if old.len() != new.len() {
+        return None;
+    }
+    for (old, new) in old.iter().zip(new) {
+        match (old, new) {
+            (Node::Simple(a), Node::Simple(b))
+                if a.get_str("$Type").ok()? == b.get_str("$Type").ok()? =>
+            {
+                pairs.push((a, b))
+            }
+            (Node::Loop { node: a, body: ab }, Node::Loop { node: b, body: bb }) => {
+                pairs.push((a, b));
+                pair_nodes(ab, bb, pairs)?;
+            }
+            (
+                Node::Decision {
+                    split: a,
+                    yes: ay,
+                    no: an,
+                    merge: am,
+                },
+                Node::Decision {
+                    split: b,
+                    yes: by,
+                    no: bn,
+                    merge: bm,
+                },
+            ) => {
+                pairs.push((a, b));
+                pair_nodes(ay, by, pairs)?;
+                pair_nodes(an, bn, pairs)?;
+                match (am, bm) {
+                    (Some(a), Some(b)) => pairs.push((a, b)),
+                    (None, None) => {}
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+fn edge_keys(
+    doc: &Document,
+    mapping: Option<&HashMap<String, String>>,
+) -> Option<Vec<(String, String, Option<String>)>> {
+    let collection = doc.get_document("ObjectCollection").ok()?;
+    let mut keys = Vec::new();
+    for edge in documents(doc.get("Flows").or_else(|| collection.get("Flows"))?)? {
+        let translate = |field| {
+            let key = extract_id(edge.get(field)?)?;
+            match mapping {
+                Some(mapping) => mapping.get(&key).cloned(),
+                None => Some(key),
+            }
+        };
+        let case = edge
+            .get("CaseValues")
+            .and_then(documents)
+            .and_then(|cases| {
+                cases
+                    .first()
+                    .and_then(|case| case.get_str("Value").ok())
+                    .map(str::to_string)
+            });
+        keys.push((
+            translate("OriginPointer")?,
+            translate("DestinationPointer")?,
+            case,
+        ));
+    }
+    keys.sort();
+    Some(keys)
+}
+
+fn replace_nodes(
+    collection: &mut Document,
+    replacements: &mut HashMap<String, Document>,
+) -> Option<()> {
+    for value in collection.get_array_mut("Objects").ok()? {
         if let Some(key) = value.as_document().and_then(id)
-            && let Some(replacement) = replacements.remove(&key)
+            && let Some(mut replacement) = replacements.remove(&key)
         {
+            if let Ok(inner) = replacement.get_document_mut("ObjectCollection") {
+                replace_nodes(inner, replacements)?;
+            }
             *value = Bson::Document(replacement);
         }
     }
-    collection.insert("Objects", objects);
-    Some(collection)
+    Some(())
 }
 
 fn merge_value(old: &Bson, new: &Bson) -> Bson {
@@ -228,8 +322,8 @@ fn named_item(value: &Bson) -> Option<(String, String)> {
 }
 
 /// Attests that the writer can project this declaration without changing its
-/// existing linear body, signature or documentation on an unedited rebuild.
-pub fn preserves_linear_body(previous: &Document, declaration: &mxrs_ir::MicroflowDecl) -> bool {
+/// existing structured body, signature or documentation on an unedited rebuild.
+pub fn preserves_body(previous: &Document, declaration: &mxrs_ir::MicroflowDecl) -> bool {
     if !same_parameters(previous, declaration)
         || previous.get_str("Documentation").ok() != Some(declaration.documentation.as_str())
     {
@@ -245,6 +339,11 @@ pub fn preserves_linear_body(previous: &Document, declaration: &mxrs_ir::Microfl
         "Flows":mxrs_bson::build_array(flows.into_iter().map(Bson::Document).collect(),3),
     };
     merge(previous, &fresh).as_ref() == previous.get_document("ObjectCollection").ok()
+}
+
+/// Compatibility entry point for callers that require a linear body.
+pub fn preserves_linear_body(previous: &Document, declaration: &mxrs_ir::MicroflowDecl) -> bool {
+    linear_nodes(previous).is_some() && preserves_body(previous, declaration)
 }
 
 pub(crate) fn same_parameters(previous: &Document, decl: &mxrs_ir::MicroflowDecl) -> bool {
