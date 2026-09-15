@@ -10,16 +10,10 @@
 //! Unlike domain-model entity/association sync, this is **upsert-only**:
 //! `microflows` is not treated as the module's complete authoritative
 //! microflow list — mxrb's own `write_documents` never deletes an existing
-//! document just because it's absent from a given call's declared list, and
-//! this matches that. A microflow whose name matches an existing
-//! `Microflows$Microflow` `Documents` unit keeps its `$ID`; everything else
-//! about the document is fully re-derived from the declared `MicroflowDecl`
-//! (`mxrs_model::Microflow::to_bson()` is already fully declarative, unlike
-//! mxrb's sparser Ruby declarations — which is why mxrb needs a whole
-//! `__mxrb_*_declared` sentinel dance in `merge_existing_document` that this
-//! doesn't: there's no partial-field-preserve case to handle, same
-//! principle already used for attribute/association reconciliation in
-//! `domain.rs`).
+//! document just because it is absent from the declared list. A matching flow
+//! retains its unit ID and folder. Its declaration replaces the body and
+//! signature; native header metadata and matching parameter/type/collection
+//! IDs and fields outside the typed surface survive synchronization.
 //!
 //! Imported enumerations, constants, and regular expressions may live under
 //! arbitrarily nested `Projects$Folder` units. Their lookup therefore walks
@@ -61,6 +55,7 @@ pub fn synchronize_microflows(
     let module_name = module_doc
         .get_str("Name")
         .map_err(|_| crate::WriterError::MissingModuleName(module_id.to_string()))?;
+    crate::flow_contract::validate_documents(mpr, module_name, microflows, false)?;
     synchronize_microflows_with_identity(mpr, module_id, module_name, microflows, identity)
 }
 
@@ -101,6 +96,7 @@ pub fn synchronize_nanoflows(
     let module_name = module_doc
         .get_str("Name")
         .map_err(|_| crate::WriterError::MissingModuleName(module_id.to_string()))?;
+    crate::flow_contract::validate_documents(mpr, module_name, nanoflows, true)?;
     synchronize_nanoflows_with_identity(mpr, module_id, module_name, nanoflows, identity)
 }
 
@@ -132,19 +128,8 @@ fn synchronize_flows_with_identity(
     native_type: &str,
     artifact_kind: ArtifactKind,
 ) -> Result<()> {
-    let existing_by_name: HashMap<String, String> = mpr
-        .children_of(module_id)?
-        .into_iter()
-        .filter(|u| u.containment_name == "Documents")
-        .filter_map(|u| {
-            let doc = mpr.parse_contents(&u).ok()?;
-            if doc.get_str("$Type").ok()? != native_type {
-                return None;
-            }
-            let name = doc.get_str("Name").ok()?.to_string();
-            Some((name, u.unit_id))
-        })
-        .collect();
+    let existing_by_name = existing_documents_by_name(mpr, module_id, native_type)?;
+    let mut updates = Vec::new();
 
     for decl in declarations {
         let (objects, flows) = flow_compiler::build_microflow_graph(
@@ -152,7 +137,8 @@ fn synchronize_flows_with_identity(
             &decl.rescue_activities,
             decl.return_expression.as_deref(),
         );
-        let existing_id = existing_by_name.get(&decl.name).cloned();
+        let previous = existing_by_name.get(&decl.name);
+        let existing_id = previous.map(|(id, _)| id.clone());
         let id = existing_id.clone().unwrap_or_else(|| {
             identity.artifact_id(artifact_kind, &format!("{module_name}.{}", decl.name))
         });
@@ -175,7 +161,29 @@ fn synchronize_flows_with_identity(
             objects,
             flows,
         };
-        let doc = microflow.to_bson_as(native_type);
+        let fresh = microflow.to_bson_as(native_type);
+        let mut doc = previous
+            .map(|(_, doc)| doc.clone())
+            .unwrap_or_else(|| fresh.clone());
+        // A flow declaration owns its body and signature. Preserve other native
+        // header properties (permissions, execution flags, future metadata).
+        for field in [
+            "Name",
+            "Documentation",
+            "MicroflowReturnType",
+            "ObjectCollection",
+            "Flows",
+        ] {
+            doc.insert(field, fresh.get(field).expect("serialized field").clone());
+        }
+        let collection =
+            crate::flow_parameters::lower(decl, &id, previous.map(|(_, doc)| doc), identity)?;
+        doc.insert("MicroflowParameterCollection", collection);
+        // The older Parameters alias is replaced by the canonical collection.
+        doc.remove("Parameters");
+        updates.push((existing_id, id, doc));
+    }
+    for (existing_id, id, doc) in updates {
         match existing_id {
             Some(id) => {
                 mpr.update_unit(&id, doc)?;

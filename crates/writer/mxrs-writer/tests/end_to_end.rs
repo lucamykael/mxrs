@@ -157,6 +157,9 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
             e.association::<markers::Sales::Order_Order_Customer>()
                 .owner = AssociationOwner::Default;
         });
+        m.microflow("ACT_Notify", |f| {
+            f.object_parameter("Order", Ref::<markers::Sales::Order>::new(), |_| {});
+        });
         m.microflow("ACT_CreateOrder", |f| {
             let order = f.create_object(
                 "order",
@@ -221,8 +224,12 @@ fn writes_a_domain_model_and_microflow_that_reads_back_correctly() {
     assert_eq!(assoc.from_entity_id.as_deref(), order.id.as_deref());
     assert_eq!(assoc.to_entity_id.as_deref(), customer.id.as_deref());
 
-    assert_eq!(sales.microflows.len(), 1);
-    let mf = &sales.microflows[0];
+    assert_eq!(sales.microflows.len(), 2);
+    let mf = sales
+        .microflows
+        .iter()
+        .find(|flow| flow.name.as_deref() == Some("ACT_CreateOrder"))
+        .unwrap();
     assert_eq!(mf.name.as_deref(), Some("ACT_CreateOrder"));
     let return_type = mf
         .return_type_document

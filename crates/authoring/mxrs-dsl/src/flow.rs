@@ -1,4 +1,7 @@
-use mxrs_expr::{Expr, ListVar, MemberAssignment, MxBool, RenderExpr, TypedRenderExpr, Var};
+use mxrs_expr::{
+    Expr, IntoExpr, ListVar, MemberAssignment, MendixReturnType, MxBool, MxList, MxObject,
+    RenderExpr, TypedRenderExpr, Var,
+};
 use mxrs_ir::declaration::ModuleDecl;
 use mxrs_ir::flow::{Activity, MicroflowCallMapping, MicroflowDecl};
 use mxrs_ir::{EntityMarker, MicroflowMarker, MicroflowRef, Ref};
@@ -80,32 +83,73 @@ impl NanoflowModuleBuilder {
 pub struct CallArgument {
     parameter: String,
     value: String,
+    value_type: mxrs_ir::flow::FlowReturnType,
 }
 
 impl CallArgument {
-    pub fn new(parameter: impl Into<String>, value: impl RenderExpr) -> Self {
+    pub fn new(parameter: impl Into<String>, value: impl TypedRenderExpr) -> Self {
         Self {
             parameter: parameter.into(),
             value: value.render(),
+            value_type: value.flow_return_type(),
         }
+    }
+
+    pub fn typed<T: MendixReturnType>(
+        parameter: impl Into<String>,
+        value: impl IntoExpr<T>,
+    ) -> Self {
+        Self::new(parameter, value.into_expr())
     }
 
     fn into_ir(self) -> MicroflowCallMapping {
         MicroflowCallMapping {
             parameter: self.parameter,
             value: self.value,
+            value_type: Some(self.value_type),
         }
+    }
+}
+
+pub struct FlowParameterBuilder<T: MendixReturnType> {
+    declaration: mxrs_ir::FlowParameterDecl,
+    marker: std::marker::PhantomData<T>,
+}
+
+impl<T: MendixReturnType> FlowParameterBuilder<T> {
+    pub fn documentation(&mut self, value: impl Into<String>) -> &mut Self {
+        self.declaration.documentation = value.into();
+        self
+    }
+
+    pub fn required(&mut self, value: bool) -> &mut Self {
+        self.declaration.required = value;
+        self
+    }
+
+    pub fn default_value(&mut self, value: impl IntoExpr<T>) -> &mut Self {
+        self.declaration.default_value = Some(value.into_expr().render());
+        self
     }
 }
 
 pub struct FlowBuilder {
     decl: MicroflowDecl,
+    accepts_parameters: bool,
 }
 
 impl FlowBuilder {
     pub(crate) fn new(name: impl Into<String>) -> Self {
         FlowBuilder {
             decl: MicroflowDecl::new(name),
+            accepts_parameters: true,
+        }
+    }
+
+    fn branch() -> Self {
+        Self {
+            decl: MicroflowDecl::new(String::new()),
+            accepts_parameters: false,
         }
     }
 
@@ -116,6 +160,53 @@ impl FlowBuilder {
     pub fn documentation(&mut self, text: impl Into<String>) -> &mut Self {
         self.decl.documentation = text.into();
         self
+    }
+
+    /// Declares a scalar parameter and returns its typed `$name` expression.
+    /// Object/list parameters can also use this method when an `Expr` is desired.
+    ///
+    /// # Panics
+    /// Panics inside decision, loop or rescue builders: parameters belong to the
+    /// outer flow signature, never to a branch of its body.
+    pub fn parameter<T: MendixReturnType>(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut FlowParameterBuilder<T>),
+    ) -> Expr<T> {
+        assert!(
+            self.accepts_parameters,
+            "flow parameters must be declared on the outer flow builder"
+        );
+        let name = name.into();
+        let mut parameter = FlowParameterBuilder {
+            declaration: mxrs_ir::FlowParameterDecl::new(&name, T::flow_return_type()),
+            marker: std::marker::PhantomData,
+        };
+        configure(&mut parameter);
+        self.decl.parameters.push(parameter.declaration);
+        Expr::variable(name)
+    }
+
+    pub fn object_parameter<M: EntityMarker>(
+        &mut self,
+        name: impl Into<String>,
+        _entity: Ref<M>,
+        configure: impl FnOnce(&mut FlowParameterBuilder<MxObject<M>>),
+    ) -> Var<M> {
+        let name = name.into();
+        self.parameter::<MxObject<M>>(&name, configure);
+        Var::new(name)
+    }
+
+    pub fn list_parameter<M: EntityMarker>(
+        &mut self,
+        name: impl Into<String>,
+        _entity: Ref<M>,
+        configure: impl FnOnce(&mut FlowParameterBuilder<MxList<M>>),
+    ) -> ListVar<M> {
+        let name = name.into();
+        self.parameter::<MxList<M>>(&name, configure);
+        ListVar::new(name)
     }
 
     pub fn create_object<M: EntityMarker>(
@@ -207,9 +298,9 @@ impl FlowBuilder {
         then: impl FnOnce(&mut FlowBuilder),
         otherwise: impl FnOnce(&mut FlowBuilder),
     ) -> &mut Self {
-        let mut true_builder = FlowBuilder::new(String::new());
+        let mut true_builder = FlowBuilder::branch();
         then(&mut true_builder);
-        let mut false_builder = FlowBuilder::new(String::new());
+        let mut false_builder = FlowBuilder::branch();
         otherwise(&mut false_builder);
         self.decl.activities.push(Activity::Decision {
             condition: condition.render(),
@@ -226,7 +317,7 @@ impl FlowBuilder {
         body: impl FnOnce(&mut FlowBuilder, Var<M>),
     ) -> &mut Self {
         let iterator_name = iterator_name.into();
-        let mut builder = FlowBuilder::new(String::new());
+        let mut builder = FlowBuilder::branch();
         body(&mut builder, Var::new(iterator_name.clone()));
         self.decl.activities.push(Activity::LoopOver {
             list_variable: list.name().to_string(),
@@ -241,7 +332,7 @@ impl FlowBuilder {
         condition: Expr<MxBool>,
         body: impl FnOnce(&mut FlowBuilder),
     ) -> &mut Self {
-        let mut builder = FlowBuilder::new(String::new());
+        let mut builder = FlowBuilder::branch();
         body(&mut builder);
         self.decl.activities.push(Activity::WhileLoop {
             condition: condition.render(),
@@ -261,7 +352,7 @@ impl FlowBuilder {
     }
 
     pub fn rescue_all(&mut self, body: impl FnOnce(&mut FlowBuilder)) -> &mut Self {
-        let mut builder = FlowBuilder::new(String::new());
+        let mut builder = FlowBuilder::branch();
         body(&mut builder);
         self.decl.rescue_activities = builder.decl.activities;
         self

@@ -252,6 +252,7 @@ fn call(hook: &Hook, result: Option<&str>) -> Activity {
             .map(|(parameter, value)| MicroflowCallMapping {
                 parameter: parameter.clone(),
                 value: value.clone(),
+                value_type: None,
             })
             .collect(),
     }

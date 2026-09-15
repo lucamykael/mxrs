@@ -38,6 +38,8 @@ pub mod documents;
 pub mod domain;
 pub mod error;
 pub mod flow_compiler;
+mod flow_contract;
+mod flow_parameters;
 pub mod instrumentation;
 pub mod layout_compiler;
 pub mod module;

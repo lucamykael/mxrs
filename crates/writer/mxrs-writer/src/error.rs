@@ -2,6 +2,20 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum WriterError {
+    #[error("flow {flow:?} has invalid parameter {parameter:?}: {reason}")]
+    InvalidFlowParameter {
+        flow: String,
+        parameter: String,
+        reason: String,
+    },
+
+    #[error("flow {flow:?} has invalid call to {target:?}: {reason}")]
+    InvalidFlowCall {
+        flow: String,
+        target: String,
+        reason: String,
+    },
+
     #[error("unsupported Mendix version {0:?} (mxrs-schema has no embedded schema hash for it)")]
     UnsupportedVersion(String),
 

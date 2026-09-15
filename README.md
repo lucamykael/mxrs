@@ -75,7 +75,12 @@ PostgreSQL workspace, and offline Team Server repository status. Typed
 domain import covers all attribute kinds plus documentation, length, date
 localization, required/unique validation, and association owner/storage/docs.
 Microflows and nanoflows can be authored and incrementally synchronized with
-stable identities. Imported graph shapes not yet decompiled remain complete
+stable identities. Flow signatures support typed scalar, object, and list
+parameters, documentation, required flags, and typed defaults. Calls in one
+`project!` block check argument names and types at compile time; the writer
+checks builder/IR calls against authored or existing native signatures before
+writing. Parameter and type IDs survive synchronization. Imported graph shapes
+not yet decompiled remain complete
 in the snapshot; new server flows live in
 `src/application/microflows/mod.rs`, while client flows live in
 `src/presentation/nanoflows/mod.rs`. Project/module security is imported into
@@ -101,6 +106,30 @@ documents and localized captions retain stable identities across rebuilds.
 Associations use `Reference<T>` or `ReferenceSet<T>` fields; their target and
 cardinality are checked by Rust, while names and storage metadata can be
 overridden with `#[mxrs(...)]`.
+
+For example, flow parameters bind expressions that can be passed to another
+flow or returned:
+
+```rust,ignore
+let project = mxrs::project! {
+    "11.12.1",
+    module Sales {
+        microflow Echo {
+            parameter message: string { documentation "Text to return"; }
+            return message;
+        }
+        microflow Send {
+            call Sales::Echo (message: mxrs::string("Hello"));
+        }
+    }
+};
+```
+
+Object and list declarations use `parameter order: object<Sales::Order>;`
+and `parameter orders: list<Sales::Order>;`. All declared parameters require a
+call argument; `required` and `default_value` are native parameter metadata,
+not permission to omit arguments. Imported flow bodies and typed bindings for
+call results remain outside this authoring increment.
 
 Projects created before the four-layer layout can run
 `mxrs upgrade --target .` for a read-only preview and add `--apply` to migrate

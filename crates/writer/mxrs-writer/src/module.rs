@@ -7,11 +7,10 @@ use std::collections::HashSet;
 
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::declaration::ModuleDecl;
-use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
 
 use crate::error::Result;
-use crate::{documents, domain, flow_compiler, security};
+use crate::{documents, domain, security};
 
 pub fn write_module(
     mpr: &mut MprFile,
@@ -41,75 +40,20 @@ pub fn write_module(
         identity,
     )?;
 
-    for mf in &decl.microflows {
-        let (objects, flows) = flow_compiler::build_microflow_graph(
-            &mf.activities,
-            &mf.rescue_activities,
-            mf.return_expression.as_deref(),
-        );
-        let microflow = Microflow {
-            id: Some(identity.artifact_id(
-                ArtifactKind::Microflow,
-                &format!("{}.{}", decl.name, mf.name),
-            )),
-            name: Some(mf.name.clone()),
-            documentation: mf.documentation.clone(),
-            return_variable_name: "ReturnValue".into(),
-            allow_concurrent_execution: true,
-            apply_entity_access: false,
-            mark_as_used: false,
-            excluded: false,
-            export_level: "Hidden".into(),
-            allowed_module_roles: vec![],
-            parameters: vec![],
-            return_type_document: flow_compiler::return_type_document(mf.return_type.as_ref()),
-            return_type: None,
-            objects,
-            flows,
-        };
-        let microflow_id = microflow.id.clone().expect("assigned above");
-        mpr.insert_unit(
-            &module_id,
-            "Documents",
-            microflow.to_bson(),
-            Some(&microflow_id),
-        )?;
-    }
-
-    for nf in &decl.nanoflows {
-        let (objects, flows) = flow_compiler::build_microflow_graph(
-            &nf.activities,
-            &nf.rescue_activities,
-            nf.return_expression.as_deref(),
-        );
-        let nanoflow = Microflow {
-            id: Some(identity.artifact_id(
-                ArtifactKind::Nanoflow,
-                &format!("{}.{}", decl.name, nf.name),
-            )),
-            name: Some(nf.name.clone()),
-            documentation: nf.documentation.clone(),
-            return_variable_name: "ReturnValue".into(),
-            allow_concurrent_execution: true,
-            apply_entity_access: false,
-            mark_as_used: false,
-            excluded: false,
-            export_level: "Hidden".into(),
-            allowed_module_roles: vec![],
-            parameters: vec![],
-            return_type_document: flow_compiler::return_type_document(nf.return_type.as_ref()),
-            return_type: None,
-            objects,
-            flows,
-        };
-        let nanoflow_id = nanoflow.id.clone().expect("assigned above");
-        mpr.insert_unit(
-            &module_id,
-            "Documents",
-            nanoflow.to_bson_as("Microflows$Nanoflow"),
-            Some(&nanoflow_id),
-        )?;
-    }
+    documents::synchronize_microflows_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.microflows,
+        identity,
+    )?;
+    documents::synchronize_nanoflows_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.nanoflows,
+        identity,
+    )?;
 
     documents::synchronize_enumerations_with_identity(
         mpr,

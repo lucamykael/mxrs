@@ -37,8 +37,15 @@
 //! association-option := "owner" ("Default" | "Both") ";"
 //!               | "storage" ("Column" | "Table") ";"
 //!               | "documentation" <string-lit> ";"
-//! microflow  := "microflow" <ident> "{" <flow-item>* <rescue>? ("return" <expr> ";")? "}"
-//! nanoflow   := "nanoflow" <ident> "{" <flow-item>* <rescue>? ("return" <expr> ";")? "}"
+//! microflow  := "microflow" <ident> "{" <parameter>* <flow-item>* <rescue>? ("return" <expr> ";")? "}"
+//! nanoflow   := "nanoflow" <ident> "{" <parameter>* <flow-item>* <rescue>? ("return" <expr> ";")? "}"
+//! parameter  := "parameter" <ident> ":" <parameter-type>
+//!               (";" | "{" <parameter-option>* "}" ";"?)
+//! parameter-type := "string" | "integer" | "long" | "float" | "decimal"
+//!                 | "boolean" | "datetime" | "binary"
+//!                 | ("object" | "list") "<" <rust-path> ">"
+//! parameter-option := "documentation" <string-lit> ";" | "required" <bool-lit> ";"
+//!                   | "default_value" <expr> ";"
 //! flow-item  := <create> | <create-list> | <change> | <delete> | <commit> | <call> | <if>
 //!             | <for> | <while> | "break" ";" | "continue" ";"
 //! create     := "create" <ident> "=" <rust-path> "{" <member>* "}" "commit"? ";"
@@ -288,7 +295,22 @@ pub struct LifecycleInput {
     pub raise_error_on_false: Option<syn::LitBool>,
 }
 
+pub enum FlowParameterType {
+    Scalar(AttrKind),
+    Object(syn::Path),
+    List(syn::Path),
+}
+
+pub struct FlowParameterInput {
+    pub name: Ident,
+    pub value_type: FlowParameterType,
+    pub documentation: Option<syn::LitStr>,
+    pub required: Option<syn::LitBool>,
+    pub default_value: Option<Expr>,
+}
+
 pub struct MicroflowInput {
+    pub parameters: Vec<FlowParameterInput>,
     pub name: Ident,
     pub is_nanoflow: bool,
     pub activities: Vec<FlowItem>,
@@ -915,6 +937,91 @@ fn parse_lifecycle(input: ParseStream) -> Result<LifecycleInput> {
     })
 }
 
+impl Parse for FlowParameterInput {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let _: Ident = input.parse()?;
+        let name: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let kind: Ident = input.parse()?;
+        let value_type = match kind.to_string().as_str() {
+            "object" | "list" => {
+                input.parse::<Token![<]>()?;
+                let entity: syn::Path = input.parse()?;
+                input.parse::<Token![>]>()?;
+                if kind == "object" {
+                    FlowParameterType::Object(entity)
+                } else {
+                    FlowParameterType::List(entity)
+                }
+            }
+            "string" | "integer" | "long" | "float" | "decimal" | "boolean" | "datetime"
+            | "binary" => FlowParameterType::Scalar(AttrKind::from_ident(&kind)?),
+            _ => {
+                return Err(syn::Error::new(
+                    kind.span(),
+                    "unsupported flow parameter type",
+                ));
+            }
+        };
+        let mut parameter = Self {
+            name,
+            value_type,
+            documentation: None,
+            required: None,
+            default_value: None,
+        };
+        if input.peek(syn::token::Brace) {
+            let options;
+            braced!(options in input);
+            while !options.is_empty() {
+                let option: Ident = options.parse()?;
+                match option.to_string().as_str() {
+                    "documentation" => {
+                        let value = options.parse()?;
+                        if parameter.documentation.replace(value).is_some() {
+                            return Err(syn::Error::new(
+                                option.span(),
+                                "duplicate parameter documentation",
+                            ));
+                        }
+                    }
+                    "required" => {
+                        let value = options.parse()?;
+                        if parameter.required.replace(value).is_some() {
+                            return Err(syn::Error::new(
+                                option.span(),
+                                "duplicate parameter required option",
+                            ));
+                        }
+                    }
+                    "default_value" => {
+                        let value = options.parse()?;
+                        if parameter.default_value.replace(value).is_some() {
+                            return Err(syn::Error::new(
+                                option.span(),
+                                "duplicate parameter default value",
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(syn::Error::new(
+                            option.span(),
+                            "unknown flow parameter option",
+                        ));
+                    }
+                }
+                options.parse::<Token![;]>()?;
+            }
+            if input.peek(Token![;]) {
+                input.parse::<Token![;]>()?;
+            }
+        } else {
+            input.parse::<Token![;]>()?;
+        }
+        Ok(parameter)
+    }
+}
+
 impl Parse for MicroflowInput {
     fn parse(input: ParseStream) -> Result<Self> {
         let keyword: Ident = input.parse()?;
@@ -931,11 +1038,27 @@ impl Parse for MicroflowInput {
         let name: Ident = input.parse()?;
         let content;
         braced!(content in input);
+        let mut parameters: Vec<FlowParameterInput> = Vec::new();
         let mut activities = Vec::new();
         let mut rescue_activities = Vec::new();
         let mut return_expression: Option<Expr> = None;
         while !content.is_empty() {
-            if content.peek(Token![return]) {
+            if peek_keyword(&content, "parameter") {
+                if !activities.is_empty() || !rescue_activities.is_empty() {
+                    return Err(content.error("parameters must precede flow activities"));
+                }
+                let parameter: FlowParameterInput = content.parse()?;
+                if parameters
+                    .iter()
+                    .any(|existing| existing.name == parameter.name)
+                {
+                    return Err(syn::Error::new(
+                        parameter.name.span(),
+                        "duplicate flow parameter",
+                    ));
+                }
+                parameters.push(parameter);
+            } else if content.peek(Token![return]) {
                 content.parse::<Token![return]>()?;
                 let expr: Expr = content.parse()?;
                 content.parse::<Token![;]>()?;
@@ -968,6 +1091,7 @@ impl Parse for MicroflowInput {
         validate_loop_control(&activities, false)?;
         validate_loop_control(&rescue_activities, false)?;
         Ok(MicroflowInput {
+            parameters,
             name,
             is_nanoflow,
             activities,

@@ -29,7 +29,7 @@ pub use declaration::{
     MenuItemDecl, ModuleDecl, OnOverlap, OqlViewSourceDecl, ProjectDecl, RegularExpressionDecl,
     ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule, SystemMember, SystemMembersDecl,
 };
-pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
+pub use flow::{Activity, FlowParameterDecl, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::system;
 pub use markers::{
     AssociationMarker, AttributeMarker, EntityMarker, EnumerationMarker, MicroflowMarker,

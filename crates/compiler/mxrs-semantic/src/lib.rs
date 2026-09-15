@@ -989,6 +989,10 @@ mod tests {
             });
         }
         let mut declaration = builder.build();
+        mxrs_writer::write_project(&path, &declaration).unwrap();
+        // Bare/case-insensitive native references are intentionally constructed
+        // below the typed authoring boundary to exercise the native index.
+        let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
         for module in &mut declaration.modules {
             let targets: &[&str] = if module.name == "Sales" {
                 &["act_save", "Other.ACT_Save", "RemoteOnly"]
@@ -1004,8 +1008,49 @@ mod tests {
                     mappings: vec![],
                 })
                 .collect();
+            let module_unit = mpr
+                .units_by_containment("Modules")
+                .unwrap()
+                .into_iter()
+                .find(|unit| {
+                    mpr.parse_contents(unit).unwrap().get_str("Name").ok()
+                        == Some(module.name.as_str())
+                })
+                .unwrap();
+            let unit = mpr
+                .children_of(&module_unit.unit_id)
+                .unwrap()
+                .into_iter()
+                .find(|unit| {
+                    mpr.parse_contents(unit).unwrap().get_str("Name").ok() == Some("ACT_Caller")
+                })
+                .unwrap();
+            let mut document = mpr.parse_contents(&unit).unwrap();
+            let (objects, flows) = mxrs_writer::flow_compiler::build_microflow_graph(
+                &module.microflows[0].activities,
+                &[],
+                None,
+            );
+            document
+                .get_document_mut("ObjectCollection")
+                .unwrap()
+                .insert(
+                    "Objects",
+                    mxrs_bson::build_array(
+                        objects.into_iter().map(mxrs_bson::Bson::Document).collect(),
+                        3,
+                    ),
+                );
+            document.insert(
+                "Flows",
+                mxrs_bson::build_array(
+                    flows.into_iter().map(mxrs_bson::Bson::Document).collect(),
+                    3,
+                ),
+            );
+            mpr.update_unit(&unit.unit_id, document).unwrap();
         }
-        mxrs_writer::write_project(&path, &declaration).unwrap();
+        drop(mpr);
         let project = mxrs_model::Project::open(&path, true).unwrap();
         let index = SemanticIndex::build(&project).unwrap();
         assert!(index.analyze().valid(), "{:?}", index.diagnostics());

@@ -572,3 +572,169 @@ fn iterating_an_unbound_list_fails_at_the_list_name() {
         "unexpected diagnostic:\n{stderr}"
     );
 }
+
+fn parameter_diagnostic(module_body: &str, expected: &str) {
+    let source = format!(
+        "pub fn build() -> mxrs_ir::ProjectDecl {{ mxrs_macros::project! {{ \"11.12.1\", module Sales {{ {module_body} }} }} }}"
+    );
+    let output = try_compile(&source);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "invalid input compiled: {module_body}"
+    );
+    assert!(
+        stderr.contains(expected),
+        "expected {expected:?}, got {stderr}"
+    );
+}
+
+#[test]
+fn flow_parameter_names_and_options_have_explicit_diagnostics() {
+    for (body, expected) in [
+        (
+            "microflow Target { parameter value: string; parameter value: string; }",
+            "duplicate flow parameter",
+        ),
+        (
+            "microflow Target { parameter value: enumeration; }",
+            "unsupported flow parameter type",
+        ),
+        (
+            "microflow Target { parameter value: string { required true; required false; } }",
+            "duplicate parameter required",
+        ),
+        (
+            "microflow Target { parameter value: string { documentation \"a\"; documentation \"b\"; } }",
+            "duplicate parameter documentation",
+        ),
+        (
+            "microflow Target { parameter value: string { default_value mxrs_expr::string(\"a\"); default_value mxrs_expr::string(\"b\"); } }",
+            "duplicate parameter default",
+        ),
+        (
+            "microflow Target { parameter value: string { mystery true; } }",
+            "unknown flow parameter option",
+        ),
+        (
+            "entity Order {} microflow Target { create order = Sales::Order {}; parameter value: string; }",
+            "parameters must precede",
+        ),
+    ] {
+        parameter_diagnostic(body, expected);
+    }
+}
+
+#[test]
+fn local_calls_require_each_declared_argument_exactly_once() {
+    for (arguments, expected) in [
+        ("", "missing argument `value`"),
+        (
+            "(extra: mxrs_expr::string(\"x\"))",
+            "unknown parameter `extra`",
+        ),
+        (
+            "(value: mxrs_expr::string(\"a\"), value: mxrs_expr::string(\"b\"))",
+            "duplicate call argument",
+        ),
+    ] {
+        parameter_diagnostic(
+            &format!(
+                "microflow Target {{ parameter value: string; }} microflow Caller {{ call Sales::Target {arguments}; }}"
+            ),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn local_call_arguments_and_parameter_defaults_are_rust_type_checked() {
+    parameter_diagnostic(
+        "microflow Target { parameter value: string; } microflow Caller { call Sales::Target (value: mxrs_expr::boolean(true)); }",
+        "IntoExpr",
+    );
+    parameter_diagnostic(
+        "microflow Target { parameter value: string { default_value mxrs_expr::boolean(true); } }",
+        "IntoExpr",
+    );
+    parameter_diagnostic(
+        "entity Order {} microflow Target { parameter value: list<Sales::Order>; } microflow Caller { parameter order: object<Sales::Order>; call Sales::Target (value: order); }",
+        "IntoExpr",
+    );
+    parameter_diagnostic(
+        "entity Order {} entity Other {} microflow Target { parameter value: object<Sales::Order>; } microflow Caller { parameter order: object<Sales::Other>; call Sales::Target (value: order); }",
+        "IntoExpr",
+    );
+}
+
+#[test]
+fn nested_calls_keep_the_same_argument_contract() {
+    parameter_diagnostic(
+        "microflow Target { parameter value: string; } microflow Caller { if mxrs_expr::boolean(true) { call Sales::Target; } else {} }",
+        "missing argument `value`",
+    );
+    parameter_diagnostic(
+        "microflow Target { parameter value: string; } microflow Caller { rescue { call Sales::Target (value: mxrs_expr::boolean(true)); } }",
+        "IntoExpr",
+    );
+}
+
+#[test]
+fn public_facade_macro_works_with_a_single_renamed_dependency_and_denied_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        format!(
+            r#"
+[package]
+name = "flow-facade-contract"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+model_api = {{ package = "mxrs", path = {:?} }}
+"#,
+            workspace_root().join("crates/app/mxrs")
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        r#"
+#![deny(warnings)]
+mod helpers { pub mod mxrs_expr { pub fn value() -> model_api::Expr<model_api::MxString> { model_api::string("value") } } }
+pub fn make() -> model_api::ProjectDecl {
+    model_api::project! {
+        "11.12.1",
+        module Sales {
+            entity Order { string Number; }
+            microflow Echo { parameter message: string { default_value helpers::mxrs_expr::value(); } return message; }
+            microflow Caller {
+                parameter message: string;
+                parameter order: object<Sales::Order>;
+                parameter orders: list<Sales::Order>;
+                change order { Number = message.clone(); };
+                for current in orders { change current { Number = message.clone(); }; }
+                call Sales::Echo (message: message);
+            }
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO"))
+        .args(["check", "--offline"])
+        .current_dir(dir.path())
+        .env(
+            "CARGO_TARGET_DIR",
+            nested_cargo::target_dir(workspace_root().join("target/nested-flow-facade")),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

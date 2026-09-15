@@ -7,7 +7,7 @@
 //!
 //! The authoring builders keep expressions and variables typed; this IR is
 //! their storage-independent lowered form and therefore stores only the
-//! canonical Mendix source and lexical variable names needed by writers.
+//! canonical Mendix source, variable names, and signature/call type metadata.
 
 /// A single attribute or association assignment inside a create/change
 /// object activity. `value` is a raw Mendix expression string (e.g. `"'A-1'"`
@@ -44,6 +44,10 @@ impl Member {
 pub struct MicroflowCallMapping {
     pub parameter: String,
     pub value: String,
+    /// Typed authoring always supplies this. `None` is reserved for the
+    /// separate functional-test instrumentation path accepting native text;
+    /// project authoring rejects unchecked call expressions.
+    pub value_type: Option<FlowReturnType>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +72,7 @@ impl LogLevel {
 pub enum FlowReturnType {
     String,
     Integer,
+    /// Distinct authoring tag, persisted as native IntegerType in flows.
     Long,
     Float,
     Decimal,
@@ -143,9 +148,31 @@ pub enum Activity {
     ContinueLoop,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowParameterDecl {
+    pub name: String,
+    pub value_type: FlowReturnType,
+    pub documentation: String,
+    pub required: bool,
+    pub default_value: Option<String>,
+}
+
+impl FlowParameterDecl {
+    pub fn new(name: impl Into<String>, value_type: FlowReturnType) -> Self {
+        Self {
+            name: name.into(),
+            value_type,
+            documentation: String::new(),
+            required: false,
+            default_value: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MicroflowDecl {
     pub name: String,
+    pub parameters: Vec<FlowParameterDecl>,
     pub documentation: String,
     pub activities: Vec<Activity>,
     /// Activities reached by the custom error-handler edge from the last
@@ -161,6 +188,7 @@ impl MicroflowDecl {
     pub fn new(name: impl Into<String>) -> Self {
         MicroflowDecl {
             name: name.into(),
+            parameters: Vec::new(),
             documentation: String::new(),
             activities: vec![],
             rescue_activities: vec![],

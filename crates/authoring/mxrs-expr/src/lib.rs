@@ -65,6 +65,10 @@ impl<T: MendixType> Expr<T> {
         }
     }
 
+    pub fn variable(name: impl AsRef<str>) -> Self {
+        Self::new(format!("${}", name.as_ref()))
+    }
+
     pub fn eq(self, other: impl IntoExpr<T>) -> Expr<MxBool> {
         binary(self, "=", other.into_expr())
     }
@@ -375,6 +379,36 @@ impl<M: EntityMarker> ListVar<M> {
 impl<M: EntityMarker> RenderExpr for ListVar<M> {
     fn render(&self) -> String {
         format!("${}", self.name)
+    }
+}
+
+impl<M: EntityMarker> Clone for ListVar<M> {
+    fn clone(&self) -> Self {
+        Self::new(self.name.clone())
+    }
+}
+
+impl<M: EntityMarker> IntoExpr<MxList<M>> for ListVar<M> {
+    fn into_expr(self) -> Expr<MxList<M>> {
+        Expr::variable(self.name)
+    }
+}
+
+impl<M: EntityMarker> IntoExpr<MxList<M>> for &ListVar<M> {
+    fn into_expr(self) -> Expr<MxList<M>> {
+        Expr::variable(&self.name)
+    }
+}
+
+impl<T: TypedRenderExpr + ?Sized> TypedRenderExpr for &T {
+    fn flow_return_type(&self) -> FlowReturnType {
+        T::flow_return_type(self)
+    }
+}
+
+impl<T: RenderExpr + ?Sized> RenderExpr for &T {
+    fn render(&self) -> String {
+        T::render(self)
     }
 }
 

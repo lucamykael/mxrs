@@ -70,7 +70,9 @@ pub use access::AccessRuleBuilder;
 pub use constant::ConstantBuilder;
 pub use entity::{EntityBuilder, EntityIndexBuilder, LifecycleBuilder, SystemMembersBuilder};
 pub use enumeration::EnumerationBuilder;
-pub use flow::{CallArgument, FlowBuilder, MicroflowModuleBuilder, NanoflowModuleBuilder};
+pub use flow::{
+    CallArgument, FlowBuilder, FlowParameterBuilder, MicroflowModuleBuilder, NanoflowModuleBuilder,
+};
 pub use menu::{MenuBuilder, MenuItemBuilder};
 pub use module::{ModuleBuilder, OqlViewSourceBuilder};
 pub use mxrs_expr::{

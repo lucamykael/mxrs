@@ -18,6 +18,7 @@ use crate::error::{Result, WriterError};
 use crate::{documents, domain, module, navigation, scaffold, security};
 
 pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()> {
+    crate::flow_contract::validate_project(project, &[])?;
     validate_lifecycle_handlers(project, &HashSet::new())?;
     validate_oql_sources(project, &HashSet::new())?;
     let path = path.as_ref();
@@ -100,6 +101,7 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             })
         })
         .collect();
+    crate::flow_contract::validate_project(project, &existing_modules)?;
     drop(existing_project);
     validate_lifecycle_handlers(project, &existing_microflows)?;
     validate_oql_sources(project, &existing_oql_sources)?;

@@ -6,15 +6,25 @@
 
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, ConstantBuilder, ContainerBuilder, DataViewBuilder, EntityBuilder,
-    EnumerationBuilder, FlowBuilder, LayoutBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
-    LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder, MicroflowModuleBuilder, ModuleBuilder,
-    NanoflowModuleBuilder, NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder,
-    PageBuilder, PluggableWidgetBuilder, ProjectBuilder, ScheduledEventBuilder, SecurityBuilder,
-    TaskQueueBuilder, UserRoleBuilder,
+    EnumerationBuilder, FlowBuilder, FlowParameterBuilder, LayoutBuilder, LayoutGridBuilder,
+    LayoutGridColumnBuilder, LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder,
+    MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder, NavigationBuilder,
+    NavigationItemBuilder, NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder,
+    ProjectBuilder, ScheduledEventBuilder, SecurityBuilder, TaskQueueBuilder, UserRoleBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
-pub use mxrs_macros::{MxEntity, MxEnumeration, application, project};
+#[doc(hidden)]
+pub use mxrs_macros::project_facade as __project;
+pub use mxrs_macros::{MxEntity, MxEnumeration, application};
+
+/// Declares a project using the public `mxrs` authoring surface.
+#[macro_export]
+macro_rules! project {
+    ($($input:tt)*) => {
+        $crate::__project! { ($crate) $($input)* }
+    };
+}
 pub use mxrs_materializers::{
     MaterializeError, MaterializeReport, application_manifest, embedded_asset_hashes,
     embedded_frontend_source_hash, materialize_frontend_sources, materialize_manifest,

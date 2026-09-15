@@ -447,6 +447,7 @@ fn supports_the_full_widened_microflow_grammar() {
                 string Number;
                 decimal Total;
             }
+            microflow ACT_Notify { parameter order_number: string; }
             microflow ACT_ProcessOrder {
                 create order = Sales::Order {
                     Number = "A-1";
@@ -456,7 +457,7 @@ fn supports_the_full_widened_microflow_grammar() {
                 };
                 if order.total().gt(0.0) {
                     commit order;
-                    call markers::Sales::ACT_Notify (OrderNumber: order.number()) -> notified;
+                    call markers::Sales::ACT_Notify (order_number: order.number()) -> notified;
                 } else {
                     delete order;
                 }
@@ -474,8 +475,12 @@ fn supports_the_full_widened_microflow_grammar() {
         .into_iter()
         .find(|m| m.name.as_deref() == Some("Sales"))
         .unwrap();
-    assert_eq!(sales.microflows.len(), 1);
-    let mf = &sales.microflows[0];
+    assert_eq!(sales.microflows.len(), 2);
+    let mf = sales
+        .microflows
+        .iter()
+        .find(|flow| flow.name.as_deref() == Some("ACT_ProcessOrder"))
+        .unwrap();
     assert_eq!(mf.name.as_deref(), Some("ACT_ProcessOrder"));
 
     let flow_types: Vec<String> = mf
@@ -535,6 +540,7 @@ fn supports_typed_loops_and_a_rescue_branch() {
         "11.12.1",
         module Sales {
             entity Order { boolean Processed; }
+            microflow ACT_LogFailure {}
             microflow ACT_ProcessSafely {
                 create order = Sales::Order { Processed = false; };
                 create_list orders = Sales::Order;
@@ -556,7 +562,12 @@ fn supports_typed_loops_and_a_rescue_branch() {
 
     mxrs_writer::write_project(&path, &definition).unwrap();
     let read = Project::open(&path, true).unwrap();
-    let flow = &read.modules().unwrap()[0].microflows[0];
+    let modules = read.modules().unwrap();
+    let flow = modules[0]
+        .microflows
+        .iter()
+        .find(|flow| flow.name.as_deref() == Some("ACT_ProcessSafely"))
+        .unwrap();
     let loops: Vec<_> = flow
         .objects
         .iter()
@@ -587,4 +598,106 @@ fn supports_typed_loops_and_a_rescue_branch() {
             .unwrap(),
         "CustomWithoutRollBack"
     );
+}
+
+#[test]
+fn parameters_bind_typed_scalars_objects_and_lists_through_calls_and_returns() {
+    use mxrs_bson::{Bson, parse_array};
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Order { string Number; }
+            microflow Target {
+                parameter message: string { documentation "Text"; required true; default_value mxrs_expr::string("Hello"); }
+                parameter order: object<Sales::Order>;
+                parameter orders: list<Sales::Order>;
+                change order { Number = message.clone(); };
+                for current in orders { change current { Number = message.clone(); }; }
+                if message.clone().eq("stop") { commit order; } else {}
+                return orders;
+            }
+            microflow Caller {
+                parameter message: string;
+                parameter order: object<Sales::Order>;
+                parameter orders: list<Sales::Order>;
+                call Sales::Target (orders: &orders, message: &message, order: &order);
+                rescue { call Sales::Target (message: message, order: order, orders: orders); }
+            }
+            nanoflow Client {
+                parameter order: object<Sales::Order>;
+                return order;
+            }
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Parameters.mpr");
+    mxrs_writer::write_project(&path, &definition).unwrap();
+    let project = Project::open(&path, true).unwrap();
+    let modules = project.modules().unwrap();
+    let target = modules[0]
+        .microflows
+        .iter()
+        .find(|flow| flow.name.as_deref() == Some("Target"))
+        .unwrap();
+    assert_eq!(target.parameters.len(), 3);
+    assert_eq!(
+        target.parameters[0].get_str("Documentation").unwrap(),
+        "Text"
+    );
+    assert_eq!(
+        target
+            .return_type_document
+            .as_ref()
+            .unwrap()
+            .get_str("$Type")
+            .unwrap(),
+        "DataTypes$ListType"
+    );
+    let change = target
+        .objects
+        .iter()
+        .filter_map(|o| o.get_document("Action").ok())
+        .find(|action| action.get_str("$Type").ok() == Some("Microflows$ChangeAction"))
+        .unwrap();
+    let members = parse_array(change.get_array("Items").ok().map(Vec::as_slice));
+    assert!(
+        members
+            .items
+            .iter()
+            .filter_map(Bson::as_document)
+            .any(|member| member.get_str("Value").ok() == Some("$message"))
+    );
+    let caller = modules[0]
+        .microflows
+        .iter()
+        .find(|flow| flow.name.as_deref() == Some("Caller"))
+        .unwrap();
+    let calls: Vec<_> = caller
+        .objects
+        .iter()
+        .filter_map(|o| o.get_document("Action").ok())
+        .filter(|a| a.get_str("$Type").ok() == Some("Microflows$MicroflowCallAction"))
+        .collect();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        let mappings = parse_array(
+            call.get_document("MicroflowCall")
+                .unwrap()
+                .get_array("ParameterMappings")
+                .ok()
+                .map(Vec::as_slice),
+        );
+        assert_eq!(mappings.items.len(), 3);
+        assert!(
+            mappings
+                .items
+                .iter()
+                .filter_map(Bson::as_document)
+                .any(
+                    |m| m.get_str("Parameter").ok() == Some("Sales.Target.message")
+                        && m.get_str("Argument").ok() == Some("$message")
+                )
+        );
+    }
+    assert_eq!(modules[0].nanoflows[0].parameters.len(), 1);
 }

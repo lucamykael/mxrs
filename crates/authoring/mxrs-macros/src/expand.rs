@@ -9,9 +9,9 @@ use syn::{Ident, Path, Result};
 
 use crate::parse::{
     AccessMemberInput, AccessRuleInput, AssociationInput, AttrKind, AttributeInput,
-    EntityImageInput, EntityInput, EntitySourceInput, FlowItem, IndexInput, IndexMemberInput,
-    InheritanceInput, LifecycleInput, MappingInput, MemberInput, MicroflowInput, ModuleInput,
-    ProjectInput,
+    EntityImageInput, EntityInput, EntitySourceInput, FlowItem, FlowParameterType, IndexInput,
+    IndexMemberInput, InheritanceInput, LifecycleInput, MappingInput, MemberInput, MicroflowInput,
+    ModuleInput, ProjectInput,
 };
 
 #[derive(Clone)]
@@ -34,10 +34,20 @@ pub fn expand(input: &ProjectInput) -> Result<TokenStream> {
         let module_name = &module.name;
         quote! { use __mxrs_markers::#module_name as #module_name; }
     });
+    let signatures: HashMap<String, &MicroflowInput> = input
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module
+                .microflows
+                .iter()
+                .map(move |flow| (format!("{}.{}", module.name, flow.name), flow))
+        })
+        .collect();
     let module_stmts: Vec<TokenStream> = input
         .modules
         .iter()
-        .map(expand_module)
+        .map(|module| expand_module(module, &signatures))
         .collect::<Result<_>>()?;
     Ok(quote! {
         {
@@ -174,7 +184,10 @@ fn expression_type(kind: &AttrKind) -> TokenStream {
     }
 }
 
-fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
+fn expand_module(
+    module: &ModuleInput,
+    signatures: &HashMap<String, &MicroflowInput>,
+) -> Result<TokenStream> {
     let name = module.name.to_string();
     let role_stmts = module.roles.iter().map(|role| {
         let role_name = role.name.to_string();
@@ -249,12 +262,12 @@ fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
     let microflow_stmts: Vec<TokenStream> = module
         .microflows
         .iter()
-        .map(expand_microflow)
+        .map(|flow| expand_microflow(flow, signatures))
         .collect::<Result<_>>()?;
     let nanoflow_stmts: Vec<TokenStream> = module
         .nanoflows
         .iter()
-        .map(expand_microflow)
+        .map(|flow| expand_microflow(flow, signatures))
         .collect::<Result<_>>()?;
     Ok(quote! {
         __mxrs_project.module(#name, |m| {
@@ -475,12 +488,50 @@ fn expand_lifecycle(callback: &LifecycleInput) -> TokenStream {
     }
 }
 
-fn expand_microflow(microflow: &MicroflowInput) -> Result<TokenStream> {
+fn parameter_type(kind: &FlowParameterType) -> TokenStream {
+    match kind {
+        FlowParameterType::Scalar(kind) => expression_type(kind),
+        FlowParameterType::Object(entity) => quote! { ::mxrs_expr::MxObject<#entity> },
+        FlowParameterType::List(entity) => quote! { ::mxrs_expr::MxList<#entity> },
+    }
+}
+
+fn expand_microflow(
+    microflow: &MicroflowInput,
+    signatures: &HashMap<String, &MicroflowInput>,
+) -> Result<TokenStream> {
     let name = microflow.name.to_string();
     let mut bindings = HashMap::new();
-    let activity_stmts = expand_flow_items(&microflow.activities, &mut bindings)?;
+    let parameter_stmts: Vec<_> = microflow.parameters.iter().map(|parameter| {
+        let variable = &parameter.name;
+        let name = variable.to_string();
+        let documentation = parameter.documentation.as_ref().map(|value| quote! { p.documentation(#value); });
+        let required = parameter.required.as_ref().map(|value| quote! { p.required(#value); });
+        let default_value = parameter.default_value.as_ref().map(|value| quote! { p.default_value(#value); });
+        let configure = quote! { |p| { #documentation #required #default_value } };
+        let declaration = match &parameter.value_type {
+            FlowParameterType::Scalar(kind) => {
+                let tag = expression_type(kind);
+                quote! { f.parameter::<#tag>(#name, #configure) }
+            }
+            FlowParameterType::Object(entity) => {
+                bindings.insert(name.clone(), Binding::Object(entity.clone()));
+                quote! { f.object_parameter(#name, ::mxrs_ir::Ref::<#entity>::new(), #configure) }
+            }
+            FlowParameterType::List(entity) => {
+                bindings.insert(name.clone(), Binding::List(entity.clone()));
+                quote! { f.list_parameter(#name, ::mxrs_ir::Ref::<#entity>::new(), #configure) }
+            }
+        };
+        quote! { let #variable = #declaration; let _ = &#variable; }
+    }).collect();
+    let activity_stmts = expand_flow_items(&microflow.activities, &mut bindings, signatures)?;
     let mut rescue_bindings = bindings.clone();
-    let rescue_stmts = expand_flow_items(&microflow.rescue_activities, &mut rescue_bindings)?;
+    let rescue_stmts = expand_flow_items(
+        &microflow.rescue_activities,
+        &mut rescue_bindings,
+        signatures,
+    )?;
     let rescue_stmt =
         (!rescue_stmts.is_empty()).then(|| quote! { f.rescue_all(|f| { #(#rescue_stmts)* }); });
     let return_stmt = microflow
@@ -494,6 +545,7 @@ fn expand_microflow(microflow: &MicroflowInput) -> Result<TokenStream> {
     };
     Ok(quote! {
         m.#method(#name, |f| {
+            #(#parameter_stmts)*
             #(#activity_stmts)*
             #rescue_stmt
             #return_stmt
@@ -504,16 +556,18 @@ fn expand_microflow(microflow: &MicroflowInput) -> Result<TokenStream> {
 fn expand_flow_items(
     items: &[FlowItem],
     bindings: &mut HashMap<String, Binding>,
+    signatures: &HashMap<String, &MicroflowInput>,
 ) -> Result<Vec<TokenStream>> {
     items
         .iter()
-        .map(|item| expand_flow_item(item, bindings))
+        .map(|item| expand_flow_item(item, bindings, signatures))
         .collect()
 }
 
 fn expand_flow_item(
     item: &FlowItem,
     bindings: &mut HashMap<String, Binding>,
+    signatures: &HashMap<String, &MicroflowInput>,
 ) -> Result<TokenStream> {
     Ok(match item {
         FlowItem::Create {
@@ -571,7 +625,51 @@ fn expand_flow_item(
             mappings,
             result_variable,
         } => {
-            let mapping_exprs = mappings.iter().map(expand_mapping);
+            let target = microflow
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join(".");
+            let mut seen = std::collections::HashSet::new();
+            let mut mapping_exprs = Vec::new();
+            for mapping in mappings {
+                let name = mapping.parameter.to_string();
+                if !seen.insert(name.clone()) {
+                    return Err(syn::Error::new(
+                        mapping.parameter.span(),
+                        "duplicate call argument",
+                    ));
+                }
+                if let Some(signature) = signatures.get(&target) {
+                    let parameter = signature
+                        .parameters
+                        .iter()
+                        .find(|parameter| parameter.name == mapping.parameter)
+                        .ok_or_else(|| {
+                            syn::Error::new(
+                                mapping.parameter.span(),
+                                format!("unknown parameter `{name}` on `{target}`"),
+                            )
+                        })?;
+                    let tag = parameter_type(&parameter.value_type);
+                    let value = &mapping.value;
+                    mapping_exprs
+                        .push(quote! { ::mxrs_dsl::CallArgument::typed::<#tag>(#name, #value) });
+                } else {
+                    mapping_exprs.push(expand_mapping(mapping));
+                }
+            }
+            if let Some(signature) = signatures.get(&target) {
+                for parameter in &signature.parameters {
+                    if !seen.contains(&parameter.name.to_string()) {
+                        return Err(syn::Error::new(
+                            microflow.segments.last().expect("path").ident.span(),
+                            format!("missing argument `{}` for `{target}`", parameter.name),
+                        ));
+                    }
+                }
+            }
             let (result_expr, use_return) = match result_variable {
                 Some(variable) => {
                     let variable = variable.to_string();
@@ -595,8 +693,8 @@ fn expand_flow_item(
         } => {
             let mut then_bindings = bindings.clone();
             let mut else_bindings = bindings.clone();
-            let then_stmts = expand_flow_items(then_branch, &mut then_bindings)?;
-            let else_stmts = expand_flow_items(else_branch, &mut else_bindings)?;
+            let then_stmts = expand_flow_items(then_branch, &mut then_bindings, signatures)?;
+            let else_stmts = expand_flow_items(else_branch, &mut else_bindings, signatures)?;
             quote! {
                 f.decision(
                     #condition,
@@ -627,7 +725,7 @@ fn expand_flow_item(
             };
             let mut loop_bindings = bindings.clone();
             loop_bindings.insert(iterator.to_string(), Binding::Object(entity.clone()));
-            let stmts = expand_flow_items(activities, &mut loop_bindings)?;
+            let stmts = expand_flow_items(activities, &mut loop_bindings, signatures)?;
             let iterator_name = iterator.to_string();
             quote! {
                 f.loop_over(&#list, #iterator_name, |f, #iterator| {
@@ -640,7 +738,7 @@ fn expand_flow_item(
             activities,
         } => {
             let mut loop_bindings = bindings.clone();
-            let stmts = expand_flow_items(activities, &mut loop_bindings)?;
+            let stmts = expand_flow_items(activities, &mut loop_bindings, signatures)?;
             quote! { f.while_loop(#condition, |f| { #(#stmts)* }); }
         }
         FlowItem::Break => quote! { f.break_loop(); },

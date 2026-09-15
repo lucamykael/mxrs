@@ -64,6 +64,66 @@ pub fn project(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Implementation entry point for the facade's hygienic `project!` wrapper.
+#[doc(hidden)]
+#[proc_macro]
+pub fn project_facade(input: TokenStream) -> TokenStream {
+    let mut tokens = proc_macro2::TokenStream::from(input).into_iter();
+    let Some(proc_macro2::TokenTree::Group(root)) = tokens.next() else {
+        return syn::Error::new(proc_macro2::Span::call_site(), "expected facade path")
+            .to_compile_error()
+            .into();
+    };
+    let result =
+        syn::parse2::<ProjectInput>(tokens.collect()).and_then(|input| expand::expand(&input));
+    match result {
+        Ok(expanded) => facade_paths(expanded, &root.stream()).into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+fn facade_paths(
+    tokens: proc_macro2::TokenStream,
+    root: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, TokenTree};
+    let tokens: Vec<_> = tokens.into_iter().collect();
+    let mut output = proc_macro2::TokenStream::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if let [
+            TokenTree::Punct(first),
+            TokenTree::Punct(second),
+            TokenTree::Ident(name),
+            ..,
+        ] = &tokens[index..]
+            && starts_absolute_path(&tokens, index)
+            && first.as_char() == ':'
+            && second.as_char() == ':'
+            && matches!(
+                name.to_string().as_str(),
+                "mxrs_dsl" | "mxrs_expr" | "mxrs_ir"
+            )
+        {
+            output.extend(root.clone());
+            index += 3;
+            continue;
+        }
+        let token = match &tokens[index] {
+            TokenTree::Group(group) => {
+                let mut replacement =
+                    Group::new(group.delimiter(), facade_paths(group.stream(), root));
+                replacement.set_span(group.span());
+                TokenTree::Group(replacement)
+            }
+            token => token.clone(),
+        };
+        output.extend([token]);
+        index += 1;
+    }
+    output
+}
+
 #[proc_macro_derive(MxEntity, attributes(mx_entity, mx_attribute, mxrs))]
 pub fn derive_mx_entity(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as syn::DeriveInput);
@@ -79,5 +139,26 @@ pub fn derive_mx_enumeration(input: TokenStream) -> TokenStream {
     match derive_enumeration::expand_derive(&parsed) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
+    }
+}
+
+// Do not reinterpret a user path such as `helpers::mxrs_expr::value` as
+// one of the absolute framework paths emitted by the expander.
+fn starts_absolute_path(tokens: &[proc_macro2::TokenTree], index: usize) -> bool {
+    use proc_macro2::TokenTree;
+    match index
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+    {
+        Some(TokenTree::Ident(ident)) => matches!(
+            ident.to_string().as_str(),
+            "impl" | "as" | "for" | "return" | "break" | "yield" | "dyn" | "mut" | "const" | "in"
+        ),
+        Some(TokenTree::Punct(punct)) if punct.as_char() == '>' => {
+            index >= 2
+                && matches!(&tokens[index - 2], TokenTree::Punct(previous) if previous.as_char() == '-')
+        }
+        Some(TokenTree::Group(_)) => false,
+        _ => true,
     }
 }

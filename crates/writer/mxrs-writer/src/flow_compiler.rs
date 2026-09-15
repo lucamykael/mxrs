@@ -19,8 +19,10 @@ pub fn return_type_document(return_type: Option<&FlowReturnType>) -> Option<Docu
     let id = uuid::Uuid::new_v4().to_string();
     let document = match return_type {
         FlowReturnType::String => doc! { "$ID": id, "$Type": "DataTypes$StringType" },
-        FlowReturnType::Integer => doc! { "$ID": id, "$Type": "DataTypes$IntegerType" },
-        FlowReturnType::Long => doc! { "$ID": id, "$Type": "DataTypes$LongType" },
+        // Flow Integer is the native 64-bit integer type for both attribute tags.
+        FlowReturnType::Integer | FlowReturnType::Long => {
+            doc! { "$ID": id, "$Type": "DataTypes$IntegerType" }
+        }
         FlowReturnType::Float => doc! { "$ID": id, "$Type": "DataTypes$FloatType" },
         FlowReturnType::Decimal => doc! { "$ID": id, "$Type": "DataTypes$DecimalType" },
         FlowReturnType::Boolean => doc! { "$ID": id, "$Type": "DataTypes$BooleanType" },
