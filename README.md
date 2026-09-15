@@ -22,6 +22,14 @@ verification and how to repeat the comparison.
 bytes in native hexadecimal/ASCII format. Its [command contract](docs/commands/dump-unit.md)
 includes byte-for-byte CLI verification against MXRB.
 
+The read-command contracts now also cover [SQL](docs/commands/sql.md),
+[native inspection via `units`](docs/commands/inspect.md),
+[protocol audit](docs/commands/protocols.md), [MDA inspection/comparison](docs/commands/mda.md)
+and [Cargo workspace inspection](docs/commands/project.md). Each includes a
+repeatable MXRB CLI oracle and explicit presentation or language mappings.
+Protocol audit remains GUID-based and fail-closed; neither current registry
+contains evidenced recognition GUIDs.
+
 33 crates + a dev-only `xtask` harness. The primary direction is Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 

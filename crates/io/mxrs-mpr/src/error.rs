@@ -8,6 +8,9 @@ pub enum MprError {
     #[error("{0}: Unit table missing — not a valid .mpr file")]
     MissingUnitTable(String),
 
+    #[error("SQL query must return columns; empty statements are not queries")]
+    EmptyQuery,
+
     #[error("opened in read-only mode")]
     ReadOnly,
 

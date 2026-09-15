@@ -215,10 +215,8 @@ fn complete_layered_layout(root: &Path, library: &str) -> bool {
         ]
         .iter()
         .all(|declaration| library.lines().any(|line| line.trim() == *declaration))
-        && library
-            .lines()
-            .find(|line| application_version_on_line(line).is_some())
-            .is_some_and(|attribute| attribute.contains("project ="))
+        && crate::artifact::rust_application_metadata(library)
+            .is_ok_and(|(version, has_project)| version.is_some() && has_project)
 }
 
 fn layered_library(source: &str, path: &Path) -> Result<String> {

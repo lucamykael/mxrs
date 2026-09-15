@@ -11,6 +11,7 @@ description = "Transactional Cargo-native application scaffolds for MXRS."
 workspace = true
 
 [dependencies]
+syn = { version = "2", features = ["full", "visit"] }
 serde_json.workspace = true
 sha2 = "0.10"
 thiserror.workspace = true

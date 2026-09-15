@@ -155,8 +155,9 @@ pub fn inspect_mda(path: impl AsRef<Path>) -> Result<MdaInspection> {
     let path = absolute(path.as_ref())?;
     let file = std::fs::File::open(&path).map_err(|source| io_error(&path, source))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|error| invalid_mda(&path, error))?;
+    verify_mda_entry_count(&path, archive.central_directory_start(), archive.len())?;
     let mut entries = Vec::with_capacity(archive.len());
-    let mut metadata = None;
+    let mut metadata: Option<serde_json::Value> = None;
     let mut seen = BTreeSet::new();
     for index in 0..archive.len() {
         let mut file = archive
@@ -203,6 +204,18 @@ pub fn inspect_mda(path: impl AsRef<Path>) -> Result<MdaInspection> {
         path: path.display().to_string(),
         reason: "archive has no model/metadata.json".to_string(),
     })?;
+    if !metadata.is_object()
+        || ["RuntimeVersion", "ProjectName"].iter().any(|key| {
+            metadata
+                .get(key)
+                .is_some_and(|value| !value.is_null() && !value.is_string())
+        })
+    {
+        return Err(invalid_mda(
+            &path,
+            "metadata must be an object with optional string RuntimeVersion/ProjectName",
+        ));
+    }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     let archive_bytes = std::fs::read(&path).map_err(|source| io_error(&path, source))?;
     Ok(MdaInspection {
@@ -250,11 +263,56 @@ pub fn compare_mda(left: impl AsRef<Path>, right: impl AsRef<Path>) -> Result<Ve
         .collect())
 }
 
+/// zip 2 indexes entries by decoded filename and silently collapses duplicates.
+/// Count physical central-directory records before trusting that inventory.
+/// The archive reader has already validated the directory offset (including
+/// ZIP64/prefixed archives); variable name, extra and comment data is skipped.
+fn verify_mda_entry_count(path: &Path, directory_start: u64, indexed: usize) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut input = std::fs::File::open(path).map_err(|source| io_error(path, source))?;
+    input
+        .seek(SeekFrom::Start(directory_start))
+        .map_err(|error| invalid_mda(path, error))?;
+    let mut count = 0;
+    loop {
+        let mut header = [0_u8; 46];
+        input
+            .read_exact(&mut header[..4])
+            .map_err(|error| invalid_mda(path, error))?;
+        if &header[..4] != b"PK\x01\x02" {
+            break;
+        }
+        input
+            .read_exact(&mut header[4..])
+            .map_err(|error| invalid_mda(path, error))?;
+        let variable_bytes: i64 = [28, 30, 32]
+            .iter()
+            .map(|offset| i64::from(u16::from_le_bytes([header[*offset], header[*offset + 1]])))
+            .sum();
+        input
+            .seek(SeekFrom::Current(variable_bytes))
+            .map_err(|error| invalid_mda(path, error))?;
+        count += 1;
+        if count > indexed {
+            return Err(invalid_mda(path, "duplicate or collapsed ZIP entry names"));
+        }
+    }
+    if count != indexed {
+        return Err(invalid_mda(
+            path,
+            "ZIP entry inventory does not match its central directory",
+        ));
+    }
+    Ok(())
+}
+
 fn safe_mda_path(path: &str) -> std::result::Result<String, String> {
     let normalized = path.replace('\\', "/");
     if normalized.starts_with('/')
         || normalized.is_empty()
         || normalized
+            .strip_suffix('/')
+            .unwrap_or(&normalized)
             .split('/')
             .any(|part| matches!(part, "" | "." | ".."))
     {

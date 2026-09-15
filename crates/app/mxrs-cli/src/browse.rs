@@ -27,37 +27,43 @@ pub struct UnitSummary {
 }
 
 pub fn units(path: impl AsRef<Path>) -> mxrs_model::Result<UnitsReport> {
+    let path = path.as_ref();
     let project = Project::open(path, true)?;
     let all_units = project.all_units()?;
-
-    let mut unit_types: Vec<String> = all_units
-        .iter()
-        .filter_map(|u| project.mpr().parse_contents(u).ok())
-        .filter_map(|doc| doc.get_str("$Type").ok().map(str::to_string))
-        .collect();
-    unit_types.sort();
-    unit_types.dedup();
-
-    let units = all_units
-        .iter()
-        .map(|u| UnitSummary {
-            unit_id: u.unit_id.clone(),
-            type_name: project
-                .mpr()
-                .parse_contents(u)
-                .ok()
-                .and_then(|doc| doc.get_str("$Type").ok().map(str::to_string))
-                .unwrap_or_default(),
-            container_id: u.container_id.clone(),
-            containment_name: u.containment_name.clone(),
-        })
-        .collect();
-
+    let mut units = Vec::with_capacity(all_units.len());
+    let mut unit_types = std::collections::BTreeSet::new();
+    let mut project_name = None;
+    for unit in all_units {
+        let doc = project.mpr().parse_contents(&unit)?;
+        if unit.unit_id == unit.container_id && project_name.is_none() {
+            project_name = Some(
+                doc.get_str("Name")
+                    .or_else(|_| doc.get_str("name"))
+                    .map(str::to_owned)
+                    .unwrap_or_else(|_| {
+                        path.file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+            );
+        }
+        let type_name = doc.get_str("$Type").ok();
+        if let Some(name) = type_name {
+            unit_types.insert(name.to_owned());
+        }
+        units.push(UnitSummary {
+            unit_id: unit.unit_id,
+            type_name: type_name.unwrap_or_default().to_owned(),
+            container_id: unit.container_id,
+            containment_name: unit.containment_name,
+        });
+    }
     Ok(UnitsReport {
-        project_name: project.name()?,
+        project_name,
         mendix_version: project.mendix_version()?,
         tables: project.mpr().tables()?,
-        unit_types,
+        unit_types: unit_types.into_iter().collect(),
         units,
     })
 }
@@ -124,7 +130,32 @@ pub fn format_hex_dump(bytes: &[u8]) -> String {
 
 pub fn sql(path: impl AsRef<Path>, query: &str) -> MprResult<SqlResult> {
     let mpr = mxrs_mpr::MprFile::open(path, true)?;
-    mpr.raw_query(query)
+    let result = mpr.raw_query(query)?;
+    if result.columns.is_empty() {
+        return Err(mxrs_mpr::MprError::EmptyQuery);
+    }
+    Ok(result)
+}
+
+/// Unambiguous, lossless SQL cells: JSON-quoted UTF-8 text and hexadecimal
+/// SQLite blobs. Invalid UTF-8 TEXT retains its type and every original byte.
+pub fn format_sql_cell(cell: &mxrs_mpr::SqlCell) -> String {
+    use mxrs_mpr::SqlCell;
+    match cell {
+        SqlCell::Null => "NULL".into(),
+        SqlCell::Integer(value) => value.to_string(),
+        SqlCell::Real(value) => format!("{value:?}"),
+        SqlCell::Text(value) => serde_json::to_string(value).expect("text is serializable"),
+        SqlCell::Blob(bytes) | SqlCell::InvalidText(bytes) => {
+            let prefix = if matches!(cell, SqlCell::InvalidText(_)) {
+                "TEXT "
+            } else {
+                ""
+            };
+            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{prefix}X'{hex}'")
+        }
+    }
 }
 
 pub fn list_modules(path: impl AsRef<Path>) -> mxrs_model::Result<Vec<String>> {

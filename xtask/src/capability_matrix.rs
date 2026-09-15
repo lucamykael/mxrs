@@ -181,9 +181,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "ordered names/entity/page/microflow counts, v1/v2, folders, empty models and errors: xtask command-oracle modules; presentation normalization and extensions in docs/commands/modules.md",
         ),
         "sql" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs sql",
-            "read-only MPR SQL tests; CLI oracle missing",
+            "lossless dynamic SQL values and bytes, read-only restrictions, v1/v2 and errors: xtask command-oracle sql; presentation contract in docs/commands/sql.md",
         ),
         // A corresponding MXRS surface exists, but full option/output/model
         // parity has not been proved and must remain visibly partial.
@@ -251,9 +251,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "generator catalog and digest-checked removal",
         ),
         "project" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs project inspect",
-            "workspace inventory; MXRB has no other project subcommand",
+            "native workspace inventory with explicit Cargo path/field mapping, text/JSON and errors: xtask command-oracle project; docs/commands/project.md",
         ),
         "preflight" => (
             Status::Partial,
@@ -281,9 +281,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "declarative JSON checks for artifacts, references, cycles, unresolved references and module dependency rules; arbitrary Ruby check blocks are intentionally not executed",
         ),
         "protocols" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs protocols",
-            "fail-closed offline audit using the evidence-backed connector registry; no connector protocol is implemented or executed",
+            "native fail-closed GUID registry audit, human/JSON output and errors: xtask command-oracle protocols; no currently evidenced connector GUIDs; docs/commands/protocols.md",
         ),
         "evaluation" => (
             Status::Partial,
@@ -380,9 +380,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "transactional project scaffold",
         ),
         "inspect" => (
-            Status::Partial,
-            "mxrs inspect/units",
-            "non-interactive inspection",
+            Status::Verified,
+            "mxrs units",
+            "native metadata, sorted types and ordered unit inventory, v1/v2 and BSON errors: xtask command-oracle inspect; docs/commands/inspect.md",
         ),
         "oql" => (
             Status::Partial,
@@ -416,9 +416,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "official Content API client plus .mpk module install, both verified against the live API and a real published package; dependency resolution and uninstall are not ported",
         ),
         "mda" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs mda inspect/compare",
-            "safe ZIP inventory, Mendix metadata parsing and content-hash comparison; full CLI oracle missing",
+            "native ZIP inventory, metadata and content differences, directories and errors: xtask command-oracle mda; stricter archive validation in docs/commands/mda.md",
         ),
         "migrate" => (
             Status::Partial,
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["compare", "inspect", "tree", "sql"])).unwrap();
+        let report = build(&inventory(&["compare", "describe", "tree", "cache"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

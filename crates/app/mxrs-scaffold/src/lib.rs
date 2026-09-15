@@ -23,6 +23,8 @@ pub use registry::RegisteredScaffold;
 pub enum ScaffoldError {
     #[error("scaffold destination already exists: {0}")]
     DestinationExists(String),
+    #[error("invalid project source {path}: {reason}")]
+    InvalidProjectSource { path: String, reason: String },
     #[error("invalid application name: {0}")]
     InvalidName(String),
     #[error("invalid Mendix version: {0}")]

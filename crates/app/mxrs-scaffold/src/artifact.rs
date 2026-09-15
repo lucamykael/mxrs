@@ -466,26 +466,28 @@ pub struct ProjectInspection {
 pub fn inspect_project(target: impl AsRef<Path>) -> Result<ProjectInspection> {
     let target = target.as_ref();
     let root = std::path::absolute(target).map_err(|error| io_error(target, error))?;
+    let root = lexical_root(&root);
     let mut mprs = Vec::new();
     for directory in [root.clone(), root.join("build")] {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
+        let Some(entries) = optional_directory(&directory)? else {
             continue;
         };
         for entry in entries {
             let path = entry.map_err(|error| io_error(&directory, error))?.path();
-            if path.extension().is_some_and(|extension| extension == "mpr") {
+            if !is_hidden(&path) && path.extension().is_some_and(|extension| extension == "mpr") {
                 mprs.push(path);
             }
         }
     }
     mprs.sort();
     let mut modules = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root.join("src/domain/modules")) {
+    if let Some(entries) = optional_directory(&root.join("src/domain/modules"))? {
         for entry in entries {
             let path = entry
                 .map_err(|error| io_error(&root.join("src/domain/modules"), error))?
                 .path();
-            if path.join("mod.rs").is_file()
+            if !is_hidden(&path)
+                && path.join("mod.rs").is_file()
                 && let Some(name) = path.file_name().and_then(|name| name.to_str())
             {
                 modules.push(name.to_string());
@@ -508,6 +510,34 @@ pub fn inspect_project(target: impl AsRef<Path>) -> Result<ProjectInspection> {
     })
 }
 
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
+}
+
+// Match a lexical absolute workspace path, without resolving symlinks.
+fn lexical_root(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            std::path::Component::CurDir => {}
+            component => result.push(component.as_os_str()),
+        }
+    }
+    result
+}
+
+fn optional_directory(path: &Path) -> Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
 /// Reads the Mendix version an imported project records in `mxrs.toml`, then
 /// falls back to the `#[mxrs::application(version = "…")]` attribute the
 /// `mxrs new` scaffold emits. Returns `None` rather than a guess when neither
@@ -526,10 +556,77 @@ fn declared_version(root: &Path) -> Result<Option<String>> {
     let Some(text) = read_optional(&root.join("src/lib.rs"))? else {
         return Ok(None);
     };
-    Ok(text
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("#[mxrs::application(version ="))
-        .find_map(|value| quoted(value.trim())))
+    rust_application_metadata(&text)
+        .map(|(version, _)| version)
+        .map_err(|error| ScaffoldError::InvalidProjectSource {
+            path: root.join("src/lib.rs").display().to_string(),
+            reason: error.to_string(),
+        })
+}
+
+pub(crate) fn rust_application_metadata(source: &str) -> syn::Result<(Option<String>, bool)> {
+    use syn::visit::Visit;
+    #[derive(Default)]
+    struct Versions {
+        values: Vec<String>,
+        has_project: bool,
+        error: Option<syn::Error>,
+    }
+    impl<'ast> Visit<'ast> for Versions {
+        fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+            let path = attribute.path();
+            if path.segments.len() != 2
+                || path.segments[0].ident != "mxrs"
+                || path.segments[1].ident != "application"
+            {
+                return;
+            }
+            let parsed = attribute.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            );
+            match parsed {
+                Ok(items) => {
+                    for item in items {
+                        if let syn::Meta::NameValue(value) = &item
+                            && value.path.is_ident("project")
+                        {
+                            self.has_project = true;
+                        }
+                        if let syn::Meta::NameValue(value) = item
+                            && value.path.is_ident("version")
+                        {
+                            if let syn::Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(text),
+                                ..
+                            }) = &value.value
+                            {
+                                self.values.push(text.value());
+                            } else {
+                                self.error = Some(syn::Error::new_spanned(
+                                    value,
+                                    "application version must be a string literal",
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+    }
+    let file = syn::parse_file(source)?;
+    let mut versions = Versions::default();
+    versions.visit_file(&file);
+    if let Some(error) = versions.error {
+        return Err(error);
+    }
+    if versions.values.len() > 1 {
+        return Err(syn::Error::new_spanned(
+            file,
+            "multiple application versions are ambiguous",
+        ));
+    }
+    Ok((versions.values.pop(), versions.has_project))
 }
 
 fn quoted(value: &str) -> Option<String> {

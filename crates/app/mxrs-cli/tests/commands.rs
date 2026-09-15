@@ -377,7 +377,7 @@ fn mda_cli_inspects_metadata_and_compares_content() {
         right.to_str().unwrap(),
     ]);
     assert!(compare.status.success(), "{:?}", compare.stderr);
-    assert!(text(&compare).contains("Changed\tweb/index.html"));
+    assert!(text(&compare).contains("changed\tweb/index.html"));
     assert!(!cli(&["mda", "inspect", "/missing.mda"]).status.success());
 }
 

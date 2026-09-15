@@ -198,6 +198,7 @@ pub fn registry_command(mut arguments: Vec<String>) -> Result<(), String> {
 pub const PROJECT_USAGE: &str = "usage: mxrs project inspect [DIR] [--json]";
 
 pub fn project_command(mut arguments: Vec<String>) -> Result<(), String> {
+    take_flag(&mut arguments, "--no-progress");
     let json = take_flag(&mut arguments, "--json");
     let target = match arguments.as_slice() {
         [action] if action == "inspect" => ".".to_string(),

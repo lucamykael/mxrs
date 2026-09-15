@@ -62,8 +62,9 @@ fn command_options(
 ) {
     match name {
         "callees" | "callers" | "changelog" | "compare" | "describe" | "evaluate" | "impact"
-        | "inspect" | "lint" | "protocols" | "refs" | "preflight" | "report" | "tree"
-        | "validate" => (&[], &["--json"], &[]),
+        | "inspect" | "lint" | "refs" | "preflight" | "report" | "tree" | "validate" => {
+            (&[], &["--json"], &[])
+        }
         "portability" => (
             &[],
             &["--json", "--require-typed", "--verify-round-trip"],
@@ -75,7 +76,8 @@ fn command_options(
         "db" => (&["--port"], &["--json"], &[]),
         "doctor" => (&[], &["--json"], &[]),
         "modules" => (&[], &["--json", "--names", "--no-progress"], &[]),
-        "dump-unit" => (&[], &["--no-progress"], &[]),
+        "dump-unit" | "units" | "sql" => (&[], &["--no-progress"], &[]),
+        "protocols" => (&[], &["--json", "--no-progress"], &[]),
         "export" => (&["-o"], &[], &[]),
         "env" => (&["--environment"], &["--json"], &[]),
         "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
@@ -112,9 +114,9 @@ fn command_options(
             &["--json", "--apply", "--allow-model-upgrade"],
             &[],
         ),
-        "mda" => (&[], &["--json"], &[]),
+        "mda" => (&[], &["--json", "--no-progress"], &[]),
         "migrate" => (&[], &["--json"], &[]),
-        "project" => (&[], &["--json"], &[]),
+        "project" => (&[], &["--json", "--no-progress"], &[]),
         "team-server" => (&["--pat-file"], &["--json"], &[]),
         "upgrade" => (&["--mendix", "--target"], &["--apply", "--json"], &[]),
         _ => (&[], &[], &[]),
@@ -510,6 +512,7 @@ fn run_marketplace(args: Vec<String>) -> ExitCode {
 }
 
 fn run_mda(mut args: Vec<String>) -> ExitCode {
+    take_flag(&mut args, "--no-progress");
     let json = take_flag(&mut args, "--json");
     let result = match args.as_slice() {
         [action, path] if action == "inspect" => mxrs_packager::inspect_mda(path).map(|report| {
@@ -530,11 +533,11 @@ fn run_mda(mut args: Vec<String>) -> ExitCode {
                     "Runtime       : {}",
                     report.metadata["RuntimeVersion"]
                         .as_str()
-                        .unwrap_or("unknown")
+                        .unwrap_or_default()
                 );
                 println!(
                     "Project       : {}",
-                    report.metadata["ProjectName"].as_str().unwrap_or("unknown")
+                    report.metadata["ProjectName"].as_str().unwrap_or_default()
                 );
                 println!("Files         : {}", report.files().count());
                 println!("Roots         : {}", report.roots().join(", "));
@@ -544,7 +547,15 @@ fn run_mda(mut args: Vec<String>) -> ExitCode {
         [action, left, right] if action == "compare" && !json => {
             mxrs_packager::compare_mda(left, right).map(|differences| {
                 for difference in &differences {
-                    println!("{:?}\t{}", difference.status, difference.path);
+                    println!(
+                        "{}\t{}",
+                        match difference.status {
+                            mxrs_packager::MdaDifferenceStatus::Added => "added",
+                            mxrs_packager::MdaDifferenceStatus::Removed => "removed",
+                            mxrs_packager::MdaDifferenceStatus::Changed => "changed",
+                        },
+                        difference.path
+                    );
                 }
                 println!("[mxrs] {} difference(s)", differences.len());
             })
@@ -1040,6 +1051,7 @@ fn run_evaluate(mut args: Vec<String>) -> ExitCode {
 }
 
 fn run_protocols(mut args: Vec<String>) -> ExitCode {
+    take_flag(&mut args, "--no-progress");
     let json = take_flag(&mut args, "--json");
     let [path] = args.as_slice() else {
         eprintln!("Usage: mxrs protocols <file.mpr> [--json]");
@@ -1061,6 +1073,12 @@ fn run_protocols(mut args: Vec<String>) -> ExitCode {
                         connector.metadata.marketplace_id,
                         connector.protected
                     );
+                    if !connector.entities.is_empty() {
+                        println!("  entities: {}", connector.entities.join(", "));
+                    }
+                    if !connector.microflows.is_empty() {
+                        println!("  microflows: {}", connector.microflows.join(", "));
+                    }
                 }
                 if !audit.unknown_marketplace_modules.is_empty() {
                     println!(
@@ -1068,6 +1086,7 @@ fn run_protocols(mut args: Vec<String>) -> ExitCode {
                         audit.unknown_marketplace_modules.len(),
                         audit.unknown_marketplace_modules.join(", ")
                     );
+                    println!("Run `mxrs modules {path}` to list every module.");
                 }
             }
             ExitCode::SUCCESS
@@ -1872,7 +1891,8 @@ fn run_inspect(mut args: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_units(args: Vec<String>) -> ExitCode {
+fn run_units(mut args: Vec<String>) -> ExitCode {
+    take_flag(&mut args, "--no-progress");
     let [path] = args.as_slice() else {
         eprintln!("[mxrs] error: usage: mxrs units <file.mpr>");
         return ExitCode::FAILURE;
@@ -1939,7 +1959,8 @@ fn run_dump_unit(mut args: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_sql(args: Vec<String>) -> ExitCode {
+fn run_sql(mut args: Vec<String>) -> ExitCode {
+    take_flag(&mut args, "--no-progress");
     if args.len() != 2 {
         eprintln!("[mxrs] error: usage: mxrs sql <file.mpr> \"<query>\"");
         return ExitCode::FAILURE;
@@ -1952,7 +1973,7 @@ fn run_sql(args: Vec<String>) -> ExitCode {
         }
     };
     for row in &result.rows {
-        let cells: Vec<String> = row.iter().map(|c| c.to_string()).collect();
+        let cells: Vec<String> = row.iter().map(mxrs_cli::browse::format_sql_cell).collect();
         println!("[{}]", cells.join(", "));
     }
     println!("({} rows)", result.rows.len());

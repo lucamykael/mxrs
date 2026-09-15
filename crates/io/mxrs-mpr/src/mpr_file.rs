@@ -67,6 +67,8 @@ pub enum SqlCell {
     Integer(i64),
     Real(f64),
     Text(String),
+    /// SQLite permits TEXT containing invalid UTF-8; retain its original bytes.
+    InvalidText(Vec<u8>),
     Blob(Vec<u8>),
 }
 
@@ -76,9 +78,10 @@ impl SqlCell {
             rusqlite::types::ValueRef::Null => SqlCell::Null,
             rusqlite::types::ValueRef::Integer(i) => SqlCell::Integer(i),
             rusqlite::types::ValueRef::Real(f) => SqlCell::Real(f),
-            rusqlite::types::ValueRef::Text(t) => {
-                SqlCell::Text(String::from_utf8_lossy(t).into_owned())
-            }
+            rusqlite::types::ValueRef::Text(t) => match std::str::from_utf8(t) {
+                Ok(text) => SqlCell::Text(text.to_owned()),
+                Err(_) => SqlCell::InvalidText(t.to_vec()),
+            },
             rusqlite::types::ValueRef::Blob(b) => SqlCell::Blob(b.to_vec()),
         })
     }
@@ -91,6 +94,7 @@ impl std::fmt::Display for SqlCell {
             SqlCell::Integer(i) => write!(f, "{i}"),
             SqlCell::Real(r) => write!(f, "{r}"),
             SqlCell::Text(s) => write!(f, "{s}"),
+            SqlCell::InvalidText(b) => write!(f, "<{} byte invalid UTF-8 text>", b.len()),
             SqlCell::Blob(b) => write!(f, "<{} byte blob>", b.len()),
         }
     }
@@ -282,8 +286,11 @@ impl MprFile {
         self.ensure_outside_transaction("raw SQL")?;
         let mut stmt = self.conn.prepare(sql)?;
         let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        // SQLite treats unbound placeholders as NULL; this CLI-oriented API
+        // has no bind arguments, matching the native query command.
+        let parameters = vec![rusqlite::types::Null; stmt.parameter_count()];
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
                 (0..columns.len())
                     .map(|i| SqlCell::from_value_ref(row.get_ref(i)?))
                     .collect::<rusqlite::Result<Vec<_>>>()
