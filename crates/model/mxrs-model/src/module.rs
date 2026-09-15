@@ -30,12 +30,11 @@ pub struct ModuleRole {
 }
 
 /// `$Type`s the artifact document compiler (`mxrs-compiler-widgets`)
-/// handles that live under a module's own `Documents`/`Folders` tree
-/// (unlike `DomainModels$ViewEntitySourceDocument`, which is domain-model-
-/// scoped, not module-document-scoped, and so isn't collected here).
+/// handles that live under a module's own `Documents`/`Folders` tree.
 pub const ARTIFACT_UNIT_TYPES: &[&str] = &[
     "Enumerations$Enumeration",
     "Images$ImageCollection",
+    "DomainModels$ViewEntitySourceDocument",
     "RegularExpressions$RegularExpression",
     "ScheduledEvents$ScheduledEvent",
     "CustomIcons$CustomIconCollection",

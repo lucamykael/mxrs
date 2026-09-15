@@ -69,7 +69,7 @@ pub use entity::{EntityBuilder, EntityIndexBuilder, LifecycleBuilder, SystemMemb
 pub use enumeration::EnumerationBuilder;
 pub use flow::{CallArgument, FlowBuilder, MicroflowModuleBuilder, NanoflowModuleBuilder};
 pub use menu::{MenuBuilder, MenuItemBuilder};
-pub use module::ModuleBuilder;
+pub use module::{ModuleBuilder, OqlViewSourceBuilder};
 pub use mxrs_expr::{
     Expr, ListVar, MxBool, MxDecimal, MxFloat, MxInteger, MxLong, MxString, Var, boolean, decimal,
     float, integer, long, string,

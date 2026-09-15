@@ -123,6 +123,7 @@ pub struct AccessMember {
     pub reference: String,
     pub rights: String,
     pub kind: AccessMemberKind,
+    pub raw: Document,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +137,7 @@ pub struct AccessRule {
     pub members: Vec<AccessMember>,
     pub xpath: String,
     pub xpath_caption: Option<String>,
+    pub raw: Document,
 }
 
 #[derive(Debug, Clone)]
@@ -286,7 +288,7 @@ impl Entity {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         doc! {
             "$ID": id,
-            "$Type": "DomainModels$EntityImpl",
+            "$Type": self.native_type.clone().unwrap_or_else(|| "DomainModels$EntityImpl".to_string()),
             "$QualifiedName": self.qualified_name.clone(),
             "name": self.name.clone(),
             "documentation": self.documentation.clone(),
@@ -298,7 +300,7 @@ impl Entity {
             "eventHandlers": mxrs_bson::build_array(self.lifecycle.iter().map(lifecycle_bson).collect(), 3),
             "indexes": mxrs_bson::build_array(self.indexes.iter().map(index_bson).collect(), 3),
             "accessRules": mxrs_bson::build_array(self.access_rules.iter().map(access_rule_bson).collect(), 3),
-            "source": mxrs_bson::Bson::Null,
+            "source": self.source.clone().map(mxrs_bson::Bson::Document).unwrap_or(mxrs_bson::Bson::Null),
             "exportLevel": self.export_level.clone(),
             "image": self.image.clone().unwrap_or_default(),
             "imageData": "",
@@ -611,6 +613,7 @@ fn parse_access_rule(doc: &Document) -> AccessRule {
                 reference: attr_ref,
                 rights: get_str_any(m, &["AccessRights"]).unwrap_or_else(|| "None".into()),
                 kind,
+                raw: m.clone(),
             }
         })
         .collect();
@@ -626,6 +629,7 @@ fn parse_access_rule(doc: &Document) -> AccessRule {
         members,
         xpath: get_str_any(doc, &["XPathConstraint"]).unwrap_or_default(),
         xpath_caption: get_str_any(doc, &["XPathConstraintCaption"]),
+        raw: doc.clone(),
     }
 }
 
@@ -694,34 +698,73 @@ fn lifecycle_bson(callback: &LifecycleCallback) -> mxrs_bson::Bson {
 /// (by-name references), which is the spelling both mxrb's writer and the
 /// runtime's reader use.
 pub fn access_rule_bson(rule: &AccessRule) -> mxrs_bson::Bson {
+    if !rule.raw.is_empty() && rule.raw.get_str("$Type").ok() != Some("DomainModels$AccessRule") {
+        return mxrs_bson::Bson::Document(rule.raw.clone());
+    }
     let members = rule
         .members
         .iter()
         .map(|member| {
             let association = member.kind == AccessMemberKind::Association;
-            mxrs_bson::Bson::Document(doc! {
-                "$ID": member.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                "$Type": "DomainModels$MemberAccess",
-                "Association": if association { member.reference.clone() } else { String::new() },
-                "Attribute": if association { String::new() } else { member.reference.clone() },
-                "AccessRights": member.rights.clone(),
-            })
+            if !member.raw.is_empty()
+                && member.raw.get_str("$Type").ok() != Some("DomainModels$MemberAccess")
+            {
+                return mxrs_bson::Bson::Document(member.raw.clone());
+            }
+            let mut document = member.raw.clone();
+            document.insert(
+                "$ID",
+                member
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            );
+            document.insert("$Type", "DomainModels$MemberAccess");
+            document.insert(
+                "Association",
+                if association {
+                    member.reference.clone()
+                } else {
+                    String::new()
+                },
+            );
+            document.insert(
+                "Attribute",
+                if association {
+                    String::new()
+                } else {
+                    member.reference.clone()
+                },
+            );
+            document.insert("AccessRights", member.rights.clone());
+            mxrs_bson::Bson::Document(document)
         })
         .collect();
-    let mut document = doc! {
-        "$ID": rule.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        "$Type": "DomainModels$AccessRule",
-        "Documentation": rule.documentation.clone(),
-        "AllowedModuleRoles": mxrs_bson::build_array(
-            rule.roles.iter().cloned().map(mxrs_bson::Bson::String).collect(),
+    let mut document = rule.raw.clone();
+    document.insert(
+        "$ID",
+        rule.id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    );
+    document.insert("$Type", "DomainModels$AccessRule");
+    document.insert("Documentation", rule.documentation.clone());
+    document.insert(
+        "AllowedModuleRoles",
+        mxrs_bson::build_array(
+            rule.roles
+                .iter()
+                .cloned()
+                .map(mxrs_bson::Bson::String)
+                .collect(),
             1,
         ),
-        "AllowCreate": rule.create,
-        "AllowDelete": rule.delete,
-        "DefaultMemberAccessRights": rule.default_rights.clone(),
-        "MemberAccesses": mxrs_bson::build_array(members, 3),
-        "XPathConstraint": rule.xpath.clone(),
-    };
+    );
+    document.insert("AllowCreate", rule.create);
+    document.insert("AllowDelete", rule.delete);
+    document.insert("DefaultMemberAccessRights", rule.default_rights.clone());
+    document.insert("MemberAccesses", mxrs_bson::build_array(members, 3));
+    document.insert("XPathConstraint", rule.xpath.clone());
     // Absent and empty are different to Studio Pro, so the key is written
     // only when the rule actually carries a caption — as mxrb does.
     if let Some(caption) = &rule.xpath_caption {
@@ -817,6 +860,43 @@ mod tests {
                 .raw
                 .get_bool("OpaqueRuntimeField")
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn access_rules_preserve_future_rule_and_member_fields() {
+        let entity = Entity::from_bson(&doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "accessRules": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "DomainModels$AccessRule",
+                "AllowedModuleRoles": mxrs_bson::build_array(vec![mxrs_bson::Bson::String("Sales.User".into())], 1),
+                "DefaultMemberAccessRights": "None",
+                "FutureRuleField": "kept",
+                "MemberAccesses": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": "DomainModels$MemberAccess",
+                    "Attribute": "Sales.Order.Number",
+                    "Association": "",
+                    "AccessRights": "ReadOnly",
+                    "FutureMemberField": "kept",
+                })], 3),
+            })], 3),
+        });
+        let serialized = entity.to_bson();
+        let rules =
+            mxrs_bson::parse_array(serialized.get_array("accessRules").ok().map(Vec::as_slice));
+        let rule = rules.items[0].as_document().unwrap();
+        assert_eq!(rule.get_str("FutureRuleField").unwrap(), "kept");
+        let members =
+            mxrs_bson::parse_array(rule.get_array("MemberAccesses").ok().map(Vec::as_slice));
+        assert_eq!(
+            members.items[0]
+                .as_document()
+                .unwrap()
+                .get_str("FutureMemberField")
+                .unwrap(),
+            "kept"
         );
     }
 

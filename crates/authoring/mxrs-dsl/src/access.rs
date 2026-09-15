@@ -55,6 +55,11 @@ impl AccessRuleBuilder {
         self
     }
 
+    pub fn xpath_caption(&mut self, caption: impl Into<String>) -> &mut Self {
+        self.decl.xpath_caption = Some(caption.into());
+        self
+    }
+
     /// Grants `rights` on one attribute of the entity this rule belongs to.
     pub fn attribute<A: AttributeMarker>(&mut self, rights: MemberRights) -> &mut Self {
         let reference = format!("{}.{}", A::Entity::qualified_name(), A::NAME);

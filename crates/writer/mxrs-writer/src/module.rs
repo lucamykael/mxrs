@@ -119,6 +119,14 @@ pub fn write_module(
         identity,
     )?;
 
+    documents::synchronize_oql_view_sources_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.oql_view_sources,
+        identity,
+    )?;
+
     documents::synchronize_constants_with_identity(
         mpr,
         &module_id,

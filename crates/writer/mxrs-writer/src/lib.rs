@@ -10,11 +10,10 @@
 //! attribute add/remove with `$ID` preservation on a name match) and
 //! associations — via `domain::synchronize_domain_model`, mirroring mxrb's
 //! own `write_domain_model` (the method mxrb itself reuses for both fresh
-//! creation and incremental resync). Narrower than mxrb's full entity
-//! surface: indexes, access rules, lifecycle callbacks, validation rules,
-//! and generalization targets have no `EntityDecl` DSL surface yet, so an
-//! existing entity's values for those survive untouched rather than being
-//! reconciled (see `domain`'s module doc). The microflow slice of
+//! creation and incremental resync). Entity declarations cover inheritance,
+//! system members, indexes, access rules, lifecycle callbacks, validation
+//! rules, images, and stored/OQL view sources with identity-preserving
+//! reconciliation. The microflow slice of
 //! `synchronize_ruby_documents!` — upserting a `Documents` unit by name
 //! instead of always inserting a new one — is ported too, in
 //! `documents::synchronize_microflows` and `synchronize_nanoflows`

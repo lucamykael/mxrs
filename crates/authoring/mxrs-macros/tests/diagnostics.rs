@@ -210,6 +210,34 @@ fn an_unknown_indexed_system_member_fails_at_the_declaration() {
 }
 
 #[test]
+fn an_unknown_access_right_fails_at_the_declaration() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    entity Order {
+                        string Number;
+                        access_rule ["User"] {
+                            attribute Number Admin;
+                        }
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Admin"), "unexpected diagnostic:\n{stderr}");
+    assert!(
+        stderr.contains("member rights"),
+        "unexpected diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
 fn a_missing_semicolon_fails_to_compile() {
     let output = try_compile(
         r#"

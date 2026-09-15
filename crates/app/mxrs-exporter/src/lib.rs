@@ -43,11 +43,9 @@
 //!   too.
 //! - **Association `Owner`/`StorageFormat`/`Documentation` round-trip** via
 //!   typed options in `project!`.
-//! - **Entity `Image`, access-rule macro syntax, and OQL view declarations**
-//!   remain outside the generated `project!` surface. Generalization, system
-//!   members, indexes, and lifecycle callbacks are typed and emitted when
-//!   every reference resolves; otherwise the lossless imported unit remains
-//!   authoritative.
+//! - **Entity structure and behavior** — images, stored/OQL source kind,
+//!   access rules, generalization, system members, indexes, and lifecycle
+//!   callbacks are emitted through typed declarations when references resolve.
 //!
 //! Marker types are emitted by `project!` from these same entity
 //! declarations, so exported source is self-contained without a second
@@ -2264,6 +2262,7 @@ fn io_error(path: &Path, source: std::io::Error) -> ExportError {
 fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
     let entity_qualified_name_by_id = index_entities_by_id(modules);
     let known_microflows = known_microflows(modules);
+    let known_oql_sources = known_oql_sources(modules);
     let mut gaps = Vec::new();
     for module in modules {
         let module_name = module.name.as_deref().unwrap_or("Unnamed");
@@ -2341,6 +2340,106 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
                     });
                 }
             }
+            let entity_associations = domain_model
+                .all_associations()
+                .filter(|association| association.from_entity_id.as_deref() == entity.id.as_deref())
+                .collect::<Vec<_>>();
+            if !access_rules_renderable(entity, &entity_associations) {
+                gaps.push(RoundTripGap {
+                    path: format!("{module_name}.{entity_name}.access_rules"),
+                    reason: "access rule contains an unresolved member or rights value".to_string(),
+                });
+            }
+            if entity.access_rules.iter().any(|rule| {
+                !document_has_only(
+                    &rule.raw,
+                    &[
+                        "$ID",
+                        "$Type",
+                        "Documentation",
+                        "AllowedModuleRoles",
+                        "ModuleRoles",
+                        "AllowCreate",
+                        "AllowDelete",
+                        "DefaultMemberAccessRights",
+                        "MemberAccesses",
+                        "XPathConstraint",
+                        "XPathConstraintCaption",
+                    ],
+                ) || rule.members.iter().any(|member| {
+                    !document_has_only(
+                        &member.raw,
+                        &["$ID", "$Type", "Association", "Attribute", "AccessRights"],
+                    )
+                })
+            }) {
+                gaps.push(RoundTripGap {
+                    path: format!("{module_name}.{entity_name}.access_rules"),
+                    reason: "access rule contains native fields outside the typed declaration"
+                        .to_string(),
+                });
+            }
+            if entity.oql_view() {
+                if entity.persistable {
+                    gaps.push(RoundTripGap {
+                        path: format!("{module_name}.{entity_name}.persistable"),
+                        reason: "OQL view entity is marked persistable".to_string(),
+                    });
+                }
+                match entity.oql_source_document() {
+                    Some(source) if known_oql_sources.contains(&source) => {}
+                    Some(source) => gaps.push(RoundTripGap {
+                        path: format!("{module_name}.{entity_name}.source"),
+                        reason: format!("OQL view source {source:?} cannot be resolved"),
+                    }),
+                    None => gaps.push(RoundTripGap {
+                        path: format!("{module_name}.{entity_name}.source"),
+                        reason: "OQL view has no source document reference".to_string(),
+                    }),
+                }
+                if entity.source.as_ref().is_some_and(|source| {
+                    !document_has_only(
+                        source,
+                        &["$ID", "$Type", "SourceDocument", "sourceDocument"],
+                    )
+                }) {
+                    gaps.push(RoundTripGap {
+                        path: format!("{module_name}.{entity_name}.source"),
+                        reason: "view source contains native fields outside the typed declaration"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        for source in module.artifact_units.iter().filter(|document| {
+            document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+        }) {
+            if !document_has_only(
+                source,
+                &[
+                    "$ID",
+                    "$Type",
+                    "$QualifiedName",
+                    "Name",
+                    "Oql",
+                    "Documentation",
+                    "Excluded",
+                    "ExportLevel",
+                ],
+            ) || !matches!(
+                source.get_str("ExportLevel").unwrap_or("Hidden"),
+                "Hidden" | "Published"
+            ) {
+                gaps.push(RoundTripGap {
+                    path: format!(
+                        "{module_name}.{}",
+                        source.get_str("Name").unwrap_or("Unnamed")
+                    ),
+                    reason:
+                        "OQL source document contains native fields outside the typed declaration"
+                            .to_string(),
+                });
+            }
         }
         for association in domain_model.all_associations() {
             let name = association.name.as_deref().unwrap_or("Unnamed");
@@ -2361,6 +2460,64 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
         }
     }
     gaps
+}
+
+fn document_has_only(document: &mxrs_bson::Document, allowed: &[&str]) -> bool {
+    document.is_empty() || document.keys().all(|key| allowed.contains(&key.as_str()))
+}
+
+fn known_oql_sources(modules: &[Module]) -> std::collections::HashSet<String> {
+    modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.as_deref().unwrap_or("Unnamed");
+            module.artifact_units.iter().filter_map(move |document| {
+                if document.get_str("$Type").ok() != Some("DomainModels$ViewEntitySourceDocument") {
+                    return None;
+                }
+                Some(format!("{module_name}.{}", document.get_str("Name").ok()?))
+            })
+        })
+        .collect()
+}
+
+fn member_rights_variant(value: &str) -> Option<&'static str> {
+    match value {
+        "None" => Some("None"),
+        "ReadOnly" => Some("ReadOnly"),
+        "ReadWrite" => Some("ReadWrite"),
+        _ => None,
+    }
+}
+
+fn access_rules_renderable(entity: &Entity, associations: &[&Association]) -> bool {
+    let qualified_entity = entity.qualified_name.as_deref().unwrap_or_default();
+    let module_name = qualified_entity.split('.').next().unwrap_or_default();
+    entity.access_rules.iter().all(|rule| {
+        (rule.raw.is_empty() || rule.raw.get_str("$Type").ok() == Some("DomainModels$AccessRule"))
+            && !rule.roles.is_empty()
+            && member_rights_variant(&rule.default_rights).is_some()
+            && rule.members.iter().all(|member| {
+                (member.raw.is_empty()
+                    || member.raw.get_str("$Type").ok() == Some("DomainModels$MemberAccess"))
+                    && member_rights_variant(&member.rights).is_some()
+                    && match member.kind {
+                        mxrs_model::entity::AccessMemberKind::Attribute => {
+                            entity.attributes.iter().any(|attribute| {
+                                attribute.name.as_deref() == Some(&member.name)
+                                    && member.reference
+                                        == format!("{qualified_entity}.{}", member.name)
+                            })
+                        }
+                        mxrs_model::entity::AccessMemberKind::Association => {
+                            associations.iter().any(|association| {
+                                association.name.as_deref() == Some(&member.name)
+                                    && member.reference == format!("{module_name}.{}", member.name)
+                            })
+                        }
+                    }
+            })
+    })
 }
 
 fn known_microflows(modules: &[Module]) -> std::collections::HashSet<String> {
@@ -2486,6 +2643,48 @@ fn render_module(
     let mut out = String::new();
     let _ = writeln!(out, "        module {} {{", sanitize_ident(module_name));
 
+    let mut roles = module.module_roles.iter().collect::<Vec<_>>();
+    roles.sort_by(|left, right| left.name.cmp(&right.name));
+    for role in roles {
+        let _ = writeln!(
+            out,
+            "            role {} {:?};",
+            sanitize_ident(role.name.as_deref().unwrap_or("Unnamed")),
+            role.description,
+        );
+    }
+    let mut oql_sources = module
+        .artifact_units
+        .iter()
+        .filter(|document| {
+            document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+        })
+        .collect::<Vec<_>>();
+    oql_sources.sort_by_key(|document| document.get_str("Name").unwrap_or_default());
+    for source in oql_sources {
+        let name = sanitize_ident(source.get_str("Name").unwrap_or("Unnamed"));
+        let query = source.get_str("Oql").unwrap_or_default();
+        let documentation = source.get_str("Documentation").unwrap_or_default();
+        let excluded = source.get_bool("Excluded").unwrap_or(false);
+        let export_level = source.get_str("ExportLevel").unwrap_or("Hidden");
+        let has_options = !documentation.is_empty() || excluded || export_level != "Hidden";
+        if has_options {
+            let _ = writeln!(out, "            oql_view_source {name} {query:?} {{");
+            if !documentation.is_empty() {
+                let _ = writeln!(out, "                documentation {documentation:?};");
+            }
+            if excluded {
+                let _ = writeln!(out, "                excluded true;");
+            }
+            if export_level == "Published" {
+                let _ = writeln!(out, "                export_level Published;");
+            }
+            let _ = writeln!(out, "            }}");
+        } else {
+            let _ = writeln!(out, "            oql_view_source {name} {query:?};");
+        }
+    }
+
     let Some(domain_model) = &module.domain_model else {
         let _ = writeln!(out, "        }}");
         return out;
@@ -2504,6 +2703,7 @@ fn render_module(
     entities.sort_by(|a, b| a.name.cmp(&b.name));
     for entity in entities {
         out.push_str(&render_entity(
+            module_name,
             entity,
             associations_by_entity_id
                 .get(entity.id.as_deref().unwrap_or(""))
@@ -2518,6 +2718,7 @@ fn render_module(
 }
 
 fn render_entity(
+    module_name: &str,
     entity: &Entity,
     associations: &[&Association],
     entity_qualified_name_by_id: &HashMap<String, String>,
@@ -2534,6 +2735,23 @@ fn render_entity(
         );
     }
     let _ = writeln!(out, "                persistable {};", entity.persistable);
+    if let Some(image) = entity.image.as_deref().filter(|image| !image.is_empty()) {
+        let _ = writeln!(out, "                image {image:?};");
+    } else {
+        let _ = writeln!(out, "                clear_image;");
+    }
+    if entity.oql_view() {
+        if let Some(source) = entity.oql_source_document() {
+            let source_path = source
+                .split('.')
+                .map(sanitize_ident)
+                .collect::<Vec<_>>()
+                .join("::");
+            let _ = writeln!(out, "                oql_view {source_path};");
+        }
+    } else {
+        let _ = writeln!(out, "                stored;");
+    }
     if let Some(generalization) = &entity.generalization {
         if let Some(target) = &generalization.target {
             if built_in_generalization_path(target).is_none()
@@ -2756,6 +2974,63 @@ fn render_entity(
                     out,
                     "                    raise_error_on_false {};",
                     callback.raise_error_on_false
+                );
+            }
+            let _ = writeln!(out, "                }}");
+        }
+    }
+
+    if entity.access_rules.is_empty() {
+        let _ = writeln!(out, "                clear_access_rules;");
+    } else if access_rules_renderable(entity, associations) {
+        for rule in &entity.access_rules {
+            let roles = rule
+                .roles
+                .iter()
+                .map(|role| {
+                    role.strip_prefix(&format!("{module_name}."))
+                        .unwrap_or(role)
+                })
+                .map(|role| format!("{role:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "                access_rule [{roles}] {{");
+            if !rule.documentation.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "                    documentation {:?};",
+                    rule.documentation
+                );
+            }
+            if rule.create {
+                let _ = writeln!(out, "                    allow_create true;");
+            }
+            if rule.delete {
+                let _ = writeln!(out, "                    allow_delete true;");
+            }
+            let _ = writeln!(
+                out,
+                "                    default_rights {};",
+                member_rights_variant(&rule.default_rights)
+                    .expect("access rules checked before rendering")
+            );
+            if !rule.xpath.is_empty() {
+                let _ = writeln!(out, "                    xpath {:?};", rule.xpath);
+            }
+            if let Some(caption) = &rule.xpath_caption {
+                let _ = writeln!(out, "                    xpath_caption {caption:?};");
+            }
+            for member in &rule.members {
+                let kind = match member.kind {
+                    mxrs_model::entity::AccessMemberKind::Attribute => "attribute",
+                    mxrs_model::entity::AccessMemberKind::Association => "association",
+                };
+                let _ = writeln!(
+                    out,
+                    "                    {kind} {} {};",
+                    sanitize_ident(&member.name),
+                    member_rights_variant(&member.rights)
+                        .expect("access rules checked before rendering")
                 );
             }
             let _ = writeln!(out, "                }}");
@@ -3261,6 +3536,13 @@ mod tests {
 
         let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
         builder.module("Sales", |module| {
+            module.role("User", "Can read orders");
+            module.oql_view_source("OrderSource", "SELECT Number FROM Sales.Order", |source| {
+                source
+                    .documentation("Order projection")
+                    .excluded(true)
+                    .export_level(mxrs_ir::ExportLevel::Published);
+            });
             module.entity("Order", |entity| {
                 let number = entity.string("Number");
                 number.documentation = "External order number".to_string();
@@ -3268,6 +3550,7 @@ mod tests {
                 number.required = true;
                 number.unique = true;
                 entity.datetime("SubmittedAt").localize_date = Some(false);
+                entity.image("Sales.OrderIcon");
                 entity.system_members(|members| {
                     members.owner(true).created_date(true);
                 });
@@ -3280,6 +3563,16 @@ mod tests {
                 entity.before_commit::<sales_markers::ACT_Ping>(|callback| {
                     callback.pass_event_object(false);
                 });
+                entity.access_rule(["User"], |rule| {
+                    rule.documentation("Visible orders")
+                        .attribute::<sales_markers::Order_Number>(mxrs_ir::MemberRights::ReadOnly)
+                        .xpath("[Number != empty]")
+                        .xpath_caption("Orders with a number");
+                });
+            });
+            module.entity("OrderReport", |entity| {
+                entity.oql_view("Sales.OrderSource");
+                entity.string("Number");
             });
             module.enumeration("Status", |enumeration| {
                 enumeration.documentation("Order lifecycle");
@@ -3448,6 +3741,15 @@ mod tests {
                 .contains("before_commit crate::infrastructure::markers::Sales::ACT_Ping")
         );
         assert!(entities_source.contains("pass_event_object false;"));
+        assert!(entities_source.contains("image \"Sales.OrderIcon\";"));
+        assert!(entities_source.contains("oql_view Sales::OrderSource;"));
+        assert!(entities_source.contains("access_rule [\"User\"]"));
+        assert!(entities_source.contains("attribute Number ReadOnly;"));
+        assert!(entities_source.contains("xpath_caption \"Orders with a number\";"));
+        assert!(entities_source.contains("oql_view_source OrderSource"));
+        assert!(entities_source.contains("documentation \"Order projection\";"));
+        assert!(entities_source.contains("excluded true;"));
+        assert!(entities_source.contains("export_level Published;"));
         let documents =
             std::fs::read_to_string(generated.join("src/domain/documents/mod.rs")).unwrap();
         assert!(documents.contains("module.enumeration(\"Status\""));
@@ -3578,6 +3880,37 @@ mod tests {
         assert_eq!(rebuilt_order.lifecycle.len(), 1);
         assert_eq!(rebuilt_order.lifecycle[0].event, "before_commit");
         assert_eq!(rebuilt_order.lifecycle[0].handler, "Sales.ACT_Ping");
+        assert_eq!(rebuilt_order.image.as_deref(), Some("Sales.OrderIcon"));
+        assert_eq!(rebuilt_order.access_rules.len(), 1);
+        assert_eq!(rebuilt_order.access_rules[0].members[0].rights, "ReadOnly");
+        let rebuilt_report = rebuilt_sales
+            .entities()
+            .iter()
+            .find(|entity| entity.name.as_deref() == Some("OrderReport"))
+            .unwrap();
+        assert!(rebuilt_report.oql_view());
+        assert!(!rebuilt_report.persistable);
+        assert_eq!(
+            rebuilt_report.oql_source_document().as_deref(),
+            Some("Sales.OrderSource")
+        );
+        assert_eq!(
+            rebuilt_report.attributes[0]
+                .raw_value_doc
+                .as_ref()
+                .unwrap()
+                .get_str("$Type")
+                .unwrap(),
+            "DomainModels$OqlViewValue"
+        );
+        assert!(documents.iter().any(|document| {
+            document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+                && document.get_str("Name").ok() == Some("OrderSource")
+                && document.get_str("Oql").ok() == Some("SELECT Number FROM Sales.Order")
+                && document.get_str("Documentation").ok() == Some("Order projection")
+                && document.get_bool("Excluded").ok() == Some(true)
+                && document.get_str("ExportLevel").ok() == Some("Published")
+        }));
         assert!(documents.iter().any(|document| {
             document.get_str("$Type").ok() == Some("Microflows$Microflow")
                 && document.get_str("Name").ok() == Some("ACT_Ping")

@@ -211,9 +211,11 @@ fn resolves_module_roles_to_user_roles_via_the_default_security_scaffold() {
             reference: "Sales.Order/Number".to_string(),
             rights: "ReadWrite".to_string(),
             kind: AccessMemberKind::Attribute,
+            raw: mxrs_bson::Document::new(),
         }],
         xpath: String::new(),
         xpath_caption: None,
+        raw: mxrs_bson::Document::new(),
     };
 
     let compiled = security.access_rule(&rule);

@@ -138,6 +138,33 @@ impl Attribute {
             type_doc.insert("enumeration", self.enumeration.clone().unwrap_or_default());
         }
 
+        let value_doc = if self
+            .raw_value_doc
+            .as_ref()
+            .and_then(|value| value.get_str("$Type").ok())
+            == Some("DomainModels$OqlViewValue")
+        {
+            let mut value = self.raw_value_doc.clone().unwrap_or_default();
+            value.insert(
+                "$ID",
+                value
+                    .get("$ID")
+                    .and_then(mxrs_bson::extract_id)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            );
+            value.insert("$Type", "DomainModels$OqlViewValue");
+            value.insert("Reference", self.name.clone().unwrap_or_default());
+            value.remove("defaultValue");
+            value.remove("DefaultValue");
+            value
+        } else {
+            doc! {
+                "$ID": self.raw_value_doc.as_ref().and_then(|value| value.get("$ID")).and_then(mxrs_bson::extract_id).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                "$Type": "DomainModels$StoredValue",
+                "defaultValue": self.default_value.clone().unwrap_or_default(),
+            }
+        };
+
         doc! {
             "$ID": id,
             "$Type": "DomainModels$Attribute",
@@ -146,11 +173,7 @@ impl Attribute {
             "dataStorageGuid": self.data_storage_guid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             "exportLevel": self.export_level.clone(),
             "type": type_doc,
-            "value": doc! {
-                "$ID": uuid::Uuid::new_v4().to_string(),
-                "$Type": "DomainModels$StoredValue",
-                "defaultValue": self.default_value.clone().unwrap_or_default(),
-            },
+            "value": value_doc,
         }
     }
 }

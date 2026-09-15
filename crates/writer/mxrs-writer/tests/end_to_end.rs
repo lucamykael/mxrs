@@ -1556,6 +1556,7 @@ fn entity_access_rules_persist_and_read_back_with_qualified_roles() {
             e.access_rule(["User"], |rule| {
                 rule.documentation("Own orders, read only")
                     .xpath("[System.owner = '[%CurrentUser%]']")
+                    .xpath_caption("Orders owned by the current user")
                     .attribute::<markers::Sales::Order_Number>(MemberRights::ReadOnly)
                     .attribute::<markers::Sales::Order_Total>(MemberRights::ReadOnly);
             });
@@ -1581,6 +1582,10 @@ fn entity_access_rules_persist_and_read_back_with_qualified_roles() {
     assert!(!user.create && !user.delete);
     assert_eq!(user.default_rights, "None");
     assert_eq!(user.xpath, "[System.owner = '[%CurrentUser%]']");
+    assert_eq!(
+        user.xpath_caption.as_deref(),
+        Some("Orders owned by the current user")
+    );
     assert_eq!(user.documentation, "Own orders, read only");
     assert_eq!(
         user.members
@@ -1605,6 +1610,99 @@ fn entity_access_rules_persist_and_read_back_with_qualified_roles() {
         manager.members[0].kind,
         mxrs_model::entity::AccessMemberKind::Association
     );
+}
+
+#[test]
+fn oql_view_source_and_entity_source_preserve_identity_and_future_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("OqlViewSync.mpr");
+
+    let project = |query: &str, image: &str| {
+        let mut project = ProjectBuilder::new("11.12.1");
+        project.module("Sales", |module| {
+            module.oql_view_source("OrderSource", query, |_| {});
+            module.entity("OrderReport", |entity| {
+                entity.oql_view("Sales.OrderSource").image(image);
+                entity.string("Number");
+            });
+        });
+        project.build()
+    };
+    mxrs_writer::write_project(&path, &project("SELECT 1", "Sales.OldIcon")).unwrap();
+
+    let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+    let units = mpr.all_units().unwrap();
+    let source_unit = units
+        .iter()
+        .find(|unit| {
+            mpr.parse_contents(unit).ok().is_some_and(|document| {
+                document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+            })
+        })
+        .unwrap()
+        .clone();
+    let source_id = source_unit.unit_id.clone();
+    let mut source_document = mpr.parse_contents(&source_unit).unwrap();
+    source_document.insert("FutureSourceField", "preserved");
+    mpr.update_unit(&source_id, source_document).unwrap();
+
+    let domain_unit = mpr.units_by_containment("DomainModel").unwrap().remove(0);
+    let mut domain = mpr.parse_contents(&domain_unit).unwrap();
+    let report = domain
+        .get_array_mut("entities")
+        .unwrap()
+        .iter_mut()
+        .filter_map(mxrs_bson::Bson::as_document_mut)
+        .find(|entity| entity.get_str("name").ok() == Some("OrderReport"))
+        .unwrap();
+    let entity_source = report.get_document_mut("source").unwrap();
+    let entity_source_id = mxrs_bson::extract_id(entity_source.get("$ID").unwrap()).unwrap();
+    entity_source.insert("FutureEntitySourceField", "preserved");
+    mpr.update_unit(&domain_unit.unit_id, domain).unwrap();
+    drop(mpr);
+
+    mxrs_writer::synchronize_project(&path, &project("SELECT 2", "Sales.NewIcon")).unwrap();
+    let mpr = mxrs_mpr::MprFile::open(&path, true).unwrap();
+    let updated_source = mpr.unit(&source_id).unwrap().unwrap();
+    let updated_source = mpr.parse_contents(&updated_source).unwrap();
+    assert_eq!(updated_source.get_str("Oql").unwrap(), "SELECT 2");
+    assert_eq!(
+        updated_source.get_str("FutureSourceField").unwrap(),
+        "preserved"
+    );
+    let project = Project::open(&path, true).unwrap();
+    let sales = project.modules().unwrap().remove(0);
+    let report = sales.entities().first().unwrap();
+    assert_eq!(report.image.as_deref(), Some("Sales.NewIcon"));
+    let updated_entity_source = report.source.as_ref().unwrap();
+    assert_eq!(
+        mxrs_bson::extract_id(updated_entity_source.get("$ID").unwrap()).as_deref(),
+        Some(entity_source_id.as_str())
+    );
+    assert_eq!(
+        updated_entity_source
+            .get_str("FutureEntitySourceField")
+            .unwrap(),
+        "preserved"
+    );
+}
+
+#[test]
+fn an_oql_view_cannot_reference_an_unknown_source_document() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("MissingOqlSource.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |module| {
+        module.entity("OrderReport", |entity| {
+            entity.oql_view("Sales.MissingSource");
+        });
+    });
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::UnknownOqlViewSource { entity, source_name }
+            if entity == "Sales.OrderReport" && source_name == "Sales.MissingSource"
+    ));
 }
 
 #[test]

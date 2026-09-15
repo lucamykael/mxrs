@@ -280,6 +280,87 @@ fn entity_structure_and_lifecycle_are_typed_and_round_trip() {
 }
 
 #[test]
+fn entity_image_access_and_oql_view_are_typed_and_round_trip() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("EntityPresentation.mpr");
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            role User "Can read reports";
+            oql_view_source OrderSource "SELECT Number FROM Sales.Order";
+            entity Customer {}
+            entity Order {
+                image "Sales.OrderIcon";
+                string Number;
+                association Order_Customer -> Sales::Customer as Reference;
+                access_rule ["User"] {
+                    documentation "Visible orders";
+                    default_rights None;
+                    attribute Number ReadOnly;
+                    association Order_Customer ReadWrite;
+                    xpath "[Number != empty]";
+                    xpath_caption "Orders with a number";
+                }
+            }
+            entity OrderReport {
+                oql_view Sales::OrderSource;
+                string Number;
+            }
+        }
+    };
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+    let project = Project::open(&path, true).unwrap();
+    let sales = project.modules().unwrap().remove(0);
+    let order = sales
+        .entities()
+        .iter()
+        .find(|entity| entity.name.as_deref() == Some("Order"))
+        .unwrap();
+    assert_eq!(order.image.as_deref(), Some("Sales.OrderIcon"));
+    assert_eq!(order.access_rules.len(), 1);
+    assert_eq!(order.access_rules[0].roles, ["Sales.User"]);
+    assert_eq!(order.access_rules[0].members.len(), 2);
+    assert_eq!(
+        order.access_rules[0].xpath_caption.as_deref(),
+        Some("Orders with a number")
+    );
+
+    let report = sales
+        .entities()
+        .iter()
+        .find(|entity| entity.name.as_deref() == Some("OrderReport"))
+        .unwrap();
+    assert!(report.oql_view());
+    assert!(!report.persistable);
+    assert_eq!(
+        report.oql_source_document().as_deref(),
+        Some("Sales.OrderSource")
+    );
+    assert_eq!(
+        report.attributes[0]
+            .raw_value_doc
+            .as_ref()
+            .unwrap()
+            .get_str("$Type")
+            .unwrap(),
+        "DomainModels$OqlViewValue"
+    );
+    let source = sales
+        .artifact_units
+        .iter()
+        .find(|document| {
+            document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+        })
+        .unwrap();
+    assert_eq!(source.get_str("Name").unwrap(), "OrderSource");
+    assert_eq!(
+        source.get_str("Oql").unwrap(),
+        "SELECT Number FROM Sales.Order"
+    );
+}
+
+#[test]
 fn supports_a_module_level_microflow_with_a_return_statement() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Microflow.mpr");

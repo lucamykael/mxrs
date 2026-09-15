@@ -89,7 +89,7 @@
 
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{Expr, Ident, LitStr, Result, Token, braced, parenthesized};
+use syn::{Expr, Ident, LitStr, Result, Token, braced, bracketed, parenthesized};
 
 pub struct ProjectInput {
     pub version: LitStr,
@@ -99,6 +99,8 @@ pub struct ProjectInput {
 pub struct ModuleInput {
     pub name: Ident,
     pub entities: Vec<EntityInput>,
+    pub roles: Vec<ModuleRoleInput>,
+    pub oql_view_sources: Vec<OqlViewSourceInput>,
     pub microflows: Vec<MicroflowInput>,
     pub nanoflows: Vec<MicroflowInput>,
 }
@@ -107,11 +109,53 @@ pub struct EntityInput {
     pub name: Ident,
     pub documentation: Option<LitStr>,
     pub persistable: Option<syn::LitBool>,
+    pub image: Option<EntityImageInput>,
+    pub source: Option<EntitySourceInput>,
     pub attributes: Vec<AttributeInput>,
     pub associations: Vec<AssociationInput>,
     pub inheritance: Option<InheritanceInput>,
     pub indexes: Option<Vec<IndexInput>>,
     pub lifecycle: Option<Vec<LifecycleInput>>,
+    pub access_rules: Option<Vec<AccessRuleInput>>,
+}
+
+pub struct ModuleRoleInput {
+    pub name: Ident,
+    pub description: LitStr,
+}
+
+pub struct OqlViewSourceInput {
+    pub name: Ident,
+    pub query: LitStr,
+    pub documentation: Option<LitStr>,
+    pub excluded: Option<syn::LitBool>,
+    pub export_level: Option<Ident>,
+}
+
+pub enum EntityImageInput {
+    None,
+    Reference(LitStr),
+}
+
+pub enum EntitySourceInput {
+    Stored,
+    OqlView(syn::Path),
+}
+
+pub struct AccessRuleInput {
+    pub roles: Vec<LitStr>,
+    pub documentation: Option<LitStr>,
+    pub allow_create: Option<syn::LitBool>,
+    pub allow_delete: Option<syn::LitBool>,
+    pub default_rights: Option<Ident>,
+    pub xpath: Option<LitStr>,
+    pub xpath_caption: Option<LitStr>,
+    pub members: Vec<AccessMemberInput>,
+}
+
+pub enum AccessMemberInput {
+    Attribute { name: Ident, rights: Ident },
+    Association { name: Ident, rights: Ident },
 }
 
 pub enum InheritanceInput {
@@ -316,6 +360,8 @@ impl Parse for ModuleInput {
         let content;
         braced!(content in input);
         let mut entities = Vec::new();
+        let mut roles = Vec::new();
+        let mut oql_view_sources = Vec::new();
         let mut microflows = Vec::new();
         let mut nanoflows = Vec::new();
         while !content.is_empty() {
@@ -324,6 +370,61 @@ impl Parse for ModuleInput {
                 microflows.push(content.parse()?);
             } else if peeked == "nanoflow" {
                 nanoflows.push(content.parse()?);
+            } else if peeked == "role" {
+                content.parse::<Ident>()?;
+                let role_name = content.parse()?;
+                let description = content.parse()?;
+                content.parse::<Token![;]>()?;
+                roles.push(ModuleRoleInput {
+                    name: role_name,
+                    description,
+                });
+            } else if peeked == "oql_view_source" {
+                content.parse::<Ident>()?;
+                let source_name = content.parse()?;
+                let query = content.parse()?;
+                let mut documentation = None;
+                let mut excluded = None;
+                let mut export_level = None;
+                if content.peek(Token![;]) {
+                    content.parse::<Token![;]>()?;
+                } else {
+                    let options;
+                    braced!(options in content);
+                    while !options.is_empty() {
+                        let option: Ident = options.parse()?;
+                        match option.to_string().as_str() {
+                            "documentation" => {
+                                set_once(&mut documentation, options.parse()?, &option)?
+                            }
+                            "excluded" => set_once(&mut excluded, options.parse()?, &option)?,
+                            "export_level" => {
+                                let value: Ident = options.parse()?;
+                                if !matches!(value.to_string().as_str(), "Hidden" | "Published") {
+                                    return Err(syn::Error::new(
+                                        value.span(),
+                                        "unknown export level (expected Hidden or Published)",
+                                    ));
+                                }
+                                set_once(&mut export_level, value, &option)?;
+                            }
+                            _ => {
+                                return Err(syn::Error::new(
+                                    option.span(),
+                                    "unknown OQL view source option",
+                                ));
+                            }
+                        }
+                        options.parse::<Token![;]>()?;
+                    }
+                }
+                oql_view_sources.push(OqlViewSourceInput {
+                    name: source_name,
+                    query,
+                    documentation,
+                    excluded,
+                    export_level,
+                });
             } else {
                 entities.push(content.parse()?);
             }
@@ -331,6 +432,8 @@ impl Parse for ModuleInput {
         Ok(ModuleInput {
             name,
             entities,
+            roles,
+            oql_view_sources,
             microflows,
             nanoflows,
         })
@@ -345,15 +448,66 @@ impl Parse for EntityInput {
         braced!(content in input);
         let mut documentation: Option<LitStr> = None;
         let mut persistable: Option<syn::LitBool> = None;
+        let mut image = None;
+        let mut source = None;
         let mut attributes = Vec::new();
         let mut associations = Vec::new();
         let mut inheritance = None;
         let mut indexes = None;
         let mut lifecycle = None;
+        let mut access_rules = None;
         while !content.is_empty() {
             let peeked: Ident = content.fork().parse()?;
             if peeked == "association" {
                 associations.push(content.parse()?);
+            } else if peeked == "access_rule" {
+                access_rules
+                    .get_or_insert_with(Vec::new)
+                    .push(parse_access_rule(&content)?);
+            } else if peeked == "clear_access_rules" {
+                content.parse::<Ident>()?;
+                content.parse::<Token![;]>()?;
+                if access_rules
+                    .as_ref()
+                    .is_some_and(|values: &Vec<AccessRuleInput>| !values.is_empty())
+                {
+                    return Err(
+                        content.error("`clear_access_rules` conflicts with declared access rules")
+                    );
+                }
+                access_rules = Some(vec![]);
+            } else if peeked == "image" {
+                let keyword: Ident = content.parse()?;
+                let reference = content.parse()?;
+                content.parse::<Token![;]>()?;
+                if image
+                    .replace(EntityImageInput::Reference(reference))
+                    .is_some()
+                {
+                    return Err(syn::Error::new(keyword.span(), "duplicate entity image"));
+                }
+            } else if peeked == "clear_image" {
+                let keyword: Ident = content.parse()?;
+                content.parse::<Token![;]>()?;
+                if image.replace(EntityImageInput::None).is_some() {
+                    return Err(syn::Error::new(keyword.span(), "duplicate entity image"));
+                }
+            } else if peeked == "stored" {
+                let keyword: Ident = content.parse()?;
+                content.parse::<Token![;]>()?;
+                if source.replace(EntitySourceInput::Stored).is_some() {
+                    return Err(syn::Error::new(keyword.span(), "duplicate entity source"));
+                }
+            } else if peeked == "oql_view" {
+                let keyword: Ident = content.parse()?;
+                let source_document = content.parse()?;
+                content.parse::<Token![;]>()?;
+                if source
+                    .replace(EntitySourceInput::OqlView(source_document))
+                    .is_some()
+                {
+                    return Err(syn::Error::new(keyword.span(), "duplicate entity source"));
+                }
             } else if peeked == "generalizes" {
                 let keyword: Ident = content.parse()?;
                 let target = content.parse()?;
@@ -427,15 +581,23 @@ impl Parse for EntityInput {
                 attributes.push(content.parse()?);
             }
         }
+        if matches!(source.as_ref(), Some(EntitySourceInput::OqlView(_)))
+            && persistable.as_ref().is_some_and(|value| value.value)
+        {
+            return Err(input.error("an OQL view entity cannot be persistable"));
+        }
         Ok(EntityInput {
             name,
             documentation,
             persistable,
+            image,
+            source,
             attributes,
             associations,
             inheritance,
             indexes,
             lifecycle,
+            access_rules,
         })
     }
 }
@@ -468,6 +630,95 @@ fn parse_system_members(input: ParseStream) -> Result<InheritanceInput> {
         changed_date,
         changed_by,
     })
+}
+
+fn parse_access_rule(input: ParseStream) -> Result<AccessRuleInput> {
+    expect_keyword(input, "access_rule")?;
+    let roles_content;
+    bracketed!(roles_content in input);
+    let mut roles = Vec::new();
+    while !roles_content.is_empty() {
+        roles.push(roles_content.parse()?);
+        if roles_content.peek(Token![,]) {
+            roles_content.parse::<Token![,]>()?;
+        }
+    }
+    if roles.is_empty() {
+        return Err(input.error("an access rule requires at least one role"));
+    }
+    let content;
+    braced!(content in input);
+    let mut documentation = None;
+    let mut allow_create = None;
+    let mut allow_delete = None;
+    let mut default_rights = None;
+    let mut xpath = None;
+    let mut xpath_caption = None;
+    let mut members = Vec::new();
+    while !content.is_empty() {
+        let keyword: Ident = content.parse()?;
+        match keyword.to_string().as_str() {
+            "documentation" => set_once(&mut documentation, content.parse()?, &keyword)?,
+            "allow_create" => set_once(&mut allow_create, content.parse()?, &keyword)?,
+            "allow_delete" => set_once(&mut allow_delete, content.parse()?, &keyword)?,
+            "default_rights" => {
+                let rights = parse_member_rights(&content)?;
+                set_once(&mut default_rights, rights, &keyword)?;
+            }
+            "xpath" => set_once(&mut xpath, content.parse()?, &keyword)?,
+            "xpath_caption" => set_once(&mut xpath_caption, content.parse()?, &keyword)?,
+            "attribute" | "association" => {
+                let name = content.parse()?;
+                let rights = parse_member_rights(&content)?;
+                members.push(if keyword == "attribute" {
+                    AccessMemberInput::Attribute { name, rights }
+                } else {
+                    AccessMemberInput::Association { name, rights }
+                });
+            }
+            _ => {
+                return Err(syn::Error::new(
+                    keyword.span(),
+                    "unknown access-rule option",
+                ));
+            }
+        }
+        content.parse::<Token![;]>()?;
+    }
+    Ok(AccessRuleInput {
+        roles,
+        documentation,
+        allow_create,
+        allow_delete,
+        default_rights,
+        xpath,
+        xpath_caption,
+        members,
+    })
+}
+
+fn parse_member_rights(input: ParseStream) -> Result<Ident> {
+    let rights: Ident = input.parse()?;
+    if !matches!(
+        rights.to_string().as_str(),
+        "None" | "ReadOnly" | "ReadWrite"
+    ) {
+        return Err(syn::Error::new(
+            rights.span(),
+            "unknown member rights (expected None, ReadOnly, or ReadWrite)",
+        ));
+    }
+    Ok(rights)
+}
+
+fn set_once<T>(slot: &mut Option<T>, value: T, keyword: &Ident) -> Result<()> {
+    if slot.replace(value).is_some() {
+        return Err(syn::Error::new(
+            keyword.span(),
+            format!("duplicate `{keyword}`"),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_index(input: ParseStream) -> Result<IndexInput> {

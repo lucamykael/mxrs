@@ -1,5 +1,5 @@
 use mxrs_ir::ScheduleUnit;
-use mxrs_ir::declaration::ModuleDecl;
+use mxrs_ir::declaration::{ModuleDecl, OqlViewSourceDecl};
 
 use crate::constant::ConstantBuilder;
 use crate::entity::EntityBuilder;
@@ -14,12 +14,34 @@ pub struct ModuleBuilder {
     decl: ModuleDecl,
 }
 
+pub struct OqlViewSourceBuilder {
+    decl: OqlViewSourceDecl,
+}
+
+impl OqlViewSourceBuilder {
+    pub fn documentation(&mut self, value: impl Into<String>) -> &mut Self {
+        self.decl.documentation = value.into();
+        self
+    }
+
+    pub fn excluded(&mut self, value: bool) -> &mut Self {
+        self.decl.excluded = value;
+        self
+    }
+
+    pub fn export_level(&mut self, value: mxrs_ir::ExportLevel) -> &mut Self {
+        self.decl.export_level = value;
+        self
+    }
+}
+
 impl ModuleBuilder {
     pub(crate) fn new(name: impl Into<String>) -> Self {
         ModuleBuilder {
             decl: ModuleDecl {
                 name: name.into(),
                 entities: vec![],
+                oql_view_sources: vec![],
                 enumerations: vec![],
                 constants: vec![],
                 regular_expressions: vec![],
@@ -46,6 +68,20 @@ impl ModuleBuilder {
         let mut builder = EntityBuilder::new(name);
         configure(&mut builder);
         self.decl.entities.push(builder.into_decl());
+        self
+    }
+
+    pub fn oql_view_source(
+        &mut self,
+        name: impl Into<String>,
+        query: impl Into<String>,
+        configure: impl FnOnce(&mut OqlViewSourceBuilder),
+    ) -> &mut Self {
+        let mut builder = OqlViewSourceBuilder {
+            decl: OqlViewSourceDecl::new(name, query),
+        };
+        configure(&mut builder);
+        self.decl.oql_view_sources.push(builder.decl);
         self
     }
 

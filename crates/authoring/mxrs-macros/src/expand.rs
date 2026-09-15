@@ -8,9 +8,10 @@ use quote::{format_ident, quote};
 use syn::{Ident, Path, Result};
 
 use crate::parse::{
-    AssociationInput, AttrKind, AttributeInput, EntityInput, FlowItem, IndexInput,
-    IndexMemberInput, InheritanceInput, LifecycleInput, MappingInput, MemberInput, MicroflowInput,
-    ModuleInput, ProjectInput,
+    AccessMemberInput, AccessRuleInput, AssociationInput, AttrKind, AttributeInput,
+    EntityImageInput, EntityInput, EntitySourceInput, FlowItem, IndexInput, IndexMemberInput,
+    InheritanceInput, LifecycleInput, MappingInput, MemberInput, MicroflowInput, ModuleInput,
+    ProjectInput,
 };
 
 #[derive(Clone)]
@@ -175,6 +176,33 @@ fn expression_type(kind: &AttrKind) -> TokenStream {
 
 fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
     let name = module.name.to_string();
+    let role_stmts = module.roles.iter().map(|role| {
+        let role_name = role.name.to_string();
+        let description = &role.description;
+        quote! { m.role(#role_name, #description); }
+    });
+    let oql_source_stmts = module.oql_view_sources.iter().map(|source| {
+        let source_name = source.name.to_string();
+        let query = &source.query;
+        let documentation = source
+            .documentation
+            .as_ref()
+            .map(|value| quote! { source.documentation(#value); });
+        let excluded = source
+            .excluded
+            .as_ref()
+            .map(|value| quote! { source.excluded(#value); });
+        let export_level = source.export_level.as_ref().map(|value| {
+            quote! { source.export_level(::mxrs_ir::ExportLevel::#value); }
+        });
+        quote! {
+            m.oql_view_source(#source_name, #query, |source| {
+                #documentation
+                #excluded
+                #export_level
+            });
+        }
+    });
     let entity_stmts: Vec<TokenStream> = module
         .entities
         .iter()
@@ -192,6 +220,8 @@ fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
         .collect::<Result<_>>()?;
     Ok(quote! {
         __mxrs_project.module(#name, |m| {
+            #(#role_stmts)*
+            #(#oql_source_stmts)*
             #(#entity_stmts)*
             #(#microflow_stmts)*
             #(#nanoflow_stmts)*
@@ -209,6 +239,17 @@ fn expand_entity(entity: &EntityInput, module_name: &Ident) -> TokenStream {
         .persistable
         .as_ref()
         .map(|value| quote! { e.persistable(#value); });
+    let image_stmt = entity.image.as_ref().map(|image| match image {
+        EntityImageInput::None => quote! { e.clear_image(); },
+        EntityImageInput::Reference(reference) => quote! { e.image(#reference); },
+    });
+    let source_stmt = entity.source.as_ref().map(|source| match source {
+        EntitySourceInput::Stored => quote! { e.stored(); },
+        EntitySourceInput::OqlView(path) => {
+            let qualified = qualified_path(path, &module_name.to_string());
+            quote! { e.oql_view(#qualified); }
+        }
+    });
     let attr_stmts = entity.attributes.iter().map(expand_attribute);
     let assoc_stmts = entity
         .associations
@@ -228,15 +269,89 @@ fn expand_entity(entity: &EntityInput, module_name: &Ident) -> TokenStream {
         Some(callbacks) if callbacks.is_empty() => vec![quote! { e.clear_lifecycle(); }],
         Some(callbacks) => callbacks.iter().map(expand_lifecycle).collect(),
     };
+    let access_stmts: Vec<TokenStream> = match &entity.access_rules {
+        None => vec![],
+        Some(rules) if rules.is_empty() => vec![quote! { e.clear_access_rules(); }],
+        Some(rules) => rules
+            .iter()
+            .map(|rule| expand_access_rule(rule, &entity.name, module_name))
+            .collect(),
+    };
     quote! {
         m.entity(#name, |e| {
             #documentation_stmt
             #persistable_stmt
+            #image_stmt
+            #source_stmt
             #inheritance_stmt
             #(#attr_stmts)*
             #(#assoc_stmts)*
             #(#index_stmts)*
             #(#lifecycle_stmts)*
+            #(#access_stmts)*
+        });
+    }
+}
+
+fn qualified_path(path: &Path, default_module: &str) -> String {
+    let joined = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join(".");
+    if joined.contains('.') {
+        joined
+    } else {
+        format!("{default_module}.{joined}")
+    }
+}
+
+fn expand_access_rule(
+    rule: &AccessRuleInput,
+    entity_name: &Ident,
+    module_name: &Ident,
+) -> TokenStream {
+    let roles = &rule.roles;
+    let documentation = rule
+        .documentation
+        .as_ref()
+        .map(|value| quote! { r.documentation(#value); });
+    let allow_create = rule
+        .allow_create
+        .as_ref()
+        .map(|value| quote! { r.allow_create(#value); });
+    let allow_delete = rule
+        .allow_delete
+        .as_ref()
+        .map(|value| quote! { r.allow_delete(#value); });
+    let default_rights = rule.default_rights.as_ref().map(|value| {
+        quote! { r.default_rights(::mxrs_ir::MemberRights::#value); }
+    });
+    let xpath = rule.xpath.as_ref().map(|value| quote! { r.xpath(#value); });
+    let xpath_caption = rule
+        .xpath_caption
+        .as_ref()
+        .map(|value| quote! { r.xpath_caption(#value); });
+    let members = rule.members.iter().map(|member| match member {
+        AccessMemberInput::Attribute { name, rights } => {
+            let marker = format_ident!("{}_{}", entity_name, name);
+            quote! { r.attribute::<#module_name::#marker>(::mxrs_ir::MemberRights::#rights); }
+        }
+        AccessMemberInput::Association { name, rights } => {
+            let marker = format_ident!("{}_{}", entity_name, name);
+            quote! { r.association::<#module_name::#marker>(::mxrs_ir::MemberRights::#rights); }
+        }
+    });
+    quote! {
+        e.access_rule([#(#roles),*], |r| {
+            #documentation
+            #allow_create
+            #allow_delete
+            #default_rights
+            #xpath
+            #xpath_caption
+            #(#members)*
         });
     }
 }

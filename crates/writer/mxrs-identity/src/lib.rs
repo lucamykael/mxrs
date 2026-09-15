@@ -40,6 +40,9 @@ pub enum ArtifactKind {
     EntityIndex,
     EntityIndexMember,
     LifecycleCallback,
+    EntitySource,
+    OqlViewSource,
+    OqlViewValue,
     Constant,
     /// The `Type` sub-document of a constant, which carries its own `$ID`
     /// distinct from the constant's.
@@ -92,6 +95,9 @@ impl fmt::Display for ArtifactKind {
             Self::EntityIndex => "entity-index",
             Self::EntityIndexMember => "entity-index-member",
             Self::LifecycleCallback => "lifecycle-callback",
+            Self::EntitySource => "entity-source",
+            Self::OqlViewSource => "oql-view-source",
+            Self::OqlViewValue => "oql-view-value",
             Self::Constant => "constant",
             Self::ConstantType => "constant-type",
             Self::RegularExpression => "regular-expression",

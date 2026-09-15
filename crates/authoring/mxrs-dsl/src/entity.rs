@@ -1,7 +1,7 @@
 use mxrs_ir::declaration::{
     AssociationDecl, AssociationOwner, AssociationStorage, AttributeDecl, AttributeType,
-    EntityDecl, EntityIndexDecl, EntityInheritanceDecl, IndexMemberDecl, LifecycleDecl,
-    LifecycleEvent, SystemMember, SystemMembersDecl,
+    EntityDecl, EntityImageDecl, EntityIndexDecl, EntityInheritanceDecl, EntitySourceDecl,
+    IndexMemberDecl, LifecycleDecl, LifecycleEvent, SystemMember, SystemMembersDecl,
 };
 use mxrs_ir::{AssociationMarker, AttributeMarker, EntityMarker, MicroflowMarker};
 
@@ -122,6 +122,29 @@ impl EntityBuilder {
 
     pub fn persistable(&mut self, value: bool) -> &mut Self {
         self.decl.persistable = value;
+        self
+    }
+
+    pub fn image(&mut self, qualified_name: impl Into<String>) -> &mut Self {
+        self.decl.image = Some(EntityImageDecl::Reference(qualified_name.into()));
+        self
+    }
+
+    pub fn clear_image(&mut self) -> &mut Self {
+        self.decl.image = Some(EntityImageDecl::None);
+        self
+    }
+
+    pub fn stored(&mut self) -> &mut Self {
+        self.decl.source = Some(EntitySourceDecl::Stored);
+        self
+    }
+
+    pub fn oql_view(&mut self, source_document: impl Into<String>) -> &mut Self {
+        self.decl.persistable = false;
+        self.decl.source = Some(EntitySourceDecl::OqlView {
+            source_document: source_document.into(),
+        });
         self
     }
 

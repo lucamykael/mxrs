@@ -147,6 +147,7 @@ pub struct AccessRuleDecl {
     pub default_rights: MemberRights,
     pub members: Vec<MemberAccessDecl>,
     pub xpath_constraint: String,
+    pub xpath_caption: Option<String>,
 }
 
 impl AccessRuleDecl {
@@ -159,8 +160,21 @@ impl AccessRuleDecl {
             default_rights: MemberRights::default(),
             members: vec![],
             xpath_constraint: String::new(),
+            xpath_caption: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityImageDecl {
+    None,
+    Reference(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntitySourceDecl {
+    Stored,
+    OqlView { source_document: String },
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +182,12 @@ pub struct EntityDecl {
     pub name: String,
     pub documentation: String,
     pub persistable: bool,
+    /// `None` preserves an imported image. `Some` is authoritative, including
+    /// [`EntityImageDecl::None`] for an explicit clear.
+    pub image: Option<EntityImageDecl>,
+    /// `None` preserves an imported entity/source kind. Fresh entities default
+    /// to [`EntitySourceDecl::Stored`].
+    pub source: Option<EntitySourceDecl>,
     pub attributes: Vec<AttributeDecl>,
     pub associations: Vec<AssociationDecl>,
     /// `None` preserves whatever access rules an imported entity already has.
@@ -343,6 +363,8 @@ impl EntityDecl {
             name: name.into(),
             documentation: String::new(),
             persistable: true,
+            image: None,
+            source: None,
             attributes: vec![],
             associations: vec![],
             access_rules: None,
@@ -616,6 +638,7 @@ impl ScheduledEventDecl {
 pub struct ModuleDecl {
     pub name: String,
     pub entities: Vec<EntityDecl>,
+    pub oql_view_sources: Vec<OqlViewSourceDecl>,
     pub enumerations: Vec<EnumerationDecl>,
     pub constants: Vec<ConstantDecl>,
     pub regular_expressions: Vec<RegularExpressionDecl>,
@@ -631,6 +654,27 @@ pub struct ModuleDecl {
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OqlViewSourceDecl {
+    pub name: String,
+    pub query: String,
+    pub documentation: String,
+    pub excluded: bool,
+    pub export_level: ExportLevel,
+}
+
+impl OqlViewSourceDecl {
+    pub fn new(name: impl Into<String>, query: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            query: query.into(),
+            documentation: String::new(),
+            excluded: false,
+            export_level: ExportLevel::Hidden,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -670,6 +714,7 @@ impl ProjectDecl {
             return;
         };
         target.entities.extend(declared.entities);
+        target.oql_view_sources.extend(declared.oql_view_sources);
         target.enumerations.extend(declared.enumerations);
         target.constants.extend(declared.constants);
         target

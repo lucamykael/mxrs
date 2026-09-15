@@ -19,6 +19,7 @@ use crate::{documents, domain, module, navigation, scaffold, security};
 
 pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()> {
     validate_lifecycle_handlers(project, &HashSet::new())?;
+    validate_oql_sources(project, &HashSet::new())?;
     let path = path.as_ref();
     let schema_hash = mxrs_schema::schema_hash(&project.mendix_version)
         .ok_or_else(|| WriterError::UnsupportedVersion(project.mendix_version.clone()))?;
@@ -76,19 +77,32 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
 pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()> {
     let path = path.as_ref();
     let existing_project = mxrs_model::Project::open(path, true)?;
-    let existing_microflows: HashSet<String> = existing_project
-        .modules()?
-        .into_iter()
+    let existing_modules = existing_project.modules()?;
+    let existing_microflows: HashSet<String> = existing_modules
+        .iter()
         .flat_map(|module| {
-            let module_name = module.name.unwrap_or_else(|| "Unnamed".to_string());
+            let module_name = module.name.clone().unwrap_or_else(|| "Unnamed".to_string());
             module
                 .microflows
-                .into_iter()
-                .filter_map(move |flow| Some(format!("{module_name}.{}", flow.name?)))
+                .iter()
+                .filter_map(move |flow| Some(format!("{module_name}.{}", flow.name.as_deref()?)))
+        })
+        .collect();
+    let existing_oql_sources: HashSet<String> = existing_modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_else(|| "Unnamed".to_string());
+            module.artifact_units.iter().filter_map(move |document| {
+                if document.get_str("$Type").ok() != Some("DomainModels$ViewEntitySourceDocument") {
+                    return None;
+                }
+                Some(format!("{module_name}.{}", document.get_str("Name").ok()?))
+            })
         })
         .collect();
     drop(existing_project);
     validate_lifecycle_handlers(project, &existing_microflows)?;
+    validate_oql_sources(project, &existing_oql_sources)?;
     let mut mpr = MprFile::open(path, false)?;
     let root_id = mpr
         .root_unit()?
@@ -159,6 +173,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &module_id,
             &decl.name,
             &decl.enumerations,
+            identity,
+        )?;
+        documents::synchronize_oql_view_sources_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.oql_view_sources,
             identity,
         )?;
         documents::synchronize_constants_with_identity(
@@ -234,6 +255,7 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
     let existing_modules_by_name = existing_module_ids_by_name(&mpr, &root_id)?;
     for declaration in &project.modules {
         if declaration.enumerations.is_empty()
+            && declaration.oql_view_sources.is_empty()
             && declaration.constants.is_empty()
             && declaration.regular_expressions.is_empty()
             && declaration.scheduled_events.is_empty()
@@ -249,6 +271,13 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
             module_id,
             &declaration.name,
             &declaration.enumerations,
+            identity,
+        )?;
+        documents::synchronize_oql_view_sources_with_identity(
+            &mut mpr,
+            module_id,
+            &declaration.name,
+            &declaration.oql_view_sources,
             identity,
         )?;
         documents::synchronize_constants_with_identity(
@@ -320,6 +349,49 @@ fn validate_lifecycle_handlers(
                         handler: callback.handler.clone(),
                     });
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_oql_sources(project: &ProjectDecl, existing: &HashSet<String>) -> Result<()> {
+    let mut sources = existing.clone();
+    for module in &project.modules {
+        let mut names = HashSet::new();
+        for source in &module.oql_view_sources {
+            if !names.insert(source.name.clone()) {
+                return Err(WriterError::DuplicateOqlViewSource {
+                    module_name: module.name.clone(),
+                    name: source.name.clone(),
+                });
+            }
+            sources.insert(format!("{}.{}", module.name, source.name));
+        }
+    }
+    for module in &project.modules {
+        for entity in &module.entities {
+            let Some(mxrs_ir::EntitySourceDecl::OqlView { source_document }) =
+                entity.source.as_ref()
+            else {
+                continue;
+            };
+            if entity.persistable {
+                return Err(WriterError::PersistableOqlView(format!(
+                    "{}.{}",
+                    module.name, entity.name
+                )));
+            }
+            let qualified = if source_document.contains('.') {
+                source_document.clone()
+            } else {
+                format!("{}.{}", module.name, source_document)
+            };
+            if !sources.contains(&qualified) {
+                return Err(WriterError::UnknownOqlViewSource {
+                    entity: format!("{}.{}", module.name, entity.name),
+                    source_name: qualified,
+                });
             }
         }
     }

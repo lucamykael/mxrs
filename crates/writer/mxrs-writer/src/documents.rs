@@ -35,8 +35,8 @@ use mxrs_ir::flow::MicroflowDecl;
 use mxrs_ir::page::PageDecl;
 use mxrs_ir::{
     ConstantDecl, ConstantType, EnumerationDecl, ExportLevel, LocalizedText, MenuActionDecl,
-    MenuDecl, MenuIconDecl, MenuItemDecl, OnOverlap, RegularExpressionDecl, ScheduleUnit,
-    ScheduledEventDecl, ScheduledEventSchedule,
+    MenuDecl, MenuIconDecl, MenuItemDecl, OnOverlap, OqlViewSourceDecl, RegularExpressionDecl,
+    ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule,
 };
 use mxrs_model::Microflow;
 use mxrs_mpr::MprFile;
@@ -334,6 +334,49 @@ pub(crate) fn synchronize_enumerations_with_identity(
             mpr.update_unit(&enumeration_id, document)?;
         } else {
             mpr.insert_unit(module_id, "Documents", document, Some(&enumeration_id))?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn synchronize_oql_view_sources_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    declarations: &[OqlViewSourceDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    if declarations.is_empty() {
+        return Ok(());
+    }
+    let existing =
+        existing_documents_by_name(mpr, module_id, "DomainModels$ViewEntitySourceDocument")?;
+    for declaration in declarations {
+        let qualified_name = format!("{module_name}.{}", declaration.name);
+        let previous = existing.get(&declaration.name);
+        let id = previous
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| identity.artifact_id(ArtifactKind::OqlViewSource, &qualified_name));
+        let mut document = previous
+            .map(|(_, document)| document.clone())
+            .unwrap_or_default();
+        document.insert("$ID", id.clone());
+        document.insert("$Type", "DomainModels$ViewEntitySourceDocument");
+        document.insert("Name", declaration.name.clone());
+        document.insert("Oql", declaration.query.clone());
+        document.insert("Documentation", declaration.documentation.clone());
+        document.insert("Excluded", declaration.excluded);
+        document.insert(
+            "ExportLevel",
+            match declaration.export_level {
+                ExportLevel::Hidden => "Hidden",
+                ExportLevel::Published => "Published",
+            },
+        );
+        if previous.is_some() {
+            mpr.update_unit(&id, document)?;
+        } else {
+            mpr.insert_unit(module_id, "Documents", document, Some(&id))?;
         }
     }
     Ok(())

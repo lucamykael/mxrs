@@ -109,6 +109,15 @@ pub enum WriterError {
     )]
     AccessRuleWithoutRoles { module_name: String, name: String },
 
+    #[error("entity {entity:?} references unknown OQL view source {source_name:?}")]
+    UnknownOqlViewSource { entity: String, source_name: String },
+
+    #[error("module {module_name:?} declares duplicate OQL view source {name:?}")]
+    DuplicateOqlViewSource { module_name: String, name: String },
+
+    #[error("OQL view entity {0:?} cannot be persistable")]
+    PersistableOqlView(String),
+
     #[error("entity {module_name}.{name} declares an empty index")]
     EmptyEntityIndex { module_name: String, name: String },
 

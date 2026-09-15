@@ -21,11 +21,11 @@ pub use application::{
 pub use declaration::{
     AccessMemberKind, AccessRuleDecl, AssociationDecl, AssociationOwner, AssociationStorage,
     AssociationType, AttributeDecl, AttributeType, ConstantDecl, ConstantType, EntityDecl,
-    EntityIndexDecl, EntityInheritanceDecl, EnumerationDecl, EnumerationValueDecl, ExportLevel,
-    IndexMemberDecl, LifecycleDecl, LifecycleEvent, LocalizedText, MemberAccessDecl, MemberRights,
-    MenuActionDecl, MenuDecl, MenuIconDecl, MenuItemDecl, ModuleDecl, OnOverlap, ProjectDecl,
-    RegularExpressionDecl, ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule, SystemMember,
-    SystemMembersDecl,
+    EntityImageDecl, EntityIndexDecl, EntityInheritanceDecl, EntitySourceDecl, EnumerationDecl,
+    EnumerationValueDecl, ExportLevel, IndexMemberDecl, LifecycleDecl, LifecycleEvent,
+    LocalizedText, MemberAccessDecl, MemberRights, MenuActionDecl, MenuDecl, MenuIconDecl,
+    MenuItemDecl, ModuleDecl, OnOverlap, OqlViewSourceDecl, ProjectDecl, RegularExpressionDecl,
+    ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule, SystemMember, SystemMembersDecl,
 };
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::system;

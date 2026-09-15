@@ -42,8 +42,9 @@ use mxrs_bson::{Bson, Document};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::declaration::{
     AccessMemberKind, AccessRuleDecl, AssociationOwner, AssociationStorage, AssociationType,
-    AttributeDecl, AttributeType, EntityDecl, EntityIndexDecl, EntityInheritanceDecl,
-    IndexMemberDecl, LifecycleDecl, MemberRights, SystemMember,
+    AttributeDecl, AttributeType, EntityDecl, EntityImageDecl, EntityIndexDecl,
+    EntityInheritanceDecl, EntitySourceDecl, IndexMemberDecl, LifecycleDecl, MemberRights,
+    SystemMember,
 };
 use mxrs_model::association::{
     Association, AssociationType as ModelAssociationType, Owner, StorageFormat,
@@ -454,7 +455,7 @@ fn fresh_entity(
     let entity_name = format!("{module_name}.{}", decl.name);
     let validation_rules =
         reconcile_validation_rules(module_name, &decl.name, &decl.attributes, vec![], identity);
-    let attributes: Vec<Attribute> = decl
+    let mut attributes: Vec<Attribute> = decl
         .attributes
         .iter()
         .map(|attribute| {
@@ -466,6 +467,19 @@ fn fresh_entity(
             )
         })
         .collect();
+    if matches!(decl.source.as_ref(), Some(EntitySourceDecl::OqlView { .. })) {
+        for attribute in &mut attributes {
+            let name = attribute.name.as_deref().unwrap_or("Unnamed");
+            attribute.raw_value_doc = Some(mxrs_bson::doc! {
+                "$ID": identity.artifact_id(
+                    ArtifactKind::OqlViewValue,
+                    &format!("{entity_name}.{name}"),
+                ),
+                "$Type": "DomainModels$OqlViewValue",
+                "Reference": name,
+            });
+        }
+    }
     let attribute_ids = attributes
         .iter()
         .filter_map(|attribute| Some((attribute.name.clone()?, attribute.id.clone()?)))
@@ -478,7 +492,10 @@ fn fresh_entity(
         persistable: decl.persistable,
         location: Location { x: 0, y: 0 },
         data_storage_guid: None,
-        image: None,
+        image: Some(match decl.image.as_ref() {
+            Some(EntityImageDecl::Reference(reference)) => reference.clone(),
+            Some(EntityImageDecl::None) | None => String::new(),
+        }),
         export_level: "Hidden".into(),
         generalization: Some(reconcile_generalization(
             module_name,
@@ -513,11 +530,62 @@ fn fresh_entity(
             identity,
         )?,
         validation_rules,
-        source: None,
+        source: match decl.source.as_ref() {
+            Some(source @ EntitySourceDecl::OqlView { .. }) => Some(entity_source_document(
+                module_name,
+                &decl.name,
+                source,
+                None,
+                identity,
+            )),
+            Some(EntitySourceDecl::Stored) | None => None,
+        },
         oql_query: None,
-        native_type: None,
+        native_type: Some(
+            match decl.source.as_ref() {
+                Some(EntitySourceDecl::OqlView { .. }) => "DomainModels$ViewEntity",
+                Some(EntitySourceDecl::Stored) | None => "DomainModels$EntityImpl",
+            }
+            .to_string(),
+        ),
         attributes,
     })
+}
+
+fn entity_source_document(
+    module_name: &str,
+    entity_name: &str,
+    source: &EntitySourceDecl,
+    previous: Option<&Document>,
+    identity: ProjectIdentity,
+) -> Document {
+    match source {
+        EntitySourceDecl::Stored => Document::new(),
+        EntitySourceDecl::OqlView { source_document } => {
+            let qualified_source = if source_document.contains('.') {
+                source_document.clone()
+            } else {
+                format!("{module_name}.{source_document}")
+            };
+            let mut document = previous.cloned().unwrap_or_default();
+            document.insert(
+                "$ID",
+                previous
+                    .and_then(|document| document.get("$ID"))
+                    .and_then(mxrs_bson::extract_id)
+                    .unwrap_or_else(|| {
+                        identity.artifact_id(
+                            ArtifactKind::EntitySource,
+                            &format!("{module_name}.{entity_name}"),
+                        )
+                    }),
+            );
+            document.insert("$Type", "DomainModels$OqlViewEntitySource");
+            let source_key = native_key(&document, "sourceDocument", "SourceDocument");
+            document.insert(source_key, qualified_source);
+            document
+        }
+    }
 }
 
 /// Reads whichever of `"name"`/`"Name"` a raw entity/attribute doc carries.
@@ -1028,6 +1096,37 @@ fn reconcile_attribute_doc(
     }
 }
 
+fn reconcile_oql_attribute_value(
+    attribute: &mut Document,
+    previous: Option<&Document>,
+    attribute_name: &str,
+    qualified_name: &str,
+    identity: ProjectIdentity,
+) {
+    let value_key = native_key(attribute, "value", "Value");
+    let previous_value = previous.and_then(|document| {
+        let key = native_key(document, "value", "Value");
+        document.get_document(key).ok()
+    });
+    let mut value = previous_value
+        .filter(|value| value.get_str("$Type").ok() == Some("DomainModels$OqlViewValue"))
+        .cloned()
+        .unwrap_or_default();
+    value.insert(
+        "$ID",
+        previous_value
+            .and_then(|value| value.get("$ID"))
+            .and_then(mxrs_bson::extract_id)
+            .unwrap_or_else(|| identity.artifact_id(ArtifactKind::OqlViewValue, qualified_name)),
+    );
+    value.insert("$Type", "DomainModels$OqlViewValue");
+    let reference_key = native_key(&value, "reference", "Reference");
+    value.insert(reference_key, attribute_name);
+    value.remove("defaultValue");
+    value.remove("DefaultValue");
+    attribute.insert(value_key, value);
+}
+
 /// Rebuilds one entity doc for a declared `EntityDecl` against its prior
 /// on-disk counterpart (`None` for a brand-new entity). For an existing
 /// entity, everything **not** explicitly re-declared — including `location`,
@@ -1075,7 +1174,17 @@ fn build_entity_doc(
         .map(|a| {
             let prior = prev_attrs_by_name.get(&a.name);
             let qualified_name = format!("{module_name}.{}.{}", decl.name, a.name);
-            Bson::Document(reconcile_attribute_doc(a, prior, &qualified_name, identity))
+            let mut document = reconcile_attribute_doc(a, prior, &qualified_name, identity);
+            if matches!(decl.source.as_ref(), Some(EntitySourceDecl::OqlView { .. })) {
+                reconcile_oql_attribute_value(
+                    &mut document,
+                    prior,
+                    &a.name,
+                    &qualified_name,
+                    identity,
+                );
+            }
+            Bson::Document(document)
         })
         .collect();
     out.insert(
@@ -1100,6 +1209,44 @@ fn build_entity_doc(
         );
         let key = native_key(prev, "generalization", "Generalization");
         out.insert(key, generalization.to_bson());
+    }
+
+    if let Some(image) = decl.image.as_ref() {
+        let key = native_key(prev, "image", "Image");
+        out.insert(
+            key,
+            match image {
+                EntityImageDecl::None => String::new(),
+                EntityImageDecl::Reference(reference) => reference.clone(),
+            },
+        );
+    }
+    if let Some(source) = decl.source.as_ref() {
+        out.insert(
+            "$Type",
+            match source {
+                EntitySourceDecl::Stored => "DomainModels$EntityImpl",
+                EntitySourceDecl::OqlView { .. } => "DomainModels$ViewEntity",
+            },
+        );
+        let key = native_key(prev, "source", "Source");
+        match source {
+            EntitySourceDecl::Stored => {
+                out.insert(key, Bson::Null);
+            }
+            EntitySourceDecl::OqlView { .. } => {
+                out.insert(
+                    key,
+                    entity_source_document(
+                        module_name,
+                        &decl.name,
+                        source,
+                        previous_entity.source.as_ref(),
+                        identity,
+                    ),
+                );
+            }
+        }
     }
 
     if let Some(indexes) = decl.indexes.as_deref() {
@@ -1375,6 +1522,7 @@ fn reconcile_access_rules(
                 };
                 let prior = previous_by_roles.get(&role_key).copied();
                 let previous_members = previous_member_ids(prior);
+                let previous_member_documents = previous_member_documents(prior);
                 ModelAccessRule {
                     id: Some(
                         prior
@@ -1416,15 +1564,20 @@ fn reconcile_access_rules(
                                 AccessMemberKind::Attribute => ModelAccessMemberKind::Attribute,
                                 AccessMemberKind::Association => ModelAccessMemberKind::Association,
                             },
+                            raw: previous_member_documents
+                                .get(&member.reference)
+                                .cloned()
+                                .unwrap_or_default(),
                         })
                         .collect(),
                     xpath: rule.xpath_constraint.clone(),
-                    // Captions are Studio Pro's, not ours: preserved when the
-                    // rule already had one, never invented.
-                    xpath_caption: prior
-                        .and_then(|document| document.get_str("XPathConstraintCaption").ok())
-                        .filter(|caption| !caption.is_empty())
-                        .map(str::to_string),
+                    xpath_caption: rule.xpath_caption.clone().or_else(|| {
+                        prior
+                            .and_then(|document| document.get_str("XPathConstraintCaption").ok())
+                            .filter(|caption| !caption.is_empty())
+                            .map(str::to_string)
+                    }),
+                    raw: prior.cloned().unwrap_or_default(),
                 }
             })
             .collect(),
@@ -1453,6 +1606,26 @@ fn previous_member_ids(previous: Option<&Document>) -> HashMap<String, String> {
                 reference.to_string(),
                 mxrs_bson::extract_id(member.get("$ID")?)?,
             ))
+        })
+        .collect()
+}
+
+fn previous_member_documents(previous: Option<&Document>) -> HashMap<String, Document> {
+    let Some(previous) = previous else {
+        return HashMap::new();
+    };
+    mxrs_bson::parse_array(previous.get_array("MemberAccesses").ok().map(Vec::as_slice))
+        .items
+        .iter()
+        .filter_map(Bson::as_document)
+        .filter_map(|member| {
+            let association = member.get_str("Association").unwrap_or("");
+            let reference = if association.is_empty() {
+                member.get_str("Attribute").unwrap_or("")
+            } else {
+                association
+            };
+            (!reference.is_empty()).then(|| (reference.to_string(), member.clone()))
         })
         .collect()
 }
