@@ -1,6 +1,6 @@
 use mxrs_expr::{
-    Expr, IntoExpr, ListVar, MemberAssignment, MendixReturnType, MxBool, MxList, MxObject,
-    RenderExpr, TypedRenderExpr, Var,
+    Expr, FlowResultType, IntoExpr, ListVar, MemberAssignment, MendixReturnType, MxBool, MxList,
+    MxObject, RenderExpr, TypedRenderExpr, Var,
 };
 use mxrs_ir::declaration::ModuleDecl;
 use mxrs_ir::flow::{Activity, MicroflowCallMapping, MicroflowDecl};
@@ -274,6 +274,9 @@ impl FlowBuilder {
         ListVar::new(variable)
     }
 
+    /// Emits a call whose result is discarded. Set `result_variable` to None
+    /// and `use_return` to false; use [`Self::call_microflow_result`] to capture
+    /// a typed result. The writer rejects unchecked result captures.
     pub fn call_microflow<M: MicroflowMarker>(
         &mut self,
         target: MicroflowRef<M>,
@@ -284,10 +287,31 @@ impl FlowBuilder {
         self.decl.activities.push(Activity::CallMicroflow {
             name: target.qualified_name(),
             result_variable,
+            result_type: None,
             use_return,
             mappings: mappings.into_iter().map(CallArgument::into_ir).collect(),
         });
         self
+    }
+
+    /// Captures a call result as a scalar expression, object, or list variable.
+    /// The writer checks `T` against the authored or imported target signature
+    /// before changing the model. A void flow cannot supply a result.
+    pub fn call_microflow_result<T: FlowResultType>(
+        &mut self,
+        target: MicroflowRef<impl MicroflowMarker>,
+        variable: impl Into<String>,
+        mappings: Vec<CallArgument>,
+    ) -> T::Variable {
+        let variable = variable.into();
+        self.decl.activities.push(Activity::CallMicroflow {
+            name: target.qualified_name(),
+            result_variable: Some(variable.clone()),
+            result_type: Some(T::flow_return_type()),
+            use_return: true,
+            mappings: mappings.into_iter().map(CallArgument::into_ir).collect(),
+        });
+        T::result_variable(variable)
     }
 
     /// A two-branch if/else. `then`/`otherwise` receive a fresh sub-builder

@@ -245,6 +245,7 @@ fn call(hook: &Hook, result: Option<&str>) -> Activity {
     Activity::CallMicroflow {
         name: hook.call.clone(),
         result_variable: result.map(str::to_string),
+        result_type: None,
         use_return: result.is_some(),
         mappings: hook
             .arguments
@@ -266,6 +267,7 @@ fn runner(tests: &[TestCase]) -> MicroflowDecl {
         flow.activities.push(Activity::CallMicroflow {
             name: format!("MxrsTests.Test_{:03}", index + 1),
             result_variable: Some(variable.clone()),
+            result_type: Some(FlowReturnType::Boolean),
             use_return: true,
             mappings: vec![],
         });

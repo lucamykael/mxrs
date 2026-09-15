@@ -2,6 +2,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum WriterError {
+    #[error("flow {flow:?} has invalid variable {variable:?}: {reason}")]
+    InvalidFlowVariable {
+        flow: String,
+        variable: String,
+        reason: String,
+    },
+
     #[error("flow {flow:?} has invalid parameter {parameter:?}: {reason}")]
     InvalidFlowParameter {
         flow: String,

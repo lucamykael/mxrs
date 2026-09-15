@@ -9,13 +9,14 @@ use syn::{Ident, Path, Result};
 
 use crate::parse::{
     AccessMemberInput, AccessRuleInput, AssociationInput, AttrKind, AttributeInput,
-    EntityImageInput, EntityInput, EntitySourceInput, FlowItem, FlowParameterType, IndexInput,
+    EntityImageInput, EntityInput, EntitySourceInput, FlowItem, FlowValueType, IndexInput,
     IndexMemberInput, InheritanceInput, LifecycleInput, MappingInput, MemberInput, MicroflowInput,
     ModuleInput, ProjectInput,
 };
 
 #[derive(Clone)]
 enum Binding {
+    Scalar,
     Object(Path),
     List(Path),
 }
@@ -488,11 +489,11 @@ fn expand_lifecycle(callback: &LifecycleInput) -> TokenStream {
     }
 }
 
-fn parameter_type(kind: &FlowParameterType) -> TokenStream {
+fn parameter_type(kind: &FlowValueType) -> TokenStream {
     match kind {
-        FlowParameterType::Scalar(kind) => expression_type(kind),
-        FlowParameterType::Object(entity) => quote! { ::mxrs_expr::MxObject<#entity> },
-        FlowParameterType::List(entity) => quote! { ::mxrs_expr::MxList<#entity> },
+        FlowValueType::Scalar(kind) => expression_type(kind),
+        FlowValueType::Object(entity) => quote! { ::mxrs_expr::MxObject<#entity> },
+        FlowValueType::List(entity) => quote! { ::mxrs_expr::MxList<#entity> },
     }
 }
 
@@ -510,15 +511,16 @@ fn expand_microflow(
         let default_value = parameter.default_value.as_ref().map(|value| quote! { p.default_value(#value); });
         let configure = quote! { |p| { #documentation #required #default_value } };
         let declaration = match &parameter.value_type {
-            FlowParameterType::Scalar(kind) => {
+            FlowValueType::Scalar(kind) => {
+                bindings.insert(name.clone(), Binding::Scalar);
                 let tag = expression_type(kind);
                 quote! { f.parameter::<#tag>(#name, #configure) }
             }
-            FlowParameterType::Object(entity) => {
+            FlowValueType::Object(entity) => {
                 bindings.insert(name.clone(), Binding::Object(entity.clone()));
                 quote! { f.object_parameter(#name, ::mxrs_ir::Ref::<#entity>::new(), #configure) }
             }
-            FlowParameterType::List(entity) => {
+            FlowValueType::List(entity) => {
                 bindings.insert(name.clone(), Binding::List(entity.clone()));
                 quote! { f.list_parameter(#name, ::mxrs_ir::Ref::<#entity>::new(), #configure) }
             }
@@ -595,6 +597,12 @@ fn expand_flow_item(
         } => {
             let entity = match bindings.get(&variable.to_string()) {
                 Some(Binding::Object(entity)) => entity,
+                Some(Binding::Scalar) => {
+                    return Err(syn::Error::new(
+                        variable.span(),
+                        format!("`{variable}` is a scalar, not an object variable"),
+                    ));
+                }
                 Some(Binding::List(_)) => {
                     return Err(syn::Error::new(
                         variable.span(),
@@ -624,6 +632,7 @@ fn expand_flow_item(
             microflow,
             mappings,
             result_variable,
+            result_type,
         } => {
             let target = microflow
                 .segments
@@ -670,20 +679,42 @@ fn expand_flow_item(
                     }
                 }
             }
-            let (result_expr, use_return) = match result_variable {
-                Some(variable) => {
-                    let variable = variable.to_string();
-                    (quote! { Some(#variable.to_string()) }, quote! { true })
+            if let (Some(variable), Some(value_type)) = (result_variable, result_type) {
+                let name = variable.to_string();
+                if bindings.contains_key(&name) {
+                    return Err(syn::Error::new(
+                        variable.span(),
+                        format!("duplicate flow variable `{name}`"),
+                    ));
                 }
-                None => (quote! { None }, quote! { false }),
-            };
-            quote! {
-                f.call_microflow(
-                    ::mxrs_ir::MicroflowRef::<#microflow>::new(),
-                    #result_expr,
-                    #use_return,
-                    vec![#(#mapping_exprs),*],
-                );
+                if signatures
+                    .get(&target)
+                    .is_some_and(|flow| flow.return_expression.is_none())
+                {
+                    return Err(syn::Error::new(
+                        variable.span(),
+                        format!("flow `{target}` returns no value"),
+                    ));
+                }
+                let tag = parameter_type(value_type);
+                let binding = match value_type {
+                    FlowValueType::Scalar(_) => Binding::Scalar,
+                    FlowValueType::Object(entity) => Binding::Object(entity.clone()),
+                    FlowValueType::List(entity) => Binding::List(entity.clone()),
+                };
+                bindings.insert(name.clone(), binding);
+                quote! {
+                    let #variable = f.call_microflow_result::<#tag>(
+                        ::mxrs_ir::MicroflowRef::<#microflow>::new(), #name,
+                        vec![#(#mapping_exprs),*],
+                    );
+                    let _ = &#variable;
+                }
+            } else {
+                quote! {
+                    f.call_microflow(::mxrs_ir::MicroflowRef::<#microflow>::new(),
+                        None, false, vec![#(#mapping_exprs),*]);
+                }
             }
         }
         FlowItem::If {
@@ -710,6 +741,12 @@ fn expand_flow_item(
         } => {
             let entity = match bindings.get(&list.to_string()) {
                 Some(Binding::List(entity)) => entity.clone(),
+                Some(Binding::Scalar) => {
+                    return Err(syn::Error::new(
+                        list.span(),
+                        format!("`{list}` is a scalar, not a list variable"),
+                    ));
+                }
                 Some(Binding::Object(_)) => {
                     return Err(syn::Error::new(
                         list.span(),

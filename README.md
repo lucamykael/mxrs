@@ -119,7 +119,8 @@ let project = mxrs::project! {
             return message;
         }
         microflow Send {
-            call Sales::Echo (message: mxrs::string("Hello"));
+            call Sales::Echo (message: mxrs::string("Hello")) -> response: string;
+            return response;
         }
     }
 };
@@ -128,8 +129,15 @@ let project = mxrs::project! {
 Object and list declarations use `parameter order: object<Sales::Order>;`
 and `parameter orders: list<Sales::Order>;`. All declared parameters require a
 call argument; `required` and `default_value` are native parameter metadata,
-not permission to omit arguments. Imported flow bodies and typed bindings for
-call results remain outside this authoring increment.
+not permission to omit arguments. Captured results declare their type after the name, such as
+`-> order: object<Sales::Order>` or `-> orders: list<Sales::Order>`; the result
+can be changed, iterated, passed to another call, or returned. The builder
+counterpart is `flow.call_microflow_result::<MxObject<Order>>(target, "order",
+arguments)`. Before writing, the target must return that type; void results,
+unchecked captures, and duplicate variable names are rejected. Imported flow
+bodies remain snapshot-backed until a supported decompiler can reconstruct
+them. Capturing a result does not execute a flow; runtime interpretation is
+still pending.
 
 Projects created before the four-layer layout can run
 `mxrs upgrade --target .` for a read-only preview and add `--apply` to migrate

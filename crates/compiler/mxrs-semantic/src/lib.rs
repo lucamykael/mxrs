@@ -1004,6 +1004,7 @@ mod tests {
                 .map(|target| Activity::CallMicroflow {
                     name: (*target).into(),
                     result_variable: None,
+                    result_type: None,
                     use_return: false,
                     mappings: vec![],
                 })

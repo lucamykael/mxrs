@@ -26,6 +26,7 @@ fn call(parameter: &str, value_type: Option<FlowReturnType>) -> Activity {
     Activity::CallMicroflow {
         name: "Sales.Target".into(),
         result_variable: None,
+        result_type: None,
         use_return: false,
         mappings: vec![MicroflowCallMapping {
             parameter: parameter.into(),
@@ -312,12 +313,12 @@ fn invalid_signatures_fail_before_creating_output() {
         (
             "value",
             FlowReturnType::Object("Sales.Missing".into()),
-            "unknown parameter entity",
+            "unknown flow value entity",
         ),
         (
             "value",
             FlowReturnType::List("Sales.Missing".into()),
-            "unknown parameter entity",
+            "unknown flow value entity",
         ),
     ];
     for (name, kind, message) in cases {
@@ -513,7 +514,7 @@ fn unsupported_native_signature_fails_closed_but_unrelated_flows_can_sync() {
         mxrs_writer::documents::synchronize_microflows(&mut mpr, &module.unit_id, &[caller])
             .unwrap_err()
             .to_string()
-            .contains("unsupported native parameter type")
+            .contains("unsupported native data type")
     );
 }
 
@@ -576,7 +577,7 @@ fn overwriting_an_unsupported_native_signature_is_rejected_before_domain_changes
         mxrs_writer::synchronize_project(&path, &project)
             .unwrap_err()
             .to_string()
-            .contains("unsupported native parameter type")
+            .contains("unsupported native data type")
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }

@@ -149,8 +149,19 @@ fn validate(
     }
     for &(module, flow, _) in flows {
         let name = format!("{module}.{}", flow.name);
-        validate_activities(&name, &flow.activities, &targets, entities)?;
-        validate_activities(&name, &flow.rescue_activities, &targets, entities)?;
+        let mut variables = flow
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect();
+        validate_activities(&name, &flow.activities, &targets, entities, &mut variables)?;
+        validate_activities(
+            &name,
+            &flow.rescue_activities,
+            &targets,
+            entities,
+            &mut variables,
+        )?;
     }
     Ok(())
 }
@@ -170,7 +181,7 @@ fn validate_entity(
     if let FlowReturnType::Object(entity) | FlowReturnType::List(entity) = value_type
         && !entities.contains(entity)
     {
-        return Err(format!("unknown parameter entity {entity:?}"));
+        return Err(format!("unknown flow value entity {entity:?}"));
     }
     Ok(())
 }
@@ -209,7 +220,7 @@ fn native_type(doc: &Document) -> std::result::Result<FlowReturnType, String> {
         kind @ ("DataTypes$ObjectType" | "DataTypes$ListType") => {
             let entity = doc
                 .get_str("Entity")
-                .map_err(|_| "native object/list parameter has no entity")?
+                .map_err(|_| "native object/list type has no entity")?
                 .to_string();
             if kind == "DataTypes$ObjectType" {
                 FlowReturnType::Object(entity)
@@ -217,7 +228,7 @@ fn native_type(doc: &Document) -> std::result::Result<FlowReturnType, String> {
                 FlowReturnType::List(entity)
             }
         }
-        kind => return Err(format!("unsupported native parameter type {kind:?}")),
+        kind => return Err(format!("unsupported native data type {kind:?}")),
     })
 }
 
@@ -226,10 +237,17 @@ fn validate_activities(
     activities: &[Activity],
     targets: &HashMap<String, Target<'_>>,
     entities: &HashSet<String>,
+    variables: &mut HashSet<String>,
 ) -> Result<()> {
     for activity in activities {
         match activity {
-            Activity::CallMicroflow { name, mappings, .. } => {
+            Activity::CallMicroflow {
+                name,
+                mappings,
+                result_variable,
+                result_type,
+                use_return,
+            } => {
                 let error = |reason: String| WriterError::InvalidFlowCall {
                     flow: flow.into(),
                     target: name.clone(),
@@ -238,6 +256,46 @@ fn validate_activities(
                 let target = targets
                     .get(name)
                     .ok_or_else(|| error("unknown microflow target".into()))?;
+                if *use_return {
+                    let variable = result_variable
+                        .as_deref()
+                        .ok_or_else(|| error("result capture requires a variable name".into()))?;
+                    declare_variable(flow, variable, variables)?;
+                    let expected = result_type.as_ref().ok_or_else(|| {
+                        error(
+                            "result capture requires a checked type; use call_microflow_result"
+                                .into(),
+                        )
+                    })?;
+                    validate_entity(expected, entities).map_err(&error)?;
+                    let actual = match target {
+                        Target::Authored(flow) => flow.return_type.clone(),
+                        Target::Native(flow) => match flow.return_type_document.as_ref() {
+                            None => None,
+                            Some(doc)
+                                if doc.get_str("$Type").ok() == Some("DataTypes$VoidType") =>
+                            {
+                                None
+                            }
+                            Some(doc) => Some(native_type(doc).map_err(|reason| {
+                                error(format!("unsupported native return signature: {reason}"))
+                            })?),
+                        },
+                    }
+                    .ok_or_else(|| error("cannot capture a result from a void flow".into()))?;
+                    let native_integer_alias = matches!(target, Target::Native(_))
+                        && actual == FlowReturnType::Integer
+                        && expected == &FlowReturnType::Long;
+                    if &actual != expected && !native_integer_alias {
+                        return Err(error(format!(
+                            "result expects {expected:?}, but target returns {actual:?}"
+                        )));
+                    }
+                } else if result_variable.is_some() || result_type.is_some() {
+                    return Err(error(
+                        "discarded call cannot declare a result variable or type".into(),
+                    ));
+                }
                 let signature = match target {
                     Target::Authored(flow) => flow
                         .parameters
@@ -290,14 +348,55 @@ fn validate_activities(
                 false_branch,
                 ..
             } => {
-                validate_activities(flow, true_branch, targets, entities)?;
-                validate_activities(flow, false_branch, targets, entities)?;
+                validate_activities(flow, true_branch, targets, entities, &mut variables.clone())?;
+                validate_activities(
+                    flow,
+                    false_branch,
+                    targets,
+                    entities,
+                    &mut variables.clone(),
+                )?;
             }
-            Activity::LoopOver { activities, .. } | Activity::WhileLoop { activities, .. } => {
-                validate_activities(flow, activities, targets, entities)?
+            Activity::LoopOver {
+                activities,
+                iterator,
+                ..
+            } => {
+                let mut local = variables.clone();
+                declare_variable(flow, iterator, &mut local)?;
+                validate_activities(flow, activities, targets, entities, &mut local)?;
             }
+            Activity::WhileLoop { activities, .. } => {
+                validate_activities(flow, activities, targets, entities, &mut variables.clone())?;
+            }
+            Activity::CreateObject { variable, .. }
+            | Activity::CreateList { variable, .. }
+            | Activity::RetrieveObjects { variable, .. } => {
+                declare_variable(flow, variable, variables)?
+            }
+            Activity::AggregateCount {
+                output_variable, ..
+            } => declare_variable(flow, output_variable, variables)?,
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn declare_variable(flow: &str, variable: &str, variables: &mut HashSet<String>) -> Result<()> {
+    let reason = if !valid_identifier(variable) {
+        Some("invalid variable identifier")
+    } else if !variables.insert(variable.to_string()) {
+        Some("duplicate flow variable")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(WriterError::InvalidFlowVariable {
+            flow: flow.into(),
+            variable: variable.into(),
+            reason: reason.into(),
+        });
     }
     Ok(())
 }

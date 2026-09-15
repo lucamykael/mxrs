@@ -527,6 +527,7 @@ fn activity_action_doc(activity: &Activity, error_handling: &str) -> Document {
             result_variable,
             use_return,
             mappings,
+            ..
         } => {
             let mapping_docs: Vec<Bson> = mappings
                 .iter()

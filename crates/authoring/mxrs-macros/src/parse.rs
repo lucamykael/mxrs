@@ -53,7 +53,7 @@
 //! create-list:= "create_list" <ident> "=" <rust-path> ";"
 //! delete     := "delete" <ident> ";"
 //! commit     := "commit" <ident> ";"
-//! call       := "call" <rust-path> ("(" <mapping> ("," <mapping>)* ","? ")")? ("->" <ident>)? ";"
+//! call       := "call" <rust-path> ("(" <mapping> ("," <mapping>)* ","? ")")? ("->" <ident> ":" <parameter-type>)? ";"
 //! if         := "if" <expr> "{" <flow-item>* "}" "else" "{" <flow-item>* "}"
 //! for        := "for" <ident> "in" <ident> "{" <flow-item>* "}"
 //! while      := "while" <expr> "{" <flow-item>* "}"
@@ -295,7 +295,7 @@ pub struct LifecycleInput {
     pub raise_error_on_false: Option<syn::LitBool>,
 }
 
-pub enum FlowParameterType {
+pub enum FlowValueType {
     Scalar(AttrKind),
     Object(syn::Path),
     List(syn::Path),
@@ -303,7 +303,7 @@ pub enum FlowParameterType {
 
 pub struct FlowParameterInput {
     pub name: Ident,
-    pub value_type: FlowParameterType,
+    pub value_type: FlowValueType,
     pub documentation: Option<syn::LitStr>,
     pub required: Option<syn::LitBool>,
     pub default_value: Option<Expr>,
@@ -347,6 +347,7 @@ pub enum FlowItem {
         microflow: syn::Path,
         mappings: Vec<MappingInput>,
         result_variable: Option<Ident>,
+        result_type: Option<FlowValueType>,
     },
     If {
         condition: Expr,
@@ -937,11 +938,8 @@ fn parse_lifecycle(input: ParseStream) -> Result<LifecycleInput> {
     })
 }
 
-impl Parse for FlowParameterInput {
+impl Parse for FlowValueType {
     fn parse(input: ParseStream) -> Result<Self> {
-        let _: Ident = input.parse()?;
-        let name: Ident = input.parse()?;
-        input.parse::<Token![:]>()?;
         let kind: Ident = input.parse()?;
         let value_type = match kind.to_string().as_str() {
             "object" | "list" => {
@@ -949,20 +947,27 @@ impl Parse for FlowParameterInput {
                 let entity: syn::Path = input.parse()?;
                 input.parse::<Token![>]>()?;
                 if kind == "object" {
-                    FlowParameterType::Object(entity)
+                    FlowValueType::Object(entity)
                 } else {
-                    FlowParameterType::List(entity)
+                    FlowValueType::List(entity)
                 }
             }
             "string" | "integer" | "long" | "float" | "decimal" | "boolean" | "datetime"
-            | "binary" => FlowParameterType::Scalar(AttrKind::from_ident(&kind)?),
+            | "binary" => FlowValueType::Scalar(AttrKind::from_ident(&kind)?),
             _ => {
-                return Err(syn::Error::new(
-                    kind.span(),
-                    "unsupported flow parameter type",
-                ));
+                return Err(syn::Error::new(kind.span(), "unsupported flow value type"));
             }
         };
+        Ok(value_type)
+    }
+}
+
+impl Parse for FlowParameterInput {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let _: Ident = input.parse()?;
+        let name: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let value_type = input.parse()?;
         let mut parameter = Self {
             name,
             value_type,
@@ -1270,17 +1275,23 @@ fn parse_call(input: ParseStream) -> Result<FlowItem> {
             }
         }
     }
-    let result_variable = if input.peek(Token![->]) {
+    let (result_variable, result_type) = if input.peek(Token![->]) {
         input.parse::<Token![->]>()?;
-        Some(input.parse()?)
+        let variable = input.parse()?;
+        if !input.peek(Token![:]) {
+            return Err(input.error("result binding requires a type: `-> result: string`"));
+        }
+        input.parse::<Token![:]>()?;
+        (Some(variable), Some(input.parse()?))
     } else {
-        None
+        (None, None)
     };
     input.parse::<Token![;]>()?;
     Ok(FlowItem::Call {
         microflow,
         mappings,
         result_variable,
+        result_type,
     })
 }
 

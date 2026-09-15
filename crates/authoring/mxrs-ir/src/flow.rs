@@ -110,6 +110,9 @@ pub enum Activity {
     CallMicroflow {
         name: String,
         result_variable: Option<String>,
+        /// Expected type of a captured result. Typed authoring supplies this;
+        /// unchecked functional instrumentation uses its separate writer path.
+        result_type: Option<FlowReturnType>,
         use_return: bool,
         mappings: Vec<MicroflowCallMapping>,
     },

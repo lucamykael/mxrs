@@ -447,7 +447,7 @@ fn supports_the_full_widened_microflow_grammar() {
                 string Number;
                 decimal Total;
             }
-            microflow ACT_Notify { parameter order_number: string; }
+            microflow ACT_Notify { parameter order_number: string; return mxrs_expr::boolean(true); }
             microflow ACT_ProcessOrder {
                 create order = Sales::Order {
                     Number = "A-1";
@@ -457,7 +457,7 @@ fn supports_the_full_widened_microflow_grammar() {
                 };
                 if order.total().gt(0.0) {
                     commit order;
-                    call markers::Sales::ACT_Notify (order_number: order.number()) -> notified;
+                    call markers::Sales::ACT_Notify (order_number: order.number()) -> notified: boolean;
                 } else {
                     delete order;
                 }
@@ -700,4 +700,67 @@ fn parameters_bind_typed_scalars_objects_and_lists_through_calls_and_returns() {
         );
     }
     assert_eq!(modules[0].nanoflows[0].parameters.len(), 1);
+}
+
+#[test]
+fn call_results_feed_changes_loops_other_calls_and_returns() {
+    use mxrs_ir::Activity;
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Order { string Number; }
+            microflow Text { parameter input: string; return input; }
+            microflow Object { parameter input: object<Sales::Order>; return input; }
+            microflow List { parameter input: list<Sales::Order>; return input; }
+            microflow Caller {
+                parameter order: object<Sales::Order>;
+                parameter orders: list<Sales::Order>;
+                call Sales::Text (input: mxrs_expr::string("new")) -> text: string;
+                call Sales::Object (input: order) -> object: object<Sales::Order>;
+                change object { Number = &text; };
+                call Sales::List (input: orders) -> list: list<Sales::Order>;
+                for item in list { change item { Number = &text; }; }
+                if text.clone().eq("new") { commit object; } else {}
+                call Sales::Text (input: text) -> final_text: string;
+                return final_text;
+            }
+        }
+    };
+    let caller = &definition.modules[0].microflows[3];
+    assert_eq!(caller.return_expression.as_deref(), Some("$final_text"));
+    let Activity::ChangeObject { members, .. } = &caller.activities[2] else {
+        panic!("change");
+    };
+    assert_eq!(members[0].value, "$text");
+    let Activity::LoopOver {
+        list_variable,
+        activities,
+        ..
+    } = &caller.activities[4]
+    else {
+        panic!("loop");
+    };
+    assert_eq!(list_variable, "list");
+    let Activity::ChangeObject { members, .. } = &activities[0] else {
+        panic!("loop change");
+    };
+    assert_eq!(members[0].value, "$text");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Results.mpr");
+    mxrs_writer::write_project(&path, &definition).unwrap();
+    let model = Project::open(&path, true).unwrap();
+    let modules = model.modules().unwrap();
+    let caller = modules[0]
+        .microflows
+        .iter()
+        .find(|f| f.name.as_deref() == Some("Caller"))
+        .unwrap();
+    let names: Vec<_> = caller
+        .objects
+        .iter()
+        .filter_map(|o| o.get_document("Action").ok())
+        .filter(|a| a.get_bool("UseReturnVariable").ok() == Some(true))
+        .map(|a| a.get_str("ResultVariableName").unwrap())
+        .collect();
+    assert_eq!(names, ["text", "object", "list", "final_text"]);
 }

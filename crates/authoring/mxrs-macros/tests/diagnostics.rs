@@ -598,7 +598,7 @@ fn flow_parameter_names_and_options_have_explicit_diagnostics() {
         ),
         (
             "microflow Target { parameter value: enumeration; }",
-            "unsupported flow parameter type",
+            "unsupported flow value type",
         ),
         (
             "microflow Target { parameter value: string { required true; required false; } }",
@@ -715,11 +715,13 @@ pub fn make() -> model_api::ProjectDecl {
                 parameter orders: list<Sales::Order>;
                 change order { Number = message.clone(); };
                 for current in orders { change current { Number = message.clone(); }; }
-                call Sales::Echo (message: message);
+                call Sales::Echo (message: message) -> response: string;
+                return response;
             }
         }
     }
 }
+
 "#,
     )
     .unwrap();
@@ -737,4 +739,65 @@ pub fn make() -> model_api::ProjectDecl {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn result_capture_requires_a_type_and_a_value_returning_target() {
+    for (body, expected) in [
+        (
+            "microflow Target { return mxrs_expr::string(\"x\"); } microflow Caller { call Sales::Target -> result; }",
+            "result binding requires a type",
+        ),
+        (
+            "microflow Target { return mxrs_expr::string(\"x\"); } microflow Caller { call Sales::Target -> result: mystery; }",
+            "unsupported flow value type",
+        ),
+        (
+            "microflow Target {} microflow Caller { call Sales::Target -> result: string; }",
+            "returns no value",
+        ),
+    ] {
+        parameter_diagnostic(body, expected);
+    }
+}
+
+#[test]
+fn result_variables_keep_their_kind_type_and_lexical_scope() {
+    let prefix =
+        "entity Order { string Number; } microflow Target { return mxrs_expr::boolean(true); }";
+    for (caller, expected) in [
+        (
+            "call Sales::Target -> result: boolean; change result {};",
+            "is a scalar, not an object",
+        ),
+        (
+            "call Sales::Target -> result: boolean; for item in result {}",
+            "is a scalar, not a list",
+        ),
+        (
+            "create order = Sales::Order {}; call Sales::Target -> result: boolean; change order { Number = result; };",
+            "IntoExpr",
+        ),
+        (
+            "if mxrs_expr::boolean(true) { call Sales::Target -> result: boolean; } else {} return result;",
+            "cannot find value `result`",
+        ),
+        (
+            "parameter result: boolean; call Sales::Target -> result: boolean;",
+            "duplicate flow variable",
+        ),
+        (
+            "create result = Sales::Order {}; call Sales::Target -> result: boolean;",
+            "duplicate flow variable",
+        ),
+        (
+            "call Sales::Target -> result: boolean; call Sales::Target -> result: boolean;",
+            "duplicate flow variable",
+        ),
+    ] {
+        parameter_diagnostic(
+            &format!("{prefix} microflow Caller {{ {caller} }}"),
+            expected,
+        );
+    }
 }

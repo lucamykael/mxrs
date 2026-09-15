@@ -47,6 +47,7 @@ fn fixture(cyclic: bool) -> (tempfile::TempDir, PathBuf) {
     let call = |name: &str| Activity::CallMicroflow {
         name: name.into(),
         result_variable: None,
+        result_type: None,
         use_return: false,
         mappings: vec![],
     };

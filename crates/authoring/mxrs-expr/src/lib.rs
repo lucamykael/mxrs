@@ -162,6 +162,13 @@ pub trait MendixReturnType: MendixType {
     fn flow_return_type() -> FlowReturnType;
 }
 
+/// Chooses the authoring variable returned by a flow call: an expression for
+/// scalars, an entity variable for objects, or an iterable variable for lists.
+pub trait FlowResultType: MendixReturnType {
+    type Variable: TypedRenderExpr;
+    fn result_variable(name: String) -> Self::Variable;
+}
+
 macro_rules! primitive_return_types {
     ($($ty:ty => $variant:ident),+ $(,)?) => {
         $(
@@ -169,6 +176,10 @@ macro_rules! primitive_return_types {
                 fn flow_return_type() -> FlowReturnType {
                     FlowReturnType::$variant
                 }
+            }
+            impl FlowResultType for $ty {
+                type Variable = Expr<Self>;
+                fn result_variable(name: String) -> Self::Variable { Expr::variable(name) }
             }
         )+
     };
@@ -194,6 +205,20 @@ impl<M: EntityMarker> MendixReturnType for MxObject<M> {
 impl<M: EntityMarker> MendixReturnType for MxList<M> {
     fn flow_return_type() -> FlowReturnType {
         FlowReturnType::List(M::qualified_name())
+    }
+}
+
+impl<M: EntityMarker> FlowResultType for MxObject<M> {
+    type Variable = Var<M>;
+    fn result_variable(name: String) -> Self::Variable {
+        Var::new(name)
+    }
+}
+
+impl<M: EntityMarker> FlowResultType for MxList<M> {
+    type Variable = ListVar<M>;
+    fn result_variable(name: String) -> Self::Variable {
+        ListVar::new(name)
     }
 }
 
