@@ -444,3 +444,363 @@ fn duplicate_flow_names_do_not_choose_an_arbitrary_call_signature() {
     assert!(!source.contains("\"Echo\""));
     assert!(!source.contains("\"Caller\""));
 }
+
+fn member_fixture() -> mxrs_ir::ProjectDecl {
+    use mxrs_ir::Member;
+    let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+    builder.module("Calls", |m| {
+        m.entity("Record", |e| {
+            e.string("Name");
+            e.integer("Count");
+            e.long("Serial");
+            e.float("Weight");
+            e.decimal("Amount");
+            e.boolean("Active");
+            e.datetime("When");
+            e.binary("Data");
+        });
+    });
+    let mut project = builder.build();
+    let mut flow = MicroflowDecl::new("Create");
+    flow.parameters = vec![
+        FlowParameterDecl::new("source", Ty::Object("Calls.Record".into())),
+        FlowParameterDecl::new("date", Ty::DateTime),
+        FlowParameterDecl::new("data", Ty::Binary),
+    ];
+    flow.activities.push(Activity::CreateObject {
+        variable: "record".into(),
+        entity: "Calls.Record".into(),
+        commit: false,
+        members: vec![
+            Member::attribute("Name", "'before'"),
+            Member::attribute("Count", "1"),
+            Member::attribute("Serial", "$source/Count"),
+            Member::attribute("Weight", "1.5"),
+            Member::attribute("Amount", "10.0"),
+            Member::attribute("Active", "true"),
+            Member::attribute("When", "$date"),
+            Member::attribute("Data", "$data"),
+        ],
+    });
+    flow.activities.push(Activity::ChangeObject {
+        variable: "record".into(),
+        entity: "Calls.Record".into(),
+        commit: true,
+        members: [
+            "Name", "Count", "Serial", "Weight", "Amount", "Active", "When", "Data",
+        ]
+        .into_iter()
+        .map(|name| Member::attribute(name, format!("$source/{name}")))
+        .collect(),
+    });
+    flow.return_type = Some(Ty::Object("Calls.Record".into()));
+    flow.return_expression = Some("$record".into());
+    let mut client = flow.clone();
+    client.name = "ClientCreate".into();
+    project.modules[0].nanoflows.push(client);
+    project.modules[0].microflows.push(flow);
+    let mut echo = MicroflowDecl::new("Echo");
+    echo.parameters
+        .push(FlowParameterDecl::new("input", Ty::Long));
+    echo.return_type = Some(Ty::Long);
+    echo.return_expression = Some("$input".into());
+    project.modules[0].microflows.push(echo);
+    for (name, call) in [("Read", false), ("Call", true)] {
+        let mut flow = MicroflowDecl::new(name);
+        flow.parameters.push(FlowParameterDecl::new(
+            "record",
+            Ty::Object("Calls.Record".into()),
+        ));
+        flow.return_type = Some(Ty::Long);
+        flow.return_expression = Some("$record/Count".into());
+        if call {
+            flow.activities.push(Activity::CallMicroflow {
+                name: "Calls.Echo".into(),
+                result_variable: Some("result".into()),
+                result_type: Some(Ty::Long),
+                use_return: true,
+                mappings: vec![MicroflowCallMapping {
+                    parameter: "input".into(),
+                    value: "$record/Count".into(),
+                    value_type: Some(Ty::Long),
+                }],
+            });
+            flow.return_expression = Some("$result".into());
+        }
+        project.modules[0].microflows.push(flow);
+    }
+    project
+}
+
+#[test]
+fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_native_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_dir = dir.path().join("source");
+    std::fs::create_dir(&source_dir).unwrap();
+    let original = source_dir.join("Members.mpr");
+    let generated = dir.path().join("generated");
+    let rebuilt = dir.path().join("Rebuilt.mpr");
+    mxrs_writer::write_project(&original, &member_fixture()).unwrap();
+    let before = flows(&original);
+    let report = mxrs_exporter::verify_editable_document_round_trip(&original).unwrap();
+    assert!(report.passed, "{:?}", report.failures);
+    assert_eq!(report.candidate_units, 5);
+    mxrs_exporter::import_cargo_project(&original, &generated, Some(&workspace())).unwrap();
+    let editable = generated.join("src/application/microflows/mod.rs");
+    let source = std::fs::read_to_string(&editable).unwrap();
+    for needle in [
+        "flow.create_object(",
+        "flow.change_object(",
+        "mxrs::attribute::<model::Calls::Record_Name>",
+        "attribute::<model::Calls::Record_Count>().into_long()",
+    ] {
+        assert!(
+            source
+                .split_whitespace()
+                .collect::<String>()
+                .contains(needle),
+            "{needle}\n{source}"
+        );
+    }
+    let markers = std::fs::read_to_string(generated.join("src/infrastructure/markers.rs")).unwrap();
+    for name in [
+        "Name", "Count", "Serial", "Weight", "Amount", "Active", "When", "Data",
+    ] {
+        assert!(markers.contains(&format!("TypedAttributeMarker for Calls::Record_{name}")));
+    }
+    std::fs::remove_dir_all(source_dir).unwrap();
+    run(&generated, &rebuilt);
+    assert_eq!(flows(&rebuilt), before);
+    let invalid = source.replace("mxrs::integer(1)", "mxrs::boolean(true)");
+    assert_ne!(invalid, source);
+    std::fs::write(&editable, invalid).unwrap();
+    let bytes = std::fs::read(&rebuilt).unwrap();
+    let rejected = Command::new(env!("CARGO"))
+        .args(["run", "--quiet", "--offline", "--manifest-path"])
+        .arg(generated.join("Cargo.toml"))
+        .arg("--")
+        .arg(&rebuilt)
+        .env(
+            "CARGO_TARGET_DIR",
+            nested_cargo::target_dir(workspace().join("target")),
+        )
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let error = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        error.contains("IntoExpr") && error.contains("MxInteger"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&rebuilt).unwrap(), bytes);
+    let edited = source.replace("mxrs::string(\"before\")", "mxrs::string(\"after\")");
+    assert_ne!(edited, source);
+    std::fs::write(&editable, edited).unwrap();
+    run(&generated, &rebuilt);
+    let after = flows(&rebuilt);
+    for (name, old) in &before {
+        let new = &after[name];
+        assert_eq!((&old.0, &old.1), (&new.0, &new.1));
+        if name != "Create" {
+            assert_eq!(old, new);
+            continue;
+        }
+        let mut expected = old.3.clone();
+        for object in expected
+            .get_document_mut("ObjectCollection")
+            .unwrap()
+            .get_array_mut("Objects")
+            .unwrap()
+            .iter_mut()
+            .filter_map(Bson::as_document_mut)
+        {
+            let Ok(action) = object.get_document_mut("Action") else {
+                continue;
+            };
+            if action.get_str("$Type").ok() != Some("Microflows$CreateChangeAction") {
+                continue;
+            }
+            for item in action
+                .get_array_mut("Items")
+                .unwrap()
+                .iter_mut()
+                .filter_map(Bson::as_document_mut)
+            {
+                if item.get_str("Value").ok() == Some("'before'") {
+                    item.insert("Value", "'after'");
+                }
+            }
+        }
+        assert_eq!(new.3, expected);
+    }
+}
+
+#[test]
+fn invalid_members_unsupported_options_and_narrowing_stay_preserved() {
+    for mutation in [
+        "unknown-member",
+        "wrong-owner",
+        "wrong-type",
+        "overflow",
+        "self-reference",
+        "duplicate-member",
+        "association",
+        "operation",
+        "refresh",
+        "commit",
+        "long-to-integer",
+        "list-read",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Unsupported.mpr");
+        mxrs_writer::write_project(&path, &member_fixture()).unwrap();
+        customize(&path, "Create", |doc| {
+            let objects = doc
+                .get_document_mut("ObjectCollection")
+                .unwrap()
+                .get_array_mut("Objects")
+                .unwrap();
+            let action = objects
+                .iter_mut()
+                .filter_map(Bson::as_document_mut)
+                .find_map(|o| o.get_document_mut("Action").ok())
+                .unwrap();
+            if mutation == "refresh" {
+                action.insert("RefreshInClient", true);
+                return;
+            }
+            if mutation == "commit" {
+                action.insert("Commit", "YesWithoutEvents");
+                return;
+            }
+            let items = action.get_array_mut("Items").unwrap();
+            if mutation == "duplicate-member" {
+                items.push(items[1].clone());
+                return;
+            }
+            let index = if matches!(mutation, "overflow" | "long-to-integer") {
+                2
+            } else {
+                1
+            };
+            let item = items[index].as_document_mut().unwrap();
+            match mutation {
+                "unknown-member" => {
+                    item.insert("Attribute", "Calls.Record.Missing");
+                }
+                "wrong-owner" => {
+                    item.insert("Attribute", "Calls.Other.Name");
+                }
+                "wrong-type" => {
+                    item.insert("Value", "true");
+                }
+                "overflow" => {
+                    item.insert("Value", "2147483648");
+                }
+                "self-reference" => {
+                    item.insert("Value", "$record/Name");
+                }
+                "association" => {
+                    item.insert("Association", "Calls.Record_Other");
+                }
+                "operation" => {
+                    item.insert("Type", "Add");
+                }
+                "long-to-integer" => {
+                    item.insert("Value", "$source/Serial");
+                }
+                _ => {
+                    item.insert("Value", "$source/Name/Other");
+                }
+            }
+        });
+        let generated = dir.path().join("generated");
+        mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
+        let source =
+            std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
+        assert!(!source.contains("\"Create\""), "{mutation}");
+        let report = mxrs_exporter::audit_portability(&path).unwrap();
+        let family = report
+            .families
+            .iter()
+            .find(|f| f.native_type == "Microflows$Microflow")
+            .unwrap();
+        assert_eq!((family.partial, family.preserved), (3, 1), "{mutation}");
+    }
+}
+
+#[test]
+fn readonly_and_unknown_attribute_shapes_do_not_produce_writable_members() {
+    for shape in ["autonumber", "calculated", "unknown"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Attributes.mpr");
+        let mut project = member_fixture();
+        if shape == "autonumber" {
+            project.modules[0].entities[0]
+                .attributes
+                .iter_mut()
+                .find(|a| a.name == "Count")
+                .unwrap()
+                .attribute_type = mxrs_ir::AttributeType::AutoNumber;
+        }
+        mxrs_writer::write_project(&path, &project).unwrap();
+        if shape != "autonumber" {
+            let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+            let unit = mpr
+                .all_units()
+                .unwrap()
+                .into_iter()
+                .find(|u| {
+                    mpr.parse_contents(u).unwrap().get_str("$Type").ok()
+                        == Some("DomainModels$DomainModel")
+                })
+                .unwrap();
+            let mut doc = mpr.parse_contents(&unit).unwrap();
+            let entity = doc
+                .get_array_mut("entities")
+                .unwrap()
+                .iter_mut()
+                .filter_map(Bson::as_document_mut)
+                .find(|e| e.get_str("name").ok() == Some("Record"))
+                .unwrap();
+            let attribute = entity
+                .get_array_mut("attributes")
+                .unwrap()
+                .iter_mut()
+                .filter_map(Bson::as_document_mut)
+                .find(|a| a.get_str("name").ok() == Some("Count"))
+                .unwrap();
+            let field = if shape == "calculated" {
+                "Value"
+            } else {
+                "Type"
+            };
+            let key = if attribute.contains_key(field) {
+                field.to_string()
+            } else {
+                field.to_ascii_lowercase()
+            };
+            attribute.get_document_mut(&key).unwrap().insert(
+                "$Type",
+                if shape == "calculated" {
+                    "DomainModels$CalculatedValue"
+                } else {
+                    "DomainModels$FutureAttributeType"
+                },
+            );
+            mpr.update_unit(&unit.unit_id, doc).unwrap();
+        }
+        let report = mxrs_exporter::audit_portability(&path).unwrap();
+        let family = report
+            .families
+            .iter()
+            .find(|f| f.native_type == "Microflows$Microflow")
+            .unwrap();
+        assert_eq!(
+            family.partial,
+            if shape == "unknown" { 1 } else { 3 },
+            "{shape}: {family:?}"
+        );
+        assert!(family.preserved >= 1);
+    }
+}

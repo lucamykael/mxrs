@@ -4,8 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use mxrs_bson::{Bson, Document};
+use mxrs_ir::Member;
 use mxrs_ir::flow::FlowReturnType as Ty;
 use mxrs_ir::{Activity, FlowParameterDecl, MicroflowCallMapping, MicroflowDecl};
+use mxrs_model::attribute::AttributeType;
 use mxrs_model::{Microflow, Module, Project};
 use mxrs_writer::flow_graph::{documents, linear_nodes};
 
@@ -16,6 +18,91 @@ pub(crate) struct ConvertedFlow {
     pub native_type: String,
     pub declaration: MicroflowDecl,
     source: Vec<String>,
+}
+
+struct AttributeInfo {
+    marker: String,
+    value_type: Ty,
+    writable: bool,
+}
+
+type Attributes = HashMap<(String, String), AttributeInfo>;
+
+fn attributes(modules: &[Module]) -> Attributes {
+    let mut result = HashMap::new();
+    for module in modules {
+        let Some(module_name) = module.name.as_deref() else {
+            continue;
+        };
+        for entity in module.entities() {
+            let Some(entity_name) = entity.name.as_deref() else {
+                continue;
+            };
+            let qualified = format!("{module_name}.{entity_name}");
+            if marker(&qualified).is_none() {
+                continue;
+            }
+            for attribute in &entity.attributes {
+                let Some(name) = attribute.name.as_deref() else {
+                    continue;
+                };
+                if !mxrs_typegen::is_rust_identifier(name) {
+                    continue;
+                }
+                let Some(native) = attribute
+                    .raw_type_doc
+                    .as_ref()
+                    .and_then(|d| d.get_str("$Type").ok())
+                else {
+                    continue;
+                };
+                if AttributeType::from_storage_type(native) != Some(attribute.attribute_type) {
+                    continue;
+                }
+                let value_type = match attribute.attribute_type {
+                    AttributeType::String | AttributeType::HashString => Ty::String,
+                    AttributeType::Integer => Ty::Integer,
+                    AttributeType::Long | AttributeType::AutoNumber => Ty::Long,
+                    AttributeType::Float => Ty::Float,
+                    AttributeType::Decimal => Ty::Decimal,
+                    AttributeType::Boolean => Ty::Boolean,
+                    AttributeType::DateTime => Ty::DateTime,
+                    AttributeType::Binary => Ty::Binary,
+                    AttributeType::Enum => continue,
+                };
+                result.insert(
+                    (qualified.clone(), name.into()),
+                    AttributeInfo {
+                        marker: format!("model::{module_name}::{entity_name}_{name}"),
+                        value_type,
+                        writable: attribute.attribute_type != AttributeType::AutoNumber
+                            && attribute
+                                .raw_value_doc
+                                .as_ref()
+                                .and_then(|d| d.get_str("$Type").ok())
+                                == Some("DomainModels$StoredValue"),
+                    },
+                );
+            }
+        }
+    }
+    result
+}
+
+pub(crate) fn typed_attribute_markers(modules: &[Module]) -> String {
+    let mut entries: Vec<_> = attributes(modules).into_values().collect();
+    entries.sort_by(|a, b| a.marker.cmp(&b.marker));
+    let mut source = String::new();
+    for entry in entries {
+        let marker = entry.marker.strip_prefix("model::").expect("marker prefix");
+        writeln!(
+            source,
+            "impl mxrs::TypedAttributeMarker for {marker} {{ type Value = {}; }}",
+            tag(&entry.value_type, &HashSet::new()).expect("scalar tag")
+        )
+        .unwrap();
+    }
+    source
 }
 
 fn data_type(doc: &Document) -> Option<Ty> {
@@ -80,8 +167,27 @@ fn binding(name: &str) -> Option<String> {
     Some(format!("value_{name}"))
 }
 
-fn expression(value: &str, ty: &Ty, variables: &HashMap<String, Ty>) -> Option<String> {
+fn expression(
+    value: &str,
+    ty: &Ty,
+    variables: &HashMap<String, Ty>,
+    attributes: &Attributes,
+) -> Option<String> {
     if let Some(name) = value.strip_prefix('$') {
+        if let Some((object, member)) = name.split_once('/') {
+            let Ty::Object(entity) = variables.get(object)? else {
+                return None;
+            };
+            let attribute = attributes.get(&(entity.clone(), member.into()))?;
+            let rendered = format!("{}.attribute::<{}>()", binding(object)?, attribute.marker);
+            return if &attribute.value_type == ty {
+                Some(rendered)
+            } else if attribute.value_type == Ty::Integer && ty == &Ty::Long {
+                Some(format!("{rendered}.into_long()"))
+            } else {
+                None
+            };
+        }
         if variables.get(name) != Some(ty) {
             return None;
         }
@@ -100,6 +206,10 @@ fn expression(value: &str, ty: &Ty, variables: &HashMap<String, Ty>) -> Option<S
         Ty::Long => {
             let parsed = value.parse::<i64>().ok()?;
             (parsed.to_string() == value).then(|| format!("mxrs::long({value})"))
+        }
+        Ty::Integer => {
+            let parsed = value.parse::<i32>().ok()?;
+            (parsed.to_string() == value).then(|| format!("mxrs::integer({value})"))
         }
         Ty::Float | Ty::Decimal => {
             let parsed = value.parse::<f64>().ok()?;
@@ -139,6 +249,7 @@ fn signature(flow: &Microflow) -> Option<Vec<(String, Ty)>> {
 }
 
 pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<ConvertedFlow>> {
+    let attributes = attributes(modules);
     let entities: HashSet<_> = modules
         .iter()
         .flat_map(|m| {
@@ -208,7 +319,7 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
                 doc.get_str("$Type").unwrap_or_default().to_string(),
             ))
         })
-        .filter_map(|(module, doc)| convert(module, doc, &targets, &entities))
+        .filter_map(|(module, doc)| convert(module, doc, &targets, &entities, &attributes))
         .collect();
     result.sort_by(|a, b| (&a.module, &a.declaration.name).cmp(&(&b.module, &b.declaration.name)));
     Ok(result)
@@ -245,6 +356,7 @@ fn convert(
     doc: &Document,
     targets: &HashMap<String, &Microflow>,
     entities: &HashSet<String>,
+    attributes: &Attributes,
 ) -> Option<ConvertedFlow> {
     let nodes = linear_nodes(doc)?;
     let model = Microflow::from_bson(doc);
@@ -276,7 +388,7 @@ fn convert(
         if let Ok(default) = native.get_str("DefaultValue")
             && !default.is_empty()
         {
-            let rendered = expression(default, &ty, &HashMap::new())?;
+            let rendered = expression(default, &ty, &HashMap::new(), attributes)?;
             parameter.default_value = Some(default.into());
             options.push(format!("parameter.default_value({rendered});"));
         }
@@ -313,6 +425,82 @@ fn convert(
     for node in nodes.iter().skip(1).take(nodes.len().saturating_sub(2)) {
         let action = node.get_document("Action").ok()?;
         let activity = match action.get_str("$Type").ok()? {
+            kind @ ("Microflows$CreateChangeAction" | "Microflows$ChangeAction") => {
+                let create = kind == "Microflows$CreateChangeAction";
+                let name = action
+                    .get_str(if create {
+                        "VariableName"
+                    } else {
+                        "ChangeVariableName"
+                    })
+                    .ok()?;
+                let variable = binding(name)?;
+                let entity = if create {
+                    action.get_str("Entity").ok()?.to_string()
+                } else {
+                    let Ty::Object(entity) = variables.get(name)? else {
+                        return None;
+                    };
+                    entity.clone()
+                };
+                tag(&Ty::Object(entity.clone()), entities)?;
+                let commit = match action.get_str("Commit").ok()? {
+                    "Yes" => true,
+                    "No" => false,
+                    _ => return None,
+                };
+                let mut members = Vec::new();
+                let mut rendered = Vec::new();
+                let mut seen = HashSet::new();
+                for item in documents(action.get("Items")?)? {
+                    if !item.get_str("Association").ok()?.is_empty() {
+                        return None;
+                    }
+                    let qualified = item.get_str("Attribute").ok()?;
+                    let member = qualified.strip_prefix(&format!("{entity}."))?;
+                    if !seen.insert(member) {
+                        return None;
+                    }
+                    let attribute = attributes.get(&(entity.clone(), member.into()))?;
+                    if !attribute.writable {
+                        return None;
+                    }
+                    let value = item.get_str("Value").ok()?;
+                    rendered.push(format!(
+                        "mxrs::attribute::<{}>({})",
+                        attribute.marker,
+                        expression(value, &attribute.value_type, &variables, attributes)?
+                    ));
+                    members.push(Member::attribute(member, value));
+                }
+                let members_source = format!("vec![{}]", rendered.join(", "));
+                if create {
+                    if variables
+                        .insert(name.into(), Ty::Object(entity.clone()))
+                        .is_some()
+                    {
+                        return None;
+                    }
+                    source.push(format!("let {variable} = flow.create_object({}, mxrs::Ref::<{}>::new(), {members_source}, {commit});",rust_string(name),marker(&entity)?));
+                    source.push(format!("let _ = &{variable};"));
+                    Activity::CreateObject {
+                        variable: name.into(),
+                        entity,
+                        members,
+                        commit,
+                    }
+                } else {
+                    source.push(format!(
+                        "flow.change_object(&{variable}, {members_source}, {commit});"
+                    ));
+                    Activity::ChangeObject {
+                        variable: name.into(),
+                        entity,
+                        members,
+                        commit,
+                    }
+                }
+            }
             "Microflows$MicroflowCallAction" => {
                 let call = action.get_document("MicroflowCall").ok()?;
                 let target = call.get_str("Microflow").ok()?;
@@ -336,7 +524,7 @@ fn convert(
                     rendered.push(format!(
                         "mxrs::CallArgument::new({}, {})",
                         rust_string(name),
-                        expression(value, ty, &variables)?
+                        expression(value, ty, &variables, attributes)?
                     ));
                     mappings.push(MicroflowCallMapping {
                         parameter: parameter.into(),
@@ -448,7 +636,7 @@ fn convert(
         tag(&ty, entities)?;
         source.push(format!(
             "flow.return_value({});",
-            expression(returned, &ty, &variables)?
+            expression(returned, &ty, &variables, attributes)?
         ));
         declaration.return_type = Some(ty);
         declaration.return_expression = Some(returned.into());

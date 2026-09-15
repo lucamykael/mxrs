@@ -5,7 +5,11 @@ use mxrs_ir::{Activity, FlowParameterDecl, MicroflowDecl};
 fn declaration() -> mxrs_ir::ProjectDecl {
     let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
     builder.module("Calls", |m| {
-        m.entity("Record", |_| {});
+        m.entity("Record", |e| {
+            e.string("First");
+            e.string("Second");
+            e.string("Third");
+        });
     });
     let mut project = builder.build();
     let mut flow = MicroflowDecl::new("Echo");
@@ -101,4 +105,71 @@ fn graph_traversal_rejects_cycles_disconnected_nodes_and_reused_identities() {
             "{mutation}"
         );
     }
+}
+
+#[test]
+fn member_identity_follows_its_name_across_reordering_removal_and_insertion() {
+    use mxrs_ir::Member;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Members.mpr");
+    let mut project = declaration();
+    project.modules[0].microflows[0]
+        .activities
+        .push(Activity::CreateObject {
+            variable: "record".into(),
+            entity: "Calls.Record".into(),
+            commit: false,
+            members: vec![
+                Member::attribute("First", "'first'"),
+                Member::attribute("Second", "'second'"),
+            ],
+        });
+    mxrs_writer::write_project(&path, &project).unwrap();
+    let snapshot = || {
+        let mpr = mxrs_mpr::MprFile::open(&path, true).unwrap();
+        let doc = flow(&mpr);
+        let nodes = mxrs_writer::flow_graph::linear_nodes(&doc).unwrap();
+        nodes[1].clone()
+    };
+    let before = snapshot();
+    let items = |node: &Document| {
+        mxrs_writer::flow_graph::documents(
+            node.get_document("Action").unwrap().get("Items").unwrap(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|item| {
+            (
+                item.get_str("Attribute").unwrap().to_string(),
+                mxrs_bson::extract_id(item.get("$ID").unwrap()).unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let old = items(&before);
+    let Activity::CreateObject { members, .. } =
+        &mut project.modules[0].microflows[0].activities[0]
+    else {
+        panic!("create");
+    };
+    members.reverse();
+    members.push(Member::attribute("Third", "'third'"));
+    mxrs_writer::synchronize_project(&path, &project).unwrap();
+    let reordered = snapshot();
+    let current = items(&reordered);
+    assert_eq!(before.get("$ID"), reordered.get("$ID"));
+    assert_eq!(old["Calls.Record.First"], current["Calls.Record.First"]);
+    assert_eq!(old["Calls.Record.Second"], current["Calls.Record.Second"]);
+    assert!(!old.values().any(|id| id == &current["Calls.Record.Third"]));
+    let Activity::CreateObject { members, .. } =
+        &mut project.modules[0].microflows[0].activities[0]
+    else {
+        panic!("create");
+    };
+    members.retain(|m| m.attribute.as_deref() != Some("First"));
+    mxrs_writer::synchronize_project(&path, &project).unwrap();
+    let after = items(&snapshot());
+    assert_eq!(after.len(), 2);
+    assert_eq!(after["Calls.Record.Second"], old["Calls.Record.Second"]);
+    assert_eq!(after["Calls.Record.Third"], current["Calls.Record.Third"]);
 }

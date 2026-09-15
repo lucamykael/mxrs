@@ -196,6 +196,13 @@ fn merge_value(old: &Bson, new: &Bson) -> Bson {
                     {
                         return old[0].clone();
                     }
+                    if let Some(key) = named_item(value) {
+                        return old
+                            .iter()
+                            .find(|prior| named_item(prior).as_ref() == Some(&key))
+                            .map(|prior| merge_value(prior, value))
+                            .unwrap_or_else(|| value.clone());
+                    }
                     old.get(i)
                         .map(|prior| merge_value(prior, value))
                         .unwrap_or_else(|| value.clone())
@@ -204,6 +211,20 @@ fn merge_value(old: &Bson, new: &Bson) -> Bson {
         ),
         _ => new.clone(),
     }
+}
+
+fn named_item(value: &Bson) -> Option<(String, String)> {
+    let doc = value.as_document()?;
+    Some(match doc.get_str("$Type").ok()? {
+        "Microflows$ChangeActionItem" => (
+            doc.get_str("Attribute").ok()?.into(),
+            doc.get_str("Association").ok()?.into(),
+        ),
+        "Microflows$MicroflowCallParameterMapping" => {
+            (doc.get_str("Parameter").ok()?.into(), String::new())
+        }
+        _ => return None,
+    })
 }
 
 /// Attests that the writer can project this declaration without changing its

@@ -255,6 +255,14 @@ pub fn integer(value: i32) -> Expr<MxInteger> {
     Expr::new(value.to_string())
 }
 
+impl Expr<MxInteger> {
+    /// Widens an integer attribute expression for a Long flow value. The
+    /// Mendix expression is unchanged; every i32 value is representable as i64.
+    pub fn into_long(self) -> Expr<MxLong> {
+        Expr::new(self.source)
+    }
+}
+
 pub fn long(value: i64) -> Expr<MxLong> {
     Expr::new(value.to_string())
 }

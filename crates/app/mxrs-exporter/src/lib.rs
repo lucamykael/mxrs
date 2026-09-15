@@ -26,9 +26,9 @@
 //!   --verify-round-trip` checks these documents by identity, containment
 //!   and raw BSON bytes.
 //! - **Cargo flow bodies** — attested linear microflows and nanoflows become
-//!   typed builders for parameters, microflow calls, list creation,
-//!   commit/delete and returns. Supported expressions are variable references
-//!   and canonical scalar literals. Unedited rebuilds preserve native bytes;
+//!   typed builders for parameters, microflow calls, list creation, object
+//!   create/change, commit/delete and returns. Supported expressions are typed
+//!   variable references, direct attribute reads and canonical scalar literals. Unedited rebuilds preserve native bytes;
 //!   edits with matching linear structure retain node identities and layout.
 //!   Other graphs remain in the imported model. Flow headers/layout still
 //!   depend on that model, so portability reports a partial projection.
@@ -240,7 +240,8 @@ fn import_cargo_project_inner(
     let navigation_source = render_navigation_module(&project.navigation()?);
     let (documents_source, _) = render_documents_module(&project, &mendix_version)?;
     let task_queues_source = render_task_queues_module(&project, &mendix_version)?;
-    let markers_source = mxrs_typegen::generate(&marker_manifest(&modules))?;
+    let mut markers_source = mxrs_typegen::generate(&marker_manifest(&modules))?;
+    markers_source.push_str(&flow_export::typed_attribute_markers(&modules));
     drop(project);
 
     let imported = destination.join("model/imported");

@@ -137,10 +137,15 @@ arguments)`. Before writing, the target must return that type; void results,
 unchecked captures, and duplicate variable names are rejected.
 
 Cargo import reconstructs supported linear microflows and nanoflows as typed
-builders: parameters, microflow calls, list creation, object commit/delete, and
-returns. Expressions currently cover typed variable references and canonical
-string, boolean and numeric literals. A rebuild without edits preserves the
-original bytes; edits with the same activity structure retain node identities,
+builders: parameters, microflow calls, list creation, object create/change and
+commit/delete, and returns. Create/change assignments use typed attribute markers.
+Expressions cover typed variables, direct attribute reads and canonical string,
+boolean and numeric literals. Integer attribute reads can widen to Long through
+`into_long()`; narrowing is never inferred. Calculated/autonumber writes,
+associations, inherited or chained member paths and enum values remain outside
+this projection. Attribute markers describe the imported schema; when changing
+a domain attribute type, update the matching `TypedAttributeMarker::Value` too.
+A rebuild without edits preserves the original bytes; edits with the same activity structure retain node identities,
 layout and native metadata. Structural edits rebuild the activity graph while
 retaining the flow identity. Decisions, loops, other activities and unsupported
 expressions/options remain in the imported model. `mxrs portability` reports
