@@ -121,7 +121,7 @@ fn audit_scaffolded_project(workspace_root: &Path) -> Result<Vec<Finding>, Strin
             continue;
         }
         let name = match command.kind {
-            mxrs_scaffold::ArtifactKind::Security => "AuditModule".to_string(),
+            _ if command.argument == "<Module>" => "AuditModule".to_string(),
             mxrs_scaffold::ArtifactKind::Evaluation => "GeneratedEvaluation".to_string(),
             mxrs_scaffold::ArtifactKind::Ci => "github".to_string(),
             _ => format!("AuditModule.Generated{}", pascal_case(command.name)),

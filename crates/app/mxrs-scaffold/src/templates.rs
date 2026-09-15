@@ -427,6 +427,12 @@ pub(crate) fn functional_test(module_name: &str, name: &str) -> String {
     )
 }
 
+pub(crate) fn presentation_layout(module_name: &str) -> String {
+    format!(
+        "//! Application layout for `{module_name}`.\n\npub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    module.layout(\"ApplicationLayout\", |layout| {{\n        layout.class(\"mxrb-application-shell\");\n        layout.application_shell(\"ApplicationLayout\", Some(\"Responsive\"));\n    }});\n}}\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

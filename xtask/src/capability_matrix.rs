@@ -280,6 +280,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs evaluate",
             "declarative JSON checks for artifacts, references, cycles, unresolved references and module dependency rules; arbitrary Ruby check blocks are intentionally not executed",
         ),
+        "presentation" => (
+            Status::Verified,
+            "mxrs presentation init",
+            "paired native/Cargo scaffold CLI and complete native application layout: xtask command-oracle presentation; docs/commands/presentation.md",
+        ),
         "protocols" => (
             Status::Verified,
             "mxrs protocols",

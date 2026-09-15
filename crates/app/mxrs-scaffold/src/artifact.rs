@@ -59,6 +59,7 @@ pub enum ArtifactKind {
     Repository,
     Security,
     Module,
+    Presentation,
 }
 
 /// One scaffold command as `mxrs scaffold list` prints it. `destination` is
@@ -76,6 +77,14 @@ pub struct ScaffoldCommand {
 /// Only commands that actually generate something are listed: advertising a
 /// generator mxrs does not have would be a promise `scaffold list` cannot keep.
 pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
+    ScaffoldCommand {
+        name: "presentation",
+        action: "init",
+        argument: "<Module>",
+        summary: "Initialize presentation and the application layout",
+        destination: "src/presentation/modules/<module>",
+        kind: ArtifactKind::Presentation,
+    },
     ScaffoldCommand {
         name: "ci",
         action: "init",
@@ -245,6 +254,7 @@ impl ArtifactKind {
             Self::Repository => "repository",
             Self::Security => "security",
             Self::Module => "module",
+            Self::Presentation => "presentation",
         }
     }
 
@@ -267,6 +277,7 @@ impl ArtifactKind {
             Self::Ci => "ci",
             Self::Repository => "repositories",
             Self::Security | Self::Module => "security",
+            Self::Presentation => "presentation",
         }
     }
 
@@ -275,7 +286,7 @@ impl ArtifactKind {
             Self::Entity | Self::Enumeration | Self::Constant | Self::Security | Self::Module => {
                 "domain"
             }
-            Self::Page | Self::Nanoflow => "presentation",
+            Self::Page | Self::Nanoflow | Self::Presentation => "presentation",
             Self::ScheduledEvent
             | Self::UseCase
             | Self::PublishedRest
@@ -289,11 +300,11 @@ impl ArtifactKind {
         }
     }
 
-    /// `Security` and `Module` name a module, every other kind names an
+    /// `Security`, `Module` and `Presentation` name a module; the other kinds name an
     /// artifact inside one — the same split mxrb draws between its `init`
     /// commands and its `new` commands.
     fn names_a_module(self) -> bool {
-        matches!(self, Self::Security | Self::Module)
+        matches!(self, Self::Security | Self::Module | Self::Presentation)
     }
 }
 
@@ -332,7 +343,7 @@ impl PageChain {
 pub struct ArtifactScaffold {
     pub kind: ArtifactKind,
     /// `Module.Artifact`, or `Module` for [`ArtifactKind::Security`] and
-    /// [`ArtifactKind::Module`].
+    /// [`ArtifactKind::Module`] or [`ArtifactKind::Presentation`].
     pub name: String,
     pub target: PathBuf,
     pub dry_run: bool,
@@ -422,6 +433,9 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
         let module_name = identifier(&options.name, "module")?;
         match options.kind {
             ArtifactKind::Module => create_module_layer(&mut transaction, &root, module_name)?,
+            ArtifactKind::Presentation => {
+                initialize_presentation(&mut transaction, &root, module_name)?
+            }
             _ => create_module_security(&mut transaction, &root, module_name)?,
         }
     } else {
@@ -827,7 +841,9 @@ fn create_artifact(
             LAYOUT_PARAMETER,
             &options.page_roles,
         ),
-        ArtifactKind::Security | ArtifactKind::Module => unreachable!("handled by the caller"),
+        ArtifactKind::Security | ArtifactKind::Module | ArtifactKind::Presentation => {
+            unreachable!("handled by the caller")
+        }
     };
     create_family_file(
         transaction,
@@ -1225,4 +1241,63 @@ fn rust_module_path(stem: &str) -> Result<String> {
     } else {
         stem.to_string()
     })
+}
+
+fn initialize_presentation(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+) -> Result<()> {
+    let directory = snake_case(module_name);
+    let base = root.join(format!("src/presentation/modules/{directory}"));
+    let aggregator = base.join("mod.rs");
+    let keeps = ["pages", "snippets", "nanoflows"].map(|family| base.join(family).join(".keep"));
+    if transaction.content(&aggregator)?.is_some()
+        && keeps
+            .iter()
+            .map(|path| transaction.content(path))
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .all(Option::is_some)
+    {
+        return Err(ScaffoldError::FileExists(aggregator.display().to_string()));
+    }
+    require_module(root, module_name)?;
+    let layout_family = base.join("layouts/mod.rs");
+    let layout_file = base.join("layouts/application_layout.rs");
+    if transaction.content(&layout_family)?.is_none()
+        && transaction.content(&layout_file)?.is_some()
+    {
+        return Err(ScaffoldError::FileExists(layout_file.display().to_string()));
+    }
+    connect_family(
+        transaction,
+        root,
+        module_name,
+        ArtifactKind::Presentation,
+        "layouts",
+    )?;
+    if transaction.content(&layout_file)?.is_none() {
+        transaction.create(&layout_file, templates::presentation_layout(module_name))?;
+        declare_child_module(transaction, &layout_family, "application_layout")?;
+        append_list_entry(
+            transaction,
+            &layout_family,
+            DECLARATIONS_LIST,
+            &format!("application_layout::{DECLARE}"),
+        )?;
+    }
+    for (family, keep) in ["pages", "snippets", "nanoflows"].iter().zip(keeps) {
+        connect_family(
+            transaction,
+            root,
+            module_name,
+            ArtifactKind::Presentation,
+            family,
+        )?;
+        if transaction.content(&keep)?.is_none() {
+            transaction.create(keep, String::new())?;
+        }
+    }
+    Ok(())
 }

@@ -431,7 +431,7 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
     }
     // Guards against the loop silently degenerating if `destination` spellings
     // ever change shape.
-    assert_eq!(checked, 15);
+    assert_eq!(checked, 16);
 }
 
 /// A project generated before the layering split has no `src/application/` or
@@ -721,4 +721,59 @@ fn an_unknown_template_or_chain_is_rejected_before_anything_is_written() {
         ScaffoldError::UnknownPageTemplate(value) if value == "form-horizontal"
     ));
     assert!(!root.join("src/domain/modules/sales/pages").exists());
+}
+
+#[test]
+fn presentation_initialization_previews_compiles_and_recovers_missing_directories() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    let options = ArtifactScaffold::new(ArtifactKind::Presentation, "Sales", &root);
+    assert!(scaffold_artifact(&options).is_err());
+    assert!(!root.join("src/presentation/modules/sales").exists());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    let orphan = root.join("src/presentation/modules/sales/layouts/application_layout.rs");
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, "custom layout source").unwrap();
+    assert!(scaffold_artifact(&options).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&orphan).unwrap(),
+        "custom layout source"
+    );
+    assert!(!orphan.with_file_name("mod.rs").exists());
+    std::fs::remove_dir_all(root.join("src/presentation/modules/sales")).unwrap();
+    let before = registry::entries(&root).unwrap();
+    let preview = scaffold_artifact(&options.clone().dry_run(true)).unwrap();
+    assert!(!root.join("src/presentation/modules/sales").exists());
+    assert_eq!(registry::entries(&root).unwrap(), before);
+    let applied = scaffold_artifact(&options).unwrap();
+    assert_eq!(preview.files, applied.files);
+    assert_eq!(preview.updated, applied.updated);
+    assert!(scaffold_artifact(&options).is_err());
+    let layout = root.join("src/presentation/modules/sales/layouts/application_layout.rs");
+    let source = std::fs::read_to_string(&layout).unwrap();
+    assert!(source.contains("application_shell("));
+    std::fs::remove_file(root.join("src/presentation/modules/sales/snippets/.keep")).unwrap();
+    scaffold_artifact(&options).unwrap();
+    assert_eq!(std::fs::read_to_string(&layout).unwrap(), source);
+    let output = cargo(
+        &root,
+        &[
+            "run",
+            "--offline",
+            "--quiet",
+            "--",
+            "build/Presentation.mpr",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let project = mxrs_model::Project::open(root.join("build/Presentation.mpr"), true).unwrap();
+    assert!(project.all_units().unwrap().iter().any(|unit| {
+        let doc = project.mpr().parse_contents(unit).unwrap();
+        doc.get_str("Name").ok() == Some("ApplicationLayout")
+            && unit.containment_name == "Documents"
+    }));
 }

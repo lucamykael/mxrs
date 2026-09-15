@@ -30,7 +30,20 @@ pub fn compile_layout(catalog: &Rc<Catalog>, decl: &LayoutDecl) -> Result<Docume
         "canvasHeight",
         Value::Integer(i64::from(decl.canvas_height)),
     )?;
-    if let Some(appearance) =
+    if decl
+        .widgets
+        .iter()
+        .any(|widget| matches!(widget, WidgetDecl::ApplicationShell { .. }))
+    {
+        layout.set(
+            "appearance",
+            Value::Node(page_compiler::shell_appearance(
+                catalog,
+                decl.class.as_deref(),
+                decl.style.as_deref(),
+            )?),
+        )?;
+    } else if let Some(appearance) =
         page_compiler::appearance_node(catalog, decl.class.as_deref(), decl.style.as_deref())?
     {
         layout.set("appearance", Value::Node(appearance))?;
@@ -78,6 +91,7 @@ fn placeholder_names(decl: &LayoutDecl) -> Result<Vec<String>> {
     fn visit(widget: &WidgetDecl, names: &mut Vec<String>) {
         match widget {
             WidgetDecl::LayoutPlaceholder { name } => names.push(name.clone()),
+            WidgetDecl::ApplicationShell { .. } => names.push("Main".into()),
             WidgetDecl::Container { children, .. } | WidgetDecl::DataView { children, .. } => {
                 for child in children {
                     visit(child, names);
@@ -615,5 +629,67 @@ mod tests {
             document(&mpr, "Forms$Layout", "ApplicationLayout").1,
             original
         );
+    }
+}
+
+#[cfg(test)]
+mod application_shell_tests {
+    use super::*;
+    #[test]
+    fn stock_shell_compiles_both_navigation_modes_and_reserves_main() {
+        fn types(value: &Bson, result: &mut Vec<String>) {
+            match value {
+                Bson::Document(doc) => {
+                    if let Ok(ty) = doc.get_str("$Type") {
+                        result.push(ty.into());
+                    }
+                    for value in doc.values() {
+                        types(value, result);
+                    }
+                }
+                Bson::Array(items) => {
+                    for item in items {
+                        types(item, result);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let catalog = Rc::new(Catalog::for_version("11.12.1").unwrap());
+        for navigation in [None, Some("Responsive")] {
+            let mut layout = mxrs_dsl::LayoutBuilder::new("ApplicationLayout");
+            layout.application_shell("My application", navigation);
+            let mut decl = layout.into_decl();
+            assert_eq!(placeholder_names(&decl).unwrap(), ["Main"]);
+            let doc = compile_layout(&catalog, &decl).unwrap();
+            let mut actual = Vec::new();
+            types(&Bson::Document(doc), &mut actual);
+            for kind in ["ScrollContainer", "DynamicText", "Placeholder"] {
+                assert!(
+                    actual.iter().any(|ty| ty.ends_with(&format!("${kind}"))),
+                    "{actual:?}"
+                );
+            }
+            for kind in ["NavigationTree", "SidebarToggleButton"] {
+                assert_eq!(
+                    actual.iter().any(|ty| ty.ends_with(&format!("${kind}"))),
+                    navigation.is_some()
+                );
+            }
+            decl.widgets.push(WidgetDecl::LayoutPlaceholder {
+                name: "Main".into(),
+            });
+            assert!(compile_layout(&catalog, &decl).is_err());
+            let mut page = mxrs_ir::PageDecl::new("Page");
+            page.widgets.push(WidgetDecl::ApplicationShell {
+                title: "x".into(),
+                navigation: None,
+            });
+            page.layout = Some(mxrs_ir::LayoutRef {
+                qualified_name: "Main.ApplicationLayout".into(),
+                parameter: "Main".into(),
+            });
+            assert!(page_compiler::compile_page(&catalog, &page).is_err());
+        }
     }
 }

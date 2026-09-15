@@ -32,6 +32,9 @@ repeatable MXRB CLI oracle and explicit presentation or language mappings.
 The [native document queries](docs/commands/document-queries.md) cover callers,
 callees, refs, impact, describe and tree, including unknown named documents and
 expression tokens. Their read-only graph is separate from typed refactoring.
+[`presentation init`](docs/commands/presentation.md) now creates the native
+application layout through editable, typed Rust, including its header and
+optional navigation sidebar.
 Protocol audit remains GUID-based and fail-closed; neither current registry
 contains evidenced recognition GUIDs.
 
@@ -301,7 +304,7 @@ workspace).
 
 `capability-matrix` reads MXRB's own command inventory and classifies every
 row as verified, partial, or missing. Its identity-based CI ratchet records 76
-commands: 15 verified, 54 partial, and 7 missing. "Verified" refers to the
+commands: 16 verified, 54 partial, and 6 missing. "Verified" refers to the
 documented command contract, including explicit mappings and restrictions;
 it does not establish full Studio Pro or runtime parity. "Partial" never means
 command parity; each row stays incomplete until its full observable contract

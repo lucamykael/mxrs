@@ -52,6 +52,19 @@ pub struct LayoutBuilder {
 }
 
 impl LayoutBuilder {
+    /// Add the stock application header, navigation and Main content slot.
+    pub fn application_shell(
+        &mut self,
+        title: impl Into<String>,
+        navigation: Option<&str>,
+    ) -> &mut Self {
+        self.decl.widgets.push(WidgetDecl::ApplicationShell {
+            title: title.into(),
+            navigation: navigation.map(str::to_string),
+        });
+        self
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             decl: LayoutDecl::new(name),

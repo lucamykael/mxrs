@@ -235,6 +235,12 @@ fn validate_page_parameters(decl: &PageDecl) -> Result<()> {
     }
     fn visit(page: &str, widget: &WidgetDecl, parameters: &BTreeMap<&str, &str>) -> Result<()> {
         match widget {
+            WidgetDecl::ApplicationShell { .. } => {
+                return Err(WriterError::PlaceholderOutsideLayout {
+                    page: page.into(),
+                    placeholder: "Main".into(),
+                });
+            }
             WidgetDecl::LayoutPlaceholder { name } => {
                 return Err(WriterError::PlaceholderOutsideLayout {
                     page: page.to_string(),
@@ -294,6 +300,9 @@ pub(crate) fn compile_widget(
     counter: &mut u32,
 ) -> Result<Value> {
     match widget {
+        WidgetDecl::ApplicationShell { title, navigation } => {
+            application_shell(catalog, title, navigation.as_deref())
+        }
         WidgetDecl::LayoutPlaceholder { name } => {
             let mut node = Node::new("Placeholder", catalog.clone())?;
             node.set("name", Value::String(name.clone()))?;
@@ -737,6 +746,150 @@ fn widget_name(name: &Option<String>, default_prefix: &str, counter: &mut u32) -
     }
     *counter += 1;
     format!("{default_prefix}{counter}")
+}
+
+// The composition used by MXRB's layout helper, expressed through the checked
+// Forms schema. IDs and version-specific storage names belong to the codec.
+fn application_shell(
+    catalog: &Rc<Catalog>,
+    title: &str,
+    navigation: Option<&str>,
+) -> Result<Value> {
+    fn widget(catalog: &Rc<Catalog>, kind: &str, name: &str, class: &str) -> Result<Node> {
+        let mut node = Node::new(kind, catalog.clone())?;
+        node.set("name", Value::String(name.into()))?;
+        node.set("tabIndex", Value::Integer(0))?;
+        node.set(
+            "appearance",
+            Value::Node(shell_appearance(catalog, Some(class), None)?),
+        )?;
+        Ok(node)
+    }
+    fn region(
+        catalog: &Rc<Catalog>,
+        class: &str,
+        size: i64,
+        mode: &str,
+        toggle: &str,
+        children: Vec<Value>,
+    ) -> Result<Node> {
+        let mut node = Node::new("ScrollContainerRegion", catalog.clone())?;
+        node.set(
+            "appearance",
+            Value::Node(shell_appearance(catalog, Some(class), None)?),
+        )?;
+        node.set("size", Value::Integer(size))?;
+        node.set("sizeMode", Value::String(mode.into()))?;
+        node.set("toggleMode", Value::String(toggle.into()))?;
+        node.set("widgets", Value::List(children))?;
+        Ok(node)
+    }
+    let mut container = widget(catalog, "ScrollContainer", "scrollContainer1", "")?;
+    for (property, value) in [
+        ("alignment", "Center"),
+        ("layoutMode", "Headline"),
+        ("widthMode", "Auto"),
+        ("scrollBehavior", "PerRegion"),
+    ] {
+        container.set(property, Value::String(value.into()))?;
+    }
+    container.set("width", Value::Integer(960))?;
+    container.set("nativeHideScrollbars", Value::Boolean(false))?;
+    let mut header = Vec::new();
+    if let Some(profile) = navigation {
+        let mut source = Node::new("NavigationSource", catalog.clone())?;
+        source.set("navigationProfile", Value::String(profile.into()))?;
+        let mut tree = widget(
+            catalog,
+            "NavigationTree",
+            "navigationTree1",
+            "mxrb-navigation",
+        )?;
+        tree.set("menuSource", Value::Node(source))?;
+        container.set(
+            "left",
+            Value::Node(region(
+                catalog,
+                "region-sidebar",
+                264,
+                "Pixels",
+                "ShrinkContentInitiallyClosed",
+                vec![Value::Node(tree)],
+            )?),
+        )?;
+        let mut toggle = widget(
+            catalog,
+            "SidebarToggleButton",
+            "sidebarToggle1",
+            "mxrb-sidebar-toggle",
+        )?;
+        toggle.set("buttonStyle", Value::String("Primary".into()))?;
+        toggle.set("caption", Value::Node(shell_template(catalog, "Menu")?))?;
+        toggle.set(
+            "tooltip",
+            Value::Text(default_language_text("Toggle navigation")),
+        )?;
+        toggle.set("renderType", Value::String("Button".into()))?;
+        header.push(Value::Node(toggle));
+    }
+    let mut brand = widget(catalog, "DynamicText", "applicationTitle", "mxrb-brand")?;
+    brand.set("content", Value::Node(shell_template(catalog, title)?))?;
+    brand.set("nativeTextStyle", Value::String("Text".into()))?;
+    brand.set("renderMode", Value::String("Text".into()))?;
+    header.push(Value::Node(brand));
+    let mut topbar = widget(catalog, "DivContainer", "topbarContent", "mxrb-topbar")?;
+    let mut action = Node::new("NoClientAction", catalog.clone())?;
+    action.set("disabledDuringExecution", Value::Boolean(true))?;
+    topbar.set("onClickAction", Value::Node(action))?;
+    topbar.set("renderMode", Value::String("Div".into()))?;
+    topbar.set("screenReaderHidden", Value::Boolean(false))?;
+    topbar.set("widgets", Value::List(header))?;
+    container.set(
+        "top",
+        Value::Node(region(
+            catalog,
+            "region-topbar",
+            72,
+            "Pixels",
+            "None",
+            vec![Value::Node(topbar)],
+        )?),
+    )?;
+    let content = widget(catalog, "Placeholder", "Main", "")?;
+    container.set(
+        "center",
+        Value::Node(region(
+            catalog,
+            "region-content",
+            200,
+            "Auto",
+            "None",
+            vec![Value::Node(content)],
+        )?),
+    )?;
+    Ok(Value::Node(container))
+}
+
+pub(crate) fn shell_appearance(
+    catalog: &Rc<Catalog>,
+    class: Option<&str>,
+    style: Option<&str>,
+) -> Result<Node> {
+    let mut node = Node::new("Appearance", catalog.clone())?;
+    node.set("class", Value::String(class.unwrap_or_default().into()))?;
+    node.set("style", Value::String(style.unwrap_or_default().into()))?;
+    node.set(
+        "dynamicClasses",
+        Value::Expression(mxrs_forms::values::Expression::new("")),
+    )?;
+    node.set("designProperties", Value::List(vec![]))?;
+    Ok(node)
+}
+fn shell_template(catalog: &Rc<Catalog>, text: &str) -> Result<Node> {
+    let mut node = client_template(catalog, text)?;
+    node.set("fallback", Value::Text(default_language_text("")))?;
+    node.set("parameters", Value::List(vec![]))?;
+    Ok(node)
 }
 
 #[cfg(test)]

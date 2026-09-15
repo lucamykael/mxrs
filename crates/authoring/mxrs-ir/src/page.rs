@@ -6,6 +6,9 @@
 //! **Widget vocabulary, loud not silent about what's outside it** (mirrors
 //! `mxrs-exporter`'s own crate doc style for naming gaps):
 //!
+//! - **Stock layout composition**: [`WidgetDecl::ApplicationShell`] authors
+//!   the application header, optional navigation sidebar and Main content slot.
+//!   Individual navigation/scroll-container widget declarations remain separate work.
 //! - **Structural**: [`WidgetDecl::Container`] (`Forms$DivContainer`),
 //!   [`WidgetDecl::LayoutGrid`] (rows of weighted columns), [`WidgetDecl::Text`]
 //!   (static caption, `Forms$DynamicText`).
@@ -113,6 +116,12 @@ pub struct PageParameterDecl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetDecl {
+    /// Stock application layout composition: header, optional navigation
+    /// sidebar and the Main content slot. Only legal inside a layout.
+    ApplicationShell {
+        title: String,
+        navigation: Option<String>,
+    },
     /// Only legal inside a layout, never an ordinary page body.
     LayoutPlaceholder { name: String },
     Container {

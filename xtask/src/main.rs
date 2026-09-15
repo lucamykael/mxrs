@@ -7,7 +7,7 @@
 //! Usage:
 //!   cargo run -p xtask -- fixture-gen <name> <dsl_source.rb>
 //!   cargo run -p xtask -- oracle-diff <fixture_dir>
-//!   cargo run -p xtask -- command-oracle <modules|dump-unit|sql|inspect|protocols|mda|project|compare|diff|callers|callees|refs|impact|describe|tree> <mxrs-binary>
+//!   cargo run -p xtask -- command-oracle <modules|dump-unit|sql|inspect|protocols|mda|project|compare|diff|callers|callees|refs|impact|describe|tree|presentation> <mxrs-binary>
 //!   cargo run -p xtask -- noise-audit
 //!   cargo run -p xtask -- mxbuild-oracle <app_dir>
 //!   cargo run -p xtask -- capability-matrix [--json] [--check-baseline] [--require-complete]
@@ -62,7 +62,7 @@ fn dispatch(arguments: &[String]) -> Result<(), String> {
             _ => Err("usage: oracle-diff <fixture_dir>".into()),
         }
         "command-oracle" => match arguments {
-            [command, executable] if matches!(command.as_str(), "modules" | "dump-unit" | "sql" | "inspect" | "protocols" | "mda" | "project" | "compare" | "diff" | "callers" | "callees" | "refs" | "impact" | "describe" | "tree") => {
+            [command, executable] if matches!(command.as_str(), "modules" | "dump-unit" | "sql" | "inspect" | "protocols" | "mda" | "project" | "compare" | "diff" | "callers" | "callees" | "refs" | "impact" | "describe" | "tree" | "presentation") => {
                 let executable = std::path::absolute(executable).map_err(|e| e.to_string())?;
                 if !executable.is_file() { return Err("MXRS executable not found".into()); }
                 let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("support/{}_oracle.rb", command.replace('-', "_")));
@@ -70,7 +70,7 @@ fn dispatch(arguments: &[String]) -> Result<(), String> {
                 print!("{}", output.stdout);
                 if output.success { Ok(()) } else { Err(format!("{command} command oracle failed")) }
             }
-            _ => Err("usage: command-oracle <modules|dump-unit|sql|inspect|protocols|mda|project|compare|diff|callers|callees|refs|impact|describe|tree> <mxrs-binary>".into()),
+            _ => Err("usage: command-oracle <modules|dump-unit|sql|inspect|protocols|mda|project|compare|diff|callers|callees|refs|impact|describe|tree|presentation> <mxrs-binary>".into()),
         },
         "noise-audit" if arguments.is_empty() => {
             let root = Path::new(env!("CARGO_MANIFEST_DIR"))

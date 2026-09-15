@@ -1095,6 +1095,15 @@ fn render_widget(
     let pad = "    ".repeat(indent);
     let mut out = String::new();
     match widget {
+        WidgetDecl::ApplicationShell { title, navigation } => {
+            let profile = navigation
+                .as_ref()
+                .map_or_else(|| "None".into(), |profile| format!("Some({profile:?})"));
+            let _ = writeln!(
+                out,
+                "{pad}{receiver}.application_shell({title:?}, {profile});"
+            );
+        }
         WidgetDecl::LayoutPlaceholder { name } => {
             let _ = writeln!(out, "{pad}{receiver}.placeholder({name:?});");
         }

@@ -100,6 +100,11 @@ fn command_options(
         | "functional-test" | "integration" | "java-action" | "module" | "nanoflow"
         | "published-rest" | "repository" | "scheduled-event" | "security" | "use-case"
         | "validation" => (&["--target"], &["--dry-run", "--json"], &[]),
+        "presentation" => (
+            &["--target"],
+            &["--dry-run", "--json", "--no-progress"],
+            &[],
+        ),
         "scaffold" => (&["--target"], &[], &[]),
         "rename" | "remove" | "move" => (&[], &["--apply", "--json"], &[]),
         "marketplace" => (
@@ -176,8 +181,9 @@ commands! {
     "preflight", "<file.mpr> [--json]", "Audit native compiler and runtime compatibility", run_preflight;
     "protocols", "<file.mpr> [--json]", "Audit imported Marketplace protocol connectors", run_protocols;
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
+    "presentation", "init <Module> [--target DIR] [--dry-run] [--json]", "Initialize presentation and the application layout", run_presentation;
     "published-rest", "new <Module.Handler> [--target DIR] [--dry-run] [--json]", "Scaffold a published REST handler microflow", run_published_rest;
-    "refs", "<file.mpr> <artifact> [--json]", "Show incoming and outgoing references", run_refs;
+    "refs", "<file.mpr> <artifact> [--json]", "Show incoming references with their property paths", run_refs;
     "remove", "<file.mpr> <qualified-name> [--apply] [--json]", "Preview or apply a reference-safe removal", run_remove;
     "rename", "<file.mpr> <old-name> <new-name> [--apply] [--json]", "Preview or apply a model-wide rename", run_rename;
     "repository", "new <Module.Name> [--target DIR] [--dry-run] [--json]", "Scaffold a repository port and infrastructure adapter", run_repository;
@@ -2113,4 +2119,12 @@ fn run_javagen(mut args: Vec<String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_presentation(mut args: Vec<String>) -> ExitCode {
+    take_flag(&mut args, "--no-progress");
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Presentation,
+        args,
+    ))
 }

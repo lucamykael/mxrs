@@ -48,7 +48,7 @@
   "portability": "partial",
   "portable": "partial",
   "preflight": "partial",
-  "presentation": "missing",
+  "presentation": "verified",
   "project": "verified",
   "protocols": "verified",
   "published-rest": "partial",
