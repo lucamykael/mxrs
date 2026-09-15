@@ -162,7 +162,11 @@ pub fn export_project(path: impl AsRef<Path>) -> Result<String> {
     if !gaps.is_empty() {
         return Err(ExportError::Lossy(gaps.len(), gaps));
     }
-    Ok(render(&mendix_version, &modules, &[]))
+    let domain = render(&mendix_version, &modules, &[]);
+    let queues = render_task_queues_module(&project, &mendix_version)?;
+    Ok(format!(
+        "mod domain {{\n{domain}\n}}\nmod task_queues {{\n{queues}\n}}\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    let mut project = domain::build();\n    task_queues::apply(&mut project);\n    project\n}}\n"
+    ))
 }
 
 /// Imports an `.mpr` into a standalone Cargo project whose source tree and
@@ -222,6 +226,7 @@ fn import_cargo_project_inner(
     let security_source = render_security_module(&modules, security_document.as_ref());
     let navigation_source = render_navigation_module(&project.navigation()?);
     let (documents_source, _) = render_documents_module(&project, &mendix_version)?;
+    let task_queues_source = render_task_queues_module(&project, &mendix_version)?;
     let markers_source = mxrs_typegen::generate(&marker_manifest(&modules))?;
     drop(project);
 
@@ -251,6 +256,9 @@ fn import_cargo_project_inner(
     std::fs::create_dir_all(&application_modules_directory)
         .map_err(|source| io_error(&application_modules_directory, source))?;
     let presentation_directory = destination.join("src/presentation");
+    let task_queues_directory = application_directory.join("task_queues");
+    std::fs::create_dir_all(&task_queues_directory)
+        .map_err(|source| io_error(&task_queues_directory, source))?;
     let nanoflows_directory = presentation_directory.join("nanoflows");
     std::fs::create_dir_all(&nanoflows_directory)
         .map_err(|source| io_error(&nanoflows_directory, source))?;
@@ -306,6 +314,10 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/application/microflows/mod.rs"),
         &microflows_source,
+    )?;
+    write_text(
+        &destination.join("src/application/task_queues/mod.rs"),
+        &task_queues_source,
     )?;
     write_text(
         &destination.join("src/application/modules/mod.rs"),
@@ -392,11 +404,13 @@ fn render_domain_module() -> String {
 
 fn render_application_module() -> String {
     "//! Server-side application orchestration.\n\n\
+     pub mod task_queues;\n\
      pub mod microflows;\n\
      pub mod modules;\n\n\
      pub fn build() -> ::mxrs_ir::ProjectDecl {\n\
          let mut project = crate::domain::build();\n\
          microflows::apply(&mut project);\n\
+         task_queues::apply(&mut project);\n\
          modules::apply(&mut project);\n\
          project\n\
      }\n"
@@ -470,6 +484,10 @@ enum EditableDocument {
         module: String,
         declaration: mxrs_ir::MenuDecl,
     },
+    TaskQueue {
+        module: String,
+        declaration: mxrs_ir::TaskQueueDecl,
+    },
 }
 
 fn render_documents_module(
@@ -477,8 +495,6 @@ fn render_documents_module(
     mendix_version: &str,
 ) -> Result<(String, HashMap<&'static str, usize>)> {
     let mut declarations = collect_editable_documents(project)?;
-    declarations
-        .sort_by(|left, right| editable_document_key(left).cmp(&editable_document_key(right)));
     let mut editable_counts = HashMap::new();
     for declaration in &declarations {
         let native_type = match declaration {
@@ -487,17 +503,31 @@ fn render_documents_module(
             EditableDocument::RegularExpression { .. } => "RegularExpressions$RegularExpression",
             EditableDocument::ScheduledEvent { .. } => "ScheduledEvents$ScheduledEvent",
             EditableDocument::Menu { .. } => "Menus$MenuDocument",
+            EditableDocument::TaskQueue { .. } => "Queues$Queue",
         };
         *editable_counts.entry(native_type).or_default() += 1;
     }
 
-    let mut source = String::from(
-        "//! Editable Cargo-native enumerations, constants, regular expressions, scheduled events, and menus.\n\n\
-         fn declarations() -> ::mxrs_ir::ProjectDecl {\n\
-             let mut project = ::mxrs_dsl::ProjectBuilder::new(",
+    declarations.retain(|document| !matches!(document, EditableDocument::TaskQueue { .. }));
+    Ok((
+        render_editable_documents_source(declarations, mendix_version),
+        editable_counts,
+    ))
+}
+
+fn render_editable_documents_source(
+    mut declarations: Vec<EditableDocument>,
+    mendix_version: &str,
+) -> String {
+    declarations
+        .sort_by(|left, right| editable_document_key(left).cmp(&editable_document_key(right)));
+    let mutable = if declarations.is_empty() { "" } else { "mut " };
+    let mut source = format!(
+        "//! Editable Cargo-native module documents.\n\n\
+         fn declarations() -> ::mxrs_ir::ProjectDecl {{\n\
+             let {mutable}project = ::mxrs_dsl::ProjectBuilder::new({});\n",
+        rust_string(mendix_version),
     );
-    source.push_str(&rust_string(mendix_version));
-    source.push_str(");\n");
     let mut current_module = None::<String>;
     for declaration in declarations {
         let module = editable_document_module(&declaration);
@@ -521,19 +551,11 @@ fn render_documents_module(
         "    project.build()\n}\n\n\
          pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
              for declared in declarations().modules {\n\
-                 if let Some(target) = project.modules.iter_mut().find(|module| module.name == declared.name) {\n\
-                     target.enumerations.extend(declared.enumerations);\n\
-                     target.constants.extend(declared.constants);\n\
-                     target.regular_expressions.extend(declared.regular_expressions);\n\
-                     target.scheduled_events.extend(declared.scheduled_events);\n\
-                     target.menus.extend(declared.menus);\n\
-                 } else {\n\
-                     project.modules.push(declared);\n\
-                 }\n\
+                 project.merge_module(declared);\n\
              }\n\
          }\n",
     );
-    Ok((source, editable_counts))
+    source
 }
 
 fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>> {
@@ -674,6 +696,15 @@ fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>
                     declaration,
                 });
             }
+            Some("Queues$Queue") => {
+                let Some(declaration) = parse_complete_task_queue(&document) else {
+                    continue;
+                };
+                declarations.push(EditableDocument::TaskQueue {
+                    module,
+                    declaration,
+                });
+            }
             Some("Menus$MenuDocument") => {
                 let Some(declaration) = parse_complete_menu(&document) else {
                     continue;
@@ -717,6 +748,126 @@ fn is_complete_regular_expression_document(document: &mxrs_bson::Document) -> bo
         && document.get_str("ExportLevel").is_ok()
         && document.get_str("Expression").is_ok()
         && document.get_str("Name").is_ok()
+}
+
+fn parse_complete_task_queue(document: &mxrs_bson::Document) -> Option<mxrs_ir::TaskQueueDecl> {
+    use mxrs_ir::{ExportLevel, TaskQueueConfig, TaskQueueDecl, TaskQueueScope};
+    if !exact_document(
+        document,
+        &[
+            "$ID",
+            "$Type",
+            "Name",
+            "Documentation",
+            "Excluded",
+            "ExportLevel",
+            "Config",
+        ],
+        "Queues$Queue",
+    ) {
+        return None;
+    }
+    let config = document.get_document("Config").ok()?;
+    let config = if exact_document(
+        config,
+        &["$ID", "$Type", "Parallelism"],
+        "Queues$BasicQueueConfig",
+    ) {
+        let parallelism = bson_integer(config.get("Parallelism"))?;
+        if parallelism <= 0 {
+            return None;
+        }
+        TaskQueueConfig::Fixed {
+            parallelism: parallelism as u32,
+        }
+    } else if exact_document(
+        config,
+        &["$ID", "$Type", "ParallelismExpression", "ClusterWide"],
+        "Queues$BasicQueueConfig",
+    ) {
+        let expression = config.get_str("ParallelismExpression").ok()?;
+        if expression.trim().is_empty() {
+            return None;
+        }
+        TaskQueueConfig::Dynamic {
+            parallelism_expression: expression.to_string(),
+            scope: if config.get_bool("ClusterWide").ok()? {
+                TaskQueueScope::ClusterWide
+            } else {
+                TaskQueueScope::PerNode
+            },
+        }
+    } else {
+        return None;
+    };
+    let name = document.get_str("Name").ok()?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some(TaskQueueDecl {
+        name: name.to_string(),
+        config,
+        documentation: document.get_str("Documentation").ok()?.to_string(),
+        excluded: document.get_bool("Excluded").ok()?,
+        export_level: match document.get_str("ExportLevel").ok()? {
+            "Hidden" => ExportLevel::Hidden,
+            "Published" => ExportLevel::Published,
+            _ => return None,
+        },
+    })
+}
+
+fn render_task_queue(source: &mut String, queue: &mxrs_ir::TaskQueueDecl) {
+    use mxrs_ir::{TaskQueueConfig, TaskQueueScope};
+    let config = match &queue.config {
+        TaskQueueConfig::Fixed { parallelism } => {
+            format!("::mxrs_ir::TaskQueueConfig::Fixed {{ parallelism: {parallelism} }}")
+        }
+        TaskQueueConfig::Dynamic {
+            parallelism_expression,
+            scope,
+        } => format!(
+            "::mxrs_ir::TaskQueueConfig::Dynamic {{ parallelism_expression: {}.to_string(), scope: ::mxrs_ir::TaskQueueScope::{} }}",
+            rust_string(parallelism_expression),
+            match scope {
+                TaskQueueScope::PerNode => "PerNode",
+                TaskQueueScope::ClusterWide => "ClusterWide",
+            },
+        ),
+    };
+    let parameter = if queue.documentation.is_empty()
+        && !queue.excluded
+        && queue.export_level == mxrs_ir::ExportLevel::Hidden
+    {
+        "_"
+    } else {
+        "queue"
+    };
+    let _ = writeln!(
+        source,
+        "        module.task_queue({}, {config}, |{parameter}| {{",
+        rust_string(&queue.name)
+    );
+    if !queue.documentation.is_empty() {
+        let _ = writeln!(
+            source,
+            "            queue.documentation({});",
+            rust_string(&queue.documentation)
+        );
+    }
+    if queue.excluded {
+        source.push_str("            queue.excluded(true);\n");
+    }
+    if queue.export_level == mxrs_ir::ExportLevel::Published {
+        source.push_str("            queue.export_level(::mxrs_ir::ExportLevel::Published);\n");
+    }
+    source.push_str("        });\n");
+}
+
+fn render_task_queues_module(project: &Project, mendix_version: &str) -> Result<String> {
+    let mut queues = collect_editable_documents(project)?;
+    queues.retain(|document| matches!(document, EditableDocument::TaskQueue { .. }));
+    Ok(render_editable_documents_source(queues, mendix_version))
 }
 
 fn parse_complete_scheduled_event(
@@ -1148,6 +1299,7 @@ fn parse_pages_to_close(value: &str) -> Option<Option<u32>> {
 
 fn render_editable_document_body(source: &mut String, declaration: EditableDocument) {
     match declaration {
+        EditableDocument::TaskQueue { declaration, .. } => render_task_queue(source, &declaration),
         EditableDocument::Enumeration {
             module: _,
             name,
@@ -1547,6 +1699,7 @@ fn editable_document_module(document: &EditableDocument) -> &str {
         EditableDocument::Enumeration { module, .. }
         | EditableDocument::Constant { module, .. }
         | EditableDocument::RegularExpression { module, .. }
+        | EditableDocument::TaskQueue { module, .. }
         | EditableDocument::ScheduledEvent { module, .. } => module,
         EditableDocument::Menu { module, .. } => module,
     }
@@ -1557,6 +1710,10 @@ fn editable_document_key(document: &EditableDocument) -> (&str, u8, &str) {
         EditableDocument::Enumeration { module, name, .. } => (module, 0, name),
         EditableDocument::Constant { module, name, .. } => (module, 1, name),
         EditableDocument::RegularExpression { module, name, .. } => (module, 2, name),
+        EditableDocument::TaskQueue {
+            module,
+            declaration,
+        } => (module, 5, &declaration.name),
         EditableDocument::ScheduledEvent {
             module,
             declaration,
@@ -1575,7 +1732,8 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
             EditableDocument::Enumeration { module, .. }
             | EditableDocument::Constant { module, .. }
             | EditableDocument::RegularExpression { module, .. }
-            | EditableDocument::ScheduledEvent { module, .. } => module.clone(),
+            | EditableDocument::ScheduledEvent { module, .. }
+            | EditableDocument::TaskQueue { module, .. } => module.clone(),
             EditableDocument::Menu { module, .. } => module.clone(),
         };
         let module = modules
@@ -1643,6 +1801,7 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
                 module.scheduled_events.push(declaration)
             }
             EditableDocument::Menu { declaration, .. } => module.menus.push(declaration),
+            EditableDocument::TaskQueue { declaration, .. } => module.task_queues.push(declaration),
         }
     }
     Ok(mxrs_ir::ProjectDecl {
@@ -2185,7 +2344,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable model concepts live under `src/domain/`; server orchestration under `src/application/`; pages, navigation, and client orchestration under `src/presentation/`; generated public marker types under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. `src/application/microflows/mod.rs` is the source of truth for new server-side microflows; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable model concepts live under `src/domain/`; server orchestration and task queues under `src/application/`; pages, navigation, and client orchestration under `src/presentation/`; generated public marker types under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. `src/application/microflows/mod.rs` is the source of truth for new server-side microflows; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -2266,6 +2425,18 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
     let mut gaps = Vec::new();
     for module in modules {
         let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        for queue in module
+            .artifact_units
+            .iter()
+            .filter(|document| document.get_str("$Type").ok() == Some("Queues$Queue"))
+        {
+            if parse_complete_task_queue(queue).is_none() {
+                gaps.push(RoundTripGap {
+                    path: format!("{module_name}.{}", queue.get_str("Name").unwrap_or("Unnamed")),
+                    reason: "task queue contains native fields or configuration outside the typed declaration".to_string(),
+                });
+            }
+        }
         let Some(domain_model) = &module.domain_model else {
             continue;
         };

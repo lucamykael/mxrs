@@ -166,6 +166,12 @@ pub enum WriterError {
     #[error("duplicate constant {module_name}.{name:?} declared while synchronizing")]
     DuplicateConstant { module_name: String, name: String },
 
+    #[error("duplicate task queue {module_name}.{name:?} declared while synchronizing")]
+    DuplicateTaskQueue { module_name: String, name: String },
+
+    #[error("invalid task queue {name:?}: {reason}")]
+    InvalidTaskQueue { name: String, reason: String },
+
     #[error("duplicate regular expression {module_name}.{name:?} declared while synchronizing")]
     DuplicateRegularExpression { module_name: String, name: String },
 

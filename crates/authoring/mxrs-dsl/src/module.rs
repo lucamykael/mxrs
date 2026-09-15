@@ -45,6 +45,7 @@ impl ModuleBuilder {
                 enumerations: vec![],
                 constants: vec![],
                 regular_expressions: vec![],
+                task_queues: vec![],
                 scheduled_events: vec![],
                 menus: vec![],
                 microflows: vec![],
@@ -131,6 +132,18 @@ impl ModuleBuilder {
         let mut builder = ConstantBuilder::new(name);
         configure(&mut builder);
         self.decl.constants.push(builder.into_decl());
+        self
+    }
+
+    pub fn task_queue(
+        &mut self,
+        name: impl Into<String>,
+        config: mxrs_ir::TaskQueueConfig,
+        configure: impl FnOnce(&mut crate::TaskQueueBuilder),
+    ) -> &mut Self {
+        let mut builder = crate::TaskQueueBuilder::new(name, config);
+        configure(&mut builder);
+        self.decl.task_queues.push(builder.into_decl());
         self
     }
 

@@ -129,6 +129,7 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
             + if matches!(
                 native_type.as_str(),
                 "RegularExpressions$RegularExpression"
+                    | "Queues$Queue"
                     | "ScheduledEvents$ScheduledEvent"
                     | "Menus$MenuDocument"
             ) {
@@ -143,6 +144,7 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
                 if matches!(
                     native_type.as_str(),
                     "RegularExpressions$RegularExpression"
+                        | "Queues$Queue"
                         | "ScheduledEvents$ScheduledEvent"
                         | "Menus$MenuDocument"
                 ) {
@@ -285,50 +287,54 @@ fn editable_unit_snapshots(
     project: &Project,
     declaration: &mxrs_ir::ProjectDecl,
 ) -> Result<BTreeMap<String, Vec<UnitSnapshot>>> {
-    let expected = declaration
-        .modules
-        .iter()
-        .flat_map(|module| {
-            module
-                .enumerations
-                .iter()
-                .map(|document| {
-                    (
-                        module.name.clone(),
-                        "Enumerations$Enumeration",
-                        document.name.clone(),
-                    )
-                })
-                .chain(module.constants.iter().map(|document| {
-                    (
-                        module.name.clone(),
-                        "Constants$Constant",
-                        document.name.clone(),
-                    )
-                }))
-                .chain(module.regular_expressions.iter().map(|document| {
-                    (
-                        module.name.clone(),
-                        "RegularExpressions$RegularExpression",
-                        document.name.clone(),
-                    )
-                }))
-                .chain(module.scheduled_events.iter().map(|document| {
-                    (
-                        module.name.clone(),
-                        "ScheduledEvents$ScheduledEvent",
-                        document.name.clone(),
-                    )
-                }))
-                .chain(module.menus.iter().map(|document| {
-                    (
-                        module.name.clone(),
-                        "Menus$MenuDocument",
-                        document.name.clone(),
-                    )
-                }))
-        })
-        .collect::<std::collections::HashSet<_>>();
+    let expected =
+        declaration
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module
+                    .enumerations
+                    .iter()
+                    .map(|document| {
+                        (
+                            module.name.clone(),
+                            "Enumerations$Enumeration",
+                            document.name.clone(),
+                        )
+                    })
+                    .chain(module.constants.iter().map(|document| {
+                        (
+                            module.name.clone(),
+                            "Constants$Constant",
+                            document.name.clone(),
+                        )
+                    }))
+                    .chain(module.regular_expressions.iter().map(|document| {
+                        (
+                            module.name.clone(),
+                            "RegularExpressions$RegularExpression",
+                            document.name.clone(),
+                        )
+                    }))
+                    .chain(module.task_queues.iter().map(|document| {
+                        (module.name.clone(), "Queues$Queue", document.name.clone())
+                    }))
+                    .chain(module.scheduled_events.iter().map(|document| {
+                        (
+                            module.name.clone(),
+                            "ScheduledEvents$ScheduledEvent",
+                            document.name.clone(),
+                        )
+                    }))
+                    .chain(module.menus.iter().map(|document| {
+                        (
+                            module.name.clone(),
+                            "Menus$MenuDocument",
+                            document.name.clone(),
+                        )
+                    }))
+            })
+            .collect::<std::collections::HashSet<_>>();
     let units = project.all_units()?;
     let module_by_id = project
         .modules()?
@@ -353,6 +359,7 @@ fn editable_unit_snapshots(
             "Enumerations$Enumeration"
                 | "Constants$Constant"
                 | "RegularExpressions$RegularExpression"
+                | "Queues$Queue"
                 | "ScheduledEvents$ScheduledEvent"
                 | "Menus$MenuDocument"
         ) {

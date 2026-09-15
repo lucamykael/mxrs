@@ -196,6 +196,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.regular_expressions,
             identity,
         )?;
+        documents::synchronize_task_queues_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.task_queues,
+            identity,
+        )?;
         documents::synchronize_scheduled_events_with_identity(
             &mut mpr,
             &module_id,
@@ -258,6 +265,7 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
             && declaration.oql_view_sources.is_empty()
             && declaration.constants.is_empty()
             && declaration.regular_expressions.is_empty()
+            && declaration.task_queues.is_empty()
             && declaration.scheduled_events.is_empty()
             && declaration.menus.is_empty()
         {
@@ -292,6 +300,13 @@ pub fn synchronize_project_documents(path: impl AsRef<Path>, project: &ProjectDe
             module_id,
             &declaration.name,
             &declaration.regular_expressions,
+            identity,
+        )?;
+        documents::synchronize_task_queues_with_identity(
+            &mut mpr,
+            module_id,
+            &declaration.name,
+            &declaration.task_queues,
             identity,
         )?;
         documents::synchronize_scheduled_events_with_identity(

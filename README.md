@@ -83,6 +83,13 @@ in the snapshot; new server flows live in
 `src/presentation/navigation/`. Their writers validate role and target
 invariants, preserve native fields outside the typed surface, and keep
 existing identities. Unknown documents remain complete in the snapshot.
+Task queues import as editable declarations under
+`src/application/task_queues/`. `TaskQueueConfig` distinguishes legacy fixed
+parallelism from modern expressions with per-node or cluster-wide scope.
+Their metadata, queue/config identities, and folder placement survive sync;
+unknown native fields remain in the imported snapshot and block standalone
+export when they cannot be expressed completely. This is document authoring;
+queue-backed flow execution remains part of the runtime backlog.
 Pages have a typed front end too — see below.
 
 Cargo-native domain code can use `#[derive(MxEntity)]` on structs and

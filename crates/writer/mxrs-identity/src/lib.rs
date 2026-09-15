@@ -48,6 +48,8 @@ pub enum ArtifactKind {
     /// distinct from the constant's.
     ConstantType,
     RegularExpression,
+    TaskQueue,
+    TaskQueueConfig,
     ScheduledEvent,
     /// The `Schedule` sub-document of a scheduled event, likewise separately
     /// identified.
@@ -101,6 +103,8 @@ impl fmt::Display for ArtifactKind {
             Self::Constant => "constant",
             Self::ConstantType => "constant-type",
             Self::RegularExpression => "regular-expression",
+            Self::TaskQueue => "task-queue",
+            Self::TaskQueueConfig => "task-queue-config",
             Self::ScheduledEvent => "scheduled-event",
             Self::ScheduledEventSchedule => "scheduled-event-schedule",
             Self::Menu => "menu",

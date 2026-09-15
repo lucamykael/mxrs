@@ -36,6 +36,7 @@ pub const ARTIFACT_UNIT_TYPES: &[&str] = &[
     "Images$ImageCollection",
     "DomainModels$ViewEntitySourceDocument",
     "RegularExpressions$RegularExpression",
+    "Queues$Queue",
     "ScheduledEvents$ScheduledEvent",
     "CustomIcons$CustomIconCollection",
     "Forms$Layout",

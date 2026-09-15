@@ -619,6 +619,122 @@ fn constant_type_name(constant_type: ConstantType) -> &'static str {
     }
 }
 
+/// Mirrors mxrb's `ArtifactDocuments#task_queue`; retained native fields stay
+/// outside the editable declaration, including fields in the nested config.
+pub(crate) fn synchronize_task_queues_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    declarations: &[mxrs_ir::TaskQueueDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    use mxrs_ir::{TaskQueueConfig, TaskQueueScope};
+
+    if declarations.is_empty() {
+        return Ok(());
+    }
+    let existing_by_name = existing_documents_by_name(mpr, module_id, "Queues$Queue")?;
+    let mut declared = HashSet::new();
+    for declaration in declarations {
+        let invalid = |reason: &str| crate::WriterError::InvalidTaskQueue {
+            name: format!("{module_name}.{}", declaration.name),
+            reason: reason.to_string(),
+        };
+        if declaration.name.trim().is_empty() {
+            return Err(invalid("name must not be empty"));
+        }
+        if !declared.insert(declaration.name.as_str()) {
+            return Err(crate::WriterError::DuplicateTaskQueue {
+                module_name: module_name.to_string(),
+                name: declaration.name.clone(),
+            });
+        }
+        match &declaration.config {
+            TaskQueueConfig::Fixed { parallelism }
+                if *parallelism == 0 || *parallelism > i32::MAX as u32 =>
+            {
+                return Err(invalid("parallelism must be between 1 and 2147483647"));
+            }
+            TaskQueueConfig::Dynamic {
+                parallelism_expression,
+                ..
+            } if parallelism_expression.trim().is_empty() => {
+                return Err(invalid("parallelism expression must not be empty"));
+            }
+            _ => {}
+        }
+        let qualified_name = format!("{module_name}.{}", declaration.name);
+        let existing = existing_by_name.get(&declaration.name);
+        let id = existing.map_or_else(
+            || identity.artifact_id(ArtifactKind::TaskQueue, &qualified_name),
+            |(id, _)| id.clone(),
+        );
+        let mut document = existing
+            .map(|(_, document)| document.clone())
+            .unwrap_or_default();
+        let mut config = match document.get("Config") {
+            Some(Bson::Document(config))
+                if config.get_str("$Type").ok() == Some("Queues$BasicQueueConfig") =>
+            {
+                config.clone()
+            }
+            Some(_) => {
+                return Err(invalid(
+                    "existing queue configuration is not a supported basic config",
+                ));
+            }
+            None if existing.is_some() => {
+                return Err(invalid("existing queue configuration is missing"));
+            }
+            None => Document::new(),
+        };
+        let config_id = config.get("$ID").and_then(extract_id).unwrap_or_else(|| {
+            identity.artifact_id(ArtifactKind::TaskQueueConfig, &qualified_name)
+        });
+        config.insert("$ID", config_id);
+        config.insert("$Type", "Queues$BasicQueueConfig");
+        match &declaration.config {
+            TaskQueueConfig::Fixed { parallelism } => {
+                config.remove("ParallelismExpression");
+                config.remove("ClusterWide");
+                let value = if matches!(config.get("Parallelism"), Some(Bson::Int64(_))) {
+                    Bson::Int64(i64::from(*parallelism))
+                } else {
+                    Bson::Int32(*parallelism as i32)
+                };
+                config.insert("Parallelism", value);
+            }
+            TaskQueueConfig::Dynamic {
+                parallelism_expression,
+                scope,
+            } => {
+                config.remove("Parallelism");
+                config.insert("ParallelismExpression", parallelism_expression.clone());
+                config.insert("ClusterWide", *scope == TaskQueueScope::ClusterWide);
+            }
+        }
+        document.insert("$ID", id.clone());
+        document.insert("$Type", "Queues$Queue");
+        document.insert("Name", declaration.name.clone());
+        document.insert("Documentation", declaration.documentation.clone());
+        document.insert("Excluded", declaration.excluded);
+        document.insert(
+            "ExportLevel",
+            match declaration.export_level {
+                ExportLevel::Hidden => "Hidden",
+                ExportLevel::Published => "Published",
+            },
+        );
+        document.insert("Config", config);
+        if existing.is_some() {
+            mpr.update_unit(&id, document)?;
+        } else {
+            mpr.insert_unit(module_id, "Documents", document, Some(&id))?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn synchronize_regular_expressions_with_identity(
     mpr: &mut MprFile,
     module_id: &str,

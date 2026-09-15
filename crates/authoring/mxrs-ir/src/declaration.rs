@@ -642,6 +642,7 @@ pub struct ModuleDecl {
     pub enumerations: Vec<EnumerationDecl>,
     pub constants: Vec<ConstantDecl>,
     pub regular_expressions: Vec<RegularExpressionDecl>,
+    pub task_queues: Vec<crate::TaskQueueDecl>,
     pub scheduled_events: Vec<ScheduledEventDecl>,
     pub menus: Vec<MenuDecl>,
     pub microflows: Vec<MicroflowDecl>,
@@ -717,6 +718,7 @@ impl ProjectDecl {
         target.oql_view_sources.extend(declared.oql_view_sources);
         target.enumerations.extend(declared.enumerations);
         target.constants.extend(declared.constants);
+        target.task_queues.extend(declared.task_queues);
         target
             .regular_expressions
             .extend(declared.regular_expressions);

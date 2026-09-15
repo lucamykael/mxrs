@@ -4,7 +4,12 @@
 //! ```text
 //! project!   := <string-lit> "," <module-item>*
 //! module     := "module" <ident> "{" <module-item>* "}"
-//! module-item:= <entity> | <microflow> | <nanoflow>
+//! module-item:= <entity> | <microflow> | <nanoflow> | <task-queue>
+//! task-queue := "task_queue" <ident> "{" <queue-option>* "}"
+//! queue-option := "parallelism" <int-lit> ";" | "parallelism_expression" <string-lit> ";"
+//!               | "scope" ("PerNode" | "ClusterWide") ";"
+//!               | "documentation" <string-lit> ";" | "excluded" <bool-lit> ";"
+//!               | "export_level" ("Hidden" | "Published") ";"
 //! entity     := "entity" <ident> "{" <entity-item>* "}"
 //! entity-item:= <attribute> | <association> | <inheritance> | <index>
 //!             | <lifecycle> | "clear_indexes" ";" | "clear_lifecycle" ";"
@@ -101,8 +106,100 @@ pub struct ModuleInput {
     pub entities: Vec<EntityInput>,
     pub roles: Vec<ModuleRoleInput>,
     pub oql_view_sources: Vec<OqlViewSourceInput>,
+    pub task_queues: Vec<TaskQueueInput>,
     pub microflows: Vec<MicroflowInput>,
     pub nanoflows: Vec<MicroflowInput>,
+}
+
+pub struct TaskQueueInput {
+    pub name: Ident,
+    pub parallelism: Option<syn::LitInt>,
+    pub parallelism_expression: Option<LitStr>,
+    pub scope: Option<Ident>,
+    pub documentation: Option<LitStr>,
+    pub excluded: Option<syn::LitBool>,
+    pub export_level: Option<Ident>,
+}
+
+impl Parse for TaskQueueInput {
+    fn parse(input: ParseStream) -> Result<Self> {
+        expect_keyword(input, "task_queue")?;
+        let name: Ident = input.parse()?;
+        let content;
+        braced!(content in input);
+        let mut queue = Self {
+            name,
+            parallelism: None,
+            parallelism_expression: None,
+            scope: None,
+            documentation: None,
+            excluded: None,
+            export_level: None,
+        };
+        while !content.is_empty() {
+            let option: Ident = content.parse()?;
+            match option.to_string().as_str() {
+                "parallelism" => {
+                    let value: syn::LitInt = content.parse()?;
+                    let number = value.base10_parse::<u32>()?;
+                    if number == 0 || number > i32::MAX as u32 {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "parallelism must be between 1 and 2147483647",
+                        ));
+                    }
+                    set_once(&mut queue.parallelism, value, &option)?;
+                }
+                "parallelism_expression" => {
+                    let value: LitStr = content.parse()?;
+                    if value.value().trim().is_empty() {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "parallelism expression must not be empty",
+                        ));
+                    }
+                    set_once(&mut queue.parallelism_expression, value, &option)?;
+                }
+                "scope" => {
+                    let value: Ident = content.parse()?;
+                    if !matches!(value.to_string().as_str(), "PerNode" | "ClusterWide") {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "unknown task queue scope (expected PerNode or ClusterWide)",
+                        ));
+                    }
+                    set_once(&mut queue.scope, value, &option)?;
+                }
+                "documentation" => set_once(&mut queue.documentation, content.parse()?, &option)?,
+                "excluded" => set_once(&mut queue.excluded, content.parse()?, &option)?,
+                "export_level" => {
+                    let value: Ident = content.parse()?;
+                    if !matches!(value.to_string().as_str(), "Hidden" | "Published") {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "unknown export level (expected Hidden or Published)",
+                        ));
+                    }
+                    set_once(&mut queue.export_level, value, &option)?;
+                }
+                _ => return Err(syn::Error::new(option.span(), "unknown task queue option")),
+            }
+            content.parse::<Token![;]>()?;
+        }
+        if queue.parallelism.is_some() == queue.parallelism_expression.is_some() {
+            return Err(syn::Error::new(
+                queue.name.span(),
+                "task_queue requires exactly one of parallelism or parallelism_expression",
+            ));
+        }
+        if queue.parallelism.is_some() && queue.scope.is_some() {
+            return Err(syn::Error::new(
+                queue.name.span(),
+                "scope requires parallelism_expression",
+            ));
+        }
+        Ok(queue)
+    }
 }
 
 pub struct EntityInput {
@@ -362,6 +459,7 @@ impl Parse for ModuleInput {
         let mut entities = Vec::new();
         let mut roles = Vec::new();
         let mut oql_view_sources = Vec::new();
+        let mut task_queues = Vec::new();
         let mut microflows = Vec::new();
         let mut nanoflows = Vec::new();
         while !content.is_empty() {
@@ -379,6 +477,8 @@ impl Parse for ModuleInput {
                     name: role_name,
                     description,
                 });
+            } else if peeked == "task_queue" {
+                task_queues.push(content.parse()?);
             } else if peeked == "oql_view_source" {
                 content.parse::<Ident>()?;
                 let source_name = content.parse()?;
@@ -434,6 +534,7 @@ impl Parse for ModuleInput {
             entities,
             roles,
             oql_view_sources,
+            task_queues,
             microflows,
             nanoflows,
         })

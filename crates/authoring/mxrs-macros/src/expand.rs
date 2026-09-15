@@ -181,6 +181,44 @@ fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
         let description = &role.description;
         quote! { m.role(#role_name, #description); }
     });
+    let queue_stmts = module.task_queues.iter().map(|queue| {
+        let name = queue.name.to_string();
+        let config = if let Some(parallelism) = &queue.parallelism {
+            quote! { ::mxrs_ir::TaskQueueConfig::Fixed { parallelism: #parallelism } }
+        } else {
+            let expression = queue
+                .parallelism_expression
+                .as_ref()
+                .expect("parser requires a config");
+            let scope = queue
+                .scope
+                .as_ref()
+                .map_or_else(|| quote! { PerNode }, |scope| quote! { #scope });
+            quote! { ::mxrs_ir::TaskQueueConfig::Dynamic {
+                parallelism_expression: #expression.to_string(),
+                scope: ::mxrs_ir::TaskQueueScope::#scope,
+            } }
+        };
+        let documentation = queue
+            .documentation
+            .as_ref()
+            .map(|value| quote! { queue.documentation(#value); });
+        let excluded = queue
+            .excluded
+            .as_ref()
+            .map(|value| quote! { queue.excluded(#value); });
+        let export_level = queue
+            .export_level
+            .as_ref()
+            .map(|value| quote! { queue.export_level(::mxrs_ir::ExportLevel::#value); });
+        quote! {
+            m.task_queue(#name, #config, |queue| {
+                #documentation
+                #excluded
+                #export_level
+            });
+        }
+    });
     let oql_source_stmts = module.oql_view_sources.iter().map(|source| {
         let source_name = source.name.to_string();
         let query = &source.query;
@@ -222,6 +260,7 @@ fn expand_module(module: &ModuleInput) -> Result<TokenStream> {
         __mxrs_project.module(#name, |m| {
             #(#role_stmts)*
             #(#oql_source_stmts)*
+            #(#queue_stmts)*
             #(#entity_stmts)*
             #(#microflow_stmts)*
             #(#nanoflow_stmts)*

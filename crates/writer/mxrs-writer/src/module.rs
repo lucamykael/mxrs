@@ -143,6 +143,14 @@ pub fn write_module(
         identity,
     )?;
 
+    documents::synchronize_task_queues_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.task_queues,
+        identity,
+    )?;
+
     documents::synchronize_scheduled_events_with_identity(
         mpr,
         &module_id,

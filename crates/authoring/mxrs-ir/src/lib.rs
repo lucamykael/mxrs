@@ -13,6 +13,8 @@ pub mod declaration;
 pub mod flow;
 pub mod markers;
 pub mod page;
+pub mod task_queue;
+pub use task_queue::{TaskQueueConfig, TaskQueueDecl, TaskQueueScope};
 
 pub use application::{
     ModuleRoleDecl, NavigationDecl, NavigationIconDecl, NavigationItemDecl, NavigationProfileDecl,

@@ -62,6 +62,9 @@ mod project;
 mod regular_expression;
 mod scheduled_event;
 mod security;
+mod task_queue;
+pub use mxrs_ir::{TaskQueueConfig, TaskQueueScope};
+pub use task_queue::TaskQueueBuilder;
 
 pub use access::AccessRuleBuilder;
 pub use constant::ConstantBuilder;

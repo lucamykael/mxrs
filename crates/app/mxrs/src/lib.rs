@@ -10,7 +10,7 @@ pub use mxrs_dsl::{
     LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder, MicroflowModuleBuilder, ModuleBuilder,
     NanoflowModuleBuilder, NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder,
     PageBuilder, PluggableWidgetBuilder, ProjectBuilder, ScheduledEventBuilder, SecurityBuilder,
-    UserRoleBuilder,
+    TaskQueueBuilder, UserRoleBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
@@ -69,7 +69,8 @@ pub mod prelude {
         MxEnumeration, MxFloat, MxInteger, MxLong, MxString, NanoflowMarker, NanoflowModuleBuilder,
         NanoflowRef, NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder, OnOverlap,
         PageBuilder, ProjectBuilder, Ref, Reference, ReferenceSet, RenderExpr, ScheduleUnit,
-        ScheduledEventBuilder, SecurityBuilder, SecurityLevel, TypedAttributeMarker,
-        UserRoleBuilder, Var, application, boolean, decimal, float, integer, long, project, string,
+        ScheduledEventBuilder, SecurityBuilder, SecurityLevel, TaskQueueBuilder, TaskQueueConfig,
+        TaskQueueScope, TypedAttributeMarker, UserRoleBuilder, Var, application, boolean, decimal,
+        float, integer, long, project, string,
     };
 }
