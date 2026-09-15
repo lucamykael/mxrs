@@ -39,7 +39,7 @@
   "mda": "partial",
   "migrate": "partial",
   "module": "partial",
-  "modules": "partial",
+  "modules": "verified",
   "move": "partial",
   "nanoflow": "partial",
   "oql": "partial",

@@ -7,6 +7,7 @@
 //! Usage:
 //!   cargo run -p xtask -- fixture-gen <name> <dsl_source.rb>
 //!   cargo run -p xtask -- oracle-diff <fixture_dir>
+//!   cargo run -p xtask -- command-oracle modules <mxrs-binary>
 //!   cargo run -p xtask -- noise-audit
 //!   cargo run -p xtask -- mxbuild-oracle <app_dir>
 //!   cargo run -p xtask -- capability-matrix [--json] [--check-baseline] [--require-complete]
@@ -60,6 +61,17 @@ fn dispatch(arguments: &[String]) -> Result<(), String> {
             [fixture] => oracle_diff(Path::new(fixture)),
             _ => Err("usage: oracle-diff <fixture_dir>".into()),
         }
+        "command-oracle" => match arguments {
+            [command, executable] if command == "modules" => {
+                let executable = std::path::absolute(executable).map_err(|e| e.to_string())?;
+                if !executable.is_file() { return Err("MXRS executable not found".into()); }
+                let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("support/modules_oracle.rb");
+                let output = run_bundle_capture(&["exec", "ruby", &path_str(&script), &path_str(&executable)])?;
+                print!("{}", output.stdout);
+                if output.success { Ok(()) } else { Err("modules command oracle failed".into()) }
+            }
+            _ => Err("usage: command-oracle modules <mxrs-binary>".into()),
+        },
         "noise-audit" if arguments.is_empty() => {
             let root = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()

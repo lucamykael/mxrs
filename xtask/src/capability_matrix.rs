@@ -176,9 +176,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "raw unit tests; CLI oracle missing",
         ),
         "modules" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs modules",
-            "module listing tests; CLI oracle missing",
+            "ordered names/entity/page/microflow counts, v1/v2, folders, empty models and errors: xtask command-oracle modules; presentation normalization and extensions in docs/commands/modules.md",
         ),
         "sql" => (
             Status::Partial,
@@ -548,7 +548,15 @@ mod tests {
         assert!(check_baseline(&report, &baseline("missing", "missing")).is_ok());
         let regression = check_baseline(&report, &baseline("missing", "partial")).unwrap_err();
         assert!(regression.contains(&format!("command regressed: {UNIMPLEMENTED}")));
-        assert!(check_baseline(&report, &baseline("verified", "missing")).is_err());
+        assert!(check_baseline(&report, &baseline("verified", "missing")).is_ok());
+        let mut regressed = build(&inventory(&["modules", UNIMPLEMENTED])).unwrap();
+        regressed
+            .rows
+            .iter_mut()
+            .find(|row| row.mxrb_command == "modules")
+            .unwrap()
+            .status = Status::Partial;
+        assert!(check_baseline(&regressed, &baseline("verified", "missing")).is_err());
         assert!(
             check_baseline(&report, r#"{"modules":"partial"}"#)
                 .unwrap_err()
@@ -571,7 +579,7 @@ mod tests {
 
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["compare", "dump-unit", "modules", "sql"])).unwrap();
+        let report = build(&inventory(&["compare", "dump-unit", "tree", "sql"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

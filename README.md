@@ -13,6 +13,11 @@ project's `ai-memory` as `decisions/mxrs-rust-rewrite-plan.md`.
 
 ## Status
 
+`mxrs modules FILE.mpr` lists module names and entity/page/microflow counts.
+Use `--json` for structured output or `--names` for the previous sorted list.
+The [modules command contract](docs/commands/modules.md) documents its MXRB
+verification and how to repeat the comparison.
+
 33 crates + a dev-only `xtask` harness. The primary direction is Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 

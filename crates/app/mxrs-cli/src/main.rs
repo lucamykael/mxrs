@@ -74,6 +74,7 @@ fn command_options(
         "cache" => (&[], &["--json"], &[]),
         "db" => (&["--port"], &["--json"], &[]),
         "doctor" => (&[], &["--json"], &[]),
+        "modules" => (&[], &["--json", "--names", "--no-progress"], &[]),
         "export" => (&["-o"], &[], &[]),
         "env" => (&["--environment"], &["--json"], &[]),
         "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
@@ -160,7 +161,7 @@ commands! {
     "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json] | install <package.mpk> <file.mpr> [--target-root DIR] [--allow-model-upgrade] [--apply] [--json]", "Search, download, or install official Marketplace content", run_marketplace;
     "mda", "<inspect|compare> ...", "Inspect or compare Mendix deployment archives", run_mda;
     "migrate", "<check|plan> [DIR] [--json]", "Compare a Cargo-native build with its imported MPR snapshot", run_migrate;
-    "modules", "<file.mpr>", "List module names", run_modules;
+    "modules", "<file.mpr> [--json | --names] [--no-progress]", "List modules with entity, page and microflow counts", run_modules;
     "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a same-module unit move", run_move;
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
     "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
@@ -1956,15 +1957,51 @@ fn run_sql(args: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_modules(args: Vec<String>) -> ExitCode {
+fn run_modules(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let names_only = take_flag(&mut args, "--names");
+    take_flag(&mut args, "--no-progress");
+    if json && names_only {
+        eprintln!("[mxrs] error: use only one of --json or --names");
+        return ExitCode::FAILURE;
+    }
     let [path] = args.as_slice() else {
-        eprintln!("[mxrs] error: usage: mxrs modules <file.mpr>");
+        eprintln!(
+            "[mxrs] error: usage: mxrs modules <file.mpr> [--json | --names] [--no-progress]"
+        );
         return ExitCode::FAILURE;
     };
-    match mxrs_cli::browse::list_modules(path) {
-        Ok(names) => {
-            for name in names {
-                println!("{name}");
+    if names_only {
+        return match mxrs_cli::browse::list_modules(path) {
+            Ok(names) => {
+                for name in names {
+                    println!("{name}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match mxrs_cli::browse::module_summaries(path) {
+        Ok(modules) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&modules)
+                        .expect("module summaries are serializable")
+                );
+            } else {
+                for module in modules {
+                    let name =
+                        serde_json::to_string(&module.name).expect("module name is serializable");
+                    println!(
+                        "{name}: entities={} pages={} microflows={}",
+                        module.entities, module.pages, module.microflows
+                    );
+                }
             }
             ExitCode::SUCCESS
         }

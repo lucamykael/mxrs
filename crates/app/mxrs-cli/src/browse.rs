@@ -135,6 +135,31 @@ pub fn list_modules(path: impl AsRef<Path>) -> mxrs_model::Result<Vec<String>> {
     Ok(names)
 }
 
+/// The complete public `mxrb modules` record. Nanoflows and rules are not
+/// microflows; pages and microflows include documents in nested folders.
+#[derive(Debug, serde::Serialize)]
+pub struct ModuleSummary {
+    pub name: Option<String>,
+    pub entities: usize,
+    pub pages: usize,
+    pub microflows: usize,
+}
+
+pub fn module_summaries(path: impl AsRef<Path>) -> mxrs_model::Result<Vec<ModuleSummary>> {
+    let project = Project::open(path, true)?;
+    project.modules().map(|modules| {
+        modules
+            .into_iter()
+            .map(|module| ModuleSummary {
+                entities: module.entities().len(),
+                pages: module.pages.len(),
+                microflows: module.microflows.len(),
+                name: module.name,
+            })
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
