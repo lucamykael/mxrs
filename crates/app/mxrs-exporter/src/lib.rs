@@ -25,17 +25,14 @@
 //!   fields outside that IR are retained by the writer. `portability
 //!   --verify-round-trip` checks these documents by identity, containment
 //!   and raw BSON bytes.
-//! - **Not existing flow graphs** — reconstructing structured
-//!   `create`/`change`/`if`/`call`
-//!   statements from a microflow's persisted activity *graph* (arbitrary
-//!   branching, not just the linear-plus-one-decision shape a hand-written
-//!   `project! {}` body produces) is a real decompiler, out of scope for
-//!   the current projection. Concretely safe consequence: imported source
-//!   declares no microflows for any module, and
-//!   `mxrs-writer::synchronize_project` never deletes anything absent from
-//!   what it's given (see its own doc comment) — so writing an exported
-//!   file straight back through `synchronize_project` leaves every
-//!   existing microflow on disk untouched, not deleted.
+//! - **Cargo flow bodies** — attested linear microflows and nanoflows become
+//!   typed builders for parameters, microflow calls, list creation,
+//!   commit/delete and returns. Supported expressions are variable references
+//!   and canonical scalar literals. Unedited rebuilds preserve native bytes;
+//!   edits with matching linear structure retain node identities and layout.
+//!   Other graphs remain in the imported model. Flow headers/layout still
+//!   depend on that model, so portability reports a partial projection.
+//!   Standalone `export_project` retains its domain/document scope.
 //! - **All eleven attribute types are represented** by `project! {}`:
 //!   string/integer/long/float/decimal/boolean/datetime/autonumber,
 //!   hash-string, binary, and enumeration. Attribute documentation, string
@@ -67,6 +64,7 @@ use mxrs_model::attribute::AttributeType;
 use mxrs_model::entity::Entity;
 use mxrs_model::{Association, Module, Project};
 
+mod flow_export;
 #[cfg(test)]
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
@@ -217,8 +215,23 @@ fn import_cargo_project_inner(
     let domain_source = render_domain_module();
     let application_source = render_application_module();
     let presentation_source = render_presentation_module(&converted_pages);
-    let microflows_source = render_microflows_module(&mendix_version, &modules);
-    let nanoflows_source = render_nanoflows_module(&mendix_version, &modules);
+    let converted_flows = flow_export::collect(&project, &modules)?;
+    let microflows_source = if converted_flows
+        .iter()
+        .any(|f| f.native_type == "Microflows$Microflow")
+    {
+        flow_export::render(&converted_flows, &mendix_version, false)
+    } else {
+        render_microflows_module(&mendix_version, &modules)
+    };
+    let nanoflows_source = if converted_flows
+        .iter()
+        .any(|f| f.native_type == "Microflows$Nanoflow")
+    {
+        flow_export::render(&converted_flows, &mendix_version, true)
+    } else {
+        render_nanoflows_module(&mendix_version, &modules)
+    };
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
         (document.get_str("$Type").ok() == Some("Security$ProjectSecurity")).then_some(document)
@@ -1804,6 +1817,19 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
             EditableDocument::TaskQueue { declaration, .. } => module.task_queues.push(declaration),
         }
     }
+    for flow in flow_export::collect(project, &project.modules()?)? {
+        let module = modules
+            .entry(flow.module.clone())
+            .or_insert_with(|| mxrs_ir::ModuleDecl {
+                name: flow.module,
+                ..Default::default()
+            });
+        if flow.native_type == "Microflows$Nanoflow" {
+            module.nanoflows.push(flow.declaration);
+        } else {
+            module.microflows.push(flow.declaration);
+        }
+    }
     Ok(mxrs_ir::ProjectDecl {
         mendix_version: project.mendix_version()?.unwrap_or_default(),
         modules: modules.into_values().collect(),
@@ -2344,7 +2370,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable model concepts live under `src/domain/`; server orchestration and task queues under `src/application/`; pages, navigation, and client orchestration under `src/presentation/`; generated public marker types under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. `src/application/microflows/mod.rs` is the source of truth for new server-side microflows; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Existing graphs remain exact in the imported model data until they are redeclared.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable model concepts live under `src/domain/`; server orchestration and task queues under `src/application/`; pages, navigation, and client orchestration under `src/presentation/`; generated public marker types under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. `src/application/microflows/mod.rs` contains reconstructed supported linear server-side microflows and new declarations; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Supported linear bodies are reconstructed as typed builders. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -3942,13 +3968,13 @@ mod tests {
         let microflows =
             std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
         assert!(!microflows.contains("snapshot-backed"));
-        assert!(microflows.contains("project.microflow_module("));
-        assert!(microflows.contains("project.merge_module(declared);"));
+        assert!(microflows.contains("declarations.microflow_module("));
+        assert!(microflows.contains("project.merge_module(module);"));
         assert!(!microflows.contains("nanoflow"));
         let nanoflows =
             std::fs::read_to_string(generated.join("src/presentation/nanoflows/mod.rs")).unwrap();
-        assert!(nanoflows.contains("project.nanoflow_module("));
-        assert!(nanoflows.contains("project.merge_module(declared);"));
+        assert!(nanoflows.contains("declarations.nanoflow_module("));
+        assert!(nanoflows.contains("project.merge_module(module);"));
         assert!(!nanoflows.contains("microflow"));
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();

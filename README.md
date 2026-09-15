@@ -134,10 +134,20 @@ not permission to omit arguments. Captured results declare their type after the 
 can be changed, iterated, passed to another call, or returned. The builder
 counterpart is `flow.call_microflow_result::<MxObject<Order>>(target, "order",
 arguments)`. Before writing, the target must return that type; void results,
-unchecked captures, and duplicate variable names are rejected. Imported flow
-bodies remain snapshot-backed until a supported decompiler can reconstruct
-them. Capturing a result does not execute a flow; runtime interpretation is
-still pending.
+unchecked captures, and duplicate variable names are rejected.
+
+Cargo import reconstructs supported linear microflows and nanoflows as typed
+builders: parameters, microflow calls, list creation, object commit/delete, and
+returns. Expressions currently cover typed variable references and canonical
+string, boolean and numeric literals. A rebuild without edits preserves the
+original bytes; edits with the same activity structure retain node identities,
+layout and native metadata. Structural edits rebuild the activity graph while
+retaining the flow identity. Decisions, loops, other activities and unsupported
+expressions/options remain in the imported model. `mxrs portability` reports
+these bodies as partial projections because native header and layout data still
+come from the imported model; `--verify-round-trip` includes projected flows.
+This reconstruction is part of Cargo import; standalone `export_project` keeps
+its existing domain/document scope. Runtime interpretation remains pending.
 
 Projects created before the four-layer layout can run
 `mxrs upgrade --target .` for a read-only preview and add `--apply` to migrate

@@ -165,22 +165,61 @@ fn synchronize_flows_with_identity(
         let mut doc = previous
             .map(|(_, doc)| doc.clone())
             .unwrap_or_else(|| fresh.clone());
-        // A flow declaration owns its body and signature. Preserve other native
-        // header properties (permissions, execution flags, future metadata).
-        for field in [
-            "Name",
-            "Documentation",
+        // Matching linear bodies keep native node identities and layout.
+        let merged = previous.and_then(|(_, old)| crate::flow_graph::merge(old, &fresh));
+        let same_parameters =
+            previous.is_some_and(|(_, old)| crate::flow_graph::same_parameters(old, decl));
+        doc.insert("Name", decl.name.clone());
+        doc.insert("Documentation", decl.documentation.clone());
+        doc.insert(
             "MicroflowReturnType",
-            "ObjectCollection",
-            "Flows",
-        ] {
-            doc.insert(field, fresh.get(field).expect("serialized field").clone());
+            crate::flow_graph::merge_return_type(&doc, &fresh),
+        );
+        if let Some(collection) = merged {
+            doc.insert("ObjectCollection", collection);
+        } else {
+            doc.insert(
+                "ObjectCollection",
+                fresh.get("ObjectCollection").expect("objects").clone(),
+            );
+            doc.insert("Flows", fresh.get("Flows").expect("flows").clone());
+            if same_parameters && let Some((_, old)) = previous {
+                // Legacy parameters are graph objects; retain them even when
+                // a structural body edit requires a fresh activity graph.
+                let legacy = old
+                    .get_document("ObjectCollection")
+                    .ok()
+                    .and_then(|c| c.get("Objects"))
+                    .and_then(crate::flow_graph::documents)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|o| o.get_str("$Type").ok() == Some("Microflows$MicroflowParameter"))
+                    .cloned()
+                    .map(mxrs_bson::Bson::Document);
+                doc.get_document_mut("ObjectCollection")
+                    .expect("objects")
+                    .get_array_mut("Objects")
+                    .expect("object array")
+                    .extend(legacy);
+            }
         }
-        let collection =
-            crate::flow_parameters::lower(decl, &id, previous.map(|(_, doc)| doc), identity)?;
-        doc.insert("MicroflowParameterCollection", collection);
-        // The older Parameters alias is replaced by the canonical collection.
-        doc.remove("Parameters");
+        if !same_parameters {
+            let collection =
+                crate::flow_parameters::lower(decl, &id, previous.map(|(_, doc)| doc), identity)?;
+            doc.insert("MicroflowParameterCollection", collection);
+            doc.remove("Parameters");
+            if let Ok(objects) = doc
+                .get_document_mut("ObjectCollection")
+                .expect("objects")
+                .get_array_mut("Objects")
+            {
+                objects.retain(|o| {
+                    o.as_document().is_none_or(|o| {
+                        o.get_str("$Type").ok() != Some("Microflows$MicroflowParameter")
+                    })
+                });
+            }
+        }
         updates.push((existing_id, id, doc));
     }
     for (existing_id, id, doc) in updates {

@@ -118,13 +118,18 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
         &project,
         project.mendix_version()?.as_deref().unwrap_or(""),
     )?;
+    let converted_flows = super::flow_export::collect(&project, &modules)?;
 
     let mut families = Vec::with_capacity(counts.len());
     for (native_type, total) in counts {
         let editable = editable_documents
             .get(native_type.as_str())
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            + converted_flows
+                .iter()
+                .filter(|flow| flow.native_type == native_type)
+                .count();
         let typed = typed_pages_by_type.get(&native_type).copied().unwrap_or(0)
             + if matches!(
                 native_type.as_str(),
@@ -237,6 +242,26 @@ pub fn verify_editable_document_round_trip(
     mxrs_project::capture_imported_project(path.as_ref(), &imported)?;
     mxrs_project::restore_imported_project(&imported, &rebuilt)?;
     mxrs_writer::synchronize_project_documents(&rebuilt, &declaration)?;
+    {
+        let mut project = Project::open(&rebuilt, false)?;
+        let modules = project.modules()?;
+        for declared in &declaration.modules {
+            let module = modules
+                .iter()
+                .find(|m| m.name.as_deref() == Some(declared.name.as_str()))
+                .expect("source module");
+            mxrs_writer::documents::synchronize_microflows(
+                project.mpr_mut(),
+                &module.id,
+                &declared.microflows,
+            )?;
+            mxrs_writer::documents::synchronize_nanoflows(
+                project.mpr_mut(),
+                &module.id,
+                &declared.nanoflows,
+            )?;
+        }
+    }
 
     let rebuilt_project = Project::open(&rebuilt, true)?;
     let rebuilt_units = rebuilt_project.all_units()?.len();
@@ -326,6 +351,20 @@ fn editable_unit_snapshots(
                             document.name.clone(),
                         )
                     }))
+                    .chain(module.microflows.iter().map(|document| {
+                        (
+                            module.name.clone(),
+                            "Microflows$Microflow",
+                            document.name.clone(),
+                        )
+                    }))
+                    .chain(module.nanoflows.iter().map(|document| {
+                        (
+                            module.name.clone(),
+                            "Microflows$Nanoflow",
+                            document.name.clone(),
+                        )
+                    }))
                     .chain(module.menus.iter().map(|document| {
                         (
                             module.name.clone(),
@@ -362,6 +401,8 @@ fn editable_unit_snapshots(
                 | "Queues$Queue"
                 | "ScheduledEvents$ScheduledEvent"
                 | "Menus$MenuDocument"
+                | "Microflows$Microflow"
+                | "Microflows$Nanoflow"
         ) {
             continue;
         }
@@ -581,7 +622,7 @@ mod tests {
         );
         assert_eq!(
             family("Microflows$Microflow").status,
-            PortabilityStatus::Preserved
+            PortabilityStatus::Partial
         );
         assert_eq!(
             family("RegularExpressions$RegularExpression").status,
@@ -622,7 +663,7 @@ mod tests {
         let report = verify_editable_document_round_trip(path).unwrap();
         assert!(report.passed, "{:?}", report.failures);
         assert_eq!(report.source_units, report.rebuilt_units);
-        assert_eq!(report.candidate_units, 5);
-        assert_eq!(report.byte_identical_units, 5);
+        assert_eq!(report.candidate_units, 6);
+        assert_eq!(report.byte_identical_units, 6);
     }
 }

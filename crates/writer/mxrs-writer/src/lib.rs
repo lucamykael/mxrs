@@ -39,6 +39,7 @@ pub mod domain;
 pub mod error;
 pub mod flow_compiler;
 mod flow_contract;
+pub mod flow_graph;
 mod flow_parameters;
 pub mod instrumentation;
 pub mod layout_compiler;
