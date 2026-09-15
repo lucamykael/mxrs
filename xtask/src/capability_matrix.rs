@@ -171,9 +171,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "structural comparison tests; full CLI contract not differentially verified",
         ),
         "dump-unit" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs dump-unit",
-            "raw unit tests; CLI oracle missing",
+            "exact metadata/hex/ASCII stdout, v1/v2, empty/absent contents and errors: xtask command-oracle dump-unit; contract in docs/commands/dump-unit.md",
         ),
         "modules" => (
             Status::Verified,
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["compare", "dump-unit", "tree", "sql"])).unwrap();
+        let report = build(&inventory(&["compare", "inspect", "tree", "sql"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

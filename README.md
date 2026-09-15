@@ -18,6 +18,10 @@ Use `--json` for structured output or `--names` for the previous sorted list.
 The [modules command contract](docs/commands/modules.md) documents its MXRB
 verification and how to repeat the comparison.
 
+`mxrs dump-unit FILE.mpr UNIT_ID` prints stored unit metadata and original
+bytes in native hexadecimal/ASCII format. Its [command contract](docs/commands/dump-unit.md)
+includes byte-for-byte CLI verification against MXRB.
+
 33 crates + a dev-only `xtask` harness. The primary direction is Cargo-native: Rust is the editable
 source of truth and `.mpr` is an import/export build artifact.
 

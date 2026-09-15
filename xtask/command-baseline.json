@@ -17,7 +17,7 @@
   "diagram-er": "missing",
   "diff": "partial",
   "doctor": "partial",
-  "dump-unit": "partial",
+  "dump-unit": "verified",
   "entity": "partial",
   "enumeration": "partial",
   "env": "partial",

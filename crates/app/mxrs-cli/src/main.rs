@@ -75,6 +75,7 @@ fn command_options(
         "db" => (&["--port"], &["--json"], &[]),
         "doctor" => (&[], &["--json"], &[]),
         "modules" => (&[], &["--json", "--names", "--no-progress"], &[]),
+        "dump-unit" => (&[], &["--no-progress"], &[]),
         "export" => (&["-o"], &[], &[]),
         "env" => (&["--environment"], &["--json"], &[]),
         "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
@@ -140,7 +141,7 @@ commands! {
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "db", "<status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]", "Manage an isolated PostgreSQL workspace", run_db;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
-    "dump-unit", "<file.mpr> <unit_id>", "Dump native unit bytes", run_dump_unit;
+    "dump-unit", "<file.mpr> <unit_id> [--no-progress]", "Dump native unit metadata and bytes", run_dump_unit;
     "entity", "new <Module.Entity> [--target DIR] [--dry-run] [--json]", "Scaffold a domain entity declaration", run_entity;
     "enumeration", "new <Module.Enumeration> [--target DIR] [--dry-run] [--json]", "Scaffold an enumeration declaration", run_enumeration;
     "env", "[DIR] [--environment NAME] [--json]", "Inspect an environment profile without values", run_env;
@@ -1905,7 +1906,8 @@ fn run_units(args: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_dump_unit(args: Vec<String>) -> ExitCode {
+fn run_dump_unit(mut args: Vec<String>) -> ExitCode {
+    take_flag(&mut args, "--no-progress");
     if args.len() != 2 {
         eprintln!("[mxrs] error: usage: mxrs dump-unit <file.mpr> <unit_id>");
         return ExitCode::FAILURE;
@@ -1931,8 +1933,8 @@ fn run_dump_unit(args: Vec<String>) -> ExitCode {
     );
     println!("Contents (hex)   :");
     match &dump.bytes {
-        Some(bytes) if !bytes.is_empty() => print!("{}", mxrs_cli::browse::format_hex_dump(bytes)),
-        _ => println!("  (empty)"),
+        Some(bytes) => print!("{}", mxrs_cli::browse::format_hex_dump(bytes)),
+        None => println!("  (empty)"),
     }
     ExitCode::SUCCESS
 }

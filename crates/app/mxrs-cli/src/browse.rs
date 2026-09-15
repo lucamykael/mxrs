@@ -76,13 +76,16 @@ pub fn dump_unit(path: impl AsRef<Path>, unit_id: &str) -> mxrs_model::Result<Op
     let Some(unit) = project.mpr().unit(unit_id)? else {
         return Ok(None);
     };
-    let type_name = project
-        .mpr()
-        .parse_contents(&unit)
-        .ok()
-        .and_then(|doc| doc.get_str("$Type").ok().map(str::to_string))
-        .unwrap_or_default();
     let bytes = project.mpr().content_bytes(&unit)?;
+    // Decode the same bytes we report. An unreadable/corrupt unit must not
+    // appear to be a successful dump with an unknown type.
+    let type_name = match bytes.as_deref() {
+        Some(bytes) if !bytes.is_empty() => mxrs_bson::parse(bytes)?
+            .get_str("$Type")
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    };
     Ok(Some(UnitDump {
         unit_id: unit.unit_id,
         container_id: unit.container_id,

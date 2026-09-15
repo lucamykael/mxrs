@@ -7,7 +7,7 @@
 //! Usage:
 //!   cargo run -p xtask -- fixture-gen <name> <dsl_source.rb>
 //!   cargo run -p xtask -- oracle-diff <fixture_dir>
-//!   cargo run -p xtask -- command-oracle modules <mxrs-binary>
+//!   cargo run -p xtask -- command-oracle <modules|dump-unit> <mxrs-binary>
 //!   cargo run -p xtask -- noise-audit
 //!   cargo run -p xtask -- mxbuild-oracle <app_dir>
 //!   cargo run -p xtask -- capability-matrix [--json] [--check-baseline] [--require-complete]
@@ -50,7 +50,7 @@ fn main() {
 
 fn dispatch(arguments: &[String]) -> Result<(), String> {
     let Some((command, arguments)) = arguments.split_first() else {
-        return Err("usage: xtask <fixture-gen | oracle-diff | noise-audit | mxbuild-oracle | capability-matrix | coverage-gate>".into());
+        return Err("usage: xtask <fixture-gen | oracle-diff | command-oracle | noise-audit | mxbuild-oracle | capability-matrix | coverage-gate>".into());
     };
     match command.as_str() {
         "fixture-gen" => match arguments {
@@ -62,15 +62,15 @@ fn dispatch(arguments: &[String]) -> Result<(), String> {
             _ => Err("usage: oracle-diff <fixture_dir>".into()),
         }
         "command-oracle" => match arguments {
-            [command, executable] if command == "modules" => {
+            [command, executable] if matches!(command.as_str(), "modules" | "dump-unit") => {
                 let executable = std::path::absolute(executable).map_err(|e| e.to_string())?;
                 if !executable.is_file() { return Err("MXRS executable not found".into()); }
-                let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("support/modules_oracle.rb");
+                let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("support/{}_oracle.rb", command.replace('-', "_")));
                 let output = run_bundle_capture(&["exec", "ruby", &path_str(&script), &path_str(&executable)])?;
                 print!("{}", output.stdout);
-                if output.success { Ok(()) } else { Err("modules command oracle failed".into()) }
+                if output.success { Ok(()) } else { Err(format!("{command} command oracle failed")) }
             }
-            _ => Err("usage: command-oracle modules <mxrs-binary>".into()),
+            _ => Err("usage: command-oracle <modules|dump-unit> <mxrs-binary>".into()),
         },
         "noise-audit" if arguments.is_empty() => {
             let root = Path::new(env!("CARGO_MANIFEST_DIR"))
