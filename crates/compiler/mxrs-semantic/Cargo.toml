@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-model = { path = "../../model/mxrs-model" }
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

@@ -29,6 +29,9 @@ The read-command contracts now also cover [SQL](docs/commands/sql.md),
 [structural comparison](docs/commands/compare.md) and
 [MPR change records](docs/commands/diff.md). Each includes a
 repeatable MXRB CLI oracle and explicit presentation or language mappings.
+The [native document queries](docs/commands/document-queries.md) cover callers,
+callees, refs, impact, describe and tree, including unknown named documents and
+expression tokens. Their read-only graph is separate from typed refactoring.
 Protocol audit remains GUID-based and fail-closed; neither current registry
 contains evidenced recognition GUIDs.
 
@@ -298,7 +301,7 @@ workspace).
 
 `capability-matrix` reads MXRB's own command inventory and classifies every
 row as verified, partial, or missing. Its identity-based CI ratchet records 76
-commands: 9 verified, 60 partial, and 7 missing. "Verified" refers to the
+commands: 15 verified, 54 partial, and 7 missing. "Verified" refers to the
 documented command contract, including explicit mappings and restrictions;
 it does not establish full Studio Pro or runtime parity. "Partial" never means
 command parity; each row stays incomplete until its full observable contract

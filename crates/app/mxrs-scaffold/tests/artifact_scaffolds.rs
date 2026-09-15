@@ -4,6 +4,7 @@
 //! because nothing parses them until `project.rb` runs; a Rust template that
 //! did the same would break `cargo check` for the user's whole project.
 
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -28,8 +29,14 @@ fn workspace() -> &'static Path {
 
 fn application(directory: &Path) -> PathBuf {
     let destination = directory.join("application");
+    // Shared dependency caches must not share a final executable name between
+    // different fixtures. A per-command mutex alone does not give those
+    // artifacts distinct identities across cached builds and test binaries.
+    let mut identity = std::collections::hash_map::DefaultHasher::new();
+    destination.hash(&mut identity);
+    let name = format!("Order Portal {:016x}", identity.finish());
     generate_project(
-        &ProjectScaffold::new("Order Portal", "11.12.1", &destination)
+        &ProjectScaffold::new(name, "11.12.1", &destination)
             .dependency(MxrsDependency::Path(workspace().join("crates/app/mxrs"))),
     )
     .unwrap();
@@ -43,11 +50,8 @@ fn scaffold(root: &Path, kind: ArtifactKind, name: &str) -> Vec<PathBuf> {
 }
 
 fn cargo(root: &Path, arguments: &[&str]) -> std::process::Output {
-    // Every fixture intentionally has the same Cargo package name. Running
-    // two of them against the shared nested target concurrently can replace
-    // the executable between build and launch, making one test observe the
-    // other fixture's model. Serialize the complete command, not just the
-    // compilation phase.
+    // Keep build and launch together while sharing the nested dependency
+    // cache. Each fixture also has its own executable identity above.
     let _guard = NESTED_CARGO
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

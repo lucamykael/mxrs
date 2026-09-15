@@ -788,8 +788,9 @@ fn describe_refs_impact_and_tree_resolve_real_artifacts_and_fail_on_typos() {
         tree["Sales"]["microflow"],
         serde_json::json!(["Sales.Save", "Sales.Start", "Sales.Unused"])
     );
-    assert!(text(&query("tree", &path, &[])).contains("    Sales.Order/Number"));
-    assert!(!query("tree", &path, &["Missing"]).status.success());
+    assert!(text(&query("tree", &path, &[])).contains("    Sales.Order.Number"));
+    assert!(query("tree", &path, &["Missing"]).status.success());
+    assert!(text(&query("tree", &path, &["Missing"])).is_empty());
     assert!(!query("tree", &path, &["--bogus"]).status.success());
     assert!(!cli(&["tree", "/missing.mpr"]).status.success());
 }

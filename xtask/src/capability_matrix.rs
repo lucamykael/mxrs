@@ -196,17 +196,17 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "cache" => (
             Status::Partial,
             "mxrs cache status/warm/clear",
-            "external derivative cache with source-fingerprint invalidation, atomic writes and semantic-query consumption; full CLI oracle missing",
+            "external derivative cache with source-fingerprint invalidation, atomic writes and typed-analysis consumption; full CLI oracle missing",
         ),
         "callees" | "callers" | "describe" | "refs" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs callees/callers/describe/refs",
-            "deterministic reference graph",
+            "native named-document graph and exact CLI oracles; docs/commands/document-queries.md",
         ),
         "tree" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs tree",
-            "semantic artifact hierarchy; full CLI oracle missing",
+            "full native document inventory, ancestry and CLI: xtask command-oracle tree; docs/commands/document-queries.md",
         ),
         "lint" | "report" => (
             Status::Partial,
@@ -374,9 +374,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "Cargo declaration to MPR",
         ),
         "impact" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs impact",
-            "transitive dependency impact",
+            "native ordered transitive incoming dependencies: xtask command-oracle impact; docs/commands/document-queries.md",
         ),
         "init" => (
             Status::Partial,
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["callers", "describe", "tree", "cache"])).unwrap();
+        let report = build(&inventory(&["lint", "report", "search", "cache"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

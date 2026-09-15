@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 mod analysis;
 pub mod cache;
+pub mod documents;
 pub use analysis::{Analysis, CallCycle, ModuleDependency};
 
 #[derive(Debug, thiserror::Error)]

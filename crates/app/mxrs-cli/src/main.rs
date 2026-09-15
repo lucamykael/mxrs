@@ -61,8 +61,9 @@ fn command_options(
     &'static [&'static str],
 ) {
     match name {
-        "callees" | "callers" | "changelog" | "describe" | "evaluate" | "impact" | "inspect"
-        | "lint" | "refs" | "preflight" | "report" | "tree" | "validate" => (&[], &["--json"], &[]),
+        "changelog" | "evaluate" | "inspect" | "lint" | "preflight" | "report" | "validate" => {
+            (&[], &["--json"], &[])
+        }
         "portability" => (
             &[],
             &["--json", "--require-typed", "--verify-round-trip"],
@@ -75,7 +76,8 @@ fn command_options(
         "doctor" => (&[], &["--json"], &[]),
         "modules" => (&[], &["--json", "--names", "--no-progress"], &[]),
         "dump-unit" | "units" | "sql" => (&[], &["--no-progress"], &[]),
-        "protocols" | "compare" | "diff" => (&[], &["--json", "--no-progress"], &[]),
+        "protocols" | "compare" | "diff" | "callees" | "callers" | "describe" | "impact"
+        | "refs" | "tree" => (&[], &["--json", "--no-progress"], &[]),
         "export" => (&["-o"], &[], &[]),
         "env" => (&["--environment"], &["--json"], &[]),
         "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
@@ -1292,6 +1294,11 @@ fn run_cache(mut args: Vec<String>) -> ExitCode {
     }
 }
 
+fn document_index(path: &str) -> Result<mxrs_semantic::documents::DocumentIndex, String> {
+    let project = mxrs_model::Project::open(path, true).map_err(|error| error.to_string())?;
+    mxrs_semantic::documents::DocumentIndex::build(&project).map_err(|error| error.to_string())
+}
+
 fn run_callers(args: Vec<String>) -> ExitCode {
     run_call_graph(args, true)
 }
@@ -1302,14 +1309,15 @@ fn run_callees(args: Vec<String>) -> ExitCode {
 fn graph_command(
     mut args: Vec<String>,
     command: &str,
-    query: impl FnOnce(&mxrs_semantic::SemanticIndex, &str, bool) -> Result<(), String>,
+    query: impl FnOnce(&mxrs_semantic::documents::DocumentIndex, &str, bool) -> Result<(), String>,
 ) -> ExitCode {
+    take_flag(&mut args, "--no-progress");
     let json = take_flag(&mut args, "--json");
     if args.len() != 2 {
         eprintln!("Usage: mxrs {command} <file.mpr> <artifact> [--json]");
         return ExitCode::FAILURE;
     }
-    match semantic_index(&args[0]).and_then(|index| query(&index, &args[1], json)) {
+    match document_index(&args[0]).and_then(|index| query(&index, &args[1], json)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("[mxrs] error: {error}");
@@ -1324,9 +1332,9 @@ fn run_call_graph(args: Vec<String>, incoming: bool) -> ExitCode {
         if incoming { "callers" } else { "callees" },
         |index, name, json| {
             let artifacts = if incoming {
-                index.callers(name)
+                index.calls(name, true)
             } else {
-                index.callees(name)
+                index.calls(name, false)
             }
             .map_err(|error| error.to_string())?;
             if json {
@@ -1360,10 +1368,7 @@ fn run_describe(args: Vec<String>) -> ExitCode {
             for reference in incoming {
                 println!(
                     "  {}\t{}",
-                    index
-                        .require(&reference.from)
-                        .map_err(|error| error.to_string())?
-                        .qualified_name,
+                    index.artifact(&reference.from).qualified_name,
                     reference.relation
                 );
             }
@@ -1371,10 +1376,7 @@ fn run_describe(args: Vec<String>) -> ExitCode {
             for reference in outgoing {
                 println!(
                     "  {}\t{}",
-                    index
-                        .require(&reference.to)
-                        .map_err(|error| error.to_string())?
-                        .qualified_name,
+                    index.artifact(&reference.to).qualified_name,
                     reference.relation
                 );
             }
@@ -1384,12 +1386,13 @@ fn run_describe(args: Vec<String>) -> ExitCode {
 }
 
 fn run_tree(mut args: Vec<String>) -> ExitCode {
+    take_flag(&mut args, "--no-progress");
     let json = take_flag(&mut args, "--json");
     if !(1..=2).contains(&args.len()) || args.iter().any(|arg| arg.starts_with('-')) {
         eprintln!("Usage: mxrs tree <file.mpr> [module] [--json]");
         return ExitCode::FAILURE;
     }
-    let index = match semantic_index(&args[0]) {
+    let index = match document_index(&args[0]) {
         Ok(index) => index,
         Err(error) => {
             eprintln!("[mxrs] error: {error}");
@@ -1397,31 +1400,21 @@ fn run_tree(mut args: Vec<String>) -> ExitCode {
         }
     };
     let selected = args.get(1).map(String::as_str);
-    if let Some(module) = selected
-        && !index.artifacts().any(|artifact| {
-            artifact.kind == mxrs_semantic::ArtifactKind::Module && artifact.name == module
-        })
-    {
-        eprintln!("[mxrs] error: unknown module {module:?}");
-        return ExitCode::FAILURE;
-    }
-    let mut tree: std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, Vec<&str>>> =
-        std::collections::BTreeMap::new();
+    let mut tree: std::collections::BTreeMap<
+        Option<&str>,
+        std::collections::BTreeMap<&str, Vec<&str>>,
+    > = std::collections::BTreeMap::new();
     for artifact in index.artifacts() {
-        if artifact.kind == mxrs_semantic::ArtifactKind::Module {
-            if selected.is_none_or(|module| module == artifact.name) {
-                tree.entry(&artifact.name).or_default();
-            }
+        if selected.is_some_and(|module| artifact.module_name.as_deref() != Some(module)) {
             continue;
         }
-        if selected.is_some_and(|module| artifact.module.as_deref() != Some(module)) {
-            continue;
+        let kinds = tree.entry(artifact.module_name.as_deref()).or_default();
+        if artifact.kind != "module" {
+            kinds
+                .entry(artifact.kind.as_str())
+                .or_default()
+                .push(&artifact.qualified_name);
         }
-        tree.entry(artifact.module.as_deref().unwrap_or("(project)"))
-            .or_default()
-            .entry(artifact.kind.as_str())
-            .or_default()
-            .push(&artifact.qualified_name);
     }
     for kinds in tree.values_mut() {
         for names in kinds.values_mut() {
@@ -1431,11 +1424,17 @@ fn run_tree(mut args: Vec<String>) -> ExitCode {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&tree).expect("artifact tree is serializable")
+            serde_json::to_string_pretty(
+                &tree
+                    .iter()
+                    .map(|(module, kinds)| (module.unwrap_or("(project)"), kinds))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            )
+            .expect("artifact tree is serializable")
         );
     } else {
         for (module, kinds) in tree {
-            println!("{module}");
+            println!("{}", module.unwrap_or("(project)"));
             for (kind, names) in kinds {
                 println!("  {kind}");
                 for name in names {
@@ -1514,80 +1513,42 @@ fn run_analysis(mut args: Vec<String>, summary: bool) -> ExitCode {
     }
 }
 
-fn run_refs(mut args: Vec<String>) -> ExitCode {
-    let json = take_flag(&mut args, "--json");
-    if args.len() != 2 {
-        eprintln!("[mxrs] error: usage: mxrs refs <file.mpr> <artifact> [--json]");
-        return ExitCode::FAILURE;
-    }
-    let index = match semantic_index(&args[0]) {
-        Ok(index) => index,
-        Err(error) => {
-            eprintln!("[mxrs] error: {error}");
-            return ExitCode::FAILURE;
+fn run_refs(args: Vec<String>) -> ExitCode {
+    graph_command(args, "refs", |index, name, json| {
+        let incoming = index.incoming(name).map_err(|error| error.to_string())?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({"artifact": name, "incoming": incoming, "fingerprint": index.fingerprint()})).expect("serializable reference report"));
+        } else {
+            for reference in incoming {
+                let source = index.artifact(&reference.from);
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    source.qualified_name,
+                    source.kind,
+                    reference.relation,
+                    reference.path.join(".")
+                );
+            }
         }
-    };
-    let incoming = match index.incoming(&args[1]) {
-        Ok(references) => references,
-        Err(error) => {
-            eprintln!("[mxrs] error: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let outgoing = index
-        .outgoing(&args[1])
-        .expect("resolution already validated");
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "artifact": args[1], "incoming": incoming, "outgoing": outgoing,
-                "fingerprint": index.fingerprint(),
-            }))
-            .expect("serializable reference report")
-        );
-    } else {
-        for reference in incoming {
-            println!("<- {} ({})", reference.from, reference.relation);
-        }
-        for reference in outgoing {
-            println!("-> {} ({})", reference.to, reference.relation);
-        }
-    }
-    ExitCode::SUCCESS
+        Ok(())
+    })
 }
 
-fn run_impact(mut args: Vec<String>) -> ExitCode {
-    let json = take_flag(&mut args, "--json");
-    if args.len() != 2 {
-        eprintln!("[mxrs] error: usage: mxrs impact <file.mpr> <artifact> [--json]");
-        return ExitCode::FAILURE;
-    }
-    let index = match semantic_index(&args[0]) {
-        Ok(index) => index,
-        Err(error) => {
-            eprintln!("[mxrs] error: {error}");
-            return ExitCode::FAILURE;
+fn run_impact(args: Vec<String>) -> ExitCode {
+    graph_command(args, "impact", |index, name, json| {
+        let affected = index.impact(name).map_err(|error| error.to_string())?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&affected).expect("serializable impact report")
+            );
+        } else {
+            for artifact in affected {
+                println!("{}\t{}", artifact.qualified_name, artifact.kind);
+            }
         }
-    };
-    let impact = match index.impact(&args[1]) {
-        Ok(impact) => impact,
-        Err(error) => {
-            eprintln!("[mxrs] error: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&impact).expect("serializable impact report")
-        );
-    } else {
-        for artifact in impact {
-            println!("{:?} {}", artifact.kind, artifact.qualified_name);
-        }
-    }
-    ExitCode::SUCCESS
+        Ok(())
+    })
 }
 
 fn run_semantic_search(mut args: Vec<String>) -> ExitCode {
