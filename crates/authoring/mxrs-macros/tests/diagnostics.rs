@@ -149,6 +149,67 @@ fn an_association_target_naming_an_undeclared_marker_type_fails_to_compile() {
 }
 
 #[test]
+fn entity_parent_and_lifecycle_references_are_marker_checked() {
+    for (body, missing) in [
+        (
+            r#"
+            pub fn make() -> mxrs_ir::ProjectDecl {
+                mxrs_macros::project! {
+                    "11.12.1",
+                    module Sales {
+                        entity Order { generalizes Sales::MissingParent; }
+                    }
+                }
+            }
+            "#,
+            "MissingParent",
+        ),
+        (
+            r#"
+            pub fn make() -> mxrs_ir::ProjectDecl {
+                mxrs_macros::project! {
+                    "11.12.1",
+                    module Sales {
+                        entity Order { before_commit Sales::MissingFlow; }
+                    }
+                }
+            }
+            "#,
+            "MissingFlow",
+        ),
+    ] {
+        let output = try_compile(body);
+        assert!(!output.status.success(), "{missing} unexpectedly compiled");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(missing), "unexpected diagnostic:\n{stderr}");
+    }
+}
+
+#[test]
+fn an_unknown_indexed_system_member_fails_at_the_declaration() {
+    let output = try_compile(
+        r#"
+        pub fn make() -> mxrs_ir::ProjectDecl {
+            mxrs_macros::project! {
+                "11.12.1",
+                module Sales {
+                    entity Order {
+                        index { system InventedTimestamp; }
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown indexed system member"),
+        "unexpected diagnostic:\n{stderr}"
+    );
+}
+
+#[test]
 fn a_missing_semicolon_fails_to_compile() {
     let output = try_compile(
         r#"

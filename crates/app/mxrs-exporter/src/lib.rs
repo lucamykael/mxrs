@@ -12,8 +12,6 @@
 //!
 //! `export_project` is fail-closed: it refuses projects whose unsupported
 //! domain features would be erased or reset by a subsequent synchronization.
-//! `export_project_lossy` retains the original best-effort behavior for source
-//! inspection, but its output must be reviewed before write-back.
 //!
 //! **Current typed projection, explicit about what's outside it**:
 //!
@@ -45,12 +43,11 @@
 //!   too.
 //! - **Association `Owner`/`StorageFormat`/`Documentation` round-trip** via
 //!   typed options in `project!`.
-//! - **Entity `Image`/`indexes`/`access rules`/`lifecycle callbacks`/
-//!   `generalization target`** have no `EntityDecl` DSL surface at all yet
-//!   (same gap `mxrs-writer`'s own doc comment already names) — not
-//!   emitted into typed Rust. `mxrs import` retains these fields in the
-//!   generated snapshot and the writer preserves them during typed domain
-//!   synchronization, so they are opaque rather than lossy.
+//! - **Entity `Image`, access-rule macro syntax, and OQL view declarations**
+//!   remain outside the generated `project!` surface. Generalization, system
+//!   members, indexes, and lifecycle callbacks are typed and emitted when
+//!   every reference resolves; otherwise the lossless imported unit remains
+//!   authoritative.
 //!
 //! Marker types are emitted by `project!` from these same entity
 //! declarations, so exported source is self-contained without a second
@@ -119,9 +116,7 @@ pub enum ExportError {
     #[error("cannot format generated Cargo project at {path}: {detail}")]
     Formatting { path: String, detail: String },
 
-    #[error(
-        "refusing a lossy Rust export; {0} unsupported model feature(s) would not round-trip (pass --allow-lossy only if this is intentional)"
-    )]
+    #[error("refusing an incomplete Rust export; {0} model feature(s) need typed support")]
     Lossy(usize, Vec<RoundTripGap>),
 }
 
@@ -159,9 +154,7 @@ pub struct CargoProjectImport {
 pub type Result<T> = std::result::Result<T, ExportError>;
 
 /// Exports only when the generated source can be synchronized back without
-/// erasing a feature this first-slice grammar cannot express. The old,
-/// explicitly lossy behavior remains available as [`export_project_lossy`]
-/// for inspection and assisted migrations.
+/// erasing a feature the typed grammar cannot express.
 pub fn export_project(path: impl AsRef<Path>) -> Result<String> {
     let project = Project::open(path, true)?;
     let mendix_version = project.mendix_version()?.unwrap_or_default();
@@ -171,17 +164,6 @@ pub fn export_project(path: impl AsRef<Path>) -> Result<String> {
     if !gaps.is_empty() {
         return Err(ExportError::Lossy(gaps.len(), gaps));
     }
-    Ok(render(&mendix_version, &modules, &[]))
-}
-
-/// Emits best-effort source even when unsupported features must be rendered
-/// as `TODO` comments. Callers must not feed this output back to
-/// `synchronize_project` without reviewing every comment.
-pub fn export_project_lossy(path: impl AsRef<Path>) -> mxrs_model::Result<String> {
-    let project = Project::open(path, true)?;
-    let mendix_version = project.mendix_version()?.unwrap_or_default();
-    let mut modules = project.modules()?;
-    modules.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(render(&mendix_version, &modules, &[]))
 }
 
@@ -2281,6 +2263,7 @@ fn io_error(path: &Path, source: std::io::Error) -> ExportError {
 
 fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
     let entity_qualified_name_by_id = index_entities_by_id(modules);
+    let known_microflows = known_microflows(modules);
     let mut gaps = Vec::new();
     for module in modules {
         let module_name = module.name.as_deref().unwrap_or("Unnamed");
@@ -2302,6 +2285,61 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
                     });
                 }
                 let _ = path;
+            }
+            if let Some(target) = entity.generalization_target()
+                && built_in_generalization_path(&target).is_none()
+                && !entity_qualified_name_by_id
+                    .values()
+                    .any(|qualified_name| qualified_name == &target)
+            {
+                gaps.push(RoundTripGap {
+                    path: format!("{module_name}.{entity_name}.generalization"),
+                    reason: format!("generalization target {target:?} cannot be resolved"),
+                });
+            }
+            if let Some(generalization) = &entity.generalization
+                && generalization.target.is_none()
+                && !generalization.native_type.ends_with("NoGeneralization")
+            {
+                gaps.push(RoundTripGap {
+                    path: format!("{module_name}.{entity_name}.generalization"),
+                    reason: format!(
+                        "unsupported generalization shape {:?}",
+                        generalization.native_type
+                    ),
+                });
+            }
+            for (position, index) in entity.indexes.iter().enumerate() {
+                if index.members.iter().any(|member| {
+                    matches!(
+                        member.kind,
+                        mxrs_model::entity::IndexMemberKind::Unresolved(_)
+                    )
+                }) {
+                    gaps.push(RoundTripGap {
+                        path: format!("{module_name}.{entity_name}.index[{position}]"),
+                        reason: "index contains an unresolved native member".to_string(),
+                    });
+                }
+            }
+            for callback in &entity.lifecycle {
+                if !matches!(
+                    callback.event.as_str(),
+                    "before_commit" | "after_commit" | "before_delete" | "after_delete"
+                ) {
+                    gaps.push(RoundTripGap {
+                        path: format!("{module_name}.{entity_name}.{}", callback.event),
+                        reason: "lifecycle event has no typed DSL variant".to_string(),
+                    });
+                } else if !known_microflows.contains(&callback.handler) {
+                    gaps.push(RoundTripGap {
+                        path: format!("{module_name}.{entity_name}.{}", callback.event),
+                        reason: format!(
+                            "lifecycle handler {:?} cannot be resolved",
+                            callback.handler
+                        ),
+                    });
+                }
             }
         }
         for association in domain_model.all_associations() {
@@ -2325,12 +2363,35 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
     gaps
 }
 
+fn known_microflows(modules: &[Module]) -> std::collections::HashSet<String> {
+    modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.as_deref().unwrap_or("Unnamed");
+            module
+                .microflows
+                .iter()
+                .filter_map(move |flow| Some(format!("{module_name}.{}", flow.name.as_deref()?)))
+        })
+        .collect()
+}
+
+fn built_in_generalization_path(target: &str) -> Option<&'static str> {
+    match target {
+        "System.User" => Some("::mxrs_ir::system::User"),
+        "System.FileDocument" => Some("::mxrs_ir::system::FileDocument"),
+        "System.Image" => Some("::mxrs_ir::system::Image"),
+        _ => None,
+    }
+}
+
 fn render(
     mendix_version: &str,
     modules: &[Module],
     pages: &[page_export::ConvertedPage],
 ) -> String {
     let entity_qualified_name_by_id = index_entities_by_id(modules);
+    let known_microflows = known_microflows(modules);
 
     let mut out = String::new();
     let _ = writeln!(
@@ -2368,7 +2429,11 @@ fn render(
         let _ = writeln!(out, "    ::mxrs_macros::project! {{");
         let _ = writeln!(out, "        {:?},", mendix_version);
         for module in modules {
-            out.push_str(&render_module(module, &entity_qualified_name_by_id));
+            out.push_str(&render_module(
+                module,
+                &entity_qualified_name_by_id,
+                &known_microflows,
+            ));
         }
         let _ = writeln!(out, "    }}");
         let _ = writeln!(out, "}}");
@@ -2381,7 +2446,11 @@ fn render(
     let _ = writeln!(out, "    let mut project = ::mxrs_macros::project! {{");
     let _ = writeln!(out, "        {:?},", mendix_version);
     for module in modules {
-        out.push_str(&render_module(module, &entity_qualified_name_by_id));
+        out.push_str(&render_module(
+            module,
+            &entity_qualified_name_by_id,
+            &known_microflows,
+        ));
     }
     let _ = writeln!(out, "    }};");
     for page in pages {
@@ -2408,7 +2477,11 @@ fn index_entities_by_id(modules: &[Module]) -> HashMap<String, String> {
     by_id
 }
 
-fn render_module(module: &Module, entity_qualified_name_by_id: &HashMap<String, String>) -> String {
+fn render_module(
+    module: &Module,
+    entity_qualified_name_by_id: &HashMap<String, String>,
+    known_microflows: &std::collections::HashSet<String>,
+) -> String {
     let module_name = module.name.as_deref().unwrap_or("Unnamed");
     let mut out = String::new();
     let _ = writeln!(out, "        module {} {{", sanitize_ident(module_name));
@@ -2437,6 +2510,7 @@ fn render_module(module: &Module, entity_qualified_name_by_id: &HashMap<String, 
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
             entity_qualified_name_by_id,
+            known_microflows,
         ));
     }
     let _ = writeln!(out, "        }}");
@@ -2447,6 +2521,7 @@ fn render_entity(
     entity: &Entity,
     associations: &[&Association],
     entity_qualified_name_by_id: &HashMap<String, String>,
+    known_microflows: &std::collections::HashSet<String>,
 ) -> String {
     let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
     let mut out = String::new();
@@ -2459,64 +2534,95 @@ fn render_entity(
         );
     }
     let _ = writeln!(out, "                persistable {};", entity.persistable);
+    if let Some(generalization) = &entity.generalization {
+        if let Some(target) = &generalization.target {
+            if built_in_generalization_path(target).is_none()
+                && !entity_qualified_name_by_id
+                    .values()
+                    .any(|qualified_name| qualified_name == target)
+            {
+                // The lossless imported unit remains authoritative until its
+                // target can be represented by a marker.
+            } else {
+                let target_path = if let Some(path) = built_in_generalization_path(target) {
+                    path.to_string()
+                } else {
+                    target
+                        .split('.')
+                        .map(sanitize_ident)
+                        .collect::<Vec<_>>()
+                        .join("::")
+                };
+                let _ = writeln!(out, "                generalizes {target_path};");
+            }
+        } else if generalization.native_type.ends_with("NoGeneralization") {
+            let _ = writeln!(out, "                system_members {{");
+            for (name, enabled) in [
+                ("owner", generalization.system_members.owner),
+                ("created_date", generalization.system_members.created_date),
+                ("changed_date", generalization.system_members.changed_date),
+                ("changed_by", generalization.system_members.changed_by),
+            ] {
+                if enabled {
+                    let _ = writeln!(out, "                    {name} true;");
+                }
+            }
+            let _ = writeln!(out, "                }}");
+        }
+    }
 
     let mut attributes = entity.attributes.clone();
     attributes.sort_by(|a, b| a.name.cmp(&b.name));
     for attribute in &attributes {
         let attribute_name = attribute.name.as_deref().unwrap_or("Unnamed");
-        match project_attr_keyword(attribute.attribute_type) {
-            Some(keyword) => {
-                let default = attribute
-                    .default_value
-                    .as_deref()
-                    .map(|v| format!(" = {v:?}"))
-                    .unwrap_or_default();
-                let name = sanitize_ident(attribute_name);
-                let declaration = if attribute.attribute_type == AttributeType::Enum {
-                    let enumeration = attribute.enumeration.as_deref().unwrap_or("");
-                    format!("{keyword} {name}({enumeration:?}){default}")
-                } else {
-                    format!("{keyword} {name}{default}")
-                };
-                let has_options = !attribute.documentation.is_empty()
-                    || attribute.length.is_some()
-                    || attribute.localize_date.is_some()
-                    || attribute.required
-                    || attribute.unique;
-                if has_options {
-                    let _ = writeln!(out, "                {declaration} {{");
-                    if !attribute.documentation.is_empty() {
-                        let _ = writeln!(
-                            out,
-                            "                    documentation {:?};",
-                            attribute.documentation
-                        );
-                    }
-                    if let Some(length) = attribute.length {
-                        let _ = writeln!(out, "                    length {length};");
-                    }
-                    if let Some(localize_date) = attribute.localize_date {
-                        let _ = writeln!(out, "                    localize_date {localize_date};");
-                    }
-                    if attribute.required {
-                        let _ = writeln!(out, "                    required true;");
-                    }
-                    if attribute.unique {
-                        let _ = writeln!(out, "                    unique true;");
-                    }
-                    let _ = writeln!(out, "                }}");
-                } else {
-                    let _ = writeln!(out, "                {declaration};");
+        if let Some(keyword) = project_attr_keyword(attribute.attribute_type) {
+            let default = attribute
+                .default_value
+                .as_deref()
+                .map(|v| format!(" = {v:?}"))
+                .unwrap_or_default();
+            let name = sanitize_ident(attribute_name);
+            let declaration = if attribute.attribute_type == AttributeType::Enum {
+                let enumeration = attribute.enumeration.as_deref().unwrap_or("");
+                format!("{keyword} {name}({enumeration:?}){default}")
+            } else {
+                format!("{keyword} {name}{default}")
+            };
+            let has_options = !attribute.documentation.is_empty()
+                || attribute.length.is_some()
+                || attribute.localize_date.is_some()
+                || attribute.required
+                || attribute.unique;
+            if has_options {
+                let _ = writeln!(out, "                {declaration} {{");
+                if !attribute.documentation.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "                    documentation {:?};",
+                        attribute.documentation
+                    );
                 }
-            }
-            None => {
-                let _ = writeln!(
-                    out,
-                    "                // TODO: attribute {attribute_name:?} has type {:?}, not supported by project! {{}}'s grammar yet",
-                    attribute.attribute_type
-                );
+                if let Some(length) = attribute.length {
+                    let _ = writeln!(out, "                    length {length};");
+                }
+                if let Some(localize_date) = attribute.localize_date {
+                    let _ = writeln!(out, "                    localize_date {localize_date};");
+                }
+                if attribute.required {
+                    let _ = writeln!(out, "                    required true;");
+                }
+                if attribute.unique {
+                    let _ = writeln!(out, "                    unique true;");
+                }
+                let _ = writeln!(out, "                }}");
+            } else {
+                let _ = writeln!(out, "                {declaration};");
             }
         }
+        // A standalone export is rejected by `round_trip_gaps` before
+        // rendering. Cargo imports keep the complete native unit in their
+        // private preservation layer, so an unsupported attribute must not
+        // leak storage detail or a placeholder into editable Rust.
     }
 
     let mut sorted_associations = associations.to_vec();
@@ -2571,6 +2677,88 @@ fn render_entity(
             let _ = writeln!(out, "                }}");
         } else {
             let _ = writeln!(out, "                {declaration};");
+        }
+    }
+
+    if entity.indexes.is_empty() {
+        let _ = writeln!(out, "                clear_indexes;");
+    } else if entity.indexes.iter().all(|index| {
+        index.members.iter().all(|member| {
+            !matches!(
+                member.kind,
+                mxrs_model::entity::IndexMemberKind::Unresolved(_)
+            )
+        })
+    }) {
+        for index in &entity.indexes {
+            let _ = writeln!(out, "                index {{");
+            for member in &index.members {
+                let ascending = if member.ascending {
+                    String::new()
+                } else {
+                    " ascending false".to_string()
+                };
+                match &member.kind {
+                    mxrs_model::entity::IndexMemberKind::Attribute(name) => {
+                        let name = name.rsplit('.').next().unwrap_or(name);
+                        let _ = writeln!(
+                            out,
+                            "                    attribute {}{ascending};",
+                            sanitize_ident(name)
+                        );
+                    }
+                    mxrs_model::entity::IndexMemberKind::System(system) => {
+                        let _ = writeln!(
+                            out,
+                            "                    system {}{ascending};",
+                            system.native_name()
+                        );
+                    }
+                    mxrs_model::entity::IndexMemberKind::Unresolved(_) => {
+                        unreachable!("checked before rendering indexes")
+                    }
+                }
+            }
+            if index.include_offline {
+                let _ = writeln!(out, "                    include_offline true;");
+            }
+            let _ = writeln!(out, "                }}");
+        }
+    }
+
+    let lifecycle_is_complete = entity.lifecycle.iter().all(|callback| {
+        matches!(
+            callback.event.as_str(),
+            "before_commit" | "after_commit" | "before_delete" | "after_delete"
+        ) && known_microflows.contains(&callback.handler)
+    });
+    if entity.lifecycle.is_empty() {
+        let _ = writeln!(out, "                clear_lifecycle;");
+    } else if lifecycle_is_complete {
+        for callback in &entity.lifecycle {
+            let handler_path = callback
+                .handler
+                .split('.')
+                .map(sanitize_ident)
+                .collect::<Vec<_>>()
+                .join("::");
+            let _ = writeln!(
+                out,
+                "                {} crate::infrastructure::markers::{handler_path} {{",
+                callback.event
+            );
+            if !callback.pass_event_object {
+                let _ = writeln!(out, "                    pass_event_object false;");
+            }
+            let default_raise = callback.event.starts_with("before_");
+            if callback.raise_error_on_false != default_raise {
+                let _ = writeln!(
+                    out,
+                    "                    raise_error_on_false {};",
+                    callback.raise_error_on_false
+                );
+            }
+            let _ = writeln!(out, "                }}");
         }
     }
 
@@ -2923,7 +3111,7 @@ mod tests {
             }));
         let module = bare_module("Sales", vec![order]);
 
-        let source = render_module(&module, &HashMap::new());
+        let source = render_module(&module, &HashMap::new(), &Default::default());
         assert!(!source.contains("TODO"));
         assert!(source.contains("float Score"));
     }
@@ -3015,7 +3203,7 @@ mod tests {
             .push(association);
 
         let entity_ids = index_entities_by_id(std::slice::from_ref(&module));
-        let source = render_module(&module, &entity_ids);
+        let source = render_module(&module, &entity_ids, &Default::default());
 
         assert!(source.contains("entity Customer"));
         assert!(source.contains("entity Order"));
@@ -3080,6 +3268,18 @@ mod tests {
                 number.required = true;
                 number.unique = true;
                 entity.datetime("SubmittedAt").localize_date = Some(false);
+                entity.system_members(|members| {
+                    members.owner(true).created_date(true);
+                });
+                entity.index(|index| {
+                    index
+                        .attribute::<sales_markers::Order_Number>()
+                        .system_descending(mxrs_ir::SystemMember::CreatedDate)
+                        .include_offline(true);
+                });
+                entity.before_commit::<sales_markers::ACT_Ping>(|callback| {
+                    callback.pass_event_object(false);
+                });
             });
             module.enumeration("Status", |enumeration| {
                 enumeration.documentation("Order lifecycle");
@@ -3238,6 +3438,16 @@ mod tests {
         assert!(entities_source.contains("required true;"));
         assert!(entities_source.contains("unique true;"));
         assert!(entities_source.contains("localize_date false;"));
+        assert!(entities_source.contains("system_members {"));
+        assert!(entities_source.contains("owner true;"));
+        assert!(entities_source.contains("attribute Number;"));
+        assert!(entities_source.contains("system CreatedDate ascending false;"));
+        assert!(entities_source.contains("include_offline true;"));
+        assert!(
+            entities_source
+                .contains("before_commit crate::infrastructure::markers::Sales::ACT_Ping")
+        );
+        assert!(entities_source.contains("pass_event_object false;"));
         let documents =
             std::fs::read_to_string(generated.join("src/domain/documents/mod.rs")).unwrap();
         assert!(documents.contains("module.enumeration(\"Status\""));
@@ -3348,6 +3558,26 @@ mod tests {
             .into_iter()
             .map(|unit| rebuilt.parse_contents(&unit).unwrap())
             .collect::<Vec<_>>();
+        let rebuilt_project = Project::open(&output, true).unwrap();
+        let rebuilt_sales = rebuilt_project
+            .modules()
+            .unwrap()
+            .into_iter()
+            .find(|module| module.name.as_deref() == Some("Sales"))
+            .unwrap();
+        let rebuilt_order = rebuilt_sales
+            .entities()
+            .iter()
+            .find(|entity| entity.name.as_deref() == Some("Order"))
+            .unwrap();
+        assert!(rebuilt_order.system_members.owner);
+        assert!(rebuilt_order.system_members.created_date);
+        assert_eq!(rebuilt_order.indexes.len(), 1);
+        assert_eq!(rebuilt_order.indexes[0].members.len(), 2);
+        assert!(rebuilt_order.indexes[0].include_offline);
+        assert_eq!(rebuilt_order.lifecycle.len(), 1);
+        assert_eq!(rebuilt_order.lifecycle[0].event, "before_commit");
+        assert_eq!(rebuilt_order.lifecycle[0].handler, "Sales.ACT_Ping");
         assert!(documents.iter().any(|document| {
             document.get_str("$Type").ok() == Some("Microflows$Microflow")
                 && document.get_str("Name").ok() == Some("ACT_Ping")
@@ -3452,6 +3682,11 @@ mod tests {
         impl mxrs_ir::MicroflowMarker for ACT_GetOrder {
             const MODULE: &'static str = "Sales";
             const NAME: &'static str = "ACT_GetOrder";
+        }
+        pub struct ACT_Ping;
+        impl mxrs_ir::MicroflowMarker for ACT_Ping {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "ACT_Ping";
         }
         pub struct NF_Validate;
         impl mxrs_ir::NanoflowMarker for NF_Validate {

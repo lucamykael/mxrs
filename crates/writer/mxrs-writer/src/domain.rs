@@ -10,13 +10,11 @@
 //! `write_domain_model` (which mxrb itself reuses for both fresh creation
 //! and incremental resync, unlike the narrower, entity-structure-only
 //! `synchronize_ruby_entity_structures!`). See each function's doc comment
-//! for exactly what's preserved vs. re-derived, and what's still not ported
-//! (indexes/lifecycle/generalization-target reconciliation — `EntityDecl` has
-//! no DSL surface for those yet, so existing entities keep whatever they
-//! already had for those fields, verbatim). Access rules *do* have a DSL
-//! surface now, and are three-state: an entity that declares none keeps its
-//! imported rules verbatim, while a declaration — including an explicitly
-//! empty one — is authoritative.
+//! for exactly what's preserved vs. re-derived. Generalization, system
+//! members, indexes, lifecycle callbacks, and access rules have typed
+//! declaration surfaces. Collections are three-state: absence preserves an
+//! imported value, while a declaration — including an explicitly empty one —
+//! is authoritative. Future-schema fields remain in lossless nested sidecars.
 //!
 //! Cross-module associations mirror mxrb's own `cross_association_doc`:
 //! unlike same-module associations, the target is **not** resolved to an
@@ -44,14 +42,17 @@ use mxrs_bson::{Bson, Document};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
 use mxrs_ir::declaration::{
     AccessMemberKind, AccessRuleDecl, AssociationOwner, AssociationStorage, AssociationType,
-    AttributeDecl, AttributeType, EntityDecl, MemberRights,
+    AttributeDecl, AttributeType, EntityDecl, EntityIndexDecl, EntityInheritanceDecl,
+    IndexMemberDecl, LifecycleDecl, MemberRights, SystemMember,
 };
 use mxrs_model::association::{
     Association, AssociationType as ModelAssociationType, Owner, StorageFormat,
 };
 use mxrs_model::entity::{
     AccessMember as ModelAccessMember, AccessMemberKind as ModelAccessMemberKind,
-    AccessRule as ModelAccessRule, Entity, Location, SystemMembers, access_rule_bson,
+    AccessRule as ModelAccessRule, Entity, EntityIndex, Generalization, IndexMemberKind,
+    IndexedAttribute, IndexedSystemMember, LifecycleCallback, Location, SystemMembers,
+    access_rule_bson,
 };
 use mxrs_model::{Attribute, AttributeType as ModelAttributeType, DomainModel};
 use mxrs_mpr::{MprFile, RawUnit};
@@ -72,6 +73,7 @@ pub fn build_domain_model(
     known_entities: &HashSet<String>,
     identity: ProjectIdentity,
 ) -> Result<(DomainModel, HashMap<String, String>)> {
+    validate_entity_extras(module_name, decls, Some(known_entities))?;
     let mut entity_ids = HashMap::new();
     let mut entities = Vec::with_capacity(decls.len());
     for decl in decls {
@@ -441,8 +443,8 @@ fn find_domain_model_unit(mpr: &MprFile, module_id: &str, module_name: &str) -> 
 /// counterpart — shared by `build_domain_model` (every entity is new) and
 /// `synchronize_domain_entities` (only entities absent from the existing
 /// domain model take this path). Mirrors `Writer#entity_doc`'s `previous:
-/// nil` branch, narrowed to what `EntityDecl` exposes today (no
-/// indexes/access-rules/lifecycle/generalization-target DSL surface yet).
+/// nil` branch, including the complete typed entity structure and behavior
+/// declarations.
 fn fresh_entity(
     module_name: &str,
     decl: &EntityDecl,
@@ -452,6 +454,22 @@ fn fresh_entity(
     let entity_name = format!("{module_name}.{}", decl.name);
     let validation_rules =
         reconcile_validation_rules(module_name, &decl.name, &decl.attributes, vec![], identity);
+    let attributes: Vec<Attribute> = decl
+        .attributes
+        .iter()
+        .map(|attribute| {
+            let qualified_name = format!("{entity_name}.{}", attribute.name);
+            model_attribute(
+                attribute,
+                Some(identity.artifact_id(ArtifactKind::Attribute, &qualified_name)),
+                Some(identity.artifact_id(ArtifactKind::DataStorage, &qualified_name)),
+            )
+        })
+        .collect();
+    let attribute_ids = attributes
+        .iter()
+        .filter_map(|attribute| Some((attribute.name.clone()?, attribute.id.clone()?)))
+        .collect();
     Ok(Entity {
         id: Some(id),
         name: Some(decl.name.clone()),
@@ -462,7 +480,14 @@ fn fresh_entity(
         data_storage_guid: None,
         image: None,
         export_level: "Hidden".into(),
-        generalization: None,
+        generalization: Some(reconcile_generalization(
+            module_name,
+            &decl.name,
+            decl.persistable,
+            decl.inheritance.as_ref(),
+            None,
+            identity,
+        )),
         access_rules: reconcile_access_rules(
             module_name,
             &decl.name,
@@ -471,25 +496,27 @@ fn fresh_entity(
             identity,
         )?
         .unwrap_or_default(),
-        indexes: vec![],
-        system_members: SystemMembers::default(),
-        lifecycle: vec![],
+        indexes: reconcile_indexes(
+            module_name,
+            &decl.name,
+            decl.indexes.as_deref().unwrap_or(&[]),
+            &[],
+            &attribute_ids,
+            identity,
+        )?,
+        system_members: declared_system_members(decl.inheritance.as_ref()),
+        lifecycle: reconcile_lifecycle(
+            module_name,
+            &decl.name,
+            decl.lifecycle.as_deref().unwrap_or(&[]),
+            &[],
+            identity,
+        )?,
         validation_rules,
         source: None,
         oql_query: None,
         native_type: None,
-        attributes: decl
-            .attributes
-            .iter()
-            .map(|attribute| {
-                let qualified_name = format!("{entity_name}.{}", attribute.name);
-                model_attribute(
-                    attribute,
-                    Some(identity.artifact_id(ArtifactKind::Attribute, &qualified_name)),
-                    Some(identity.artifact_id(ArtifactKind::DataStorage, &qualified_name)),
-                )
-            })
-            .collect(),
+        attributes,
     })
 }
 
@@ -603,6 +630,344 @@ fn reconcile_validation_rules(
     output
 }
 
+fn declared_system_members(inheritance: Option<&EntityInheritanceDecl>) -> SystemMembers {
+    match inheritance {
+        Some(EntityInheritanceDecl::Root(members)) => SystemMembers {
+            owner: members.owner,
+            created_date: members.created_date,
+            changed_date: members.changed_date,
+            changed_by: members.changed_by,
+        },
+        _ => SystemMembers::default(),
+    }
+}
+
+fn validate_entity_extras(
+    module_name: &str,
+    entities: &[EntityDecl],
+    known_entities: Option<&HashSet<String>>,
+) -> Result<()> {
+    for entity in entities {
+        if let Some(EntityInheritanceDecl::Generalizes(target)) = &entity.inheritance
+            && (target.is_empty()
+                || known_entities
+                    .is_some_and(|known| !target.starts_with("System.") && !known.contains(target)))
+        {
+            return Err(WriterError::UnknownGeneralizationTarget {
+                module_name: module_name.to_string(),
+                name: entity.name.clone(),
+                target: target.clone(),
+            });
+        }
+
+        let attribute_names: HashSet<&str> = entity
+            .attributes
+            .iter()
+            .map(|attribute| attribute.name.as_str())
+            .collect();
+        let mut signatures = HashSet::new();
+        for index in entity.indexes.as_deref().unwrap_or(&[]) {
+            if index.members.is_empty() {
+                return Err(WriterError::EmptyEntityIndex {
+                    module_name: module_name.to_string(),
+                    name: entity.name.clone(),
+                });
+            }
+            let members: Vec<String> = index
+                .members
+                .iter()
+                .map(|member| match member {
+                    IndexMemberDecl::Attribute { name, .. } => format!("attribute:{name}"),
+                    IndexMemberDecl::System { member, .. } => {
+                        format!("system:{}", member.native_name())
+                    }
+                })
+                .collect();
+            for member in &index.members {
+                if let IndexMemberDecl::Attribute { name, .. } = member
+                    && !attribute_names.contains(name.as_str())
+                {
+                    return Err(WriterError::UnknownIndexedAttribute {
+                        module_name: module_name.to_string(),
+                        name: entity.name.clone(),
+                        attribute: name.clone(),
+                    });
+                }
+            }
+            if !signatures.insert(members.clone()) {
+                return Err(WriterError::DuplicateEntityIndex {
+                    module_name: module_name.to_string(),
+                    name: entity.name.clone(),
+                    members,
+                });
+            }
+        }
+
+        let mut events = HashSet::new();
+        for callback in entity.lifecycle.as_deref().unwrap_or(&[]) {
+            if callback.handler.is_empty() {
+                return Err(WriterError::EmptyLifecycleHandler {
+                    module_name: module_name.to_string(),
+                    name: entity.name.clone(),
+                    event: callback.event.rust_name().to_string(),
+                });
+            }
+            if !events.insert(callback.event) {
+                return Err(WriterError::DuplicateLifecycleEvent {
+                    module_name: module_name.to_string(),
+                    name: entity.name.clone(),
+                    event: callback.event.rust_name().to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_generalization(
+    module_name: &str,
+    entity_name: &str,
+    persistable: bool,
+    declared: Option<&EntityInheritanceDecl>,
+    previous: Option<&Generalization>,
+    identity: ProjectIdentity,
+) -> Generalization {
+    let qualified = format!("{module_name}.{entity_name}");
+    let id = previous
+        .and_then(|generalization| generalization.id.clone())
+        .unwrap_or_else(|| identity.artifact_id(ArtifactKind::EntityGeneralization, &qualified));
+    let raw = previous
+        .map(|generalization| generalization.raw.clone())
+        .unwrap_or_default();
+    match declared {
+        Some(EntityInheritanceDecl::Generalizes(target)) => Generalization {
+            id: Some(id),
+            native_type: "DomainModels$Generalization".to_string(),
+            target: Some(target.clone()),
+            persistable: None,
+            system_members: SystemMembers::default(),
+            raw,
+        },
+        Some(EntityInheritanceDecl::Root(_)) | None => Generalization {
+            id: Some(id),
+            native_type: "DomainModels$NoGeneralization".to_string(),
+            target: None,
+            persistable: Some(persistable),
+            system_members: declared_system_members(declared),
+            raw,
+        },
+    }
+}
+
+fn index_decl_signature(index: &EntityIndexDecl) -> String {
+    index
+        .members
+        .iter()
+        .map(|member| match member {
+            IndexMemberDecl::Attribute { name, .. } => format!("attribute:{name}"),
+            IndexMemberDecl::System { member, .. } => {
+                format!("system:{}", member.native_name())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn model_index_signature(index: &EntityIndex) -> Option<String> {
+    if index.raw.get_str("$Type").ok() != Some("DomainModels$EntityIndex") {
+        return None;
+    }
+    index
+        .members
+        .iter()
+        .map(|member| match &member.kind {
+            IndexMemberKind::Attribute(name) => Some(format!(
+                "attribute:{}",
+                name.rsplit('.').next().unwrap_or(name)
+            )),
+            IndexMemberKind::System(system) => Some(format!("system:{}", system.native_name())),
+            IndexMemberKind::Unresolved(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|members| members.join("+"))
+}
+
+fn model_system_member(member: SystemMember) -> IndexedSystemMember {
+    match member {
+        SystemMember::CreatedDate => IndexedSystemMember::CreatedDate,
+        SystemMember::ChangedDate => IndexedSystemMember::ChangedDate,
+        SystemMember::Owner => IndexedSystemMember::Owner,
+        SystemMember::ChangedBy => IndexedSystemMember::ChangedBy,
+    }
+}
+
+fn reconcile_indexes(
+    module_name: &str,
+    entity_name: &str,
+    declared: &[EntityIndexDecl],
+    previous: &[EntityIndex],
+    attribute_ids: &HashMap<String, String>,
+    identity: ProjectIdentity,
+) -> Result<Vec<EntityIndex>> {
+    let qualified = format!("{module_name}.{entity_name}");
+    let previous_by_signature: HashMap<String, &EntityIndex> = previous
+        .iter()
+        .filter_map(|index| Some((model_index_signature(index)?, index)))
+        .collect();
+    let mut output = Vec::with_capacity(declared.len());
+    for index in declared {
+        let signature = index_decl_signature(index);
+        let prior = previous_by_signature.get(&signature).copied();
+        let index_identity = format!("{qualified}#{signature}");
+        let prior_members: HashMap<String, &IndexedAttribute> = prior
+            .into_iter()
+            .flat_map(|index| &index.members)
+            .filter_map(|member| {
+                let key = match &member.kind {
+                    IndexMemberKind::Attribute(name) => {
+                        format!("attribute:{}", name.rsplit('.').next().unwrap_or(name))
+                    }
+                    IndexMemberKind::System(system) => format!("system:{}", system.native_name()),
+                    IndexMemberKind::Unresolved(_) => return None,
+                };
+                Some((key, member))
+            })
+            .collect();
+        let members = index
+            .members
+            .iter()
+            .map(|member| {
+                let (key, kind, pointer, ascending) = match member {
+                    IndexMemberDecl::Attribute { name, ascending } => (
+                        format!("attribute:{name}"),
+                        IndexMemberKind::Attribute(format!("{qualified}.{name}")),
+                        Some(attribute_ids.get(name).cloned().ok_or_else(|| {
+                            WriterError::UnknownIndexedAttribute {
+                                module_name: module_name.to_string(),
+                                name: entity_name.to_string(),
+                                attribute: name.clone(),
+                            }
+                        })?),
+                        *ascending,
+                    ),
+                    IndexMemberDecl::System { member, ascending } => (
+                        format!("system:{}", member.native_name()),
+                        IndexMemberKind::System(model_system_member(*member)),
+                        Some("00000000-0000-0000-0000-000000000000".to_string()),
+                        *ascending,
+                    ),
+                };
+                let prior = prior_members.get(&key).copied();
+                Ok(IndexedAttribute {
+                    id: Some(
+                        prior
+                            .and_then(|member| member.id.clone())
+                            .unwrap_or_else(|| {
+                                identity.artifact_id(
+                                    ArtifactKind::EntityIndexMember,
+                                    &format!("{index_identity}.{key}"),
+                                )
+                            }),
+                    ),
+                    kind,
+                    attribute_pointer: pointer,
+                    ascending,
+                    raw: prior.map(|member| member.raw.clone()).unwrap_or_default(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        output.push(EntityIndex {
+            id: Some(prior.and_then(|index| index.id.clone()).unwrap_or_else(|| {
+                identity.artifact_id(ArtifactKind::EntityIndex, &index_identity)
+            })),
+            guid: Some(
+                prior
+                    .and_then(|index| index.guid.clone())
+                    .unwrap_or_else(|| {
+                        identity.artifact_id(ArtifactKind::DataStorage, &index_identity)
+                    }),
+            ),
+            include_offline: index.include_offline,
+            members,
+            raw: prior.map(|index| index.raw.clone()).unwrap_or_default(),
+        });
+    }
+    // Future-schema indexes stay byte-preserved even when typed indexes are
+    // authoritative. They are explicit `Unresolved` values in the model API,
+    // never silently mistaken for a supported declaration.
+    output.extend(
+        previous
+            .iter()
+            .filter(|index| model_index_signature(index).is_none())
+            .cloned(),
+    );
+    Ok(output)
+}
+
+fn reconcile_lifecycle(
+    module_name: &str,
+    entity_name: &str,
+    declared: &[LifecycleDecl],
+    previous: &[LifecycleCallback],
+    identity: ProjectIdentity,
+) -> Result<Vec<LifecycleCallback>> {
+    let qualified = format!("{module_name}.{entity_name}");
+    let previous_by_event: HashMap<&str, &LifecycleCallback> = previous
+        .iter()
+        .filter(|callback| lifecycle_callback_is_supported(callback))
+        .map(|callback| (callback.event.as_str(), callback))
+        .collect();
+    let mut output = Vec::with_capacity(declared.len());
+    for declaration in declared {
+        let event = declaration.event.rust_name();
+        let previous = previous_by_event.get(event).copied();
+        let (moment, native_event) = declaration.event.native_parts();
+        let mut raw = previous
+            .map(|callback| callback.raw.clone())
+            .unwrap_or_default();
+        raw.insert("$Type", "DomainModels$EventHandler");
+        raw.insert("Moment", moment);
+        raw.insert("Event", native_event);
+        raw.insert("Microflow", declaration.handler.clone());
+        raw.insert("PassEventObject", declaration.pass_event_object);
+        raw.insert("RaiseErrorOnFalse", declaration.raise_error_on_false);
+        output.push(LifecycleCallback {
+            id: Some(
+                previous
+                    .and_then(|callback| callback.id.clone())
+                    .unwrap_or_else(|| {
+                        identity.artifact_id(
+                            ArtifactKind::LifecycleCallback,
+                            &format!("{qualified}.{event}"),
+                        )
+                    }),
+            ),
+            event: event.to_string(),
+            handler: declaration.handler.clone(),
+            pass_event_object: declaration.pass_event_object,
+            raise_error_on_false: declaration.raise_error_on_false,
+            raw,
+        });
+    }
+    // Preserve future lifecycle kinds losslessly, while known callbacks are
+    // controlled by their one typed event declaration.
+    output.extend(
+        previous
+            .iter()
+            .filter(|callback| !lifecycle_callback_is_supported(callback))
+            .cloned(),
+    );
+    Ok(output)
+}
+
+fn lifecycle_callback_is_supported(callback: &LifecycleCallback) -> bool {
+    callback.raw.get_str("$Type").ok() == Some("DomainModels$EventHandler")
+        && matches!(
+            callback.event.as_str(),
+            "before_commit" | "after_commit" | "before_delete" | "after_delete"
+        )
+}
+
 /// Rebuilds one attribute doc for a declared `AttributeDecl`, preserving the
 /// prior attribute's `$ID`/`dataStorageGuid` when its name matches — every
 /// other field (type, default, length, ...) is fully re-derived from the
@@ -665,15 +1030,15 @@ fn reconcile_attribute_doc(
 
 /// Rebuilds one entity doc for a declared `EntityDecl` against its prior
 /// on-disk counterpart (`None` for a brand-new entity). For an existing
-/// entity, everything **not** explicitly re-declared — `location`,
-/// `generalization`, `accessRules`, `indexes`, `eventHandlers`,
-/// `source`/`oqlQuery`, and any unknown/foreign fields —
+/// entity, everything **not** explicitly re-declared — including `location`,
+/// inheritance, access rules, indexes, callbacks, `source`/`oqlQuery`, and
+/// unknown/foreign fields —
 /// survives untouched, because this merges onto a clone of the prior raw
-/// document rather than rebuilding it from `Entity::to_bson` (which has no
-/// surface to round-trip those fields — see its doc comment). `name`,
-/// `documentation`, attributes, and required/unique validation rules are
-/// authoritative; unrelated validation-rule kinds remain untouched.
-/// Mirrors `Writer#entity_doc`, narrowed the same way `fresh_entity` is.
+/// document. Any `Some` declaration is authoritative and reconciles nested
+/// IDs by semantic identity; `None` preserves the corresponding native
+/// structure byte-for-byte. `name`, documentation, attributes, and
+/// required/unique validation rules are always authoritative; unrelated
+/// validation-rule kinds remain untouched.
 fn build_entity_doc(
     module_name: &str,
     decl: &EntityDecl,
@@ -686,6 +1051,7 @@ fn build_entity_doc(
         return Ok(fresh_entity(module_name, decl, id, identity)?.to_bson());
     };
 
+    let previous_entity = Entity::from_bson(prev);
     let mut out = prev.clone();
     out.insert("$ID", id);
     let name_key = native_key(prev, "name", "Name");
@@ -716,6 +1082,70 @@ fn build_entity_doc(
         attrs_key,
         Bson::Array(mxrs_bson::build_array(new_attrs, prev_attrs_raw.marker)),
     );
+    let updated_entity = Entity::from_bson(&out);
+    let attribute_ids: HashMap<String, String> = updated_entity
+        .attributes
+        .iter()
+        .filter_map(|attribute| Some((attribute.name.clone()?, attribute.id.clone()?)))
+        .collect();
+
+    if let Some(inheritance) = decl.inheritance.as_ref() {
+        let generalization = reconcile_generalization(
+            module_name,
+            &decl.name,
+            decl.persistable,
+            Some(inheritance),
+            previous_entity.generalization.as_ref(),
+            identity,
+        );
+        let key = native_key(prev, "generalization", "Generalization");
+        out.insert(key, generalization.to_bson());
+    }
+
+    if let Some(indexes) = decl.indexes.as_deref() {
+        let key = native_key(prev, "indexes", "Indexes");
+        let marker = mxrs_bson::parse_array(array_field(prev, key)).marker;
+        let reconciled = reconcile_indexes(
+            module_name,
+            &decl.name,
+            indexes,
+            &previous_entity.indexes,
+            &attribute_ids,
+            identity,
+        )?;
+        out.insert(
+            key,
+            Bson::Array(mxrs_bson::build_array(
+                reconciled
+                    .iter()
+                    .map(|index| Bson::Document(index.to_bson()))
+                    .collect(),
+                marker,
+            )),
+        );
+    }
+
+    if let Some(callbacks) = decl.lifecycle.as_deref() {
+        let key = native_key(prev, "eventHandlers", "EventHandlers");
+        let marker = mxrs_bson::parse_array(array_field(prev, key)).marker;
+        let reconciled = reconcile_lifecycle(
+            module_name,
+            &decl.name,
+            callbacks,
+            &previous_entity.lifecycle,
+            identity,
+        )?;
+        out.insert(
+            key,
+            Bson::Array(mxrs_bson::build_array(
+                reconciled
+                    .iter()
+                    .map(|callback| Bson::Document(callback.to_bson()))
+                    .collect(),
+                marker,
+            )),
+        );
+    }
     let validation_key = native_key(prev, "validationRules", "ValidationRules");
     let previous_validation = mxrs_bson::parse_array(array_field(prev, validation_key));
     let previous_documents = previous_validation
@@ -801,6 +1231,7 @@ pub fn synchronize_domain_entities(
     module_name: &str,
     entities: &[EntityDecl],
 ) -> Result<HashMap<String, String>> {
+    validate_entity_extras(module_name, entities, None)?;
     let identity = project_identity(mpr)?;
     let dm_unit = find_domain_model_unit(mpr, module_id, module_name)?;
     let dm_id = dm_unit.unit_id.clone();
@@ -875,6 +1306,7 @@ pub fn synchronize_domain_model(
     entities: &[EntityDecl],
     known_entities: &HashSet<String>,
 ) -> Result<()> {
+    validate_entity_extras(module_name, entities, Some(known_entities))?;
     synchronize_domain_entities(mpr, module_id, module_name, entities)?;
     synchronize_domain_associations(mpr, module_id, module_name, entities, known_entities)?;
     Ok(())
@@ -1061,6 +1493,10 @@ fn rights_name(rights: MemberRights) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mxrs_ir::{
+        EntityIndexDecl, EntityInheritanceDecl, IndexMemberDecl, LifecycleDecl, LifecycleEvent,
+        SystemMembersDecl,
+    };
 
     #[test]
     fn absent_imported_attribute_default_is_not_materialized_as_an_empty_string() {
@@ -1084,5 +1520,128 @@ mod tests {
                 .unwrap()
                 .contains_key("defaultValue")
         );
+    }
+
+    #[test]
+    fn semantic_entity_extras_keep_nested_identity_and_unknown_fields() {
+        let identity = ProjectIdentity::for_project("EntityExtras");
+        let attribute_id = uuid::Uuid::new_v4().to_string();
+        let index_id = uuid::Uuid::new_v4().to_string();
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let callback_id = uuid::Uuid::new_v4().to_string();
+        let previous = Entity::from_bson(&mxrs_bson::doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$QualifiedName": "Sales.Order",
+            "name": "Order",
+            "attributes": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                "$ID": attribute_id.clone(), "name": "Number",
+                "type": { "$Type": "DomainModels$StringAttributeType" },
+            })], 3),
+            "indexes": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                "$ID": index_id.clone(), "$Type": "DomainModels$EntityIndex",
+                "GUID": uuid::Uuid::new_v4().to_string(),
+                "IncludeInOffline": false, "FutureIndexField": "keep",
+                "Attributes": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                    "$ID": member_id.clone(), "$Type": "DomainModels$IndexedAttribute",
+                    "Type": "Normal", "AttributePointer": attribute_id.clone(),
+                    "AssociationPointer": "00000000-0000-0000-0000-000000000000",
+                    "Ascending": true, "FutureMemberField": "keep",
+                })], 3),
+            })], 3),
+            "eventHandlers": mxrs_bson::build_array(vec![Bson::Document(mxrs_bson::doc! {
+                "$ID": callback_id.clone(), "$Type": "DomainModels$EventHandler",
+                "Moment": "Before", "Event": "Commit", "Microflow": "Sales.Old",
+                "PassEventObject": true, "RaiseErrorOnFalse": true,
+                "FutureCallbackField": "keep",
+            })], 3),
+        });
+        let indexes = reconcile_indexes(
+            "Sales",
+            "Order",
+            &[EntityIndexDecl {
+                members: vec![IndexMemberDecl::Attribute {
+                    name: "Number".to_string(),
+                    ascending: false,
+                }],
+                include_offline: true,
+            }],
+            &previous.indexes,
+            &HashMap::from([("Number".to_string(), attribute_id)]),
+            identity,
+        )
+        .unwrap();
+        assert_eq!(indexes[0].id.as_deref(), Some(index_id.as_str()));
+        assert_eq!(
+            indexes[0].members[0].id.as_deref(),
+            Some(member_id.as_str())
+        );
+        let index = indexes[0].to_bson();
+        assert_eq!(index.get_str("FutureIndexField").unwrap(), "keep");
+        assert!(index.get_bool("IncludeInOffline").unwrap());
+        let member = mxrs_bson::parse_array(index.get_array("Attributes").ok().map(Vec::as_slice))
+            .items
+            .remove(0);
+        let member = member.as_document().unwrap();
+        assert_eq!(member.get_str("FutureMemberField").unwrap(), "keep");
+        assert!(!member.get_bool("Ascending").unwrap());
+
+        let callbacks = reconcile_lifecycle(
+            "Sales",
+            "Order",
+            &[LifecycleDecl {
+                event: LifecycleEvent::BeforeCommit,
+                handler: "Sales.New".to_string(),
+                pass_event_object: false,
+                raise_error_on_false: true,
+            }],
+            &previous.lifecycle,
+            identity,
+        )
+        .unwrap();
+        assert_eq!(callbacks[0].id.as_deref(), Some(callback_id.as_str()));
+        let callback = callbacks[0].to_bson();
+        assert_eq!(callback.get_str("FutureCallbackField").unwrap(), "keep");
+        assert_eq!(callback.get_str("Microflow").unwrap(), "Sales.New");
+        assert!(!callback.get_bool("PassEventObject").unwrap());
+    }
+
+    #[test]
+    fn entity_extra_validation_fails_closed() {
+        let mut entity = EntityDecl::new("Order");
+        entity
+            .attributes
+            .push(AttributeDecl::new("Number", AttributeType::String));
+        entity.indexes = Some(vec![EntityIndexDecl {
+            members: vec![IndexMemberDecl::Attribute {
+                name: "Missing".to_string(),
+                ascending: true,
+            }],
+            include_offline: false,
+        }]);
+        let error = validate_entity_extras("Sales", &[entity], None).unwrap_err();
+        assert!(
+            matches!(error, WriterError::UnknownIndexedAttribute { attribute, .. } if attribute == "Missing")
+        );
+
+        let mut child = EntityDecl::new("Child");
+        child.inheritance = Some(EntityInheritanceDecl::Root(SystemMembersDecl::default()));
+        child.lifecycle = Some(vec![
+            LifecycleDecl {
+                event: LifecycleEvent::AfterCommit,
+                handler: "Sales.One".to_string(),
+                pass_event_object: true,
+                raise_error_on_false: false,
+            },
+            LifecycleDecl {
+                event: LifecycleEvent::AfterCommit,
+                handler: "Sales.Two".to_string(),
+                pass_event_object: true,
+                raise_error_on_false: false,
+            },
+        ]);
+        assert!(matches!(
+            validate_entity_extras("Sales", &[child], None).unwrap_err(),
+            WriterError::DuplicateLifecycleEvent { .. }
+        ));
     }
 }

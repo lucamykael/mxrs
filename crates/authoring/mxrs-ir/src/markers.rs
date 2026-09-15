@@ -69,6 +69,29 @@ pub trait EntityMarker: 'static {
     }
 }
 
+/// Built-in Mendix system entities that application entities may specialize.
+/// Keeping these as ordinary marker types gives `generalizes` the same
+/// compile-time guarantee as an application-owned parent without asking a
+/// generated project to redeclare the System module.
+#[allow(non_snake_case)]
+pub mod system {
+    use super::EntityMarker;
+
+    macro_rules! system_entity {
+        ($name:ident) => {
+            pub struct $name;
+            impl EntityMarker for $name {
+                const MODULE: &'static str = "System";
+                const NAME: &'static str = stringify!($name);
+            }
+        };
+    }
+
+    system_entity!(User);
+    system_entity!(FileDocument);
+    system_entity!(Image);
+}
+
 /// Implemented by a Cargo-native Mendix enumeration. Attribute derives use
 /// this marker to resolve the qualified name without embedding a string.
 pub trait EnumerationMarker: 'static {

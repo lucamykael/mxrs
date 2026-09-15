@@ -14,16 +14,15 @@
 //! structs applies here too: no reason to re-parse what Phase 2 already
 //! decoded). Two consequences worth calling out:
 //!
-//! - `mxrs-model::Entity`'s `access_rules`/`indexes`/`validation_rules`
-//!   collapse some editor nuance the Runtime compiler needs back: an
-//!   entity's own `MaybeGeneralization` sub-document is kept **raw**
-//!   (`Entity.generalization`) specifically because `inherited_flags`
+//! - `mxrs-model::Entity` exposes generalization and indexes semantically and
+//!   keeps a lossless editor sidecar on each typed value. An entity's own
+//!   `MaybeGeneralization` sidecar is read by `inherited_flags`
 //!   (below) needs to distinguish "this entity's own doc doesn't set
 //!   `Persistable`" from "this entity's own doc sets `Persistable: false`"
 //!   — `mxrs-model`'s own summarized `Entity.persistable`/`SystemMembers`
 //!   fields already collapsed that distinction (defaults `false` either
-//!   way), so this crate recomputes the walk directly off the raw doc
-//!   instead of reusing those fields.
+//!   way), so this crate recomputes the walk from that sidecar instead of
+//!   reusing those fields.
 //! - `mxrs-model` retains the raw fields whose Runtime representation is
 //!   opaque (`Image`, association `Source`/`GUID`, and lifecycle handler
 //!   documents), while this pass builds a project-wide index for OQL
@@ -142,7 +141,7 @@ impl<'a> DomainCompiler<'a> {
                 Bson::Document(document) => document,
                 _ => unreachable!("plain_value preserves documents"),
             }).collect::<Vec<_>>(),
-            "Indexes": entity.indexes.iter().map(compile_index).collect::<Vec<_>>(),
+            "Indexes": entity.indexes.iter().map(|index| compile_index(&index.raw)).collect::<Vec<_>>(),
             "AccessRules": entity.access_rules.iter().map(|rule| self.security.access_rule(rule)).collect::<Vec<_>>(),
         }
     }
@@ -199,19 +198,17 @@ impl<'a> DomainCompiler<'a> {
                 "Generalization": "",
             };
         };
-        let type_name = get_str_any(generalization, &["$Type"])
-            .unwrap_or_else(|| "DomainModels$NoGeneralization".to_string());
-        let flags = self.generalization_flags(generalization, &type_name, 0);
+        let source = generalization.to_bson();
+        let type_name = generalization.native_type.clone();
+        let flags = self.generalization_flags(&source, &type_name, 0);
         let mut result = doc! {
-            "$ID": get_id_any(generalization, &["$ID"]).unwrap_or_else(new_id),
+            "$ID": generalization.id.clone().unwrap_or_else(new_id),
             "$Type": type_name.clone(),
         };
         if type_name == "DomainModels$NoGeneralization" {
             result.insert(
                 "Key",
-                get_any(generalization, &["Key"])
-                    .cloned()
-                    .unwrap_or(Bson::Null),
+                get_any(&source, &["Key"]).cloned().unwrap_or(Bson::Null),
             );
         }
         result.insert("Persistable", flags.persistable);
@@ -221,7 +218,7 @@ impl<'a> DomainCompiler<'a> {
         result.insert("HasChangedByAttr", flags.has_changed_by);
         result.insert(
             "Generalization",
-            get_str_any(generalization, &["Generalization", "generalization"]).unwrap_or_default(),
+            generalization.target.clone().unwrap_or_default(),
         );
         result
     }
@@ -272,9 +269,9 @@ impl<'a> DomainCompiler<'a> {
         let Some(generalization) = parent.generalization.as_ref() else {
             return GeneralizationFlags::system();
         };
-        let type_name = get_str_any(generalization, &["$Type"])
-            .unwrap_or_else(|| "DomainModels$NoGeneralization".to_string());
-        self.generalization_flags(generalization, &type_name, depth)
+        let source = generalization.to_bson();
+        let type_name = generalization.native_type.clone();
+        self.generalization_flags(&source, &type_name, depth)
     }
 }
 

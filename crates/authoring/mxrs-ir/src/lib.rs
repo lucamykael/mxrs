@@ -21,11 +21,14 @@ pub use application::{
 pub use declaration::{
     AccessMemberKind, AccessRuleDecl, AssociationDecl, AssociationOwner, AssociationStorage,
     AssociationType, AttributeDecl, AttributeType, ConstantDecl, ConstantType, EntityDecl,
-    EnumerationDecl, EnumerationValueDecl, ExportLevel, LocalizedText, MemberAccessDecl,
-    MemberRights, MenuActionDecl, MenuDecl, MenuIconDecl, MenuItemDecl, ModuleDecl, OnOverlap,
-    ProjectDecl, RegularExpressionDecl, ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule,
+    EntityIndexDecl, EntityInheritanceDecl, EnumerationDecl, EnumerationValueDecl, ExportLevel,
+    IndexMemberDecl, LifecycleDecl, LifecycleEvent, LocalizedText, MemberAccessDecl, MemberRights,
+    MenuActionDecl, MenuDecl, MenuIconDecl, MenuItemDecl, ModuleDecl, OnOverlap, ProjectDecl,
+    RegularExpressionDecl, ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule, SystemMember,
+    SystemMembersDecl,
 };
 pub use flow::{Activity, Member, MicroflowCallMapping, MicroflowDecl};
+pub use markers::system;
 pub use markers::{
     AssociationMarker, AttributeMarker, EntityMarker, EnumerationMarker, MicroflowMarker,
     MicroflowRef, NanoflowMarker, NanoflowRef, Ref, Reference, ReferenceSet,

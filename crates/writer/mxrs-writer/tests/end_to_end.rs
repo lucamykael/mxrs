@@ -55,6 +55,11 @@ mod markers {
             const MODULE: &'static str = "Sales";
             const NAME: &'static str = "ACT_Notify";
         }
+        pub struct ACT_Missing;
+        impl mxrs_ir::MicroflowMarker for ACT_Missing {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "ACT_Missing";
+        }
         pub struct Order_Order_Customer;
         impl mxrs_ir::AssociationMarker for Order_Order_Customer {
             type From = Order;
@@ -856,6 +861,24 @@ fn synchronize_domain_entities_rejects_duplicate_declared_names() {
         err,
         mxrs_writer::WriterError::DuplicateEntity { module_name, name }
             if module_name == "Sales" && name == "Order"
+    ));
+}
+
+#[test]
+fn project_write_rejects_a_lifecycle_handler_missing_from_the_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("MissingLifecycleHandler.mpr");
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |module| {
+        module.entity("Order", |entity| {
+            entity.before_commit::<markers::Sales::ACT_Missing>(|_| {});
+        });
+    });
+    let error = mxrs_writer::write_project(&path, &project.build()).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::UnknownLifecycleHandler { handler, .. }
+            if handler == "Sales.ACT_Missing"
     ));
 }
 

@@ -109,6 +109,51 @@ pub enum WriterError {
     )]
     AccessRuleWithoutRoles { module_name: String, name: String },
 
+    #[error("entity {module_name}.{name} declares an empty index")]
+    EmptyEntityIndex { module_name: String, name: String },
+
+    #[error("entity {module_name}.{name} index references unknown attribute {attribute:?}")]
+    UnknownIndexedAttribute {
+        module_name: String,
+        name: String,
+        attribute: String,
+    },
+
+    #[error("entity {module_name}.{name} declares duplicate indexes with members {members:?}")]
+    DuplicateEntityIndex {
+        module_name: String,
+        name: String,
+        members: Vec<String>,
+    },
+
+    #[error("entity {module_name}.{name} declares duplicate lifecycle event {event:?}")]
+    DuplicateLifecycleEvent {
+        module_name: String,
+        name: String,
+        event: String,
+    },
+
+    #[error("entity {module_name}.{name} lifecycle event {event:?} has an empty handler")]
+    EmptyLifecycleHandler {
+        module_name: String,
+        name: String,
+        event: String,
+    },
+
+    #[error("entity {entity:?} lifecycle event {event:?} references unknown microflow {handler:?}")]
+    UnknownLifecycleHandler {
+        entity: String,
+        event: String,
+        handler: String,
+    },
+
+    #[error("entity {module_name}.{name} generalizes unknown entity {target:?}")]
+    UnknownGeneralizationTarget {
+        module_name: String,
+        name: String,
+        target: String,
+    },
+
     #[error("duplicate constant {module_name}.{name:?} declared while synchronizing")]
     DuplicateConstant { module_name: String, name: String },
 
@@ -145,6 +190,9 @@ pub enum WriterError {
 
     #[error("MPR I/O error: {0}")]
     Mpr(#[from] mxrs_mpr::MprError),
+
+    #[error("model read error: {0}")]
+    Model(#[from] mxrs_model::ModelError),
 
     #[error("project scaffolding error: {0}")]
     ProjectTemplate(#[from] mxrs_schema::ProjectTemplateError),

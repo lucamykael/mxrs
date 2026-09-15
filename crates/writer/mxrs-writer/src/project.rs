@@ -18,6 +18,7 @@ use crate::error::{Result, WriterError};
 use crate::{documents, domain, module, navigation, scaffold, security};
 
 pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()> {
+    validate_lifecycle_handlers(project, &HashSet::new())?;
     let path = path.as_ref();
     let schema_hash = mxrs_schema::schema_hash(&project.mendix_version)
         .ok_or_else(|| WriterError::UnsupportedVersion(project.mendix_version.clone()))?;
@@ -73,6 +74,21 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
 /// might be intentionally untouched, e.g. one only ever edited directly in
 /// Studio Pro, not through `mxrs-exporter`).
 pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()> {
+    let path = path.as_ref();
+    let existing_project = mxrs_model::Project::open(path, true)?;
+    let existing_microflows: HashSet<String> = existing_project
+        .modules()?
+        .into_iter()
+        .flat_map(|module| {
+            let module_name = module.name.unwrap_or_else(|| "Unnamed".to_string());
+            module
+                .microflows
+                .into_iter()
+                .filter_map(move |flow| Some(format!("{module_name}.{}", flow.name?)))
+        })
+        .collect();
+    drop(existing_project);
+    validate_lifecycle_handlers(project, &existing_microflows)?;
     let mut mpr = MprFile::open(path, false)?;
     let root_id = mpr
         .root_unit()?
@@ -277,6 +293,37 @@ fn known_entities(project: &ProjectDecl) -> HashSet<String> {
                 .map(move |e| format!("{}.{}", m.name, e.name))
         })
         .collect()
+}
+
+fn validate_lifecycle_handlers(
+    project: &ProjectDecl,
+    existing_microflows: &HashSet<String>,
+) -> Result<()> {
+    let mut microflows: HashSet<String> = project
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module
+                .microflows
+                .iter()
+                .map(move |flow| format!("{}.{}", module.name, flow.name))
+        })
+        .collect();
+    microflows.extend(existing_microflows.iter().cloned());
+    for module in &project.modules {
+        for entity in &module.entities {
+            for callback in entity.lifecycle.as_deref().unwrap_or(&[]) {
+                if !microflows.contains(&callback.handler) {
+                    return Err(WriterError::UnknownLifecycleHandler {
+                        entity: format!("{}.{}", module.name, entity.name),
+                        event: callback.event.rust_name().to_string(),
+                        handler: callback.handler.clone(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn existing_module_ids_by_name(

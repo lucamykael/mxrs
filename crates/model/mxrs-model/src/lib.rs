@@ -26,7 +26,9 @@ mod support;
 pub use association::Association;
 pub use attribute::{Attribute, AttributeType};
 pub use domain_model::DomainModel;
-pub use entity::Entity;
+pub use entity::{
+    Entity, EntityIndex, Generalization, IndexMemberKind, IndexedAttribute, IndexedSystemMember,
+};
 pub use error::{ModelError, Result};
 pub use menu::{Menu, MenuItem};
 pub use microflow::Microflow;

@@ -6,9 +6,20 @@
 //! module     := "module" <ident> "{" <module-item>* "}"
 //! module-item:= <entity> | <microflow> | <nanoflow>
 //! entity     := "entity" <ident> "{" <entity-item>* "}"
-//! entity-item:= <attribute> | <association>
+//! entity-item:= <attribute> | <association> | <inheritance> | <index>
+//!             | <lifecycle> | "clear_indexes" ";" | "clear_lifecycle" ";"
 //!             | "documentation" <string-lit> ";"
 //!             | "persistable" <bool-lit> ";"
+//! inheritance:= "generalizes" <rust-path> ";"
+//!             | "system_members" "{" <system-member-option>* "}"
+//! system-member-option := ("owner" | "created_date" | "changed_date" | "changed_by") <bool-lit> ";"
+//! index      := "index" "{" <index-item>* "}"
+//! index-item := ("attribute" <ident> | "system" <system-member>) ("ascending" <bool-lit>)? ";"
+//!             | "include_offline" <bool-lit> ";"
+//! lifecycle  := ("before_commit" | "after_commit" | "before_delete" | "after_delete")
+//!               <rust-path> (";" | "{" <lifecycle-option>* "}" ";"?)
+//! lifecycle-option := "pass_event_object" <bool-lit> ";"
+//!                   | "raise_error_on_false" <bool-lit> ";"
 //! attribute  := <attr-kind> <ident> ("(" <expr> ")")? ("=" <expr>)?
 //!               (";" | "{" <attribute-option>* "}" ";"?)
 //! attribute-option := "documentation" <string-lit> ";" | "length" <int-lit> ";"
@@ -98,6 +109,42 @@ pub struct EntityInput {
     pub persistable: Option<syn::LitBool>,
     pub attributes: Vec<AttributeInput>,
     pub associations: Vec<AssociationInput>,
+    pub inheritance: Option<InheritanceInput>,
+    pub indexes: Option<Vec<IndexInput>>,
+    pub lifecycle: Option<Vec<LifecycleInput>>,
+}
+
+pub enum InheritanceInput {
+    Root {
+        owner: Option<syn::LitBool>,
+        created_date: Option<syn::LitBool>,
+        changed_date: Option<syn::LitBool>,
+        changed_by: Option<syn::LitBool>,
+    },
+    Generalizes(syn::Path),
+}
+
+pub struct IndexInput {
+    pub members: Vec<IndexMemberInput>,
+    pub include_offline: Option<syn::LitBool>,
+}
+
+pub enum IndexMemberInput {
+    Attribute {
+        name: Ident,
+        ascending: Option<syn::LitBool>,
+    },
+    System {
+        member: Ident,
+        ascending: Option<syn::LitBool>,
+    },
+}
+
+pub struct LifecycleInput {
+    pub event: Ident,
+    pub handler: syn::Path,
+    pub pass_event_object: Option<syn::LitBool>,
+    pub raise_error_on_false: Option<syn::LitBool>,
 }
 
 pub struct MicroflowInput {
@@ -300,10 +347,66 @@ impl Parse for EntityInput {
         let mut persistable: Option<syn::LitBool> = None;
         let mut attributes = Vec::new();
         let mut associations = Vec::new();
+        let mut inheritance = None;
+        let mut indexes = None;
+        let mut lifecycle = None;
         while !content.is_empty() {
             let peeked: Ident = content.fork().parse()?;
             if peeked == "association" {
                 associations.push(content.parse()?);
+            } else if peeked == "generalizes" {
+                let keyword: Ident = content.parse()?;
+                let target = content.parse()?;
+                content.parse::<Token![;]>()?;
+                if inheritance.is_some() {
+                    return Err(syn::Error::new(
+                        keyword.span(),
+                        "duplicate entity inheritance",
+                    ));
+                }
+                inheritance = Some(InheritanceInput::Generalizes(target));
+            } else if peeked == "system_members" {
+                let keyword: Ident = content.parse()?;
+                if inheritance.is_some() {
+                    return Err(syn::Error::new(
+                        keyword.span(),
+                        "duplicate entity inheritance",
+                    ));
+                }
+                inheritance = Some(parse_system_members(&content)?);
+            } else if peeked == "index" {
+                indexes
+                    .get_or_insert_with(Vec::new)
+                    .push(parse_index(&content)?);
+            } else if peeked == "clear_indexes" {
+                content.parse::<Ident>()?;
+                content.parse::<Token![;]>()?;
+                if indexes
+                    .as_ref()
+                    .is_some_and(|values: &Vec<IndexInput>| !values.is_empty())
+                {
+                    return Err(content.error("`clear_indexes` conflicts with declared indexes"));
+                }
+                indexes = Some(vec![]);
+            } else if peeked == "clear_lifecycle" {
+                content.parse::<Ident>()?;
+                content.parse::<Token![;]>()?;
+                if lifecycle
+                    .as_ref()
+                    .is_some_and(|values: &Vec<LifecycleInput>| !values.is_empty())
+                {
+                    return Err(
+                        content.error("`clear_lifecycle` conflicts with declared callbacks")
+                    );
+                }
+                lifecycle = Some(vec![]);
+            } else if matches!(
+                peeked.to_string().as_str(),
+                "before_commit" | "after_commit" | "before_delete" | "after_delete"
+            ) {
+                lifecycle
+                    .get_or_insert_with(Vec::new)
+                    .push(parse_lifecycle(&content)?);
             } else if peeked == "documentation" {
                 content.parse::<Ident>()?;
                 let lit: LitStr = content.parse()?;
@@ -330,8 +433,134 @@ impl Parse for EntityInput {
             persistable,
             attributes,
             associations,
+            inheritance,
+            indexes,
+            lifecycle,
         })
     }
+}
+
+fn parse_system_members(input: ParseStream) -> Result<InheritanceInput> {
+    let content;
+    braced!(content in input);
+    let mut owner = None;
+    let mut created_date = None;
+    let mut changed_date = None;
+    let mut changed_by = None;
+    while !content.is_empty() {
+        let name: Ident = content.parse()?;
+        let value: syn::LitBool = content.parse()?;
+        content.parse::<Token![;]>()?;
+        let slot = match name.to_string().as_str() {
+            "owner" => &mut owner,
+            "created_date" => &mut created_date,
+            "changed_date" => &mut changed_date,
+            "changed_by" => &mut changed_by,
+            _ => return Err(syn::Error::new(name.span(), "unknown system member")),
+        };
+        if slot.replace(value).is_some() {
+            return Err(syn::Error::new(name.span(), "duplicate system member"));
+        }
+    }
+    Ok(InheritanceInput::Root {
+        owner,
+        created_date,
+        changed_date,
+        changed_by,
+    })
+}
+
+fn parse_index(input: ParseStream) -> Result<IndexInput> {
+    expect_keyword(input, "index")?;
+    let content;
+    braced!(content in input);
+    let mut members = Vec::new();
+    let mut include_offline = None;
+    while !content.is_empty() {
+        let keyword: Ident = content.parse()?;
+        match keyword.to_string().as_str() {
+            "attribute" | "system" => {
+                let name = content.parse()?;
+                let ascending = if peek_keyword(&content, "ascending") {
+                    content.parse::<Ident>()?;
+                    Some(content.parse()?)
+                } else {
+                    None
+                };
+                content.parse::<Token![;]>()?;
+                if keyword == "attribute" {
+                    members.push(IndexMemberInput::Attribute { name, ascending });
+                } else {
+                    if !matches!(
+                        name.to_string().as_str(),
+                        "CreatedDate" | "ChangedDate" | "Owner" | "ChangedBy"
+                    ) {
+                        return Err(syn::Error::new(
+                            name.span(),
+                            "unknown indexed system member",
+                        ));
+                    }
+                    members.push(IndexMemberInput::System {
+                        member: name,
+                        ascending,
+                    });
+                }
+            }
+            "include_offline" => {
+                let value = content.parse()?;
+                content.parse::<Token![;]>()?;
+                if include_offline.replace(value).is_some() {
+                    return Err(syn::Error::new(
+                        keyword.span(),
+                        "duplicate `include_offline`",
+                    ));
+                }
+            }
+            _ => return Err(syn::Error::new(keyword.span(), "unknown index option")),
+        }
+    }
+    if members.is_empty() {
+        return Err(input.error("an index requires at least one member"));
+    }
+    Ok(IndexInput {
+        members,
+        include_offline,
+    })
+}
+
+fn parse_lifecycle(input: ParseStream) -> Result<LifecycleInput> {
+    let event: Ident = input.parse()?;
+    let handler = input.parse()?;
+    let mut pass_event_object = None;
+    let mut raise_error_on_false = None;
+    if input.peek(Token![;]) {
+        input.parse::<Token![;]>()?;
+    } else {
+        let content;
+        braced!(content in input);
+        while !content.is_empty() {
+            let option: Ident = content.parse()?;
+            let value: syn::LitBool = content.parse()?;
+            content.parse::<Token![;]>()?;
+            let slot = match option.to_string().as_str() {
+                "pass_event_object" => &mut pass_event_object,
+                "raise_error_on_false" => &mut raise_error_on_false,
+                _ => return Err(syn::Error::new(option.span(), "unknown lifecycle option")),
+            };
+            if slot.replace(value).is_some() {
+                return Err(syn::Error::new(option.span(), "duplicate lifecycle option"));
+            }
+        }
+        if input.peek(Token![;]) {
+            input.parse::<Token![;]>()?;
+        }
+    }
+    Ok(LifecycleInput {
+        event,
+        handler,
+        pass_event_object,
+        raise_error_on_false,
+    })
 }
 
 impl Parse for MicroflowInput {

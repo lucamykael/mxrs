@@ -174,6 +174,133 @@ pub struct EntityDecl {
     /// `Some` is authoritative, including an explicitly empty rule set — the
     /// same split [`ModuleDecl::roles`] draws for module security.
     pub access_rules: Option<Vec<AccessRuleDecl>>,
+    /// `None` preserves the imported inheritance document. `Some` is
+    /// authoritative and represents either a root entity (including its
+    /// system-member flags) or one explicit parent entity.
+    pub inheritance: Option<EntityInheritanceDecl>,
+    /// `None` preserves imported indexes; `Some` replaces them, including an
+    /// explicitly empty list.
+    pub indexes: Option<Vec<EntityIndexDecl>>,
+    /// `None` preserves imported callbacks; `Some` replaces them, including
+    /// an explicitly empty list.
+    pub lifecycle: Option<Vec<LifecycleDecl>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SystemMembersDecl {
+    pub owner: bool,
+    pub created_date: bool,
+    pub changed_date: bool,
+    pub changed_by: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityInheritanceDecl {
+    Root(SystemMembersDecl),
+    Generalizes(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SystemMember {
+    CreatedDate,
+    ChangedDate,
+    Owner,
+    ChangedBy,
+}
+
+impl SystemMember {
+    pub const fn native_name(self) -> &'static str {
+        match self {
+            Self::CreatedDate => "CreatedDate",
+            Self::ChangedDate => "ChangedDate",
+            Self::Owner => "Owner",
+            Self::ChangedBy => "ChangedBy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexMemberDecl {
+    Attribute {
+        name: String,
+        ascending: bool,
+    },
+    System {
+        member: SystemMember,
+        ascending: bool,
+    },
+}
+
+impl IndexMemberDecl {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Attribute { name, .. } => name,
+            Self::System { member, .. } => member.native_name(),
+        }
+    }
+
+    pub const fn ascending(&self) -> bool {
+        match self {
+            Self::Attribute { ascending, .. } | Self::System { ascending, .. } => *ascending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityIndexDecl {
+    pub members: Vec<IndexMemberDecl>,
+    pub include_offline: bool,
+}
+
+impl EntityIndexDecl {
+    pub fn new() -> Self {
+        Self {
+            members: vec![],
+            include_offline: false,
+        }
+    }
+}
+
+impl Default for EntityIndexDecl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LifecycleEvent {
+    BeforeCommit,
+    AfterCommit,
+    BeforeDelete,
+    AfterDelete,
+}
+
+impl LifecycleEvent {
+    pub const fn native_parts(self) -> (&'static str, &'static str) {
+        match self {
+            Self::BeforeCommit => ("Before", "Commit"),
+            Self::AfterCommit => ("After", "Commit"),
+            Self::BeforeDelete => ("Before", "Delete"),
+            Self::AfterDelete => ("After", "Delete"),
+        }
+    }
+
+    pub const fn rust_name(self) -> &'static str {
+        match self {
+            Self::BeforeCommit => "before_commit",
+            Self::AfterCommit => "after_commit",
+            Self::BeforeDelete => "before_delete",
+            Self::AfterDelete => "after_delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleDecl {
+    pub event: LifecycleEvent,
+    pub handler: String,
+    pub pass_event_object: bool,
+    pub raise_error_on_false: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +346,9 @@ impl EntityDecl {
             attributes: vec![],
             associations: vec![],
             access_rules: None,
+            inheritance: None,
+            indexes: None,
+            lifecycle: None,
         }
     }
 }

@@ -22,6 +22,94 @@ pub struct SystemMembers {
     pub changed_by: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct Generalization {
+    pub id: Option<String>,
+    pub native_type: String,
+    /// `None` means `DomainModels$NoGeneralization`; `Some` is the qualified
+    /// parent entity name.
+    pub target: Option<String>,
+    /// Key-presence-sensitive because runtime compilation inherits absent
+    /// values from the parent.
+    pub persistable: Option<bool>,
+    pub system_members: SystemMembers,
+    /// Lossless storage sidecar. Typed fields drive authoring and inspection;
+    /// this preserves editor fields unknown to the current schema adapter.
+    pub raw: Document,
+}
+
+impl Generalization {
+    pub fn to_bson(&self) -> Document {
+        generalization_bson(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexedSystemMember {
+    CreatedDate,
+    ChangedDate,
+    Owner,
+    ChangedBy,
+}
+
+impl IndexedSystemMember {
+    pub const fn native_name(self) -> &'static str {
+        match self {
+            Self::CreatedDate => "CreatedDate",
+            Self::ChangedDate => "ChangedDate",
+            Self::Owner => "Owner",
+            Self::ChangedBy => "ChangedBy",
+        }
+    }
+
+    fn from_native(value: &str) -> Option<Self> {
+        match value {
+            "CreatedDate" => Some(Self::CreatedDate),
+            "ChangedDate" => Some(Self::ChangedDate),
+            "Owner" => Some(Self::Owner),
+            "ChangedBy" => Some(Self::ChangedBy),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexMemberKind {
+    Attribute(String),
+    System(IndexedSystemMember),
+    /// Malformed or future-schema member retained losslessly. It is explicit
+    /// in inspection APIs and prevents exporters from claiming a typed
+    /// round-trip for a member they cannot name.
+    Unresolved(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexedAttribute {
+    pub id: Option<String>,
+    pub kind: IndexMemberKind,
+    pub attribute_pointer: Option<String>,
+    pub ascending: bool,
+    pub raw: Document,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntityIndex {
+    pub id: Option<String>,
+    pub guid: Option<String>,
+    pub include_offline: bool,
+    pub members: Vec<IndexedAttribute>,
+    pub raw: Document,
+}
+
+impl EntityIndex {
+    pub fn to_bson(&self) -> Document {
+        match index_bson(self) {
+            mxrs_bson::Bson::Document(document) => document,
+            _ => unreachable!("index_bson always returns a document"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessMemberKind {
     Attribute,
@@ -64,6 +152,15 @@ pub struct LifecycleCallback {
     pub raw: Document,
 }
 
+impl LifecycleCallback {
+    pub fn to_bson(&self) -> Document {
+        match lifecycle_bson(self) {
+            mxrs_bson::Bson::Document(document) => document,
+            _ => unreachable!("lifecycle_bson always returns a document"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Entity {
     pub id: Option<String>,
@@ -75,14 +172,9 @@ pub struct Entity {
     pub data_storage_guid: Option<String>,
     pub image: Option<String>,
     pub export_level: String,
-    /// Raw `generalization`/`Generalization` sub-document.
-    pub generalization: Option<Document>,
+    pub generalization: Option<Generalization>,
     pub access_rules: Vec<AccessRule>,
-    /// Raw index docs, post-processed so member `Attribute` refs carry the
-    /// resolved qualified attribute name — mirrors `normalize_indexes`.
-    /// mxrb itself never round-trips indexes back into `to_bson`, so this
-    /// crate doesn't either (informational only).
-    pub indexes: Vec<Document>,
+    pub indexes: Vec<EntityIndex>,
     pub system_members: SystemMembers,
     pub lifecycle: Vec<LifecycleCallback>,
     pub validation_rules: Vec<Document>,
@@ -110,12 +202,16 @@ impl Entity {
                 "maybeGeneralization",
                 "MaybeGeneralization",
             ],
-        );
+        )
+        .map(parse_generalization);
         let persistable = generalization
             .as_ref()
-            .and_then(|g| get_bool_any(g, &["persistable", "Persistable"]))
+            .and_then(|g| g.persistable)
             .unwrap_or(true);
-        let system_members = parse_system_members(generalization.as_ref());
+        let system_members = generalization
+            .as_ref()
+            .map(|g| g.system_members)
+            .unwrap_or_default();
 
         let mut attributes: Vec<Attribute> = docs_any(doc, &["attributes", "Attributes"])
             .iter()
@@ -126,7 +222,7 @@ impl Entity {
 
         let qualified_name = get_str_any(doc, &["$QualifiedName"]);
         let raw_indexes = docs_any(doc, &["indexes", "Indexes"]);
-        let indexes = normalize_indexes(raw_indexes, &attributes, qualified_name.as_deref());
+        let indexes = parse_indexes(raw_indexes, &attributes, qualified_name.as_deref());
 
         let access_rules = docs_any(doc, &["accessRules", "AccessRules"])
             .iter()
@@ -163,8 +259,7 @@ impl Entity {
     }
 
     pub fn generalization_target(&self) -> Option<String> {
-        let g = self.generalization.as_ref()?;
-        get_str_any(g, &["generalization", "Generalization"])
+        self.generalization.as_ref()?.target.clone()
     }
 
     pub fn oql_view(&self) -> bool {
@@ -201,7 +296,7 @@ impl Entity {
             "attributes": mxrs_bson::build_array(self.attributes.iter().map(|a| mxrs_bson::Bson::Document(a.to_bson())).collect(), 3),
             "validationRules": mxrs_bson::build_array(self.validation_rules.iter().cloned().map(mxrs_bson::Bson::Document).collect(), 3),
             "eventHandlers": mxrs_bson::build_array(self.lifecycle.iter().map(lifecycle_bson).collect(), 3),
-            "indexes": mxrs_bson::build_array(vec![], 3),
+            "indexes": mxrs_bson::build_array(self.indexes.iter().map(index_bson).collect(), 3),
             "accessRules": mxrs_bson::build_array(self.access_rules.iter().map(access_rule_bson).collect(), 3),
             "source": mxrs_bson::Bson::Null,
             "exportLevel": self.export_level.clone(),
@@ -211,29 +306,49 @@ impl Entity {
     }
 
     fn serialize_generalization(&self) -> Document {
-        self.generalization.clone().unwrap_or_else(|| {
-            doc! {
-                "$ID": uuid::Uuid::new_v4().to_string(),
-                "$Type": "DomainModels$NoGeneralization",
-                "persistable": self.persistable,
-                "hasChangedDate": false,
-                "hasCreatedDate": false,
-                "hasOwner": false,
-                "hasChangedBy": false,
-            }
-        })
+        self.generalization
+            .as_ref()
+            .map(generalization_bson)
+            .unwrap_or_else(|| {
+                doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": "DomainModels$NoGeneralization",
+                    "persistable": self.persistable,
+                    "hasChangedDate": false,
+                    "hasCreatedDate": false,
+                    "hasOwner": false,
+                    "hasChangedBy": false,
+                }
+            })
     }
 }
 
-fn parse_system_members(generalization: Option<&Document>) -> SystemMembers {
-    let Some(g) = generalization else {
-        return SystemMembers::default();
+fn parse_generalization(g: Document) -> Generalization {
+    let reference =
+        get_str_any(&g, &["generalization", "Generalization"]).filter(|value| !value.is_empty());
+    let type_name = get_str_any(&g, &["$Type"]).unwrap_or_else(|| {
+        if reference.is_some() {
+            "DomainModels$Generalization".to_string()
+        } else {
+            "DomainModels$NoGeneralization".to_string()
+        }
+    });
+    let target = (!type_name.ends_with("NoGeneralization"))
+        .then_some(reference)
+        .flatten();
+    let system_members = SystemMembers {
+        owner: get_bool_any(&g, &["hasOwner", "HasOwnerAttr"]).unwrap_or(false),
+        created_date: get_bool_any(&g, &["hasCreatedDate", "HasCreatedDateAttr"]).unwrap_or(false),
+        changed_date: get_bool_any(&g, &["hasChangedDate", "HasChangedDateAttr"]).unwrap_or(false),
+        changed_by: get_bool_any(&g, &["hasChangedBy", "HasChangedByAttr"]).unwrap_or(false),
     };
-    SystemMembers {
-        owner: get_bool_any(g, &["hasOwner", "HasOwnerAttr"]).unwrap_or(false),
-        created_date: get_bool_any(g, &["hasCreatedDate", "HasCreatedDateAttr"]).unwrap_or(false),
-        changed_date: get_bool_any(g, &["hasChangedDate", "HasChangedDateAttr"]).unwrap_or(false),
-        changed_by: get_bool_any(g, &["hasChangedBy", "HasChangedByAttr"]).unwrap_or(false),
+    Generalization {
+        id: get_id_any(&g, &["$ID"]),
+        native_type: type_name,
+        target,
+        persistable: get_bool_any(&g, &["persistable", "Persistable"]),
+        system_members,
+        raw: g,
     }
 }
 
@@ -253,39 +368,216 @@ fn parse_location(value: Option<&mxrs_bson::Bson>) -> Location {
     }
 }
 
-fn normalize_indexes(
-    mut indexes: Vec<Document>,
+fn parse_indexes(
+    indexes: Vec<Document>,
     attributes: &[Attribute],
     qualified_name: Option<&str>,
-) -> Vec<Document> {
+) -> Vec<EntityIndex> {
     let names_by_id: std::collections::HashMap<&str, &str> = attributes
         .iter()
         .filter_map(|a| Some((a.id.as_deref()?, a.name.as_deref()?)))
         .collect();
 
-    for index in &mut indexes {
-        let members = items_any(index, &["Attributes"]);
-        let mut updated = Vec::with_capacity(members.len());
-        for member in members {
-            let mxrs_bson::Bson::Document(mut member) = member else {
-                updated.push(member);
-                continue;
-            };
-            if get_any(&member, &["Attribute", "attribute"]).is_none()
-                && let Some(id) = get_id_any(&member, &["AttributePointer"])
-                && let Some(name) = names_by_id.get(id.as_str())
-            {
-                let full = match qualified_name {
-                    Some(q) => format!("{q}.{name}"),
-                    None => (*name).to_string(),
-                };
-                member.insert("Attribute", full);
-            }
-            updated.push(mxrs_bson::Bson::Document(member));
-        }
-        index.insert("Attributes", mxrs_bson::build_array(updated, 3));
-    }
     indexes
+        .into_iter()
+        .map(|index| parse_index(index, &names_by_id, qualified_name))
+        .collect()
+}
+
+fn parse_index(
+    index: Document,
+    names_by_id: &std::collections::HashMap<&str, &str>,
+    qualified_name: Option<&str>,
+) -> EntityIndex {
+    let members = docs_any(&index, &["Attributes"])
+        .into_iter()
+        .map(|member| {
+            let member_type = get_str_any(&member, &["Type"]).unwrap_or_else(|| "Normal".into());
+            let pointer = get_id_any(&member, &["AttributePointer"]);
+            let kind = if member_type == "Normal" {
+                get_str_any(&member, &["Attribute", "attribute"])
+                    .or_else(|| {
+                        let name = names_by_id.get(pointer.as_deref()?)?;
+                        Some(match qualified_name {
+                            Some(qualified) => format!("{qualified}.{name}"),
+                            None => (*name).to_string(),
+                        })
+                    })
+                    .map(IndexMemberKind::Attribute)
+                    .unwrap_or_else(|| {
+                        IndexMemberKind::Unresolved(
+                            pointer
+                                .clone()
+                                .unwrap_or_else(|| "missing attribute pointer".into()),
+                        )
+                    })
+            } else {
+                IndexedSystemMember::from_native(&member_type)
+                    .map(IndexMemberKind::System)
+                    .unwrap_or_else(|| IndexMemberKind::Unresolved(member_type))
+            };
+            IndexedAttribute {
+                id: get_id_any(&member, &["$ID"]),
+                kind,
+                attribute_pointer: pointer,
+                ascending: get_bool_any(&member, &["Ascending"]).unwrap_or(true),
+                raw: member,
+            }
+        })
+        .collect();
+    EntityIndex {
+        id: get_id_any(&index, &["$ID"]),
+        guid: get_id_any(&index, &["GUID"]),
+        include_offline: get_bool_any(&index, &["IncludeInOffline"]).unwrap_or(false),
+        members,
+        raw: index,
+    }
+}
+
+fn generalization_bson(generalization: &Generalization) -> Document {
+    if !matches!(
+        generalization.native_type.as_str(),
+        "DomainModels$Generalization" | "DomainModels$NoGeneralization" | ""
+    ) {
+        return generalization.raw.clone();
+    }
+    let mut document = generalization.raw.clone();
+    document.insert(
+        "$ID",
+        generalization
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    );
+    match &generalization.target {
+        Some(target) => {
+            document.insert("$Type", "DomainModels$Generalization");
+            insert_native(&mut document, "generalization", "Generalization", target);
+        }
+        None => {
+            document.insert("$Type", "DomainModels$NoGeneralization");
+            document.remove("generalization");
+            document.remove("Generalization");
+            insert_native(
+                &mut document,
+                "persistable",
+                "Persistable",
+                generalization.persistable.unwrap_or(true),
+            );
+            insert_native(
+                &mut document,
+                "hasOwner",
+                "HasOwnerAttr",
+                generalization.system_members.owner,
+            );
+            insert_native(
+                &mut document,
+                "hasCreatedDate",
+                "HasCreatedDateAttr",
+                generalization.system_members.created_date,
+            );
+            insert_native(
+                &mut document,
+                "hasChangedDate",
+                "HasChangedDateAttr",
+                generalization.system_members.changed_date,
+            );
+            insert_native(
+                &mut document,
+                "hasChangedBy",
+                "HasChangedByAttr",
+                generalization.system_members.changed_by,
+            );
+        }
+    }
+    document
+}
+
+fn insert_native(
+    document: &mut Document,
+    lower: &'static str,
+    upper: &'static str,
+    value: impl Into<mxrs_bson::Bson>,
+) {
+    let key = if document.contains_key(lower) {
+        lower
+    } else {
+        upper
+    };
+    document.insert(key, value);
+}
+
+fn index_bson(index: &EntityIndex) -> mxrs_bson::Bson {
+    if (!index.raw.is_empty()
+        && index.raw.get_str("$Type").ok() != Some("DomainModels$EntityIndex"))
+        || index
+            .members
+            .iter()
+            .any(|member| matches!(member.kind, IndexMemberKind::Unresolved(_)))
+    {
+        return mxrs_bson::Bson::Document(index.raw.clone());
+    }
+    let mut document = index.raw.clone();
+    document.insert(
+        "$ID",
+        index
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    );
+    document.insert("$Type", "DomainModels$EntityIndex");
+    document.insert("IncludeInOffline", index.include_offline);
+    if let Some(guid) = &index.guid {
+        document.insert("GUID", guid.clone());
+    }
+    let marker = match document.get("Attributes") {
+        Some(mxrs_bson::Bson::Array(values)) => mxrs_bson::parse_array(Some(values)).marker,
+        _ => 3,
+    };
+    document.insert(
+        "Attributes",
+        mxrs_bson::build_array(
+            index.members.iter().map(index_member_bson).collect(),
+            marker,
+        ),
+    );
+    mxrs_bson::Bson::Document(document)
+}
+
+fn index_member_bson(member: &IndexedAttribute) -> mxrs_bson::Bson {
+    let mut document = member.raw.clone();
+    document.insert(
+        "$ID",
+        member
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    );
+    document.insert("$Type", "DomainModels$IndexedAttribute");
+    document.insert("Ascending", member.ascending);
+    match &member.kind {
+        IndexMemberKind::Attribute(_) => {
+            document.insert("Type", "Normal");
+            if let Some(pointer) = &member.attribute_pointer {
+                document.insert("AttributePointer", pointer.clone());
+            }
+        }
+        IndexMemberKind::System(system) => {
+            document.insert("Type", system.native_name());
+            document.insert(
+                "AttributePointer",
+                member
+                    .attribute_pointer
+                    .clone()
+                    .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string()),
+            );
+        }
+        IndexMemberKind::Unresolved(_) => {}
+    }
+    if !document.contains_key("AssociationPointer") {
+        document.insert("AssociationPointer", "00000000-0000-0000-0000-000000000000");
+    }
+    mxrs_bson::Bson::Document(document)
 }
 
 fn parse_access_rule(doc: &Document) -> AccessRule {
@@ -360,9 +652,12 @@ fn parse_lifecycle(doc: &Document) -> LifecycleCallback {
 }
 
 fn lifecycle_bson(callback: &LifecycleCallback) -> mxrs_bson::Bson {
-    if !callback.raw.is_empty() {
+    if !callback.raw.is_empty()
+        && callback.raw.get_str("$Type").ok() != Some("DomainModels$EventHandler")
+    {
         return mxrs_bson::Bson::Document(callback.raw.clone());
     }
+    let mut document = callback.raw.clone();
     let mut parts = callback.event.splitn(2, '_');
     let moment = parts.next().unwrap_or_default();
     let event = parts.next().unwrap_or_default();
@@ -373,15 +668,20 @@ fn lifecycle_bson(callback: &LifecycleCallback) -> mxrs_bson::Bson {
             None => String::new(),
         }
     };
-    mxrs_bson::Bson::Document(doc! {
-        "$ID": callback.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        "$Type": "DomainModels$EventHandler",
-        "Event": capitalize(event),
-        "Moment": capitalize(moment),
-        "Microflow": callback.handler.clone(),
-        "PassEventObject": callback.pass_event_object,
-        "RaiseErrorOnFalse": callback.raise_error_on_false,
-    })
+    document.insert(
+        "$ID",
+        callback
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    );
+    document.insert("$Type", "DomainModels$EventHandler");
+    document.insert("Event", capitalize(event));
+    document.insert("Moment", capitalize(moment));
+    document.insert("Microflow", callback.handler.clone());
+    document.insert("PassEventObject", callback.pass_event_object);
+    document.insert("RaiseErrorOnFalse", callback.raise_error_on_false);
+    mxrs_bson::Bson::Document(document)
 }
 
 /// Serializes one access rule back into its native `DomainModels$AccessRule`
@@ -532,5 +832,79 @@ mod tests {
         assert_eq!(out.get_str("name").unwrap(), "Order");
         assert_eq!(out.get_str("documentation").unwrap(), "An order");
         assert_eq!(out.get_str("$Type").unwrap(), "DomainModels$EntityImpl");
+    }
+
+    #[test]
+    fn indexes_decode_to_typed_members_without_polluting_the_native_document() {
+        let attribute_id = uuid::Uuid::new_v4().to_string();
+        let d = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$QualifiedName": "Sales.Order",
+            "name": "Order",
+            "attributes": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(doc! {
+                "$ID": attribute_id.clone(),
+                "name": "Number",
+                "type": { "$Type": "DomainModels$StringAttributeType" },
+            })], 3),
+            "indexes": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "DomainModels$EntityIndex",
+                "GUID": uuid::Uuid::new_v4().to_string(),
+                "IncludeInOffline": true,
+                "Attributes": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": "DomainModels$IndexedAttribute",
+                    "Type": "Normal",
+                    "AttributePointer": attribute_id,
+                    "Ascending": false,
+                })], 7),
+            })], 5),
+        };
+        let entity = Entity::from_bson(&d);
+        assert_eq!(entity.indexes.len(), 1);
+        assert!(entity.indexes[0].include_offline);
+        assert!(matches!(
+            &entity.indexes[0].members[0].kind,
+            IndexMemberKind::Attribute(name) if name == "Sales.Order.Number"
+        ));
+        assert!(!entity.indexes[0].members[0].ascending);
+        assert!(!entity.indexes[0].members[0].raw.contains_key("Attribute"));
+
+        let output = entity.to_bson();
+        let indexes = mxrs_bson::parse_array(output.get_array("indexes").ok().map(Vec::as_slice));
+        assert_eq!(indexes.marker, 3);
+        let index = indexes.items[0].as_document().unwrap();
+        let members = mxrs_bson::parse_array(index.get_array("Attributes").ok().map(Vec::as_slice));
+        assert_eq!(members.marker, 7);
+        assert!(
+            !members.items[0]
+                .as_document()
+                .unwrap()
+                .contains_key("Attribute")
+        );
+    }
+
+    #[test]
+    fn typed_root_updates_the_existing_lowercase_generalization_shape() {
+        let d = doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "name": "Order",
+            "generalization": {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "DomainModels$NoGeneralization",
+                "persistable": true,
+                "hasOwner": false,
+            },
+        };
+        let mut entity = Entity::from_bson(&d);
+        let generalization = entity.generalization.as_mut().unwrap();
+        generalization.persistable = Some(false);
+        generalization.system_members.owner = true;
+        let output = entity.to_bson();
+        let generalization = output.get_document("generalization").unwrap();
+        assert!(!generalization.get_bool("persistable").unwrap());
+        assert!(generalization.get_bool("hasOwner").unwrap());
+        assert!(!generalization.contains_key("Persistable"));
+        assert!(!generalization.contains_key("HasOwnerAttr"));
     }
 }

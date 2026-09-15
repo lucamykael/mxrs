@@ -36,6 +36,10 @@ pub enum ArtifactKind {
     EnumerationCaption,
     AccessRule,
     AccessMember,
+    EntityGeneralization,
+    EntityIndex,
+    EntityIndexMember,
+    LifecycleCallback,
     Constant,
     /// The `Type` sub-document of a constant, which carries its own `$ID`
     /// distinct from the constant's.
@@ -84,6 +88,10 @@ impl fmt::Display for ArtifactKind {
             Self::EnumerationCaption => "enumeration-caption",
             Self::AccessRule => "access-rule",
             Self::AccessMember => "access-member",
+            Self::EntityGeneralization => "entity-generalization",
+            Self::EntityIndex => "entity-index",
+            Self::EntityIndexMember => "entity-index-member",
+            Self::LifecycleCallback => "lifecycle-callback",
             Self::Constant => "constant",
             Self::ConstantType => "constant-type",
             Self::RegularExpression => "regular-expression",

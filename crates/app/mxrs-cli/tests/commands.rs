@@ -970,27 +970,18 @@ fn cargo_import_export_scaffold_and_java_generation_have_real_filesystem_effects
     assert!(export.status.success());
     assert!(text(&export).contains("Editable domain model declarations"));
     let output = query("export", &path, &["--allow-lossy"]);
-    assert!(output.status.success(), "{:?}", output.stderr);
-    assert!(text(&output).contains("Order"));
+    assert!(!output.status.success());
     let exported = directory.path().join("export.rs");
     assert!(
-        query(
-            "export",
-            &path,
-            &["--allow-lossy", "-o", exported.to_str().unwrap()]
-        )
-        .status
-        .success()
+        query("export", &path, &["-o", exported.to_str().unwrap()])
+            .status
+            .success()
     );
     assert!(exported.is_file());
     assert!(
-        !query(
-            "export",
-            &path,
-            &["--allow-lossy", "-o", directory.path().to_str().unwrap()]
-        )
-        .status
-        .success()
+        !query("export", &path, &["-o", directory.path().to_str().unwrap()])
+            .status
+            .success()
     );
     let generated = directory.path().join("scaffold");
     let args = [

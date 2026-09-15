@@ -1,12 +1,107 @@
 use mxrs_ir::declaration::{
-    AssociationDecl, AssociationOwner, AssociationStorage, AttributeDecl, AttributeType, EntityDecl,
+    AssociationDecl, AssociationOwner, AssociationStorage, AttributeDecl, AttributeType,
+    EntityDecl, EntityIndexDecl, EntityInheritanceDecl, IndexMemberDecl, LifecycleDecl,
+    LifecycleEvent, SystemMember, SystemMembersDecl,
 };
-use mxrs_ir::{AssociationMarker, EntityMarker};
+use mxrs_ir::{AssociationMarker, AttributeMarker, EntityMarker, MicroflowMarker};
 
 use crate::access::AccessRuleBuilder;
 
 pub struct EntityBuilder {
     decl: EntityDecl,
+}
+
+/// Configures the system-owned members of a root entity. All flags start
+/// disabled, so the closure names only the members the application wants.
+pub struct SystemMembersBuilder {
+    members: SystemMembersDecl,
+}
+
+impl SystemMembersBuilder {
+    pub fn owner(&mut self, enabled: bool) -> &mut Self {
+        self.members.owner = enabled;
+        self
+    }
+
+    pub fn created_date(&mut self, enabled: bool) -> &mut Self {
+        self.members.created_date = enabled;
+        self
+    }
+
+    pub fn changed_date(&mut self, enabled: bool) -> &mut Self {
+        self.members.changed_date = enabled;
+        self
+    }
+
+    pub fn changed_by(&mut self, enabled: bool) -> &mut Self {
+        self.members.changed_by = enabled;
+        self
+    }
+}
+
+/// Builds one ordered Mendix entity index without exposing attribute names as
+/// strings. Attribute members are checked by Rust's marker traits; system
+/// members are a closed enum.
+pub struct EntityIndexBuilder {
+    index: EntityIndexDecl,
+}
+
+impl EntityIndexBuilder {
+    pub fn attribute<A: AttributeMarker>(&mut self) -> &mut Self {
+        self.index.members.push(IndexMemberDecl::Attribute {
+            name: A::NAME.to_string(),
+            ascending: true,
+        });
+        self
+    }
+
+    pub fn attribute_descending<A: AttributeMarker>(&mut self) -> &mut Self {
+        self.index.members.push(IndexMemberDecl::Attribute {
+            name: A::NAME.to_string(),
+            ascending: false,
+        });
+        self
+    }
+
+    pub fn system(&mut self, member: SystemMember) -> &mut Self {
+        self.index.members.push(IndexMemberDecl::System {
+            member,
+            ascending: true,
+        });
+        self
+    }
+
+    pub fn system_descending(&mut self, member: SystemMember) -> &mut Self {
+        self.index.members.push(IndexMemberDecl::System {
+            member,
+            ascending: false,
+        });
+        self
+    }
+
+    pub fn include_offline(&mut self, enabled: bool) -> &mut Self {
+        self.index.include_offline = enabled;
+        self
+    }
+}
+
+/// Options shared by every lifecycle callback. Before callbacks default to
+/// raising when the microflow returns false, matching Studio Pro; after
+/// callbacks default to not raising.
+pub struct LifecycleBuilder {
+    callback: LifecycleDecl,
+}
+
+impl LifecycleBuilder {
+    pub fn pass_event_object(&mut self, enabled: bool) -> &mut Self {
+        self.callback.pass_event_object = enabled;
+        self
+    }
+
+    pub fn raise_error_on_false(&mut self, enabled: bool) -> &mut Self {
+        self.callback.raise_error_on_false = enabled;
+        self
+    }
 }
 
 impl EntityBuilder {
@@ -27,6 +122,112 @@ impl EntityBuilder {
 
     pub fn persistable(&mut self, value: bool) -> &mut Self {
         self.decl.persistable = value;
+        self
+    }
+
+    /// Makes inheritance authoritative and declares a root entity with no
+    /// system-owned members.
+    pub fn root(&mut self) -> &mut Self {
+        self.decl.inheritance = Some(EntityInheritanceDecl::Root(SystemMembersDecl::default()));
+        self
+    }
+
+    /// Makes inheritance authoritative and declares a root entity's system
+    /// members. Calling this after [`EntityBuilder::generalizes`] replaces
+    /// that parent declaration, and vice versa.
+    pub fn system_members(
+        &mut self,
+        configure: impl FnOnce(&mut SystemMembersBuilder),
+    ) -> &mut Self {
+        let mut builder = SystemMembersBuilder {
+            members: SystemMembersDecl::default(),
+        };
+        configure(&mut builder);
+        self.decl.inheritance = Some(EntityInheritanceDecl::Root(builder.members));
+        self
+    }
+
+    /// Declares an entity parent through an [`EntityMarker`], so a renamed or
+    /// missing parent fails at `cargo build` rather than during `.mpr` write.
+    pub fn generalizes<E: EntityMarker>(&mut self) -> &mut Self {
+        self.decl.inheritance = Some(EntityInheritanceDecl::Generalizes(E::qualified_name()));
+        self
+    }
+
+    /// Adds one authoritative index. The first call takes ownership of the
+    /// imported index list; use [`EntityBuilder::clear_indexes`] to express an
+    /// authoritative empty list.
+    pub fn index(&mut self, configure: impl FnOnce(&mut EntityIndexBuilder)) -> &mut Self {
+        let mut builder = EntityIndexBuilder {
+            index: EntityIndexDecl::new(),
+        };
+        configure(&mut builder);
+        self.decl
+            .indexes
+            .get_or_insert_with(Vec::new)
+            .push(builder.index);
+        self
+    }
+
+    pub fn clear_indexes(&mut self) -> &mut Self {
+        self.decl.indexes = Some(vec![]);
+        self
+    }
+
+    pub fn before_commit<M: MicroflowMarker>(
+        &mut self,
+        configure: impl FnOnce(&mut LifecycleBuilder),
+    ) -> &mut Self {
+        self.lifecycle::<M>(LifecycleEvent::BeforeCommit, configure)
+    }
+
+    pub fn after_commit<M: MicroflowMarker>(
+        &mut self,
+        configure: impl FnOnce(&mut LifecycleBuilder),
+    ) -> &mut Self {
+        self.lifecycle::<M>(LifecycleEvent::AfterCommit, configure)
+    }
+
+    pub fn before_delete<M: MicroflowMarker>(
+        &mut self,
+        configure: impl FnOnce(&mut LifecycleBuilder),
+    ) -> &mut Self {
+        self.lifecycle::<M>(LifecycleEvent::BeforeDelete, configure)
+    }
+
+    pub fn after_delete<M: MicroflowMarker>(
+        &mut self,
+        configure: impl FnOnce(&mut LifecycleBuilder),
+    ) -> &mut Self {
+        self.lifecycle::<M>(LifecycleEvent::AfterDelete, configure)
+    }
+
+    pub fn clear_lifecycle(&mut self) -> &mut Self {
+        self.decl.lifecycle = Some(vec![]);
+        self
+    }
+
+    fn lifecycle<M: MicroflowMarker>(
+        &mut self,
+        event: LifecycleEvent,
+        configure: impl FnOnce(&mut LifecycleBuilder),
+    ) -> &mut Self {
+        let mut builder = LifecycleBuilder {
+            callback: LifecycleDecl {
+                event,
+                handler: M::qualified_name(),
+                pass_event_object: true,
+                raise_error_on_false: matches!(
+                    event,
+                    LifecycleEvent::BeforeCommit | LifecycleEvent::BeforeDelete
+                ),
+            },
+        };
+        configure(&mut builder);
+        self.decl
+            .lifecycle
+            .get_or_insert_with(Vec::new)
+            .push(builder.callback);
         self
     }
 

@@ -217,6 +217,69 @@ fn supports_entity_documentation_and_persistable() {
 }
 
 #[test]
+fn entity_structure_and_lifecycle_are_typed_and_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("EntitySurface.mpr");
+    let definition = project! {
+        "11.12.1",
+        module Sales {
+            entity Order {
+                persistable true;
+                system_members {
+                    owner true;
+                    created_date true;
+                }
+                string Number;
+                index {
+                    attribute Number;
+                    system CreatedDate ascending false;
+                    include_offline true;
+                }
+                before_commit Sales::ACT_Audit {
+                    pass_event_object false;
+                    raise_error_on_false true;
+                }
+            }
+            entity SpecialOrder {
+                generalizes Sales::Order;
+            }
+            microflow ACT_Audit {
+                return mxrs_expr::boolean(true);
+            }
+        }
+    };
+
+    mxrs_writer::write_project(&path, &definition).unwrap();
+    let project = Project::open(&path, true).unwrap();
+    let sales = project.modules().unwrap().remove(0);
+    let order = sales
+        .entities()
+        .iter()
+        .find(|entity| entity.name.as_deref() == Some("Order"))
+        .unwrap();
+    assert!(order.system_members.owner);
+    assert!(order.system_members.created_date);
+    assert_eq!(order.indexes.len(), 1);
+    assert!(order.indexes[0].include_offline);
+    assert_eq!(order.indexes[0].members.len(), 2);
+    assert!(!order.indexes[0].members[1].ascending);
+    assert_eq!(order.lifecycle.len(), 1);
+    assert_eq!(order.lifecycle[0].event, "before_commit");
+    assert_eq!(order.lifecycle[0].handler, "Sales.ACT_Audit");
+    assert!(!order.lifecycle[0].pass_event_object);
+
+    let special = sales
+        .entities()
+        .iter()
+        .find(|entity| entity.name.as_deref() == Some("SpecialOrder"))
+        .unwrap();
+    assert_eq!(
+        special.generalization_target().as_deref(),
+        Some("Sales.Order")
+    );
+}
+
+#[test]
 fn supports_a_module_level_microflow_with_a_return_statement() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Microflow.mpr");

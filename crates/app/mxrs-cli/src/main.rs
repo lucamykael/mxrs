@@ -74,7 +74,7 @@ fn command_options(
         "cache" => (&[], &["--json"], &[]),
         "db" => (&["--port"], &["--json"], &[]),
         "doctor" => (&[], &["--json"], &[]),
-        "export" => (&["-o"], &["--allow-lossy"], &[]),
+        "export" => (&["-o"], &[], &[]),
         "env" => (&["--environment"], &["--json"], &[]),
         "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
         "javagen" => (&["--project-root"], &[], &[]),
@@ -145,7 +145,7 @@ commands! {
     "env", "[DIR] [--environment NAME] [--json]", "Inspect an environment profile without values", run_env;
     "evaluate", "<file.mpr> <evaluation.json> [--json]", "Run declarative static model checks", run_evaluate;
     "evaluation", "new <Name> [--target DIR] [--dry-run] [--json]", "Create declarative static model checks", run_evaluation;
-    "export", "<file.mpr> [-o <out.rs>] [--allow-lossy]", "Export editable Rust declarations", run_export;
+    "export", "<file.mpr> [-o <out.rs>]", "Export complete editable Rust declarations", run_export;
     "functional-test", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create a declarative runtime test suite", run_functional_test;
     "functional-instrument", "<writable.mpr> <suite.json> [--json]", "Instrument a disposable MPR with a functional test runner", run_functional_instrument;
     "help", "[command]", "Show command usage", run_help;
@@ -1977,23 +1977,18 @@ fn run_modules(args: Vec<String>) -> ExitCode {
 
 fn run_export(mut args: Vec<String>) -> ExitCode {
     let out_path = take_value(&mut args, "-o");
-    let allow_lossy = take_flag(&mut args, "--allow-lossy");
     let [path] = args.as_slice() else {
-        eprintln!("[mxrs] error: usage: mxrs export <file.mpr> [-o <out.rs>] [--allow-lossy]");
+        eprintln!("[mxrs] error: usage: mxrs export <file.mpr> [-o <out.rs>]");
         return ExitCode::FAILURE;
     };
 
-    let exported = if allow_lossy {
-        mxrs_exporter::export_project_lossy(path).map_err(|error| error.to_string())
-    } else {
-        mxrs_exporter::export_project(path).map_err(|error| {
-            let mut message = error.to_string();
-            for gap in error.gaps() {
-                message.push_str(&format!("\n  - {}: {}", gap.path, gap.reason));
-            }
-            message
-        })
-    };
+    let exported = mxrs_exporter::export_project(path).map_err(|error| {
+        let mut message = error.to_string();
+        for gap in error.gaps() {
+            message.push_str(&format!("\n  - {}: {}", gap.path, gap.reason));
+        }
+        message
+    });
     let source = match exported {
         Ok(s) => s,
         Err(e) => {

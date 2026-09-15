@@ -8,8 +8,9 @@ use quote::{format_ident, quote};
 use syn::{Ident, Path, Result};
 
 use crate::parse::{
-    AssociationInput, AttrKind, AttributeInput, EntityInput, FlowItem, MappingInput, MemberInput,
-    MicroflowInput, ModuleInput, ProjectInput,
+    AssociationInput, AttrKind, AttributeInput, EntityInput, FlowItem, IndexInput,
+    IndexMemberInput, InheritanceInput, LifecycleInput, MappingInput, MemberInput, MicroflowInput,
+    ModuleInput, ProjectInput,
 };
 
 #[derive(Clone)]
@@ -213,12 +214,109 @@ fn expand_entity(entity: &EntityInput, module_name: &Ident) -> TokenStream {
         .associations
         .iter()
         .map(|association| expand_association(association, &entity.name, module_name));
+    let inheritance_stmt = entity.inheritance.as_ref().map(expand_inheritance);
+    let index_stmts: Vec<TokenStream> = match &entity.indexes {
+        None => vec![],
+        Some(indexes) if indexes.is_empty() => vec![quote! { e.clear_indexes(); }],
+        Some(indexes) => indexes
+            .iter()
+            .map(|index| expand_index(index, &entity.name, module_name))
+            .collect(),
+    };
+    let lifecycle_stmts: Vec<TokenStream> = match &entity.lifecycle {
+        None => vec![],
+        Some(callbacks) if callbacks.is_empty() => vec![quote! { e.clear_lifecycle(); }],
+        Some(callbacks) => callbacks.iter().map(expand_lifecycle).collect(),
+    };
     quote! {
         m.entity(#name, |e| {
             #documentation_stmt
             #persistable_stmt
+            #inheritance_stmt
             #(#attr_stmts)*
             #(#assoc_stmts)*
+            #(#index_stmts)*
+            #(#lifecycle_stmts)*
+        });
+    }
+}
+
+fn expand_inheritance(inheritance: &InheritanceInput) -> TokenStream {
+    match inheritance {
+        InheritanceInput::Generalizes(target) => quote! { e.generalizes::<#target>(); },
+        InheritanceInput::Root {
+            owner,
+            created_date,
+            changed_date,
+            changed_by,
+        } => {
+            let owner = owner.as_ref().map(|value| quote! { s.owner(#value); });
+            let created_date = created_date
+                .as_ref()
+                .map(|value| quote! { s.created_date(#value); });
+            let changed_date = changed_date
+                .as_ref()
+                .map(|value| quote! { s.changed_date(#value); });
+            let changed_by = changed_by
+                .as_ref()
+                .map(|value| quote! { s.changed_by(#value); });
+            quote! {
+                e.system_members(|s| {
+                    #owner
+                    #created_date
+                    #changed_date
+                    #changed_by
+                });
+            }
+        }
+    }
+}
+
+fn expand_index(index: &IndexInput, entity_name: &Ident, module_name: &Ident) -> TokenStream {
+    let members = index.members.iter().map(|member| match member {
+        IndexMemberInput::Attribute { name, ascending } => {
+            let marker = format_ident!("{}_{}", entity_name, name);
+            if ascending.as_ref().is_some_and(|value| !value.value) {
+                quote! { i.attribute_descending::<#module_name::#marker>(); }
+            } else {
+                quote! { i.attribute::<#module_name::#marker>(); }
+            }
+        }
+        IndexMemberInput::System { member, ascending } => {
+            if ascending.as_ref().is_some_and(|value| !value.value) {
+                quote! { i.system_descending(::mxrs_ir::SystemMember::#member); }
+            } else {
+                quote! { i.system(::mxrs_ir::SystemMember::#member); }
+            }
+        }
+    });
+    let include_offline = index
+        .include_offline
+        .as_ref()
+        .map(|value| quote! { i.include_offline(#value); });
+    quote! {
+        e.index(|i| {
+            #(#members)*
+            #include_offline
+        });
+    }
+}
+
+fn expand_lifecycle(callback: &LifecycleInput) -> TokenStream {
+    let event = &callback.event;
+    let handler = &callback.handler;
+    let pass_event_object = callback
+        .pass_event_object
+        .as_ref()
+        .map(|value| quote! { hook.pass_event_object(#value); });
+    let raise_error_on_false = callback
+        .raise_error_on_false
+        .as_ref()
+        .map(|value| quote! { hook.raise_error_on_false(#value); });
+    quote! {
+        e.#event::<#handler>(|hook| {
+            #pass_event_object
+            #raise_error_on_false
         });
     }
 }
