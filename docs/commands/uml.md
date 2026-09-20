@@ -20,6 +20,13 @@ backslash/quote escaping, and camel-case word splitting for action type
 labels. Class stereotypes mark OQL views (`OQL View`) and non-persistable
 entities (`DTO`); enumeration attributes render the enumeration's short name.
 
+## Known contract nuance
+
+`--depth` accepts base-10 integers only. Native MXRB parses it with Ruby's
+`Integer()`, which also accepts `0x`/`0`-prefixed hexadecimal and octal
+spellings; MXRS rejects those instead of guessing a base. Decimal depths —
+the documented form — behave identically in both implementations.
+
 ## What is not ported
 
 The interactive loopback viewer (`mxrb uml FILE.mpr` without `--export`,
