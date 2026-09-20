@@ -462,6 +462,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs move",
             "same-module unit relocation; MXRB additionally composes a cross-module move out of move+rename, which this refuses rather than half-performs",
         ),
+        "demo-user" => (
+            Status::Partial,
+            "mxrs demo-user new",
+            "transactional demo-user declaration over the typed security surface: generated password in a private .env (0600), writer resolves it from the environment and preserves stored passwords/identities/opaque entries; role and entity references validated structurally; no command-contract oracle against mxrb's Ruby-project recipe",
+        ),
         "uml" => (
             Status::Verified,
             "mxrs uml",

@@ -53,6 +53,34 @@ impl UserRoleDecl {
     }
 }
 
+/// A local demo account stored in the project's `Security$ProjectSecurity`
+/// unit. The password is never part of the declaration: `password_env` names
+/// an environment variable the writer resolves at write time, following the
+/// sensitive-constant rule that credential values never appear in source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DemoUserDecl {
+    pub name: String,
+    /// Qualified user entity, `System.User` by default.
+    pub entity: String,
+    /// Project user roles granted to the demo account.
+    pub roles: Vec<String>,
+    /// Environment variable holding the password. When the variable is
+    /// absent, an already-stored password is preserved; a brand-new demo
+    /// user without a resolvable password fails closed.
+    pub password_env: Option<String>,
+}
+
+impl DemoUserDecl {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            entity: "System.User".to_string(),
+            roles: vec![],
+            password_env: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSecurityDecl {
     pub level: SecurityLevel,
@@ -61,6 +89,7 @@ pub struct ProjectSecurityDecl {
     pub guest_user_role: Option<String>,
     pub sign_in_microflow: Option<String>,
     pub user_roles: Vec<UserRoleDecl>,
+    pub demo_users: Vec<DemoUserDecl>,
     pub password_policy: PasswordPolicyDecl,
 }
 
@@ -78,6 +107,7 @@ impl Default for ProjectSecurityDecl {
             guest_user_role: None,
             sign_in_microflow: None,
             user_roles: vec![administrator],
+            demo_users: vec![],
             password_policy: PasswordPolicyDecl::default(),
         }
     }

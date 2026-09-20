@@ -1,4 +1,4 @@
-use mxrs_ir::{PasswordPolicyDecl, ProjectSecurityDecl, SecurityLevel, UserRoleDecl};
+use mxrs_ir::{DemoUserDecl, PasswordPolicyDecl, ProjectSecurityDecl, SecurityLevel, UserRoleDecl};
 
 pub struct SecurityBuilder {
     declaration: ProjectSecurityDecl,
@@ -66,6 +66,50 @@ impl SecurityBuilder {
         configure: impl FnOnce(&mut PasswordPolicyDecl),
     ) -> &mut Self {
         configure(&mut self.declaration.password_policy);
+        self
+    }
+
+    pub fn demo_user(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut DemoUserBuilder),
+    ) -> &mut Self {
+        let mut builder = DemoUserBuilder::new(name);
+        configure(&mut builder);
+        self.declaration.demo_users.push(builder.into_decl());
+        self
+    }
+}
+
+pub struct DemoUserBuilder {
+    declaration: DemoUserDecl,
+}
+
+impl DemoUserBuilder {
+    fn new(name: impl Into<String>) -> Self {
+        Self {
+            declaration: DemoUserDecl::new(name),
+        }
+    }
+
+    fn into_decl(self) -> DemoUserDecl {
+        self.declaration
+    }
+
+    pub fn entity(&mut self, qualified_name: impl Into<String>) -> &mut Self {
+        self.declaration.entity = qualified_name.into();
+        self
+    }
+
+    pub fn role(&mut self, name: impl Into<String>) -> &mut Self {
+        self.declaration.roles.push(name.into());
+        self
+    }
+
+    /// Names the environment variable the writer reads the password from.
+    /// The value itself never enters the declaration or generated source.
+    pub fn password_from_env(&mut self, variable: impl Into<String>) -> &mut Self {
+        self.declaration.password_env = Some(variable.into());
         self
     }
 }

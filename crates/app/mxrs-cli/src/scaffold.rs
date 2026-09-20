@@ -38,6 +38,8 @@ pub fn usage(kind: ArtifactKind) -> String {
             " [--template NAME] [--chain CHAIN] [--role Module.Role]",
             " | templates [--json]",
         )
+    } else if kind == ArtifactKind::DemoUser {
+        (" [--entity Module.Entity] [--role ROLE]", "")
     } else {
         ("", "")
     };
@@ -63,7 +65,16 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
     let roles = take_values(&mut arguments, "--role");
     let template = take_value(&mut arguments, "--template");
     let chain = take_value(&mut arguments, "--chain");
+    let entity = take_value(&mut arguments, "--entity");
     let expected = command(kind).action;
+    // MXRB's `new` is optional for demo-user (`mxrb demo-user manager` works).
+    if kind == ArtifactKind::DemoUser
+        && arguments.len() == 1
+        && arguments[0] != expected
+        && !arguments[0].starts_with('-')
+    {
+        arguments.insert(0, expected.to_string());
+    }
     // `mxrs page templates` is the catalog, not a generator: it takes no name
     // and none of the generator options.
     if kind == ArtifactKind::Page
@@ -73,15 +84,21 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
         && roles.is_empty()
         && template.is_none()
         && chain.is_none()
+        && entity.is_none()
     {
         print_page_templates(json);
         return Ok(());
     }
-    let page_only = !roles.is_empty() || template.is_some() || chain.is_some();
+    let page_only = template.is_some() || chain.is_some();
+    let roles_allowed = matches!(kind, ArtifactKind::Page | ArtifactKind::DemoUser);
     let [action, name] = arguments.as_slice() else {
         return Err(format!("usage: mxrs {}", usage(kind)));
     };
-    if action != expected || (page_only && kind != ArtifactKind::Page) {
+    if action != expected
+        || (page_only && kind != ArtifactKind::Page)
+        || (!roles.is_empty() && !roles_allowed)
+        || (entity.is_some() && kind != ArtifactKind::DemoUser)
+    {
         return Err(format!("usage: mxrs {}", usage(kind)));
     }
     let chain = chain
@@ -93,7 +110,8 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
             .dry_run(dry_run)
             .page_roles(roles)
             .page_template(template)
-            .page_chain(chain),
+            .page_chain(chain)
+            .demo_entity(entity),
     )
     .map_err(|error| error.to_string())?;
     render(&outcome, json);
@@ -274,7 +292,14 @@ mod tests {
                 usage.contains(" | templates [--json]"),
                 command.kind == ArtifactKind::Page
             );
-            assert_eq!(usage.contains("--role"), command.kind == ArtifactKind::Page);
+            assert_eq!(
+                usage.contains("--role"),
+                matches!(command.kind, ArtifactKind::Page | ArtifactKind::DemoUser)
+            );
+            assert_eq!(
+                usage.contains("--entity"),
+                command.kind == ArtifactKind::DemoUser
+            );
         }
     }
 

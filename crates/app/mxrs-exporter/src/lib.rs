@@ -2046,6 +2046,11 @@ fn render_security_module(modules: &[Module], document: Option<&mxrs_bson::Docum
             );
         }
         source.push_str("        ],\n");
+        // Imported demo users stay losslessly preserved in the stored
+        // `DemoUsers` array (the writer leaves it untouched for an empty
+        // declaration list); exporting them would either embed their stored
+        // passwords in source or reserialize content nobody edited.
+        source.push_str("        demo_users: vec![],\n");
         let policy = document.get_document("PasswordPolicySettings").ok();
         let _ = writeln!(
             source,

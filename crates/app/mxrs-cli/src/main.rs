@@ -96,6 +96,11 @@ fn command_options(
             &["--dry-run", "--json"],
             &["--role"],
         ),
+        "demo-user" => (
+            &["--target", "--entity"],
+            &["--dry-run", "--json"],
+            &["--role"],
+        ),
         "ci" | "constant" | "consumed-rest" | "entity" | "enumeration" | "evaluation"
         | "functional-test" | "integration" | "java-action" | "module" | "nanoflow"
         | "published-rest" | "repository" | "scheduled-event" | "security" | "use-case"
@@ -157,6 +162,7 @@ commands! {
     "compare", "<left.mpr> <right.mpr> [--json]", "Compare structural model snapshots", run_compare;
     "constant", "new <Module.Constant> [--target DIR] [--dry-run] [--json]", "Scaffold a string constant declaration", run_constant;
     "consumed-rest", "new <Module.Client> [--target DIR] [--dry-run] [--json]", "Scaffold a consumed REST adapter microflow", run_consumed_rest;
+    "demo-user", "new <Name> [--entity Module.Entity] [--role ROLE] [--target DIR] [--dry-run] [--json]", "Create a local Mendix demo user backed by an ignored .env secret", run_demo_user;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "db", "<status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]", "Manage an isolated PostgreSQL workspace", run_db;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
@@ -868,6 +874,13 @@ fn run_functional_instrument(mut args: Vec<String>) -> ExitCode {
 fn run_security(args: Vec<String>) -> ExitCode {
     reported(mxrs_cli::scaffold::generate(
         mxrs_scaffold::ArtifactKind::Security,
+        args,
+    ))
+}
+
+fn run_demo_user(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::DemoUser,
         args,
     ))
 }

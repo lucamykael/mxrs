@@ -81,6 +81,16 @@ pub enum ScaffoldError {
     UnsupportedLayerMigration(String),
     #[error("project version declarations disagree: {0:?}")]
     VersionMismatch(Vec<String>),
+    #[error("{0}: project security is not initialized (run `mxrs security init <Module>` first)")]
+    SecurityNotInitialized(String),
+    #[error(
+        "demo user references user role {0:?}, which src/domain/security declares nowhere; declare it with `security.role({0:?}, …)` or scaffold it via `mxrs security init`"
+    )]
+    UnknownDemoUserRole(String),
+    #[error(
+        "demo user entity {0:?} was not found in this project's domain layer (expected `Module.Entity` with src/domain/modules/<module>/entities/<entity>.rs, or `System.User`)"
+    )]
+    UnknownDemoUserEntity(String),
 }
 
 pub type Result<T> = std::result::Result<T, ScaffoldError>;

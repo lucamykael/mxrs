@@ -10,10 +10,9 @@
 //!    source file *and* edits one or more aggregators; leaving a project with
 //!    the aggregator edited but the file missing would not even compile.
 //!
-//! Deliberately narrower than mxrb's version in one place: mxrb carries a
-//! per-change Unix mode because its `demo-user` recipe writes a `0o600`
-//! `.env` secret. No mxrs scaffold writes a secret, so modes are left to the
-//! platform default rather than carried as a field nothing sets.
+//! Like mxrb's version, a change can carry a Unix mode: the `demo-user`
+//! recipe writes a `0o600` `.env` secret, and a world-readable credential
+//! file would defeat the point of keeping the password out of source.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +22,8 @@ use crate::{Result, ScaffoldError, io_error};
 struct Change {
     content: String,
     original: Option<Vec<u8>>,
+    /// Unix permissions applied on publish (`None` keeps platform defaults).
+    mode: Option<u32>,
 }
 
 #[derive(Default)]
@@ -48,6 +49,25 @@ impl Transaction {
     }
 
     pub(crate) fn create(&mut self, path: impl Into<PathBuf>, content: String) -> Result<()> {
+        self.create_with_mode(path, content, None)
+    }
+
+    /// `create` with explicit Unix permissions — for secrets that must not be
+    /// world-readable (the `.env` file a demo-user scaffold writes).
+    pub(crate) fn create_private(
+        &mut self,
+        path: impl Into<PathBuf>,
+        content: String,
+    ) -> Result<()> {
+        self.create_with_mode(path, content, Some(0o600))
+    }
+
+    fn create_with_mode(
+        &mut self,
+        path: impl Into<PathBuf>,
+        content: String,
+        mode: Option<u32>,
+    ) -> Result<()> {
         let path = path.into();
         if self.changes.contains_key(&path) || path.symlink_metadata().is_ok() {
             return Err(ScaffoldError::FileExists(path.display().to_string()));
@@ -58,6 +78,7 @@ impl Transaction {
             Change {
                 content,
                 original: None,
+                mode,
             },
         );
         Ok(())
@@ -77,11 +98,13 @@ impl Transaction {
         if !self.changes.contains_key(&path) {
             self.updated.push(path.clone());
         }
+        let mode = self.changes.get(&path).and_then(|change| change.mode);
         self.changes.insert(
             path,
             Change {
                 content,
                 original: Some(original.into_bytes()),
+                mode,
             },
         );
         Ok(())
@@ -98,7 +121,7 @@ impl Transaction {
     pub(crate) fn commit(self) -> Result<()> {
         let mut applied: Vec<(&Path, Option<&[u8]>)> = Vec::new();
         for (path, change) in &self.changes {
-            if let Err(error) = apply(path, &change.content) {
+            if let Err(error) = apply(path, &change.content, change.mode) {
                 for (path, original) in applied.into_iter().rev() {
                     rollback(path, original);
                 }
@@ -110,7 +133,7 @@ impl Transaction {
     }
 }
 
-fn apply(path: &Path, content: &str) -> Result<()> {
+fn apply(path: &Path, content: &str, mode: Option<u32>) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
     let staging = tempfile::Builder::new()
@@ -118,6 +141,14 @@ fn apply(path: &Path, content: &str) -> Result<()> {
         .tempfile_in(parent)
         .map_err(|error| io_error(parent, error))?;
     std::fs::write(staging.path(), content).map_err(|error| io_error(staging.path(), error))?;
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(staging.path(), std::fs::Permissions::from_mode(mode))
+            .map_err(|error| io_error(staging.path(), error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
     staging
         .persist(path)
         .map_err(|error| io_error(path, error.error))?;
@@ -203,6 +234,7 @@ mod tests {
             Change {
                 content: "unwritable".into(),
                 original: None,
+                mode: None,
             },
         );
         assert!(transaction.commit().is_err());

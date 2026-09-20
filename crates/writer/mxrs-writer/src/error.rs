@@ -76,6 +76,11 @@ pub enum WriterError {
     #[error("security references unknown module role {0:?}")]
     UnknownModuleRole(String),
 
+    #[error(
+        "new demo user {name:?} has no resolvable password: set {variable} in the environment (stored passwords are only preserved for demo users that already exist)"
+    )]
+    MissingDemoUserPassword { name: String, variable: String },
+
     #[error("duplicate navigation profile {0:?}")]
     DuplicateNavigationProfile(String),
 

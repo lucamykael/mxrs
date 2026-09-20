@@ -846,3 +846,184 @@ fn synchronize_project_upserts_a_page_by_name_and_preserves_its_id() {
         "v2"
     );
 }
+
+/// Plants a stored `Security$DemoUserImpl` (plus one opaque entry) directly
+/// in the ProjectSecurity unit, the way an imported Studio Pro project would
+/// carry them, so the merge semantics can be observed without a password in
+/// the environment.
+fn plant_stored_demo_user(path: &std::path::Path, name: &str, password: &str) {
+    let mut mpr = mxrs_mpr::MprFile::open(path, false).unwrap();
+    let root = mpr.root_unit().unwrap().unwrap().unit_id;
+    let unit = mpr
+        .children_of(&root)
+        .unwrap()
+        .into_iter()
+        .find(|unit| {
+            mpr.parse_contents(unit)
+                .ok()
+                .and_then(|document| document.get_str("$Type").ok().map(str::to_string))
+                .as_deref()
+                == Some("Security$ProjectSecurity")
+        })
+        .unwrap();
+    let mut document = mpr.parse_contents(&unit).unwrap();
+    let stored = mxrs_bson::doc! {
+        "$ID": "11111111-2222-3333-4444-555555555555",
+        "$Type": "Security$DemoUserImpl",
+        "UserName": name,
+        "Password": password,
+        "Entity": "System.User",
+        "UserRoles": mxrs_bson::build_array(vec![mxrs_bson::Bson::String("User".into())], 1),
+        "ImportedExtra": "kept",
+    };
+    let opaque = mxrs_bson::doc! { "$Type": "Security$FutureUser", "UserName": "Opaque" };
+    document.insert(
+        "DemoUsers",
+        mxrs_bson::build_array(
+            vec![
+                mxrs_bson::Bson::Document(stored),
+                mxrs_bson::Bson::Document(opaque),
+            ],
+            2,
+        ),
+    );
+    mpr.transaction(|mpr| mpr.update_unit(&unit.unit_id, document))
+        .unwrap();
+}
+
+fn secured_project(demo: impl FnOnce(&mut mxrs_dsl::DemoUserBuilder)) -> mxrs_ir::ProjectDecl {
+    let mut project = ProjectBuilder::new("11.12.1");
+    project.module("Sales", |module| {
+        module.role("User", "App user");
+    });
+    project.security(|security| {
+        security
+            .clear_roles()
+            .role("Administrator", |role| {
+                role.administrator(true).module_role("Sales.User");
+            })
+            .role("User", |role| {
+                role.module_role("Sales.User");
+            })
+            .demo_user("Manager", demo);
+    });
+    project.build()
+}
+
+#[test]
+fn a_declared_demo_user_preserves_the_stored_password_identity_and_opaque_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |module| {
+        module.role("User", "App user");
+    });
+    initial.security(|security| {
+        security
+            .clear_roles()
+            .role("Administrator", |role| {
+                role.administrator(true).module_role("Sales.User");
+            })
+            .role("User", |role| {
+                role.module_role("Sales.User");
+            });
+    });
+    mxrs_writer::write_project(&path, &initial.build()).unwrap();
+    plant_stored_demo_user(&path, "Manager", "kept-secret");
+
+    let declaration = secured_project(|user| {
+        user.role("User")
+            .password_from_env("MXRS_TEST_DEMO_USER_UNSET_VARIABLE");
+    });
+    mxrs_writer::synchronize_project(&path, &declaration).unwrap();
+
+    let security = document_by_type(&path, "Security$ProjectSecurity");
+    let Some(mxrs_bson::Bson::Array(raw)) = security.get("DemoUsers") else {
+        panic!("DemoUsers array missing")
+    };
+    let users = mxrs_bson::parse_array(Some(raw)).items;
+    assert_eq!(users.len(), 2, "declared + opaque");
+    let mxrs_bson::Bson::Document(manager) = &users[0] else {
+        panic!("first entry is not a document")
+    };
+    assert_eq!(manager.get_str("UserName").unwrap(), "Manager");
+    assert_eq!(
+        manager.get_str("Password").unwrap(),
+        "kept-secret",
+        "an absent environment variable preserves the stored password"
+    );
+    assert_eq!(
+        mxrs_bson::extract_id(manager.get("$ID").unwrap()).as_deref(),
+        Some("11111111-2222-3333-4444-555555555555"),
+        "matching by name keeps the stored identity"
+    );
+    assert_eq!(
+        manager.get_str("ImportedExtra").unwrap(),
+        "kept",
+        "unmanaged fields survive the merge"
+    );
+    let mxrs_bson::Bson::Document(opaque) = &users[1] else {
+        panic!("opaque entry missing")
+    };
+    assert_eq!(opaque.get_str("$Type").unwrap(), "Security$FutureUser");
+}
+
+#[test]
+fn a_new_demo_user_without_a_resolvable_password_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    let declaration = secured_project(|user| {
+        user.role("User")
+            .password_from_env("MXRS_TEST_DEMO_USER_ALSO_UNSET");
+    });
+    let error = mxrs_writer::write_project(&path, &declaration).unwrap_err();
+    assert!(matches!(
+        error,
+        mxrs_writer::WriterError::MissingDemoUserPassword { ref name, ref variable }
+            if name == "Manager" && variable == "MXRS_TEST_DEMO_USER_ALSO_UNSET"
+    ));
+}
+
+#[test]
+fn a_demo_user_with_an_undeclared_role_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    let declaration = secured_project(|user| {
+        user.role("Ghost");
+    });
+    let error = mxrs_writer::write_project(&path, &declaration).unwrap_err();
+    assert!(matches!(error, mxrs_writer::WriterError::UnknownUserRole(role) if role == "Ghost"));
+}
+
+#[test]
+fn an_empty_demo_user_declaration_list_leaves_stored_demo_users_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |module| {
+        module.role("User", "App user");
+    });
+    initial.security(|security| {
+        security
+            .clear_roles()
+            .role("Administrator", |role| {
+                role.administrator(true).module_role("Sales.User");
+            })
+            .role("User", |role| {
+                role.module_role("Sales.User");
+            });
+    });
+    let declaration = initial.build();
+    mxrs_writer::write_project(&path, &declaration).unwrap();
+    plant_stored_demo_user(&path, "Manager", "kept-secret");
+    let before = document_by_type(&path, "Security$ProjectSecurity");
+
+    mxrs_writer::synchronize_project(&path, &declaration).unwrap();
+
+    let after = document_by_type(&path, "Security$ProjectSecurity");
+    assert_eq!(
+        before.get("DemoUsers"),
+        after.get("DemoUsers"),
+        "no declaration, no rewrite"
+    );
+}

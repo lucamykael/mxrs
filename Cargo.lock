@@ -1123,12 +1123,14 @@ dependencies = [
 name = "mxrs-scaffold"
 version = "0.1.0"
 dependencies = [
+ "mxrs-bson",
  "mxrs-model",
  "serde_json",
  "sha2",
  "syn 2.0.119",
  "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

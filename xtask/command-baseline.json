@@ -11,7 +11,7 @@
   "consumed-rest": "partial",
   "convert": "partial",
   "db": "partial",
-  "demo-user": "missing",
+  "demo-user": "partial",
   "describe": "verified",
   "design": "missing",
   "diagram-er": "missing",

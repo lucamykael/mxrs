@@ -58,6 +58,7 @@ pub enum ArtifactKind {
     Ci,
     Repository,
     Security,
+    DemoUser,
     Module,
     Presentation,
 }
@@ -213,6 +214,17 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         destination: "src/domain/modules/<module>/security",
         kind: ArtifactKind::Security,
     },
+    // Listed after `security`: a demo user requires initialized project
+    // security, and catalog order is also the order the scaffold audit
+    // generates every public scaffold in.
+    ScaffoldCommand {
+        name: "demo-user",
+        action: "new",
+        argument: "<Name>",
+        summary: "Create a local Mendix demo user backed by an ignored .env secret",
+        destination: "src/domain/security/demo_users",
+        kind: ArtifactKind::DemoUser,
+    },
     ScaffoldCommand {
         name: "validation",
         action: "new",
@@ -253,6 +265,7 @@ impl ArtifactKind {
             Self::Ci => "ci",
             Self::Repository => "repository",
             Self::Security => "security",
+            Self::DemoUser => "demo-user",
             Self::Module => "module",
             Self::Presentation => "presentation",
         }
@@ -276,7 +289,7 @@ impl ArtifactKind {
             Self::Integration => "integrations",
             Self::Ci => "ci",
             Self::Repository => "repositories",
-            Self::Security | Self::Module => "security",
+            Self::Security | Self::Module | Self::DemoUser => "security",
             Self::Presentation => "presentation",
         }
     }
@@ -294,7 +307,11 @@ impl ArtifactKind {
             | Self::JavaAction
             | Self::Validation
             | Self::Integration => "application",
-            Self::FunctionalTest | Self::Evaluation | Self::Ci | Self::Repository => {
+            Self::FunctionalTest
+            | Self::Evaluation
+            | Self::Ci
+            | Self::Repository
+            | Self::DemoUser => {
                 unreachable!("artifact is handled outside layered module families")
             }
         }
@@ -355,6 +372,10 @@ pub struct ArtifactScaffold {
     pub page_template: Option<String>,
     /// Page-led vertical slice to generate (`--chain`).
     pub page_chain: Option<PageChain>,
+    /// Demo-user backing entity (`--entity`, `System.User` by default). The
+    /// repeatable `--role` values arrive through [`Self::page_roles`], which
+    /// doubles as the generic role list for kinds that grant roles.
+    pub demo_entity: Option<String>,
 }
 
 impl ArtifactScaffold {
@@ -367,6 +388,7 @@ impl ArtifactScaffold {
             page_roles: vec![],
             page_template: None,
             page_chain: None,
+            demo_entity: None,
         }
     }
 
@@ -387,6 +409,11 @@ impl ArtifactScaffold {
 
     pub fn page_chain(mut self, chain: Option<PageChain>) -> Self {
         self.page_chain = chain;
+        self
+    }
+
+    pub fn demo_entity(mut self, entity: Option<String>) -> Self {
+        self.demo_entity = entity;
         self
     }
 }
@@ -418,6 +445,8 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
                 .join(format!("{}.json", snake_case(name))),
             templates::evaluation(name),
         )?;
+    } else if options.kind == ArtifactKind::DemoUser {
+        create_demo_user(&mut transaction, &root, options)?;
     } else if options.kind == ArtifactKind::Ci {
         if options.name != "github" {
             return Err(ScaffoldError::InvalidIdentifier {
@@ -693,6 +722,176 @@ fn create_module_layer(
     )
 }
 
+/// Ports mxrb's `scaffold_demo_user` to the Cargo-native layout: the
+/// declaration lands in `src/domain/security/demo_users/`, the generated
+/// password lands in a `0o600` `.env` at the project root (with an empty
+/// `.env.example` key for sharing), and the demo-user aggregator is wired
+/// into `build()` after `security::apply`. Role and entity references are
+/// validated structurally against the generated layout — the same
+/// source-scanning contract mxrb applies to its Ruby projects.
+fn create_demo_user(
+    transaction: &mut Transaction,
+    root: &Path,
+    options: &ArtifactScaffold,
+) -> Result<()> {
+    let name = identifier(&options.name, "demo user")?;
+    let entity = options
+        .demo_entity
+        .clone()
+        .unwrap_or_else(|| "System.User".to_string());
+    validate_demo_user_entity(root, &entity)?;
+    let mut roles: Vec<String> = Vec::new();
+    for role in &options.page_roles {
+        let role = identifier(role, "user role")?;
+        if !roles.iter().any(|known| known == role) {
+            roles.push(role.to_string());
+        }
+    }
+    if roles.is_empty() {
+        roles.push("User".to_string());
+    }
+    let security = root.join("src/domain/security/mod.rs");
+    let security_source = transaction
+        .content(&security)?
+        .ok_or_else(|| ScaffoldError::SecurityNotInitialized(root.display().to_string()))?;
+    let known_roles = declared_user_roles(&security_source);
+    for role in &roles {
+        if !known_roles.contains(role) {
+            return Err(ScaffoldError::UnknownDemoUserRole(role.clone()));
+        }
+    }
+
+    let password_env = format!(
+        "MXRS_DEMO_USER_{}_PASSWORD",
+        name.chars()
+            .map(|character| if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    );
+
+    let aggregator = root.join("src/domain/security/demo_users/mod.rs");
+    if transaction.content(&aggregator)?.is_none() {
+        transaction.create(&aggregator, templates::demo_users_aggregator())?;
+        declare_child_module(transaction, &security, "demo_users")?;
+        connect_build(
+            transaction,
+            root,
+            "security::demo_users::apply(&mut project);",
+        )?;
+    }
+    let stem = snake_case(name);
+    let file = aggregator.with_file_name(format!("{stem}.rs"));
+    transaction.create(
+        &file,
+        templates::demo_user(name, &entity, &roles, &password_env),
+    )?;
+    declare_child_module(transaction, &aggregator, &stem)?;
+    append_list_entry(
+        transaction,
+        &aggregator,
+        DECLARATIONS_LIST,
+        &format!("{}::{DECLARE}", rust_module_path(&stem)?),
+    )?;
+
+    if !options.dry_run {
+        ensure_demo_user_secret(transaction, root, &password_env)?;
+    }
+    Ok(())
+}
+
+/// User roles the generated security declaration names: every
+/// `security.role("Name", …)` (security-init template) or
+/// `UserRoleDecl { name: "Name".to_string(), … }` /
+/// `UserRoleDecl::new("Name")` (imported struct literal) occurrence under
+/// `src/domain/security/mod.rs`.
+fn declared_user_roles(source: &str) -> Vec<String> {
+    let mut roles = Vec::new();
+    for pattern in [
+        ".role(\"",
+        "UserRoleDecl { name: \"",
+        "UserRoleDecl::new(\"",
+    ] {
+        let mut rest = source;
+        while let Some(start) = rest.find(pattern) {
+            rest = &rest[start + pattern.len()..];
+            if let Some(end) = rest.find('"') {
+                let role = &rest[..end];
+                if !role.is_empty() && !roles.iter().any(|known| known == role) {
+                    roles.push(role.to_string());
+                }
+            }
+        }
+    }
+    roles
+}
+
+fn validate_demo_user_entity(root: &Path, entity: &str) -> Result<()> {
+    if entity == "System.User" {
+        return Ok(());
+    }
+    let invalid = || ScaffoldError::UnknownDemoUserEntity(entity.to_string());
+    let (module_name, entity_name) = entity.split_once('.').ok_or_else(invalid)?;
+    if identifier(module_name, "module").is_err() || identifier(entity_name, "entity").is_err() {
+        return Err(invalid());
+    }
+    let declaration = root.join(format!(
+        "src/domain/modules/{}/entities/{}.rs",
+        snake_case(module_name),
+        snake_case(entity_name)
+    ));
+    if declaration.is_file() {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+/// Mirrors mxrb's `ensure_demo_user_secret`: the generated password goes
+/// into a private `.env` (created `0o600`), and `.env.example` records the
+/// key with an empty value so the requirement is shareable without the
+/// secret. An already-present key is left untouched.
+fn ensure_demo_user_secret(
+    transaction: &mut Transaction,
+    root: &Path,
+    password_env: &str,
+) -> Result<()> {
+    let env = root.join(".env");
+    let password = format!("Mxrs{}7", uuid::Uuid::new_v4().simple());
+    match transaction.content(&env)? {
+        Some(source) => {
+            if !env_key_present(&source, password_env) {
+                transaction.write(&env, append_env(&source, password_env, &password))?;
+            }
+        }
+        None => {
+            let header = "# Local secrets; never commit this file.\n";
+            transaction.create_private(&env, append_env(header, password_env, &password))?;
+        }
+    }
+    let example = root.join(".env.example");
+    let source = transaction
+        .content(&example)?
+        .unwrap_or_else(|| "# Copy to .env and keep real values local.\n".to_string());
+    if !env_key_present(&source, password_env) {
+        transaction.write(&example, append_env(&source, password_env, ""))?;
+    }
+    Ok(())
+}
+
+fn append_env(source: &str, key: &str, value: &str) -> String {
+    format!("{}\n{key}={value}\n", source.trim_end())
+}
+
+fn env_key_present(source: &str, key: &str) -> bool {
+    source.lines().any(|line| {
+        line.strip_prefix(key)
+            .is_some_and(|rest| rest.starts_with('='))
+    })
+}
+
 fn create_module_security(
     transaction: &mut Transaction,
     root: &Path,
@@ -841,7 +1040,10 @@ fn create_artifact(
             LAYOUT_PARAMETER,
             &options.page_roles,
         ),
-        ArtifactKind::Security | ArtifactKind::Module | ArtifactKind::Presentation => {
+        ArtifactKind::Security
+        | ArtifactKind::Module
+        | ArtifactKind::Presentation
+        | ArtifactKind::DemoUser => {
             unreachable!("handled by the caller")
         }
     };

@@ -91,4 +91,4 @@ pub use page::{
 pub use project::ProjectBuilder;
 pub use regular_expression::RegularExpressionBuilder;
 pub use scheduled_event::ScheduledEventBuilder;
-pub use security::{SecurityBuilder, UserRoleBuilder};
+pub use security::{DemoUserBuilder, SecurityBuilder, UserRoleBuilder};

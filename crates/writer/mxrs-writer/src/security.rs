@@ -168,6 +168,14 @@ pub(crate) fn synchronize_project_security(
     }
     document.insert("UserRoles", build_array(roles, 2));
 
+    // An empty declaration list leaves the stored `DemoUsers` bytes untouched
+    // (lossless preservation); MXRB rewrites the array unconditionally, but a
+    // byte-preserving round-trip must not reserialize content nobody declared.
+    if !declaration.demo_users.is_empty() {
+        let lowered = lower_demo_users(&document, declaration, &identity)?;
+        document.insert("DemoUsers", lowered);
+    }
+
     let mut policy = document
         .get_document("PasswordPolicySettings")
         .cloned()
@@ -196,10 +204,103 @@ pub(crate) fn synchronize_project_security(
     Ok(())
 }
 
+/// Lowers declared demo users into the stored `DemoUsers` array with MXRB's
+/// merge semantics: entries other than `Security$DemoUserImpl` are opaque and
+/// preserved verbatim, an entry whose `UserName` matches a declaration keeps
+/// its identity and any field this slice does not manage, and passwords are
+/// resolved from the declared environment variable — never from source. When
+/// the variable is absent an existing password is preserved; a brand-new user
+/// without a resolvable password fails closed.
+fn lower_demo_users(
+    document: &Document,
+    declaration: &ProjectSecurityDecl,
+    identity: &ProjectIdentity,
+) -> Result<Bson> {
+    let raw = match document.get("DemoUsers") {
+        Some(Bson::Array(items)) => Some(items.as_slice()),
+        _ => None,
+    };
+    let payload = parse_array(raw);
+    let (supported, opaque): (Vec<Bson>, Vec<Bson>) = payload.items.into_iter().partition(|item| {
+        matches!(
+            item,
+            Bson::Document(user) if user.get_str("$Type").ok() == Some("Security$DemoUserImpl")
+        )
+    });
+    let mut by_name: HashMap<String, Vec<&Document>> = HashMap::new();
+    for item in &supported {
+        if let Bson::Document(user) = item {
+            by_name
+                .entry(user.get_str("UserName").unwrap_or_default().to_string())
+                .or_default()
+                .push(user);
+        }
+    }
+    let mut users = Vec::with_capacity(declaration.demo_users.len());
+    for user in &declaration.demo_users {
+        let matches = by_name.get(user.name.as_str());
+        let prior = match matches.map(Vec::as_slice) {
+            Some([single]) => (*single).clone(),
+            _ => Document::new(),
+        };
+        let resolved = user
+            .password_env
+            .as_deref()
+            .and_then(|variable| std::env::var(variable).ok())
+            .filter(|value| !value.is_empty());
+        let password = match resolved {
+            Some(value) => value,
+            None => {
+                let stored = prior.get_str("Password").unwrap_or_default().to_string();
+                if stored.is_empty() {
+                    return Err(WriterError::MissingDemoUserPassword {
+                        name: user.name.clone(),
+                        variable: user
+                            .password_env
+                            .clone()
+                            .unwrap_or_else(|| "a password_from_env variable".to_string()),
+                    });
+                }
+                stored
+            }
+        };
+        let role_marker = match prior.get("UserRoles") {
+            Some(Bson::Array(items)) => parse_array(Some(items.as_slice())).marker,
+            _ => 1,
+        };
+        let mut lowered = prior.clone();
+        // Stored `$ID`s may be UUID binaries, not strings — decode them the
+        // way every other identity-preserving path here does.
+        let id = prior
+            .get("$ID")
+            .and_then(mxrs_bson::extract_id)
+            .unwrap_or_else(|| identity.artifact_id(ArtifactKind::DemoUser, &user.name));
+        lowered.insert("$ID", id);
+        lowered.insert("$Type", "Security$DemoUserImpl");
+        lowered.insert("UserName", user.name.clone());
+        lowered.insert("Password", password);
+        lowered.insert("Entity", user.entity.clone());
+        lowered.insert(
+            "UserRoles",
+            build_array(
+                user.roles.iter().cloned().map(Bson::String).collect(),
+                role_marker,
+            ),
+        );
+        users.push(Bson::Document(lowered));
+    }
+    users.extend(opaque);
+    Ok(Bson::Array(build_array(users, payload.marker)))
+}
+
 fn validate_project_security(mpr: &MprFile, declaration: &ProjectSecurityDecl) -> Result<()> {
     ensure_unique(
         declaration.user_roles.iter().map(|role| role.name.as_str()),
         "user role",
+    )?;
+    ensure_unique(
+        declaration.demo_users.iter().map(|user| user.name.as_str()),
+        "demo user",
     )?;
     let role_names = declaration
         .user_roles
@@ -227,6 +328,13 @@ fn validate_project_security(mpr: &MprFile, declaration: &ProjectSecurityDecl) -
     for referenced in demo_user_roles(mpr)? {
         if !role_names.contains(referenced.as_str()) {
             return Err(WriterError::UnknownUserRole(referenced));
+        }
+    }
+    for user in &declaration.demo_users {
+        for role in &user.roles {
+            if !role_names.contains(role.as_str()) {
+                return Err(WriterError::UnknownUserRole(role.clone()));
+            }
         }
     }
 

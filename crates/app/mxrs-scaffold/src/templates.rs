@@ -314,6 +314,46 @@ pub(crate) fn project_security(module_name: &str) -> String {
     )
 }
 
+/// Aggregates demo-user declarations. The build wires this `apply` after
+/// `security::apply`, so project security is always present — declared by
+/// the security scaffold or carried by an imported model — when these run.
+pub(crate) fn demo_users_aggregator() -> String {
+    format!(
+        "//! Local demo user declarations.\n\n\
+         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
+         for declare in {DECLARATIONS_LIST} {{\n        \
+         declare(project);\n    \
+         }}\n\
+         }}\n\n\
+         const {DECLARATIONS_LIST}: &[fn(&mut ::mxrs::ProjectDecl)] = &[];\n"
+    )
+}
+
+/// One demo-user declaration. The password never appears here: the writer
+/// resolves the named environment variable at write time, and an existing
+/// stored password is preserved when the variable is absent.
+pub(crate) fn demo_user(name: &str, entity: &str, roles: &[String], password_env: &str) -> String {
+    let roles = roles
+        .iter()
+        .map(|role| format!("{role:?}.to_string()"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "//! Demo user `{name}`.\n\n\
+         pub fn declare(project: &mut ::mxrs::ProjectDecl) {{\n    \
+         let security = project\n        \
+         .security\n        \
+         .as_mut()\n        \
+         .expect(\"project security must be declared before demo users\");\n    \
+         let mut user = ::mxrs::DemoUserDecl::new({name:?});\n    \
+         user.entity = {entity:?}.to_string();\n    \
+         user.roles = vec![{roles}];\n    \
+         user.password_env = Some({password_env:?}.to_string());\n    \
+         security.demo_users.push(user);\n\
+         }}\n"
+    )
+}
+
 pub(crate) fn family_aggregator(module_name: &str, family: &str) -> String {
     format!(
         "//! `{family}` declarations for the `{module_name}` Mendix module.\n\n\

@@ -17,8 +17,9 @@ pub mod task_queue;
 pub use task_queue::{TaskQueueConfig, TaskQueueDecl, TaskQueueScope};
 
 pub use application::{
-    ModuleRoleDecl, NavigationDecl, NavigationIconDecl, NavigationItemDecl, NavigationProfileDecl,
-    PasswordPolicyDecl, ProjectSecurityDecl, RoleHomeDecl, SecurityLevel, UserRoleDecl,
+    DemoUserDecl, ModuleRoleDecl, NavigationDecl, NavigationIconDecl, NavigationItemDecl,
+    NavigationProfileDecl, PasswordPolicyDecl, ProjectSecurityDecl, RoleHomeDecl, SecurityLevel,
+    UserRoleDecl,
 };
 pub use declaration::{
     AccessMemberKind, AccessRuleDecl, AssociationDecl, AssociationOwner, AssociationStorage,

@@ -5,12 +5,13 @@
 //! normal application-facing dependency surface.
 
 pub use mxrs_dsl::{
-    ButtonBuilder, CallArgument, ConstantBuilder, ContainerBuilder, DataViewBuilder, EntityBuilder,
-    EnumerationBuilder, FlowBuilder, FlowParameterBuilder, LayoutBuilder, LayoutGridBuilder,
-    LayoutGridColumnBuilder, LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder,
-    MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder, NavigationBuilder,
-    NavigationItemBuilder, NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder,
-    ProjectBuilder, ScheduledEventBuilder, SecurityBuilder, TaskQueueBuilder, UserRoleBuilder,
+    ButtonBuilder, CallArgument, ConstantBuilder, ContainerBuilder, DataViewBuilder,
+    DemoUserBuilder, EntityBuilder, EnumerationBuilder, FlowBuilder, FlowParameterBuilder,
+    LayoutBuilder, LayoutGridBuilder, LayoutGridColumnBuilder, LayoutGridRowBuilder, MenuBuilder,
+    MenuItemBuilder, MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder,
+    NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder, PageBuilder,
+    PluggableWidgetBuilder, ProjectBuilder, ScheduledEventBuilder, SecurityBuilder,
+    TaskQueueBuilder, UserRoleBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_ir::*;
@@ -72,9 +73,9 @@ pub trait ApplicationDefinition {
 pub mod prelude {
     pub use crate::{
         ApplicationDefinition, AssociationMarker, AttributeMarker, ButtonBuilder, CallArgument,
-        ConstantBuilder, ConstantType, ContainerBuilder, DataViewBuilder, EntityMarker,
-        EnumerationBuilder, EnumerationMarker, Expr, FlowBuilder, LayoutGridBuilder, MendixType,
-        MenuActionDecl, MenuBuilder, MenuIconDecl, MenuItemBuilder, MicroflowMarker,
+        ConstantBuilder, ConstantType, ContainerBuilder, DataViewBuilder, DemoUserBuilder,
+        EntityMarker, EnumerationBuilder, EnumerationMarker, Expr, FlowBuilder, LayoutGridBuilder,
+        MendixType, MenuActionDecl, MenuBuilder, MenuIconDecl, MenuItemBuilder, MicroflowMarker,
         MicroflowModuleBuilder, MicroflowRef, ModuleBuilder, MxBool, MxDecimal, MxEntity,
         MxEnumeration, MxFloat, MxInteger, MxLong, MxString, NanoflowMarker, NanoflowModuleBuilder,
         NanoflowRef, NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder, OnOverlap,

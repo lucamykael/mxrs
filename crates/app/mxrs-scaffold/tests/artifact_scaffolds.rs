@@ -49,6 +49,22 @@ fn scaffold(root: &Path, kind: ArtifactKind, name: &str) -> Vec<PathBuf> {
         .files
 }
 
+fn cargo_env(root: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+    let _guard = NESTED_CARGO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Command::new(env!("CARGO"))
+        .args(arguments)
+        .envs(envs.iter().copied())
+        .current_dir(root)
+        .env(
+            "CARGO_TARGET_DIR",
+            nested_cargo::target_dir(workspace().join("target")),
+        )
+        .output()
+        .unwrap()
+}
+
 fn cargo(root: &Path, arguments: &[&str]) -> std::process::Output {
     // Keep build and launch together while sharing the nested dependency
     // cache. Each fixture also has its own executable identity above.
@@ -85,14 +101,20 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     scaffold(&root, ArtifactKind::Repository, "Sales.Orders");
     scaffold(&root, ArtifactKind::Security, "Sales");
     scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::DemoUser, "Support", &root)
+            .page_roles(vec!["User".to_string()]),
+    )
+    .unwrap();
+    scaffold_artifact(
         &ArtifactScaffold::new(ArtifactKind::Page, "Sales.OrderOverview", &root)
             .page_roles(vec!["Sales.User".to_string()]),
     )
     .unwrap();
 
-    let output = cargo(
+    let output = cargo_env(
         &root,
         &["run", "--offline", "--quiet", "--", "build/Sales.mpr"],
+        &[("MXRS_DEMO_USER_SUPPORT_PASSWORD", "FromEnv1!")],
     );
     assert!(
         output.status.success(),
@@ -178,6 +200,91 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
         .filter_map(|role| role.name.as_deref())
         .collect::<Vec<_>>();
     assert_eq!(roles, ["User", "Administrator"]);
+    // The demo user reached ProjectSecurity with the password resolved from
+    // the environment of the nested build — never from generated source.
+    let security = project
+        .all_units()
+        .unwrap()
+        .iter()
+        .filter_map(|unit| project.mpr().parse_contents(unit).ok())
+        .find(|document| document.get_str("$Type").ok() == Some("Security$ProjectSecurity"))
+        .expect("project security document");
+    let Some(mxrs_bson::Bson::Array(raw)) = security.get("DemoUsers") else {
+        panic!("DemoUsers array missing")
+    };
+    let users = mxrs_bson::parse_array(Some(raw)).items;
+    let [mxrs_bson::Bson::Document(support)] = users.as_slice() else {
+        panic!("expected exactly the scaffolded demo user: {users:?}")
+    };
+    assert_eq!(support.get_str("UserName").unwrap(), "Support");
+    assert_eq!(support.get_str("Password").unwrap(), "FromEnv1!");
+    assert_eq!(support.get_str("Entity").unwrap(), "System.User");
+    let generated =
+        std::fs::read_to_string(root.join("src/domain/security/demo_users/support.rs")).unwrap();
+    assert!(
+        !generated.contains("FromEnv1!"),
+        "the password value must never appear in generated source"
+    );
+    let env_file = std::fs::read_to_string(root.join(".env")).unwrap();
+    assert!(env_file.contains("MXRS_DEMO_USER_SUPPORT_PASSWORD=Mxrs"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(root.join(".env"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, ".env must stay private");
+    }
+    let example = std::fs::read_to_string(root.join(".env.example")).unwrap();
+    assert!(example.contains("MXRS_DEMO_USER_SUPPORT_PASSWORD=\n"));
+}
+
+#[test]
+fn demo_user_scaffolds_fail_closed_on_missing_prerequisites() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    // Security has not been initialized yet.
+    assert!(matches!(
+        scaffold_artifact(&ArtifactScaffold::new(
+            ArtifactKind::DemoUser,
+            "Support",
+            &root
+        )),
+        Err(ScaffoldError::SecurityNotInitialized(_))
+    ));
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    scaffold(&root, ArtifactKind::Security, "Sales");
+    // A role the security declaration never names.
+    assert!(matches!(
+        scaffold_artifact(
+            &ArtifactScaffold::new(ArtifactKind::DemoUser, "Support", &root)
+                .page_roles(vec!["Ghost".to_string()])
+        ),
+        Err(ScaffoldError::UnknownDemoUserRole(role)) if role == "Ghost"
+    ));
+    // An entity the domain layer does not declare.
+    assert!(matches!(
+        scaffold_artifact(
+            &ArtifactScaffold::new(ArtifactKind::DemoUser, "Support", &root)
+                .demo_entity(Some("Sales.Missing".to_string()))
+        ),
+        Err(ScaffoldError::UnknownDemoUserEntity(entity)) if entity == "Sales.Missing"
+    ));
+    // A scaffolded entity satisfies the structural reference check.
+    scaffold(&root, ArtifactKind::Entity, "Sales.Account");
+    let outcome = scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::DemoUser, "Support", &root)
+            .demo_entity(Some("Sales.Account".to_string()))
+            .dry_run(true),
+    )
+    .unwrap();
+    assert!(outcome.dry_run);
+    assert!(
+        !root.join("src/domain/security/demo_users").exists(),
+        "dry-run writes nothing"
+    );
+    assert!(!root.join(".env").exists(), "dry-run creates no secret");
 }
 
 #[test]
@@ -398,6 +505,9 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
         let name = match (command.kind, command.argument) {
             (ArtifactKind::Module, _) => format!("Module{index}"),
             (_, "<Module>") => "Sales".to_string(),
+            // A demo user is a plain identifier, and its role must be one the
+            // scaffolded security declaration names.
+            (ArtifactKind::DemoUser, _) => format!("Artifact{index}"),
             _ => format!("Sales.Artifact{index}"),
         };
         let files = scaffold(&root, command.kind, &name);
@@ -431,7 +541,7 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
     }
     // Guards against the loop silently degenerating if `destination` spellings
     // ever change shape.
-    assert_eq!(checked, 16);
+    assert_eq!(checked, 17);
 }
 
 /// A project generated before the layering split has no `src/application/` or
