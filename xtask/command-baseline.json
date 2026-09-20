@@ -68,7 +68,7 @@
   "team-server": "partial",
   "test": "partial",
   "tree": "verified",
-  "uml": "missing",
+  "uml": "verified",
   "update": "missing",
   "upgrade": "partial",
   "use-case": "partial",

@@ -7,7 +7,7 @@
 //! `inspect` has no `bin/mxrb` equivalent under that name — it's a new
 //! single-file front end onto `compare`'s existing snapshot machinery.
 
-use mxrs_cli::arguments::{take_flag, take_value, validate_options};
+use mxrs_cli::arguments::{take_flag, take_value, take_values, validate_options};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -123,6 +123,18 @@ fn command_options(
         "migrate" => (&[], &["--json"], &[]),
         "project" => (&[], &["--json", "--no-progress"], &[]),
         "team-server" => (&["--pat-file"], &["--json"], &[]),
+        "uml" => (
+            &[
+                "--export",
+                "--format",
+                "--microflow",
+                "--root",
+                "--depth",
+                "--port",
+            ],
+            &[],
+            &["--module"],
+        ),
         "upgrade" => (&["--mendix", "--target"], &["--apply", "--json"], &[]),
         _ => (&[], &[], &[]),
     }
@@ -197,6 +209,7 @@ commands! {
     "team-server", "login --pat-file FILE [--json] | status DIR [--json]", "Configure a PAT pointer or inspect a local Team Server repository", run_team_server;
     "test", "<file.mpr> <suite.json> --plan [--json]", "Validate a functional runtime test plan", run_test;
     "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
+    "uml", "<file.mpr> --export class|activity|sequence [--format mermaid|plantuml] [--module NAME] [--microflow Module.Flow] [--root NAME] [--depth N]", "Export class, activity, or sequence diagrams as Mermaid or PlantUML", run_uml;
     "units", "<file.mpr>", "List native units and storage metadata", run_units;
     "upgrade", "[--mendix VERSION] [--target DIR] [--apply] [--json]", "Preview or apply a generated layout and optional version upgrade", run_upgrade;
     "use-case", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold an application use-case microflow", run_use_case;
@@ -1303,6 +1316,153 @@ fn run_cache(mut args: Vec<String>) -> ExitCode {
 fn document_index(path: &str) -> Result<mxrs_semantic::documents::DocumentIndex, String> {
     let project = mxrs_model::Project::open(path, true).map_err(|error| error.to_string())?;
     mxrs_semantic::documents::DocumentIndex::build(&project).map_err(|error| error.to_string())
+}
+
+fn run_uml(mut args: Vec<String>) -> ExitCode {
+    const USAGE: &str = "Usage: mxrs uml <file.mpr> --export class|activity|sequence \
+        [--format mermaid|plantuml] [--module NAME] [--microflow Module.Flow] \
+        [--root NAME] [--depth N]";
+    let export = take_value(&mut args, "--export");
+    let format = take_value(&mut args, "--format").unwrap_or_else(|| "mermaid".to_string());
+    let microflow = take_value(&mut args, "--microflow");
+    let root = take_value(&mut args, "--root");
+    let depth = take_value(&mut args, "--depth").unwrap_or_else(|| "2".to_string());
+    // MXRB accepts --port for its interactive viewer and ignores it during
+    // `--export`; the viewer itself is not ported.
+    take_value(&mut args, "--port");
+    let modules = take_values(&mut args, "--module");
+    if args.len() != 1 {
+        eprintln!("{USAGE}");
+        return ExitCode::FAILURE;
+    }
+    if !matches!(format.as_str(), "mermaid" | "plantuml") {
+        eprintln!("[mxrs] error: --format requires mermaid or plantuml");
+        return ExitCode::FAILURE;
+    }
+    let Some(export) = export else {
+        eprintln!(
+            "[mxrs] error: the interactive UML viewer is not ported; use --export class|activity|sequence"
+        );
+        return ExitCode::FAILURE;
+    };
+    if !matches!(export.as_str(), "class" | "activity" | "sequence") {
+        eprintln!("[mxrs] error: --export requires class, activity, or sequence");
+        return ExitCode::FAILURE;
+    }
+    match uml_diagram(
+        &args[0], &export, &format, &modules, microflow, root, &depth,
+    ) {
+        Ok(diagram) => {
+            print!("{diagram}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn uml_diagram(
+    source: &str,
+    export: &str,
+    format: &str,
+    modules: &[String],
+    microflow: Option<String>,
+    root: Option<String>,
+    depth: &str,
+) -> Result<String, String> {
+    use mxrs_cli::uml::{ActivityDiagram, ClassDiagram, SequenceDiagram};
+
+    let mermaid = format == "mermaid";
+    match export {
+        "class" => {
+            let project =
+                mxrs_model::Project::open(source, true).map_err(|error| error.to_string())?;
+            let all = project.modules().map_err(|error| error.to_string())?;
+            let selected: Vec<&mxrs_model::Module> = if modules.is_empty() {
+                all.iter().collect()
+            } else {
+                let known: std::collections::HashSet<&str> = all
+                    .iter()
+                    .filter_map(|module| module.name.as_deref())
+                    .collect();
+                let unknown: Vec<&str> = modules
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|name| !known.contains(name))
+                    .collect();
+                if !unknown.is_empty() {
+                    return Err(format!("unknown modules: {}", unknown.join(", ")));
+                }
+                all.iter()
+                    .filter(|module| {
+                        module
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| modules.iter().any(|wanted| wanted == name))
+                    })
+                    .collect()
+            };
+            let diagram = ClassDiagram::new(selected);
+            Ok(if mermaid {
+                diagram.to_mermaid()
+            } else {
+                diagram.to_plantuml()
+            })
+        }
+        "activity" => {
+            let reference = microflow
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| "--microflow is required for activity export".to_string())?;
+            let (module_name, flow_name) = reference
+                .split_once('.')
+                .ok_or_else(|| format!("microflow not found: {reference}"))?;
+            let project =
+                mxrs_model::Project::open(source, true).map_err(|error| error.to_string())?;
+            let all = project.modules().map_err(|error| error.to_string())?;
+            let flow = all
+                .iter()
+                .find(|module| module.name.as_deref() == Some(module_name))
+                .and_then(|module| {
+                    module
+                        .microflows
+                        .iter()
+                        .find(|flow| flow.name.as_deref() == Some(flow_name))
+                })
+                .ok_or_else(|| format!("microflow not found: {reference}"))?;
+            let diagram = ActivityDiagram::new(flow);
+            Ok(if mermaid {
+                diagram.to_mermaid()
+            } else {
+                diagram.to_plantuml()
+            })
+        }
+        "sequence" => {
+            if root.is_some() && !modules.is_empty() {
+                return Err("use either --root or --module for sequence export".to_string());
+            }
+            if root.is_none() && modules.len() != 1 {
+                return Err("--root or --module is required for sequence export".to_string());
+            }
+            let depth: i64 = depth
+                .parse()
+                .map_err(|_| format!("invalid value for depth: {depth:?}"))?;
+            let index = document_index(source)?;
+            let diagram = SequenceDiagram::new(
+                &index,
+                root.as_deref(),
+                modules.first().map(String::as_str),
+                depth,
+            )?;
+            Ok(if mermaid {
+                diagram.to_mermaid()
+            } else {
+                diagram.to_plantuml()
+            })
+        }
+        _ => unreachable!("validated by run_uml"),
+    }
 }
 
 fn run_callers(args: Vec<String>) -> ExitCode {

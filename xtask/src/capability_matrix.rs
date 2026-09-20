@@ -462,6 +462,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs move",
             "same-module unit relocation; MXRB additionally composes a cross-module move out of move+rename, which this refuses rather than half-performs",
         ),
+        "uml" => (
+            Status::Verified,
+            "mxrs uml",
+            "byte-identical class/activity/sequence Mermaid and PlantUML exports and shared refusals: xtask command-oracle uml; the interactive browser viewer is not ported and is refused explicitly; docs/commands/uml.md",
+        ),
         _ => (Status::Missing, "—", "no equivalent surface implemented"),
     }
 }
