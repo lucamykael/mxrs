@@ -1,0 +1,28 @@
+[package]
+name = "mxrs-module-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Private module catalog and installer: mxrb's separate, pre-official-Marketplace module distribution mechanism (a JSON catalog of git/local-directory sources, an mxrb-module.json manifest, its own .mxrs/modules.lock.json). Distinct from mxrs-marketplace, which is the official Mendix Content API client."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
+serde = { workspace = true }
+serde_json.workspace = true
+sha2 = "0.10"
+tempfile = "3.27.0"
+thiserror.workspace = true
+# The only network need is fetching a remote catalog.json over HTTPS; git
+# sources are fetched by shelling out to git itself (see runner.rs), not
+# through this client.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
+tempfile = "3.27.0"

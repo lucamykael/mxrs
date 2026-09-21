@@ -62,6 +62,7 @@ pub mod evaluation;
 pub mod functional;
 pub mod inspect;
 pub mod marketplace;
+pub mod module_catalog;
 pub mod preflight;
 pub mod protocols;
 pub mod refactor;

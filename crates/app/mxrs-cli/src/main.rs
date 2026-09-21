@@ -107,9 +107,11 @@ fn command_options(
         "update" => (&[], &["--check", "--changelog"], &[]),
         "widgets" => (&["--project"], &[], &[]),
         "ci" | "constant" | "consumed-rest" | "entity" | "enumeration" | "evaluation"
-        | "functional-test" | "integration" | "java-action" | "module" | "nanoflow"
-        | "published-rest" | "repository" | "scheduled-event" | "security" | "use-case"
-        | "validation" => (&["--target"], &["--dry-run", "--json"], &[]),
+        | "functional-test" | "integration" | "java-action" | "nanoflow" | "published-rest"
+        | "repository" | "scheduled-event" | "security" | "use-case" | "validation" => {
+            (&["--target"], &["--dry-run", "--json"], &[])
+        }
+        "module" => (&["--target", "--registry"], &["--dry-run", "--json"], &[]),
         "presentation" => (
             &["--target"],
             &["--dry-run", "--json", "--no-progress"],
@@ -192,7 +194,7 @@ commands! {
     "java-action", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Scaffold a Java Action adapter microflow", run_java_action;
     "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
-    "module", "new <Module> [--target DIR] [--dry-run] [--json]", "Scaffold an editable module declaration layer", run_module;
+    "module", "new <Module> [--target DIR] [--dry-run] [--json] | search [query] --registry SOURCE [--json] | add <name|directory> --registry SOURCE [--target DIR] [--json]", "Scaffold an editable module declaration layer, or search/install from a private module catalog", run_module;
     "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json] | install <package.mpk> <file.mpr> [--target-root DIR] [--allow-model-upgrade] [--apply] [--json] | list [--target-root DIR] [--json] | remove <name> [--target-root DIR] [--mpr FILE] [--apply] [--json] | dependencies <name> [--target-root DIR] [--mendix-version V] [--apply] [--json] | update <name[@version]> [--target-root DIR] [--mendix-version V] [--apply] [--json] | audit [--target-root DIR] [--mendix-version V] [--json] | verify [--target-root DIR] [--json]", "Search, download, install, list, remove, update, audit, verify, or resolve dependencies of official Marketplace content", run_marketplace;
     "mda", "<inspect|compare> ...", "Inspect or compare Mendix deployment archives", run_mda;
     "migrate", "<check|plan> [DIR] [--json]", "Compare a Cargo-native build with its imported MPR snapshot", run_migrate;
@@ -1292,10 +1294,13 @@ fn run_update(mut args: Vec<String>) -> ExitCode {
 }
 
 fn run_module(args: Vec<String>) -> ExitCode {
-    reported(mxrs_cli::scaffold::generate(
-        mxrs_scaffold::ArtifactKind::Module,
-        args,
-    ))
+    match args.first().map(String::as_str) {
+        Some("search" | "add") => mxrs_cli::module_catalog::run(args),
+        _ => reported(mxrs_cli::scaffold::generate(
+            mxrs_scaffold::ArtifactKind::Module,
+            args,
+        )),
+    }
 }
 
 fn run_repository(args: Vec<String>) -> ExitCode {

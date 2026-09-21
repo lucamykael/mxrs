@@ -28,6 +28,7 @@ mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
 mxrs-packager = { path = "../mxrs-packager" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
 mxrs-marketplace = { path = "../mxrs-marketplace" }
+mxrs-module-catalog = { path = "../mxrs-module-catalog" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-oql = { path = "../../compiler/mxrs-oql" }

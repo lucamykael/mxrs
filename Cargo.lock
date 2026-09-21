@@ -755,6 +755,7 @@ dependencies = [
  "mxrs-marketplace",
  "mxrs-materializers",
  "mxrs-model",
+ "mxrs-module-catalog",
  "mxrs-mpr",
  "mxrs-oql",
  "mxrs-packager",
@@ -999,6 +1000,21 @@ dependencies = [
  "mxrs-settings",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "mxrs-module-catalog"
+version = "0.1.0"
+dependencies = [
+ "mxrs-dsl",
+ "mxrs-mpr",
+ "mxrs-writer",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "ureq",
 ]
 
 [[package]]

@@ -242,8 +242,8 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "module" => (
             Status::Partial,
-            "mxrs module new",
-            "module declaration layer; Marketplace dependency resolution and uninstall remain separate gaps",
+            "mxrs module new/search/add",
+            "module declaration layer plus the private (pre-official) catalog install path (local-directory and git sources, offline-tested); `builtin:` sources are refused honestly since mxrs bundles no built-in module tree, and CLI `update`/`remove` are not exposed because bin/mxrb itself never exposes them for this catalog either (Mxrs::ModuleCatalog::Installer supports both as a library API, matching Mxrb::Marketplace::Installer)",
         ),
         "scaffold" => (
             Status::Partial,

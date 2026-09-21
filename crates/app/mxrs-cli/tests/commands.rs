@@ -1387,3 +1387,96 @@ fn marketplace_lifecycle_actions_validate_offline_inputs() {
     let stderr = String::from_utf8_lossy(&audited.stderr);
     assert!(stderr.contains("no Mendix credential"), "{stderr}");
 }
+
+#[test]
+fn module_search_and_add_work_offline_against_a_local_catalog_and_directory() {
+    let workspace = tempfile::tempdir().unwrap();
+
+    let source = workspace.path().join("billing-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("mxrb-module.json"),
+        r#"{"module_name":"Billing"}"#,
+    )
+    .unwrap();
+    std::fs::write(source.join("module.rb"), "# billing module").unwrap();
+
+    let catalog_path = workspace.path().join("catalog.json");
+    std::fs::write(
+        &catalog_path,
+        serde_json::json!({
+            "modules": [{
+                "name": "billing-kit",
+                "version": "1.0.0",
+                "description": "Billing module",
+                "source": source.to_str().unwrap(),
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // `add` without `--registry` on a non-directory identifier fails with a
+    // named error rather than trying to fetch mxrb's bundled default catalog.
+    let no_registry = cli(&["module", "add", "billing-kit"]);
+    assert!(!no_registry.status.success());
+    let stderr = String::from_utf8_lossy(&no_registry.stderr);
+    assert!(stderr.contains("--registry is required"), "{stderr}");
+
+    let searched = cli(&[
+        "module",
+        "search",
+        "billing",
+        "--registry",
+        catalog_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(searched.status.success(), "{:?}", searched.stderr);
+    let results: Value = serde_json::from_slice(&searched.stdout).unwrap();
+    assert_eq!(results.as_array().unwrap().len(), 1);
+    assert_eq!(results[0]["name"], "billing-kit");
+
+    let target = workspace.path().join("project");
+    std::fs::create_dir_all(&target).unwrap();
+    let added = cli(&[
+        "module",
+        "add",
+        "billing-kit",
+        "--registry",
+        catalog_path.to_str().unwrap(),
+        "--target",
+        target.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(added.status.success(), "{:?}", added.stderr);
+    let installation: Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(installation["moduleName"], "Billing");
+    assert!(
+        target
+            .join("modules")
+            .join("Billing")
+            .join("module.rb")
+            .exists()
+    );
+    assert!(target.join(".mxrs").join("modules.lock.json").exists());
+
+    // A local directory needs no `--registry` at all.
+    let other_source = workspace.path().join("reporting-source");
+    std::fs::create_dir_all(&other_source).unwrap();
+    std::fs::write(
+        other_source.join("mxrb-module.json"),
+        r#"{"module_name":"Reporting"}"#,
+    )
+    .unwrap();
+    std::fs::write(other_source.join("module.rb"), "# reporting module").unwrap();
+    let added_local = cli(&[
+        "module",
+        "add",
+        other_source.to_str().unwrap(),
+        "--target",
+        target.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(added_local.status.success(), "{:?}", added_local.stderr);
+    assert!(target.join("modules").join("Reporting").exists());
+}

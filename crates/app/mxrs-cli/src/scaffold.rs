@@ -45,6 +45,11 @@ pub fn usage(kind: ArtifactKind) -> String {
             "",
             " | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]",
         )
+    } else if kind == ArtifactKind::Module {
+        (
+            "",
+            " | search [query] --registry SOURCE [--json] | add <name|directory> --registry SOURCE [--target DIR] [--json]",
+        )
     } else {
         ("", "")
     };
