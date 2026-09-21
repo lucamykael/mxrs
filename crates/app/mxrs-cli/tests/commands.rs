@@ -997,6 +997,33 @@ fn query_commands_expose_supported_projection_and_fail_on_unsafe_or_invalid_dial
 }
 
 #[test]
+fn analyze_command_reports_dialect_specific_oql_risks_and_validates_its_input_modes() {
+    let output = cli(&[
+        "analyze",
+        "--oql",
+        "SELECT * FROM Sales.Order o WHERE LOWER(o/Name) LIKE '%name%'",
+        "--dialect",
+        "sql_server",
+        "--json",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let report = text(&output);
+    assert!(report.contains("like_both_wildcard"));
+    assert!(report.contains("function_in_where"));
+    assert!(report.contains("sql_server"));
+    assert!(
+        !cli(&["analyze", "--sql", "SELECT 1", "--oql", "SELECT 1"])
+            .status
+            .success()
+    );
+    assert!(
+        !cli(&["analyze", "--sql", "SELECT 1", "--dialect", "unknown"])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn cargo_import_export_scaffold_and_java_generation_have_real_filesystem_effects() {
     let (directory, path) = fixture(false);
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))

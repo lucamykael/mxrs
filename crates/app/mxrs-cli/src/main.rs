@@ -104,6 +104,7 @@ fn command_options(
             &[],
         ),
         "oql" => (&["--dialect"], &["--json"], &[]),
+        "analyze" => (&["--dialect", "--sql", "--oql"], &["--json"], &[]),
         "package" => (&["--web", "--output", "-o"], &[], &[]),
         "search" => (&["--limit"], &["--json"], &[]),
         "translate-oql" => (&["--dialect"], &[], &[]),
@@ -177,6 +178,7 @@ macro_rules! commands {
 // Dispatch and discovery share a registry: help cannot advertise a stub or
 // silently omit an implemented command.
 commands! {
+    "analyze", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json] | --sql QUERY | --oql QUERY", "Analyze OQL or SQL query risks with dialect-specific advice", run_analyze;
     "benchmark", "<file.mpr> [--iterations N] [--json]", "Measure model loading, semantic indexing, and validation performance", run_benchmark;
     "cache", "<status|warm|clear> <file.mpr> [--json]", "Inspect or manage the semantic index cache", run_cache;
     "ci", "init github [--target DIR] [--dry-run] [--json]", "Create a GitHub Actions workflow", run_ci;
@@ -2329,6 +2331,100 @@ fn run_semantic_search(mut args: Vec<String>) -> ExitCode {
                 "{}\t{:?}\t{}",
                 hit.score, hit.artifact.kind, hit.artifact.qualified_name
             );
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_analyze(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let dialect = match take_value(&mut args, "--dialect")
+        .as_deref()
+        .map_or(Ok(mxrs_oql::Dialect::PostgreSql), mxrs_oql::Dialect::parse)
+    {
+        Ok(dialect) => dialect,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let sql = take_value(&mut args, "--sql");
+    let oql = take_value(&mut args, "--oql");
+    if sql.is_some() && oql.is_some() || (sql.is_some() || oql.is_some()) && !args.is_empty() {
+        eprintln!("[mxrs] error: use exactly one of --sql, --oql, or <file.mpr>");
+        return ExitCode::FAILURE;
+    }
+    let reports = if let Some(source) = sql.or(oql) {
+        vec![("AdHoc".to_string(), source)]
+    } else {
+        if args.len() != 1 {
+            eprintln!(
+                "[mxrs] error: usage: mxrs analyze <file.mpr> [--dialect postgresql|sql_server|ansi] [--json] | --sql QUERY | --oql QUERY"
+            );
+            return ExitCode::FAILURE;
+        }
+        let project = match mxrs_model::Project::open(&args[0], true) {
+            Ok(project) => project,
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match mxrs_oql::catalog(&project) {
+            Ok(queries) => queries
+                .into_iter()
+                .map(|query| (query.qualified_name, query.oql))
+                .collect(),
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+    let dialect_key = match dialect {
+        mxrs_oql::Dialect::Ansi => "ansi",
+        mxrs_oql::Dialect::PostgreSql => "postgresql",
+        mxrs_oql::Dialect::SqlServer => "sql_server",
+    };
+    if json {
+        let payload = reports
+            .iter()
+            .map(|(name, source)| {
+                let findings = mxrs_oql::analyze(source);
+                serde_json::json!({
+                    "name": name,
+                    "source": source,
+                    "clean": !findings.iter().any(|finding| finding.severity == "error"),
+                    "warnings": findings.iter().any(|finding| finding.severity == "warning"),
+                    "findings": findings,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("serializable OQL analysis")
+        );
+    } else {
+        let mut any = false;
+        for (name, source) in &reports {
+            for finding in mxrs_oql::analyze(source) {
+                any = true;
+                let suggestion = finding
+                    .suggestions
+                    .get(dialect_key)
+                    .expect("each OQL finding carries every supported dialect");
+                println!(
+                    "{name}  [{}] {}",
+                    finding.severity.to_ascii_uppercase(),
+                    finding.rule
+                );
+                println!("  {}/{}", source, finding.fragment);
+                println!("  {}", finding.message);
+                println!("  {dialect_key} -> {suggestion}");
+            }
+        }
+        if !any {
+            println!("[mxrs] No analysis findings");
         }
     }
     ExitCode::SUCCESS
