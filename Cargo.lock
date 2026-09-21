@@ -956,13 +956,18 @@ dependencies = [
 name = "mxrs-marketplace"
 version = "0.1.0"
 dependencies = [
+ "mxrs-bson",
  "mxrs-dsl",
+ "mxrs-ir",
  "mxrs-model",
  "mxrs-mpr",
+ "mxrs-semantic",
+ "mxrs-widget-package",
  "mxrs-writer",
  "quick-xml",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "ureq",

@@ -125,6 +125,7 @@ fn command_options(
                 "-o",
                 "--limit",
                 "--target-root",
+                "--mpr",
             ],
             &["--json", "--apply", "--allow-model-upgrade"],
             &[],
@@ -192,7 +193,7 @@ commands! {
     "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
     "module", "new <Module> [--target DIR] [--dry-run] [--json]", "Scaffold an editable module declaration layer", run_module;
-    "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json] | install <package.mpk> <file.mpr> [--target-root DIR] [--allow-model-upgrade] [--apply] [--json]", "Search, download, or install official Marketplace content", run_marketplace;
+    "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json] | install <package.mpk> <file.mpr> [--target-root DIR] [--allow-model-upgrade] [--apply] [--json] | list [--target-root DIR] [--json] | remove <name> [--target-root DIR] [--mpr FILE] [--apply] [--json] | dependencies <name> [--target-root DIR] [--mendix-version V] [--apply] [--json]", "Search, download, install, list, remove, or resolve dependencies of official Marketplace content", run_marketplace;
     "mda", "<inspect|compare> ...", "Inspect or compare Mendix deployment archives", run_mda;
     "migrate", "<check|plan> [DIR] [--json]", "Compare a Cargo-native build with its imported MPR snapshot", run_migrate;
     "modules", "<file.mpr> [--json | --names] [--no-progress]", "List modules with entity, page and microflow counts", run_modules;

@@ -14,14 +14,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use mxrs_marketplace::{
-    ContentApi, Credentials, MarketplaceError, Package, SearchQuery, plan_install,
+    ContentApi, Credentials, MarketplaceError, Package, SearchQuery, lifecycle, plan_install,
     ureq_transport::UreqTransport,
 };
 
 use crate::arguments::{take_flag, take_value};
 
-pub const USAGE: &str =
-    "usage: mxrs marketplace <search|show|versions|download|install> [arguments]";
+pub const USAGE: &str = "usage: mxrs marketplace <search|show|versions|download|install|list|remove|dependencies> [arguments]";
 
 pub fn run(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
@@ -32,6 +31,7 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
     let apply = take_flag(&mut args, "--apply");
     let allow_model_upgrade = take_flag(&mut args, "--allow-model-upgrade");
     let target_root = take_value(&mut args, "--target-root");
+    let mpr_option = take_value(&mut args, "--mpr");
 
     let Some((action, rest)) = args.split_first() else {
         eprintln!("[mxrs] error: {USAGE}");
@@ -54,6 +54,21 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
             Path::new(mpr),
             target_root.as_deref().map(Path::new),
             allow_model_upgrade,
+            apply,
+            json,
+        ),
+        ("list", []) => list(target_root.as_deref().map(Path::new), json),
+        ("dependencies", [identifier]) => dependencies(
+            identifier,
+            target_root.as_deref().map(Path::new),
+            mendix_version.as_deref(),
+            apply,
+            json,
+        ),
+        ("remove", [identifier]) => remove(
+            identifier,
+            target_root.as_deref().map(Path::new),
+            mpr_option.as_deref().map(Path::new),
             apply,
             json,
         ),
@@ -231,7 +246,20 @@ fn install(
     let overwrites = plan.overwrites();
     let (source_version, target_version) =
         (plan.source_version.clone(), plan.target_version.clone());
-    let report = if apply { Some(plan.apply()?) } else { None };
+    // Applying goes through the lifecycle wrapper so the install is
+    // recorded in the marketplace lockfile (cached archive, owned files,
+    // asset originals) and `remove` can later undo it.
+    let report = if apply {
+        Some(lifecycle::install_module(
+            package,
+            mpr,
+            target_root,
+            allow_model_upgrade,
+            &lifecycle::OfficialProvenance::default(),
+        )?)
+    } else {
+        None
+    };
 
     if json {
         print_json(&serde_json::json!({
@@ -271,6 +299,137 @@ fn install(
         );
     }
     Ok(())
+}
+
+fn list(target_root: Option<&Path>, json: bool) -> Result<(), MarketplaceError> {
+    let target = target_root.unwrap_or_else(|| Path::new("."));
+    let packages = lifecycle::list(target)?;
+    if json {
+        print_json(&serde_json::Value::Array(
+            packages
+                .iter()
+                .map(|(name, entry)| {
+                    serde_json::json!({
+                        "name": name,
+                        "version": entry.version,
+                        "source": entry.source,
+                        "kind": entry.kind,
+                    })
+                })
+                .collect(),
+        ));
+    } else {
+        for (name, entry) in &packages {
+            println!(
+                "{name}\t{}\t{}",
+                entry.version.as_deref().unwrap_or("-"),
+                entry.source.as_deref().unwrap_or("-")
+            );
+        }
+        println!("[mxrs] {} package(s)", packages.len());
+    }
+    Ok(())
+}
+
+fn dependencies(
+    identifier: &str,
+    target_root: Option<&Path>,
+    mendix_version: Option<&str>,
+    apply: bool,
+    json: bool,
+) -> Result<(), MarketplaceError> {
+    let target = target_root.unwrap_or_else(|| Path::new("."));
+    // Resolution needs the Content API only when something is actually
+    // missing; without a credential the plan still runs and reports the
+    // unresolvable names as blockers.
+    let api = client().ok();
+    let plan = mxrs_marketplace::resolver::plan_dependencies(
+        target,
+        identifier,
+        api.as_ref(),
+        mendix_version,
+    )?;
+    let safe = plan.safe();
+    let state = if !safe {
+        "blocked"
+    } else if apply {
+        "applied"
+    } else {
+        "preview"
+    };
+    if json {
+        print_json(&serde_json::json!({
+            "root": plan.root,
+            "state": state,
+            "changes": plan.changes(),
+            "blockers": plan.blockers,
+        }));
+    } else {
+        println!("[mxrs] dependencies {}: {state}", plan.root);
+        for change in plan.changes() {
+            println!("  change: {change}");
+        }
+        for blocker in &plan.blockers {
+            println!("  blocker: {blocker}");
+        }
+    }
+    if apply && safe {
+        plan.apply()?;
+    }
+    if safe {
+        Ok(())
+    } else {
+        Err(MarketplaceError::PlanBlocked(
+            "rerun after resolving the blockers above".into(),
+        ))
+    }
+}
+
+fn remove(
+    identifier: &str,
+    target_root: Option<&Path>,
+    mpr: Option<&Path>,
+    apply: bool,
+    json: bool,
+) -> Result<(), MarketplaceError> {
+    let target = target_root.unwrap_or_else(|| Path::new("."));
+    let plan = lifecycle::plan_remove(target, identifier, mpr)?;
+    let safe = plan.safe();
+    let state = if !safe {
+        "blocked"
+    } else if apply {
+        "applied"
+    } else {
+        "preview"
+    };
+    if json {
+        print_json(&serde_json::json!({
+            "action": plan.action,
+            "name": plan.name,
+            "installedVersion": plan.installed_version,
+            "state": state,
+            "changes": plan.changes,
+            "blockers": plan.blockers,
+        }));
+    } else {
+        println!("[mxrs] {} {}: {state}", plan.action, plan.name);
+        for change in &plan.changes {
+            println!("  change: {change}");
+        }
+        for blocker in &plan.blockers {
+            println!("  blocker: {blocker}");
+        }
+    }
+    if apply && safe {
+        plan.apply()?;
+    }
+    if safe {
+        Ok(())
+    } else {
+        Err(MarketplaceError::PlanBlocked(
+            "rerun after resolving the blockers above".into(),
+        ))
+    }
 }
 
 /// Names the file after the package when no `--output` was given, so a bare

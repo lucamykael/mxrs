@@ -130,6 +130,14 @@ pub struct SemanticIndex {
     references: BTreeSet<Reference>,
     aliases: BTreeMap<String, BTreeSet<String>>,
     diagnostics: Vec<Diagnostic>,
+    /// Reference targets that matched no artifact at all — the structured
+    /// record behind every `unresolved_reference` diagnostic, kept as data
+    /// (not message text) so tooling like the marketplace dependency
+    /// resolver can read the missing qualified names. `default` keeps
+    /// pre-existing caches deserializable; the cache format version was
+    /// bumped so they are rebuilt rather than served with this empty.
+    #[serde(default)]
+    unresolved_targets: BTreeSet<String>,
     fingerprint: String,
 }
 
@@ -351,6 +359,12 @@ impl SemanticIndex {
         &self.diagnostics
     }
 
+    /// Qualified names that matched no artifact at all, sorted — the data
+    /// behind every `unresolved_reference` diagnostic.
+    pub fn unresolved_reference_targets(&self) -> &BTreeSet<String> {
+        &self.unresolved_targets
+    }
+
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
@@ -506,6 +520,7 @@ struct IndexBuilder {
     references: BTreeSet<Reference>,
     pending: Vec<(String, String, String, Option<ExpectedKind>)>,
     diagnostics: Vec<Diagnostic>,
+    unresolved_targets: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -713,6 +728,9 @@ impl IndexBuilder {
                 let to = (*keys.iter().next().expect("one key")).clone();
                 self.references.insert(Reference { from, to, relation });
             } else if expected.is_some() && !target.starts_with("System.") {
+                if keys.is_empty() {
+                    self.unresolved_targets.insert(target.clone());
+                }
                 self.diagnostics.push(Diagnostic {
                     severity: "error".into(),
                     code: if keys.is_empty() {
@@ -743,6 +761,7 @@ impl IndexBuilder {
             references: self.references,
             aliases: self.aliases,
             diagnostics: self.diagnostics,
+            unresolved_targets: self.unresolved_targets,
             fingerprint,
         })
     }

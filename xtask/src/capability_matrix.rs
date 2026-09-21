@@ -421,8 +421,8 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "marketplace" => (
             Status::Partial,
-            "mxrs marketplace search/show/versions/download/install",
-            "official Content API client plus .mpk module install, both verified against the live API and a real published package; dependency resolution and uninstall are not ported",
+            "mxrs marketplace search/show/versions/download/install/list/remove/dependencies",
+            "official Content API client plus .mpk module install (live-API-verified), now with a marketplace lockfile, blocker-guarded transactional removal, and recursive dependency resolution from unresolved model references (offline-tested end to end); widget-bundle installation and `update`/`audit`/`verify` remain unported and are reported honestly",
         ),
         "mda" => (
             Status::Verified,

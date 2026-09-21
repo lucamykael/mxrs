@@ -11,13 +11,23 @@ description = "Client for the official Mendix Marketplace Content API: search pu
 workspace = true
 
 [dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
+# The dependency resolver discovers missing modules from the unresolved
+# qualified references inside a package's own model, and missing widget
+# bundles from the project's installed widgets/*.mpk inventory.
+mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
+mxrs-widget-package = { path = "../../model/mxrs-widget-package" }
 # A .mpk is a zip holding an .mpr plus assets, and package.xml is namespaced
 # XML. Neither is safe to parse by hand; both dependencies are confined to
 # `package`.
 quick-xml = "0.38"
 serde = { workspace = true }
 serde_json.workspace = true
+# Lock entries and asset-original bookkeeping verify file integrity by
+# SHA-256, the same digests mxrb's marketplace.lock.json records.
+sha2 = "0.10"
 thiserror.workspace = true
 # The workspace's only HTTPS client. Confined to this crate's `ureq_transport`
 # module: nothing else here needs the network, and `Transport` keeps the API
@@ -28,7 +38,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3.27.0"
 
 [dev-dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
+mxrs-mpr = { path = "../../io/mxrs-mpr" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -23,7 +23,10 @@ use serde::Deserialize;
 
 pub mod credentials;
 pub mod installer;
+pub mod lifecycle;
+pub mod lock;
 pub mod package;
+pub mod resolver;
 mod transport;
 pub mod ureq_transport;
 
@@ -193,6 +196,24 @@ pub enum MarketplaceError {
         "unit {0} already exists in the target project; installing would replace an unrelated document"
     )]
     UnitIdCollision(String),
+
+    #[error("invalid marketplace lockfile {path}: {message}")]
+    InvalidLock { path: String, message: String },
+
+    #[error("Marketplace package {0:?} is not installed")]
+    NotInstalled(String),
+
+    #[error("Marketplace package {0:?} is not an imported module")]
+    NotAModule(String),
+
+    #[error("cached Marketplace package is missing: {0}")]
+    MissingCachedPackage(String),
+
+    #[error("Marketplace lifecycle plan is blocked: {0}")]
+    PlanBlocked(String),
+
+    #[error("cached marketplace package checksum mismatch")]
+    CacheChecksumMismatch,
 
     #[error(
         "module manifest declares Mendix {declared} but its model is {actual}; the package is inconsistent"

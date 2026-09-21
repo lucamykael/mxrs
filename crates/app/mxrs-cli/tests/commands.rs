@@ -1319,3 +1319,30 @@ fn diagram_er_refuses_the_browser_lifecycle_and_validates_arguments() {
     let stderr = String::from_utf8_lossy(&bare.stderr);
     assert!(stderr.contains("Usage: mxrs diagram-er"), "{stderr}");
 }
+
+#[test]
+fn marketplace_lifecycle_actions_validate_offline_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_str().unwrap().to_string();
+
+    let listed = cli(&["marketplace", "list", "--target-root", &root]);
+    assert!(listed.status.success());
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains("0 package(s)"), "{stdout}");
+
+    let removed = cli(&["marketplace", "remove", "Ghost", "--target-root", &root]);
+    assert!(!removed.status.success());
+    let stderr = String::from_utf8_lossy(&removed.stderr);
+    assert!(stderr.contains("not installed"), "{stderr}");
+
+    let dependencies = cli(&[
+        "marketplace",
+        "dependencies",
+        "Ghost",
+        "--target-root",
+        &root,
+    ]);
+    assert!(!dependencies.status.success());
+    let stderr = String::from_utf8_lossy(&dependencies.stderr);
+    assert!(stderr.contains("not installed"), "{stderr}");
+}
