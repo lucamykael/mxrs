@@ -35,6 +35,8 @@ expression tokens. Their read-only graph is separate from typed refactoring.
 [`presentation init`](docs/commands/presentation.md) now creates the native
 application layout through editable, typed Rust, including its header and
 optional navigation sidebar.
+[`benchmark`](docs/commands/benchmark.md) measures fresh MPR opening,
+semantic indexing and storage validation with the MXRB-compatible report.
 Protocol audit remains GUID-based and fail-closed; neither current registry
 contains evidenced recognition GUIDs.
 

@@ -63,6 +63,7 @@ fn command_options(
     &'static [&'static str],
 ) {
     match name {
+        "benchmark" => (&["--iterations"], &["--json"], &[]),
         "changelog" | "evaluate" | "inspect" | "lint" | "preflight" | "report" | "validate" => {
             (&[], &["--json"], &[])
         }
@@ -176,6 +177,7 @@ macro_rules! commands {
 // Dispatch and discovery share a registry: help cannot advertise a stub or
 // silently omit an implemented command.
 commands! {
+    "benchmark", "<file.mpr> [--iterations N] [--json]", "Measure model loading, semantic indexing, and validation performance", run_benchmark;
     "cache", "<status|warm|clear> <file.mpr> [--json]", "Inspect or manage the semantic index cache", run_cache;
     "ci", "init github [--target DIR] [--dry-run] [--json]", "Create a GitHub Actions workflow", run_ci;
     "callees", "<file.mpr> <artifact> [--json]", "List distinct directly called artifacts", run_callees;
@@ -1726,6 +1728,114 @@ fn run_portability(mut args: Vec<String>) -> ExitCode {
 fn semantic_index(path: &str) -> Result<mxrs_semantic::SemanticIndex, String> {
     let project = mxrs_model::Project::open(path, true).map_err(|error| error.to_string())?;
     mxrs_semantic::cache::cached_or_build(&project).map_err(|error| error.to_string())
+}
+
+#[derive(serde::Serialize)]
+struct BenchmarkResult {
+    iterations: u16,
+    open_seconds: f64,
+    index_seconds: f64,
+    validate_seconds: f64,
+    units: usize,
+}
+
+/// Measures the same three read-only operations as MXRB's `benchmark`: open
+/// and enumerate units, build a fresh semantic index, then validate storage.
+/// The index deliberately bypasses MXRS's derivative cache: benchmark results
+/// must describe the operation itself rather than the state of a prior command.
+fn run_benchmark(mut args: Vec<String>) -> ExitCode {
+    let json = take_flag(&mut args, "--json");
+    let iterations = match take_value(&mut args, "--iterations") {
+        Some(value) => match value.parse::<u16>() {
+            Ok(value @ 1..=100) => value,
+            _ => {
+                eprintln!("[mxrs] error: --iterations must be an integer between 1 and 100");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => 3,
+    };
+    let [path] = args.as_slice() else {
+        eprintln!("Usage: mxrs benchmark <file.mpr> [--iterations N] [--json]");
+        return ExitCode::FAILURE;
+    };
+
+    let measure = |operation: &str, mut run: Box<dyn FnMut() -> Result<usize, String>>| {
+        let started = std::time::Instant::now();
+        let mut value = 0;
+        for _ in 0..iterations {
+            value = run().map_err(|error| format!("{operation}: {error}"))?;
+        }
+        Ok::<_, String>((
+            started.elapsed().as_secs_f64() / f64::from(iterations),
+            value,
+        ))
+    };
+
+    let (open_seconds, units) = match measure(
+        "open",
+        Box::new(|| {
+            mxrs_model::Project::open(path, true)
+                .and_then(|project| project.all_units())
+                .map(|units| units.len())
+                .map_err(|error| error.to_string())
+        }),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (index_seconds, _) = match measure(
+        "semantic index",
+        Box::new(|| {
+            let project =
+                mxrs_model::Project::open(path, true).map_err(|error| error.to_string())?;
+            mxrs_semantic::SemanticIndex::build(&project)
+                .map(|index| index.artifacts().count())
+                .map_err(|error| error.to_string())
+        }),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (validate_seconds, _) = match measure(
+        "validate",
+        Box::new(|| {
+            mxrs_cli::validate::validate(path)
+                .map(|report| usize::from(report.is_valid()))
+                .map_err(|error| error.to_string())
+        }),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = BenchmarkResult {
+        iterations,
+        open_seconds,
+        index_seconds,
+        validate_seconds,
+        units,
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).expect("benchmark result is serializable")
+        );
+    } else {
+        println!("Units            : {}", result.units);
+        println!("Open average     : {:.6}s", result.open_seconds);
+        println!("Index average    : {:.6}s", result.index_seconds);
+        println!("Validate average : {:.6}s", result.validate_seconds);
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_cache(mut args: Vec<String>) -> ExitCode {

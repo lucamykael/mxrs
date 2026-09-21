@@ -89,6 +89,7 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
     }
     for required in [
         "validate",
+        "benchmark",
         "changelog",
         "import",
         "export",
@@ -113,6 +114,47 @@ fn every_discoverable_command_has_working_help_and_rejects_missing_arguments() {
     ] {
         assert!(names.contains(required));
     }
+}
+
+#[test]
+fn benchmark_measures_the_three_read_only_model_operations() {
+    let (_directory, path) = fixture(false);
+
+    let output = cli(&[
+        "benchmark",
+        path.to_str().unwrap(),
+        "--iterations=2",
+        "--json",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["iterations"], 2);
+    assert!(report["units"].as_u64().unwrap() > 0);
+    for metric in ["open_seconds", "index_seconds", "validate_seconds"] {
+        assert!(report[metric].as_f64().is_some_and(|value| value >= 0.0));
+    }
+
+    let output = cli(&["benchmark", path.to_str().unwrap(), "--iterations", "1"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(text(&output).contains("Units            :"));
+    assert!(text(&output).contains("Open average     :"));
+    assert!(text(&output).contains("Index average    :"));
+    assert!(text(&output).contains("Validate average :"));
+}
+
+#[test]
+fn benchmark_rejects_invalid_iterations_and_missing_models() {
+    for iterations in ["0", "101", "one"] {
+        let output = cli(&["benchmark", "/missing.mpr", "--iterations", iterations]);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("--iterations must be an integer between 1 and 100")
+        );
+    }
+    assert!(!cli(&["benchmark", "/missing.mpr"]).status.success());
+    assert!(!cli(&["benchmark"]).status.success());
 }
 
 #[test]

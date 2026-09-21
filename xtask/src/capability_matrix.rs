@@ -197,9 +197,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         // parity has not been proved and must remain visibly partial.
         "analyze" => (Status::Partial, "mxrs oql", "risk analyzer only"),
         "benchmark" => (
-            Status::Partial,
-            "cargo bench",
-            "library benches, no CLI parity",
+            Status::Verified,
+            "mxrs benchmark",
+            "repeatable read-only MPR open/unit enumeration, fresh semantic-index construction and storage validation, with MXRB-compatible iterations, human output and JSON result fields; own evidence: CLI contract suite",
         ),
         "cache" => (
             Status::Verified,
