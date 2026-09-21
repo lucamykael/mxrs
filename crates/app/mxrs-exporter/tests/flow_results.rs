@@ -115,7 +115,9 @@ fn imported_callees_survive_typed_caller_edits_and_transactional_rejections() {
     assert_eq!(before.len(), 3);
     mxrs_exporter::import_cargo_project(&source, &generated, Some(&workspace_root())).unwrap();
     std::fs::remove_dir_all(&source_dir).unwrap();
-    let editable = generated.join("src/application/microflows/mod.rs");
+    // Reuse a registered per-flow module so this edit replaces the typed Text
+    // overlay while adding Caller; the imported Text document remains preserved.
+    let editable = generated.join("src/application/use_cases/calls_text.rs");
     std::fs::write(&editable, CALLERS).unwrap();
     let built = run(&generated, &output);
     assert!(

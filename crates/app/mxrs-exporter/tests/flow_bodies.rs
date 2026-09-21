@@ -9,6 +9,33 @@ use std::process::Command;
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
 
+fn flow_sources(generated: &Path) -> String {
+    let directory = generated.join("src/application/use_cases");
+    let mut paths: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn flow_source_path(generated: &Path, flow_name: &str) -> PathBuf {
+    let needle = format!("module.microflow({flow_name:?}");
+    std::fs::read_dir(generated.join("src/application/use_cases"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name().is_some_and(|name| name != "mod.rs")
+                && std::fs::read_to_string(path).is_ok_and(|source| source.contains(&needle))
+        })
+        .unwrap_or_else(|| panic!("generated source for flow {flow_name:?} not found"))
+}
+
 fn structured_fixture() -> mxrs_ir::ProjectDecl {
     let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
     builder.module("Calls", |m| {
@@ -113,7 +140,7 @@ fn nested_decisions_and_loops_rebuild_exactly_and_edit_in_place() {
     assert!(report.passed, "{:?}", report.failures);
     assert_eq!(report.candidate_units, 2);
     mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
-    let editable = generated.join("src/application/microflows/mod.rs");
+    let editable = flow_source_path(&generated, "Structured");
     let source = std::fs::read_to_string(&editable).unwrap();
     for token in [
         "flow.decision(",
@@ -282,9 +309,7 @@ fn unsupported_control_semantics_and_out_of_scope_variables_stay_preserved() {
         let generated = dir.path().join("generated");
         mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
         assert!(
-            !std::fs::read_to_string(generated.join("src/application/microflows/mod.rs"))
-                .unwrap()
-                .contains("\"Structured\""),
+            !flow_sources(&generated).contains("\"Structured\""),
             "{mutation}"
         );
     }
@@ -472,8 +497,9 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
     assert!(report.passed, "{:?}", report.failures);
     assert_eq!(report.candidate_units, 6);
     mxrs_exporter::import_cargo_project(&original, &generated, Some(&workspace())).unwrap();
-    let editable = generated.join("src/application/microflows/mod.rs");
-    let source = std::fs::read_to_string(&editable).unwrap();
+    let editable = flow_source_path(&generated, "Caller");
+    let editable_source = std::fs::read_to_string(&editable).unwrap();
+    let source = flow_sources(&generated);
     for token in [
         "call_microflow_result",
         "flow.commit(",
@@ -500,8 +526,8 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
     std::fs::remove_dir_all(source_dir).unwrap();
     run(&generated, &rebuilt);
     assert_eq!(flows(&rebuilt), before);
-    let edited = source.replace("mxrs::string(\"before\")", "mxrs::string(\"after\")");
-    assert_ne!(edited, source);
+    let edited = editable_source.replace("mxrs::string(\"before\")", "mxrs::string(\"after\")");
+    assert_ne!(edited, editable_source);
     std::fs::write(&editable, edited).unwrap();
     run(&generated, &rebuilt);
     let after = flows(&rebuilt);
@@ -618,8 +644,7 @@ fn unsupported_graphs_and_action_options_are_reported_as_preserved() {
         );
         let generated = dir.path().join("generated");
         mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
-        let source =
-            std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
+        let source = flow_sources(&generated);
         assert!(!source.contains("\"Caller\""), "{mutation}");
     }
 }
@@ -672,8 +697,7 @@ fn scalar_object_and_list_parameters_and_canonical_literals_rebuild_without_warn
     mxrs_writer::write_project(&original, &project).unwrap();
     let before = flows(&original);
     mxrs_exporter::import_cargo_project(&original, &generated, Some(&workspace())).unwrap();
-    let source =
-        std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
+    let source = flow_sources(&generated);
     for index in 0..10 {
         assert!(source.contains(&format!("\"Parameter{index}\"")));
     }
@@ -698,8 +722,7 @@ fn malformed_target_parameters_keep_both_target_and_caller_out_of_the_projection
     });
     let generated = dir.path().join("generated");
     mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
-    let source =
-        std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
+    let source = flow_sources(&generated);
     assert!(!source.contains("\"Caller\""));
     assert!(!source.contains("\"Echo\""));
     assert!(source.contains("\"Object\""));
@@ -720,8 +743,7 @@ fn duplicate_flow_names_do_not_choose_an_arbitrary_call_signature() {
     drop(mpr);
     let generated = dir.path().join("generated");
     mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
-    let source =
-        std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
+    let source = flow_sources(&generated);
     assert!(!source.contains("\"Echo\""));
     assert!(!source.contains("\"Caller\""));
 }
@@ -827,7 +849,7 @@ fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_nat
     assert!(report.passed, "{:?}", report.failures);
     assert_eq!(report.candidate_units, 5);
     mxrs_exporter::import_cargo_project(&original, &generated, Some(&workspace())).unwrap();
-    let editable = generated.join("src/application/microflows/mod.rs");
+    let editable = flow_source_path(&generated, "Create");
     let source = std::fs::read_to_string(&editable).unwrap();
     for needle in [
         "flow.create_object(",
@@ -843,7 +865,8 @@ fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_nat
             "{needle}\n{source}"
         );
     }
-    let markers = std::fs::read_to_string(generated.join("src/infrastructure/markers.rs")).unwrap();
+    let markers =
+        std::fs::read_to_string(generated.join("src/infrastructure/markers/calls.rs")).unwrap();
     for name in [
         "Name", "Count", "Serial", "Weight", "Amount", "Active", "When", "Data",
     ] {
@@ -997,8 +1020,7 @@ fn invalid_members_unsupported_options_and_narrowing_stay_preserved() {
         });
         let generated = dir.path().join("generated");
         mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
-        let source =
-            std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
+        let source = flow_sources(&generated);
         assert!(!source.contains("\"Create\""), "{mutation}");
         let report = mxrs_exporter::audit_portability(&path).unwrap();
         let family = report

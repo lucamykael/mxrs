@@ -140,6 +140,9 @@ pub enum ExportError {
     #[error("cannot format generated Cargo project at {path}: {detail}")]
     Formatting { path: String, detail: String },
 
+    #[error("cannot split generated marker modules: {0}")]
+    MarkerLayout(String),
+
     #[error("refusing an incomplete Rust export; {0} model feature(s) need typed support")]
     Lossy(usize, Vec<RoundTripGap>),
 }
@@ -154,6 +157,7 @@ impl ExportError {
             | ExportError::Typegen(_)
             | ExportError::Io { .. }
             | ExportError::Formatting { .. }
+            | ExportError::MarkerLayout(_)
             | ExportError::DestinationExists(_) => &[],
         }
     }
@@ -278,8 +282,9 @@ fn import_cargo_project_inner(
     let navigation_source = render_navigation_module(&project.navigation()?);
     let (documents_source, _) = render_documents_module(&project, &mendix_version)?;
     let task_queues_source = render_task_queues_module(&project, &mendix_version)?;
-    let mut markers_source = mxrs_typegen::generate(&marker_manifest(&modules))?;
-    markers_source.push_str(&flow_export::typed_attribute_markers(&modules));
+    let marker_manifest = marker_manifest(&modules);
+    let markers_source = mxrs_typegen::generate(&marker_manifest)?;
+    let typed_markers_source = flow_export::typed_attribute_markers(&modules);
     drop(project);
 
     let imported = destination.join("model/imported");
@@ -478,9 +483,11 @@ fn import_cargo_project_inner(
         &destination.join("src/utils/mod.rs"),
         "//! Small framework-independent utilities.\n",
     )?;
-    write_text(
-        &destination.join("src/infrastructure/markers.rs"),
+    write_marker_layer_sources(
+        destination,
+        &marker_manifest,
         &markers_source,
+        &typed_markers_source,
     )?;
     format_generated_cargo_project(destination)?;
     write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
@@ -550,7 +557,7 @@ fn render_presentation_module(pages: &[page_export::ConvertedPage], api_mode: Ap
     for page in pages {
         let _ = writeln!(
             source,
-            "    if !project.modules.iter().any(|m| m.name == {:?}) {{\n        let mut module = ::mxrs_ir::ModuleDecl::default();\n        module.name = {:?}.to_string();\n        project.modules.push(module);\n    }}\n    project.modules.iter_mut().find(|m| m.name == {:?}).expect(\"page module exists\").pages.push(pages::{}());",
+            "    if !project.modules.iter().any(|m| m.name == {:?}) {{\n        let module = ::mxrs_ir::ModuleDecl {{ name: {:?}.to_string(), ..Default::default() }};\n        project.modules.push(module);\n    }}\n    project.modules.iter_mut().find(|m| m.name == {:?}).expect(\"page module exists\").pages.push(pages::{}());",
             page.module_name, page.module_name, page.module_name, page.function_name,
         );
     }
@@ -2642,6 +2649,75 @@ fn write_text(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).map_err(|source| io_error(path, source))
 }
 
+fn write_marker_layer_sources(
+    destination: &Path,
+    manifest: &mxrs_typegen::Manifest,
+    generated: &str,
+    typed_markers: &str,
+) -> Result<()> {
+    let directory = destination.join("src/infrastructure/markers");
+    std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
+    let mut index = String::from(
+        "//! Compile-time model markers, split by Mendix module for concise source files.\n\n",
+    );
+    let mut file_names = std::collections::HashSet::new();
+
+    for module in &manifest.modules {
+        let declaration = format!("pub mod {} {{", module.name);
+        let module_start = generated.find(&declaration).ok_or_else(|| {
+            ExportError::MarkerLayout(format!("module {:?} was not generated", module.name))
+        })?;
+        let source_start = generated[..module_start].rfind("#[allow(").ok_or_else(|| {
+            ExportError::MarkerLayout(format!("module {:?} has no attribute", module.name))
+        })?;
+        let opening_brace = module_start
+            + generated[module_start..]
+                .find('{')
+                .expect("the module declaration contains an opening brace");
+        let mut depth = 0usize;
+        let mut source_end = None;
+        for (offset, byte) in generated.as_bytes()[opening_brace..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        source_end = Some(opening_brace + offset + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let source_end = source_end.ok_or_else(|| {
+            ExportError::MarkerLayout(format!("module {:?} is not balanced", module.name))
+        })?;
+        let mut source = generated[source_start..source_end].to_string();
+        source.push('\n');
+        let marker_prefix = format!(" for {}::", module.name);
+        for line in typed_markers
+            .lines()
+            .filter(|line| line.contains(&marker_prefix))
+        {
+            source.push_str(line);
+            source.push('\n');
+        }
+
+        let mut file_name = sanitize_ident(&module.name);
+        file_name.make_ascii_lowercase();
+        if !file_names.insert(file_name.clone()) {
+            return Err(ExportError::MarkerLayout(format!(
+                "marker filename collision for module {:?}",
+                module.name
+            )));
+        }
+        let _ = writeln!(index, "include!(\"markers/{file_name}.rs\");");
+        write_text(&directory.join(format!("{file_name}.rs")), &source)?;
+    }
+
+    write_text(&destination.join("src/infrastructure/markers.rs"), &index)
+}
+
 fn format_generated_cargo_project(destination: &Path) -> Result<()> {
     let manifest = destination.join("Cargo.toml");
     let output = std::process::Command::new("cargo")
@@ -3699,9 +3775,8 @@ fn render_entity_file(
 
     let _ = writeln!(
         out,
-        "    let mut module = ::mxrs_ir::ModuleDecl::default();"
+        "    let mut module = ::mxrs_ir::ModuleDecl {{ name: {module_name:?}.to_string(), ..Default::default() }};"
     );
-    let _ = writeln!(out, "    module.name = {module_name:?}.to_string();");
     out.push_str("    module.entities.push(entity);\n    module\n}\n");
     out
 }
@@ -4629,7 +4704,7 @@ mod tests {
         assert!(!generated.join("src/infrastructure/ids.rs").exists());
         assert!(!generated.join("src/infrastructure/imported.rs").exists());
         let markers =
-            std::fs::read_to_string(generated.join("src/infrastructure/markers.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/infrastructure/markers/sales.rs")).unwrap();
         assert!(markers.contains("pub struct Order;"));
         assert!(markers.contains("pub struct Order_Number;"));
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_Ping"));
