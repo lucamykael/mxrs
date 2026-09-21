@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use mxrs_runtime::{Runtime, Store};
 use mxrs_runtime_http::RuntimeHttp;
-use mxrs_runtime_sqlite::SqliteRuntimeStore;
+use mxrs_runtime_sqlite::RelationalRuntimeStore;
 
 use crate::environment::{EnvironmentError, EnvironmentProfile};
 
@@ -56,6 +56,9 @@ pub struct RunOptions {
     pub client_port: u16,
     pub frontend: bool,
     pub environment: Option<String>,
+    /// Allows the relational state migration to drop removed entities,
+    /// attributes, and associations. mxrb's `allow_destructive:`.
+    pub allow_destructive_schema: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -159,6 +162,73 @@ fn bind_address(options: &RunOptions) -> Result<SocketAddr, RunError> {
     Ok(SocketAddr::new(ip, options.server_port))
 }
 
+/// Real outbound HTTP for `RestCallAction` — mxrb's interpreter calls
+/// `Net::HTTP` directly with a 10s open / 30s read timeout; the interpreter
+/// crate stays network-free and the CLI injects this. Non-2xx statuses are
+/// ordinary responses (the engine owns the status check).
+pub struct UreqHttp;
+
+impl mxrs_runtime_flows::HttpCall for UreqHttp {
+    fn call(
+        &self,
+        method: &str,
+        location: &str,
+        headers: &[(String, String)],
+        body: Option<&str>,
+        timeout: Option<f64>,
+    ) -> Result<mxrs_runtime_flows::HttpResponse, mxrs_runtime_flows::FlowError> {
+        let rest_failed = |message: String| {
+            mxrs_runtime_flows::FlowError::Native(format!("REST call failed: {message}"))
+        };
+        let config = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(std::time::Duration::from_secs(10)))
+            .timeout_global(Some(std::time::Duration::from_secs_f64(
+                timeout.filter(|timeout| *timeout > 0.0).unwrap_or(30.0),
+            )))
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
+        let method = method.to_ascii_uppercase();
+        let mut response = match method.as_str() {
+            "GET" | "DELETE" | "HEAD" => {
+                let mut request = match method.as_str() {
+                    "GET" => agent.get(location),
+                    "DELETE" => agent.delete(location),
+                    _ => agent.head(location),
+                };
+                for (name, value) in headers {
+                    request = request.header(name, value);
+                }
+                request
+                    .call()
+                    .map_err(|error| rest_failed(error.to_string()))?
+            }
+            "POST" | "PUT" | "PATCH" => {
+                let mut request = match method.as_str() {
+                    "POST" => agent.post(location),
+                    "PUT" => agent.put(location),
+                    _ => agent.patch(location),
+                };
+                for (name, value) in headers {
+                    request = request.header(name, value);
+                }
+                request
+                    .send(body.unwrap_or_default())
+                    .map_err(|error| rest_failed(error.to_string()))?
+            }
+            other => {
+                return Err(rest_failed(format!("unsupported HTTP method {other:?}")));
+            }
+        };
+        let code = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|error| rest_failed(error.to_string()))?;
+        Ok(mxrs_runtime_flows::HttpResponse { code, body })
+    }
+}
+
 /// One model flow exposed as a runtime action: `Runtime::invoke` owns the
 /// document authorization and the transaction; the engine executes inside
 /// that unit of work and returns the result plus client effects and log.
@@ -222,7 +292,11 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
         path: state_directory.display().to_string(),
         source,
     })?;
-    let mut persistence = SqliteRuntimeStore::open(&target.state_path)?;
+    let mut persistence = RelationalRuntimeStore::open(
+        &target.state_path,
+        &boot.modules,
+        options.allow_destructive_schema,
+    )?;
     let mut store = Store::new(boot.schema.clone());
     let restored = persistence
         .load(&mut store)
@@ -230,7 +304,8 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     let mut runtime = Runtime::new(store, boot.security.clone());
     let engine = Arc::new(
         mxrs_runtime_flows::FlowEngine::from_modules(&boot.modules)
-            .with_policy(boot.security.clone()),
+            .with_policy(boot.security.clone())
+            .with_http(UreqHttp),
     );
     let flow_names: Vec<String> = engine.flow_names().map(str::to_string).collect();
     for name in &flow_names {
@@ -470,6 +545,7 @@ mod tests {
             client_port: 5173,
             frontend: true,
             environment: None,
+            allow_destructive_schema: false,
         }
     }
 

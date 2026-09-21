@@ -85,7 +85,7 @@ fn command_options(
                 "--port",
                 "--environment",
             ],
-            &["--no-frontend"],
+            &["--no-frontend", "--allow-destructive-schema"],
             &[],
         ),
         "doctor" => (&[], &["--json"], &[]),
@@ -230,7 +230,7 @@ commands! {
     "rename", "<file.mpr> <old-name> <new-name> [--apply] [--json]", "Preview or apply a model-wide rename", run_rename;
     "repository", "new <Module.Name> [--target DIR] [--dry-run] [--json]", "Scaffold a repository port and infrastructure adapter", run_repository;
     "report", "<file.mpr> [--json]", "Summarize explicit-reference lint and module dependencies", run_report;
-    "run", "[DIR] [--host HOST] [--server-port PORT] [--client-port PORT] [--environment NAME] [--no-frontend]", "Run the built project on the MXRS runtime with its web shell", run_run;
+    "run", "[DIR] [--host HOST] [--server-port PORT] [--client-port PORT] [--environment NAME] [--no-frontend] [--allow-destructive-schema]", "Run the built project on the MXRS runtime with its web shell", run_run;
     "scaffold", "<list|destroy> [<kind:name>] [--target DIR]", "List generators or remove a registered scaffold", run_scaffold;
     "scheduled-event", "new <Module.Event> [--target DIR] [--dry-run] [--json]", "Scaffold a scheduled event and its handler microflow", run_scheduled_event;
     "search", "<file.mpr> <query> [--limit N] [--json]", "Search artifact names and documentation", run_semantic_search;
@@ -2316,6 +2316,7 @@ fn run_run(mut args: Vec<String>) -> ExitCode {
         }
     };
     let frontend = !take_flag(&mut args, "--no-frontend");
+    let allow_destructive_schema = take_flag(&mut args, "--allow-destructive-schema");
     if !args.is_empty() {
         eprintln!("[mxrs] error: unknown arguments: {}", args.join(" "));
         return ExitCode::FAILURE;
@@ -2327,6 +2328,7 @@ fn run_run(mut args: Vec<String>) -> ExitCode {
         client_port,
         frontend,
         environment,
+        allow_destructive_schema,
     };
     match mxrs_cli::run::start(&options) {
         Ok(()) => ExitCode::SUCCESS,

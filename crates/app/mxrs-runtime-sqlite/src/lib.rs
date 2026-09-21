@@ -12,13 +12,19 @@
 //! This remains a snapshot adapter, not an incremental query engine or an
 //! automatic persistence transaction around runtime action execution.
 
+pub mod relational;
+pub mod schema;
+
+pub use relational::RelationalRuntimeStore;
+pub use schema::{MigrationResult, RemovedItem, RuntimeSchema};
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use mxrs_runtime::{ObjectValue, PersistentObjectValidator, RuntimeError, Store};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
-const APPLICATION_ID: i64 = 0x4d58_5253;
+pub(crate) const APPLICATION_ID: i64 = 0x4d58_5253;
 const SCHEMA_VERSION: i64 = 1;
 const OBJECTS_SCHEMA: &str = "CREATE TABLE mxrs_runtime_objects (
     entity TEXT NOT NULL,
@@ -60,6 +66,13 @@ pub enum SqliteRuntimeError {
     Conflict { expected: i64, actual: i64 },
     #[error("runtime snapshot generation is exhausted")]
     GenerationExhausted,
+    /// A schema evolution that would drop data, refused unless explicitly
+    /// allowed. Ports mxrb's `UnsafeSchemaMigrationError`.
+    #[error("{message}")]
+    UnsafeMigration {
+        message: String,
+        changes: Vec<schema::RemovedItem>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, SqliteRuntimeError>;

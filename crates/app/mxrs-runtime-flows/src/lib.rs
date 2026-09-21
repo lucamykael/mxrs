@@ -6,12 +6,19 @@
 //! that execute directly against [`mxrs_runtime::Store`]. Anything the
 //! native engine cannot execute is a named error, never a silent skip.
 //!
-//! Two deliberate divergences from the oracle:
+//! Deliberate divergences from the oracle:
 //! - mxrb's interpreter runs only the first activity of a loop body with
 //!   two or more nodes (a known, unreported bug — the loop body's edges live
 //!   in the document container's `Flows`); this port executes the whole
 //!   body and pins that with a regression test.
 //! - `[%CurrentDateTime%]` formats in UTC; mxrb uses the process-local zone.
+//! - Lists are values, not Ruby object references: an iterable loop walks a
+//!   snapshot of the list, `ChangeList` rebinds the named variable only
+//!   (aliases keep their copy), and `union`/`intersect` do not deduplicate
+//!   duplicates already inside the first list.
+//! - `retrieve_association` results come back in the store's id order, which
+//!   can differ from mxrb's insertion order when a `Reference` collapse or a
+//!   `head` picks "the first" of several rows.
 
 mod datetime;
 mod engine;

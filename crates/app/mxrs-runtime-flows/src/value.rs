@@ -36,6 +36,11 @@ pub enum FlowValue {
     DateTime(f64),
     Object(ObjectRef),
     List(Vec<FlowValue>),
+    /// An opaque JSON payload (REST mapping results without an entity,
+    /// JSON-object action arguments). mxrb holds the parsed Ruby hash the
+    /// same way: expressions cannot traverse it, but it survives binding
+    /// and serializes back out intact.
+    Json(Value),
 }
 
 impl FlowValue {
@@ -63,6 +68,7 @@ impl FlowValue {
             FlowValue::DateTime(seconds) => crate::datetime::to_string(*seconds),
             FlowValue::Object(reference) => format!("{}/{}", reference.entity, reference.id),
             FlowValue::List(values) => format!("[{} value(s)]", values.len()),
+            FlowValue::Json(value) => value.to_string(),
         }
     }
 
@@ -115,6 +121,7 @@ impl FlowValue {
             FlowValue::DateTime(_) => "datetime",
             FlowValue::Object(_) => "object",
             FlowValue::List(_) => "list",
+            FlowValue::Json(_) => "json",
         }
     }
 
@@ -151,14 +158,20 @@ impl FlowValue {
         self.numeric(other, "*", |left, right| left * right)
     }
 
-    /// Ruby `/` on Integers floors toward negative infinity.
+    /// Ruby `/` on Integers floors toward negative infinity. `i64::MIN / -1`
+    /// overflows and is refused, never a panic.
     pub fn divide(&self, other: &FlowValue) -> Result<FlowValue, FlowError> {
         if let (FlowValue::Int(left), FlowValue::Int(right)) = (self, other) {
             if *right == 0 {
                 return Err(FlowError::unsupported_expression("divided by 0"));
             }
-            let quotient = left / right;
-            let floored = if left % right != 0 && (*left < 0) != (*right < 0) {
+            let quotient = left
+                .checked_div(*right)
+                .ok_or_else(|| FlowError::unsupported_expression("integer overflow"))?;
+            let remainder = left
+                .checked_rem(*right)
+                .ok_or_else(|| FlowError::unsupported_expression("integer overflow"))?;
+            let floored = if remainder != 0 && (*left < 0) != (*right < 0) {
                 quotient - 1
             } else {
                 quotient
@@ -170,7 +183,10 @@ impl FlowValue {
 
     pub fn negate(&self) -> Result<FlowValue, FlowError> {
         match self {
-            FlowValue::Int(value) => Ok(FlowValue::Int(-value)),
+            FlowValue::Int(value) => value
+                .checked_neg()
+                .map(FlowValue::Int)
+                .ok_or_else(|| FlowError::unsupported_expression("integer overflow")),
             FlowValue::Float(value) => Ok(FlowValue::Float(-value)),
             _ => Err(FlowError::unsupported_expression(format!(
                 "cannot negate {}",
@@ -213,10 +229,14 @@ impl FlowValue {
             FlowValue::List(values) => {
                 Value::Array(values.iter().map(FlowValue::to_json_shallow).collect())
             }
+            FlowValue::Json(value) => value.clone(),
         }
     }
 
     /// Store members hold JSON; this is the inverse direction for reads.
+    /// A string in this adapter's own datetime rendering comes back as a
+    /// [`FlowValue::DateTime`], so `formatDateTime($object/When, …)` works
+    /// on stored values the way mxrb's live `Time` members do.
     pub fn from_member(value: &Value) -> FlowValue {
         match value {
             Value::Null => FlowValue::Empty,
@@ -226,11 +246,14 @@ impl FlowValue {
                 .map(FlowValue::Int)
                 .or_else(|| value.as_f64().map(FlowValue::Float))
                 .unwrap_or(FlowValue::Empty),
-            Value::String(value) => FlowValue::String(value.clone()),
+            Value::String(value) => match crate::datetime::parse(value) {
+                Some(seconds) => FlowValue::DateTime(seconds),
+                None => FlowValue::String(value.clone()),
+            },
             Value::Array(values) => {
                 FlowValue::List(values.iter().map(FlowValue::from_member).collect())
             }
-            Value::Object(_) => FlowValue::Empty,
+            Value::Object(_) => FlowValue::Json(value.clone()),
         }
     }
 

@@ -603,12 +603,8 @@ impl FlowEngine {
         variables: &mut Variables,
     ) -> Result<(), FlowError> {
         let kind = action.get_str("$Type").unwrap_or_default();
-        let handler = underscore(
-            kind.strip_prefix("Microflows$")
-                .unwrap_or(kind)
-                .strip_suffix("Action")
-                .unwrap_or(kind),
-        );
+        let stripped = kind.strip_prefix("Microflows$").unwrap_or(kind);
+        let handler = underscore(stripped.strip_suffix("Action").unwrap_or(stripped));
         match handler.as_str() {
             "create_change" | "create_object" => {
                 self.action_create(store, execution, action, variables)
@@ -1376,6 +1372,15 @@ impl FlowEngine {
                     "Java Custom Action {name} has an unnamed parameter mapping"
                 )));
             }
+            // mxrb resolves $ID parameter references through the java action
+            // document's own Parameters table; that catalog is not exposed by
+            // mxrs-model yet, and silently keying arguments by uuid would be
+            // worse than refusing.
+            if mxrs_bson::looks_like_uuid(&parameter_name) {
+                return Err(FlowError::native(format!(
+                    "Java Custom Action {name} maps a parameter by identifier; name resolution from the model is not ported yet"
+                )));
+            }
             let value = self.java_action_argument(
                 store,
                 name,
@@ -1589,6 +1594,7 @@ impl FlowEngine {
         let body = request
             .and_then(|request| request.get_str("MappingVariableName").ok())
             .and_then(|name| variables.get(name))
+            .filter(|value| !matches!(value, FlowValue::Empty))
             .map(|value| self.runtime_json(store, value))
             .transpose()?
             .map(|value| value.to_string());

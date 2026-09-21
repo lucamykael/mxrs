@@ -173,7 +173,7 @@ pub fn execute(
 
     let prepared = prepare(project_path.as_ref(), definition_path.as_ref())?;
     let boot = mxrs_runtime_boot::boot(&prepared.project)?;
-    let engine = FlowEngine::from_modules(&boot.modules);
+    let engine = FlowEngine::from_modules(&boot.modules).with_http(crate::run::UreqHttp);
     let mut store = mxrs_runtime::Store::new(boot.schema.clone());
     let expression = Expression::new();
     let evaluated = |arguments: &BTreeMap<String, String>| {

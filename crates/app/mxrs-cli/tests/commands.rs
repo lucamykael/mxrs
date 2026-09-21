@@ -568,7 +568,7 @@ fn portability_separates_exact_storage_from_typed_authoring_and_verifies_documen
 }
 
 #[test]
-fn functional_test_plan_validates_real_mpr_targets_and_refuses_fake_execution() {
+fn functional_test_plan_validates_real_mpr_targets_and_executes_suites() {
     let (directory, path) = fixture(false);
     let suite = directory.path().join("functional.json");
     std::fs::write(
@@ -662,13 +662,17 @@ fn functional_test_plan_validates_real_mpr_targets_and_refuses_fake_execution() 
         .success()
     );
 
+    // Execution is real now: the suite runs on the native interpreter
+    // (Sales.Start calls Sales.Save twice; no Order is ever committed).
     let execute = cli(&["test", path.to_str().unwrap(), suite.to_str().unwrap()]);
-    assert!(!execute.status.success());
+    assert!(execute.status.success(), "{:?}", execute.stderr);
+    let transcript = String::from_utf8(execute.stdout).unwrap();
     assert!(
-        String::from_utf8(execute.stderr)
-            .unwrap()
-            .contains("not implemented")
+        transcript.contains("[MXRS_TEST] PASS starts"),
+        "{transcript}"
     );
+    assert!(transcript.contains("[MXRS_TEST] DONE"), "{transcript}");
+    assert!(transcript.contains("1/1 test(s) passed"), "{transcript}");
 
     std::fs::write(
         &suite,

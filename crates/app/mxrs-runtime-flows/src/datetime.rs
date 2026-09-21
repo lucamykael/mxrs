@@ -90,6 +90,44 @@ pub fn to_string(seconds: f64) -> String {
     format(seconds, "yyyy-MM-dd HH:mm:ss") + " UTC"
 }
 
+/// The inverse of [`to_string`], for datetime members read back from the
+/// store. Only this adapter's own rendering parses; everything else is an
+/// ordinary string.
+pub fn parse(text: &str) -> Option<f64> {
+    let text = text.strip_suffix(" UTC")?;
+    let bytes = text.as_bytes();
+    if bytes.len() != 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b' ' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<i64> { text.get(range)?.parse().ok() };
+    let year = number(0..4)?;
+    let month = number(5..7)?;
+    let day = number(8..10)?;
+    let hour = number(11..13)?;
+    let minute = number(14..16)?;
+    let second = number(17..19)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=59).contains(&second)
+    {
+        return None;
+    }
+    Some((days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second) as f64)
+}
+
+/// Hinnant's `days_from_civil` (inverse of `civil_from_days`).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

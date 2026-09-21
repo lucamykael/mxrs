@@ -407,7 +407,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "run" => (
             Status::Partial,
             "mxrs run",
-            "boots the MXRS-owned runtime in-process from the built model: store schema, fail-closed security policy (XPath-guarded rules deny), SQLite persistence, static web shell, mxrb's Supervisor contract for the optional Vite frontend, and every named flow registered on the native interpreter (POST /api/microflow/<Module.Flow> executes model logic transactionally with effects and log); adapters for Java/client/web-service activities remain injectable seams",
+            "boots the MXRS-owned runtime in-process from the built model: store schema, fail-closed security policy (XPath-guarded rules deny), relational SQLite persistence (schema_migrator.rb's GUID-keyed layout with in-place evolution and destructive-change refusal), static web shell, mxrb's Supervisor contract for the optional Vite frontend, scheduled events firing on the ported scheduler, real REST HTTP, and every named flow registered on the native interpreter (POST /api/microflow/<Module.Flow> executes model logic transactionally with effects and log); Java/client/web-service adapters remain injectable seams",
         ),
         "serve" => (
             Status::Partial,

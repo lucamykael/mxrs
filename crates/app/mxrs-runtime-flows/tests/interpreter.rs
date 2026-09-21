@@ -709,6 +709,118 @@ fn entity_access_enforcement_denies_by_policy_and_stays_off_otherwise() {
 }
 
 #[test]
+fn lifecycle_hooks_fire_in_the_oracle_order_and_can_reject_commits() {
+    let mut order = mxrs_model::entity::Entity::from_bson(&doc! {
+        "$Type": "DomainModels$Entity",
+        "Name": "Order",
+    });
+    order.qualified_name = Some("App.Order".to_string());
+    order.lifecycle = vec![
+        mxrs_model::entity::LifecycleCallback {
+            id: None,
+            event: "before_commit".to_string(),
+            handler: "Stamp".to_string(),
+            pass_event_object: true,
+            raise_error_on_false: false,
+            raw: doc! {},
+        },
+        mxrs_model::entity::LifecycleCallback {
+            id: None,
+            event: "before_create".to_string(),
+            handler: "Gate".to_string(),
+            pass_event_object: true,
+            raise_error_on_false: true,
+            raw: doc! {},
+        },
+    ];
+    // Stamp writes an attribute on the committed object; Gate rejects when
+    // Name is 'blocked'.
+    let stamp = flow(
+        "Stamp",
+        vec![
+            start("s"),
+            parameter("p", "order"),
+            activity(
+                "c",
+                doc! {
+                    "$Type": "Microflows$ChangeObjectAction",
+                    "ChangeVariableName": "order",
+                    "Items": build_array(vec![
+                        Bson::Document(doc! { "Attribute": "Stamped", "Value": doc! { "Value": "true" } }),
+                    ], 2),
+                },
+            ),
+            end("e", "true"),
+        ],
+        vec![edge("f1", "s", "c"), edge("f2", "c", "e")],
+    );
+    let gate = flow(
+        "Gate",
+        vec![
+            start("s"),
+            parameter("p", "order"),
+            end("e", "$order/Name != 'blocked'"),
+        ],
+        vec![edge("f1", "s", "e")],
+    );
+    let create = |name: &str| {
+        flow(
+            name,
+            vec![
+                start("s"),
+                parameter("p", "Name"),
+                activity(
+                    "c",
+                    doc! {
+                        "$Type": "Microflows$CreateObjectAction",
+                        "Entity": "App.Order",
+                        "VariableName": "order",
+                        "Commit": "Yes",
+                        "Items": build_array(vec![
+                            Bson::Document(doc! { "Attribute": "Name", "Value": doc! { "Value": "$Name" } }),
+                        ], 2),
+                    },
+                ),
+                end("e", "$order/Stamped"),
+            ],
+            vec![edge("f1", "s", "c"), edge("f2", "c", "e")],
+        )
+    };
+    let mut module = module_with(vec![stamp, gate, create("Make")]);
+    module.domain_model = Some(mxrs_model::DomainModel {
+        id: None,
+        native_type: None,
+        documentation: String::new(),
+        entities: vec![order],
+        associations: Vec::new(),
+        cross_associations: Vec::new(),
+    });
+    let engine = FlowEngine::from_modules(std::slice::from_ref(&module));
+    let mut store = store_with_order();
+    let mut arguments = Variables::new();
+    arguments.insert("Name".into(), FlowValue::String("fine".into()));
+    // before_commit ran before the commit and its change is visible after.
+    let (result, _) = call(&engine, &mut store, "App.Make", arguments);
+    assert_eq!(result, FlowValue::Bool(true));
+    // before_create rejecting rolls the whole unit of work back.
+    let mut arguments = Variables::new();
+    arguments.insert("Name".into(), FlowValue::String("blocked".into()));
+    let error = engine
+        .call(&mut store, "App.Make", arguments, None)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "entity lifecycle App.Gate rejected App.Order"
+    );
+    let survivors = store.retrieve("App.Order").unwrap();
+    assert_eq!(survivors.len(), 1);
+    assert_eq!(
+        survivors[0].members["Name"],
+        serde_json::Value::String("fine".into())
+    );
+}
+
+#[test]
 fn list_operations_and_aggregates_follow_the_oracle_table() {
     let flows = vec![flow(
         "Lists",

@@ -1188,9 +1188,12 @@ dependencies = [
 name = "mxrs-runtime-sqlite"
 version = "0.1.0"
 dependencies = [
+ "mxrs-bson",
+ "mxrs-model",
  "mxrs-runtime",
  "rusqlite",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]
