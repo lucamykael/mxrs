@@ -1303,3 +1303,19 @@ fn update_flags_are_mutually_exclusive_and_arguments_are_validated() {
     let unknown = cli(&["update", "--force"]);
     assert!(!unknown.status.success());
 }
+
+#[test]
+fn diagram_er_refuses_the_browser_lifecycle_and_validates_arguments() {
+    for action in ["up", "down", "status", "destroy", "__serve"] {
+        let output = cli(&["diagram-er", action, "/tmp/x.mpr"]);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("not ported"), "{action}: {stderr}");
+    }
+    let missing = cli(&["diagram-er", "/nonexistent.mpr"]);
+    assert!(!missing.status.success());
+    let bare = cli(&["diagram-er"]);
+    assert!(!bare.status.success());
+    let stderr = String::from_utf8_lossy(&bare.stderr);
+    assert!(stderr.contains("Usage: mxrs diagram-er"), "{stderr}");
+}

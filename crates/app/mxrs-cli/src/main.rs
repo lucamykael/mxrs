@@ -103,6 +103,7 @@ fn command_options(
             &["--role"],
         ),
         "design" => (&["--target"], &["--apply", "--dry-run", "--json"], &[]),
+        "diagram-er" => (&[], &["--apply", "--json"], &["--module"]),
         "update" => (&[], &["--check", "--changelog"], &[]),
         "widgets" => (&["--project"], &[], &[]),
         "ci" | "constant" | "consumed-rest" | "entity" | "enumeration" | "evaluation"
@@ -170,6 +171,7 @@ commands! {
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "design", "init [--target DIR] [--dry-run] [--json] | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]", "Initialize, inventory, or migrate the project design system", run_design;
     "db", "<status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]", "Manage an isolated PostgreSQL workspace", run_db;
+    "diagram-er", "<file.mpr> [--module NAME] [--json] | layout <file.mpr> <layout.json> [--apply] [--json]", "Project the domain ER diagram or apply audited visual layout", run_diagram_er;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
     "dump-unit", "<file.mpr> <unit_id> [--no-progress]", "Dump native unit metadata and bytes", run_dump_unit;
@@ -1101,6 +1103,124 @@ fn run_widgets(mut args: Vec<String>) -> ExitCode {
         Some(action) => {
             eprintln!("[mxrs] error: unknown widgets action {action:?}; use new, build, or sync");
             ExitCode::FAILURE
+        }
+        None => {
+            eprintln!("{USAGE}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_diagram_er(mut args: Vec<String>) -> ExitCode {
+    const USAGE: &str = "Usage: mxrs diagram-er <file.mpr> [--module NAME] [--json] | \
+        layout <file.mpr> <layout.json> [--apply] [--json]";
+    match args.first().map(String::as_str) {
+        Some("up" | "down" | "status" | "destroy" | "__serve") => {
+            eprintln!(
+                "[mxrs] error: the browser ER-diagram server lifecycle is not ported; use \
+                 `mxrs diagram-er <file.mpr> --json` for the diagram data and \
+                 `mxrs diagram-er layout` to apply visual changes"
+            );
+            ExitCode::FAILURE
+        }
+        Some("layout") => {
+            args.remove(0);
+            let json = take_flag(&mut args, "--json");
+            let apply = take_flag(&mut args, "--apply");
+            let [source, layout_path] = args.as_slice() else {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            };
+            let payload = match std::fs::read_to_string(layout_path)
+                .map_err(|error| format!("cannot read {layout_path}: {error}"))
+                .and_then(|source| {
+                    serde_json::from_str::<serde_json::Value>(&source)
+                        .map_err(|error| format!("{layout_path} is not valid JSON: {error}"))
+                }) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let plan = match mxrs_cli::diagram_er::plan_layout(Path::new(source), &payload) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let changes = if apply {
+                match mxrs_cli::diagram_er::apply_layout(Path::new(source), plan) {
+                    Ok(changes) => changes,
+                    Err(error) => {
+                        eprintln!("[mxrs] error: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                plan.changes()
+            };
+            if json {
+                let payload = serde_json::json!({ "applied": apply, "changes": changes });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).expect("plan is serializable")
+                );
+            } else {
+                let label = if apply { "Applied" } else { "Preview" };
+                println!("[mxrs] {label}: {changes} visual changes");
+            }
+            ExitCode::SUCCESS
+        }
+        Some(_) => {
+            let json = take_flag(&mut args, "--json");
+            let modules = take_values(&mut args, "--module");
+            let [source] = args.as_slice() else {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            };
+            let payload = match mxrs_cli::diagram_er::document(Path::new(source), &modules) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).expect("payload is serializable")
+                );
+            } else {
+                let empty = Vec::new();
+                let module_payloads = payload["modules"].as_array().unwrap_or(&empty);
+                let mut entities = 0;
+                let mut associations = 0;
+                println!("module\tentity\tkind\tlocation");
+                for module in module_payloads {
+                    for entity in module["entities"].as_array().unwrap_or(&empty) {
+                        entities += 1;
+                        println!(
+                            "{}\t{}\t{}\t{};{}",
+                            module["name"].as_str().unwrap_or("-"),
+                            entity["name"].as_str().unwrap_or("-"),
+                            entity["kind"].as_str().unwrap_or("-"),
+                            entity["x"],
+                            entity["y"]
+                        );
+                    }
+                    associations += module["associations"]
+                        .as_array()
+                        .map(Vec::len)
+                        .unwrap_or_default();
+                }
+                println!(
+                    "[mxrs] {} modules, {entities} entities, {associations} associations",
+                    module_payloads.len()
+                );
+            }
+            ExitCode::SUCCESS
         }
         None => {
             eprintln!("{USAGE}");

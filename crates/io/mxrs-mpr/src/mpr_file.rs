@@ -18,6 +18,7 @@
 //! index, architecture metadata, ruby_app sources, domain-diagram anchors)
 //! are deliberately out of scope here — see `decisions/mxrs-rust-rewrite-plan.md`.
 
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 
@@ -307,6 +308,70 @@ impl MprFile {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(names)
+    }
+
+    /// Cross-module association anchor overrides stored by the ER-diagram
+    /// tooling — `association id -> (source anchor, target anchor)`. Kept
+    /// in the same `_MxrbDomainDiagramAssociation` sidecar table mxrb's
+    /// browser diagram writes, so layouts stay interoperable between the
+    /// two CLIs. Ports `Mxrb::IO::MprFile#domain_diagram_anchors`.
+    pub fn domain_diagram_anchors(&self) -> Result<BTreeMap<String, (String, String)>> {
+        self.ensure_recovered()?;
+        if !self
+            .tables()?
+            .iter()
+            .any(|table| table == "_MxrbDomainDiagramAssociation")
+        {
+            return Ok(BTreeMap::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT AssociationID, SourceAnchor, TargetAnchor FROM _MxrbDomainDiagramAssociation",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+                ))
+            })?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        Ok(rows)
+    }
+
+    /// Upserts anchor overrides, returning how many rows actually changed.
+    /// Ports `Mxrb::IO::MprFile#write_domain_diagram_anchors`, including
+    /// creating the sidecar table lazily and never touching rows that
+    /// already store the same anchors.
+    pub fn write_domain_diagram_anchors(
+        &mut self,
+        layouts: &[(String, String, String)],
+    ) -> Result<usize> {
+        self.ensure_writable()?;
+        if layouts.is_empty() {
+            return Ok(0);
+        }
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS _MxrbDomainDiagramAssociation (
+                AssociationID TEXT PRIMARY KEY NOT NULL,
+                SourceAnchor TEXT NOT NULL,
+                TargetAnchor TEXT NOT NULL
+            )",
+            [],
+        )?;
+        let current = self.domain_diagram_anchors()?;
+        let mut changed = 0;
+        for (id, source_anchor, target_anchor) in layouts {
+            if current.get(id) == Some(&(source_anchor.clone(), target_anchor.clone())) {
+                continue;
+            }
+            self.conn.execute(
+                "INSERT OR REPLACE INTO _MxrbDomainDiagramAssociation \
+                 (AssociationID, SourceAnchor, TargetAnchor) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, source_anchor, target_anchor],
+            )?;
+            changed += 1;
+        }
+        Ok(changed)
     }
 
     // ── Metadata ─────────────────────────────────────────────────────────

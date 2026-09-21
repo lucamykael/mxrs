@@ -477,6 +477,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs uml",
             "byte-identical class/activity/sequence Mermaid and PlantUML exports and shared refusals: xtask command-oracle uml; the interactive browser viewer is not ported and is refused explicitly; docs/commands/uml.md",
         ),
+        "diagram-er" => (
+            Status::Partial,
+            "mxrs diagram-er",
+            "ports the framework-neutral core (the diagram JSON projection and the audited visual layout writer, cross-module anchors interoperable through mxrb's own sidecar table); the browser server and its db-style lifecycle are refused explicitly, not pretended",
+        ),
         "update" => (
             Status::Partial,
             "mxrs update",

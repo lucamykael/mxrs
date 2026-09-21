@@ -55,6 +55,7 @@ pub mod changelog;
 pub mod compare;
 pub mod database;
 pub mod design;
+pub mod diagram_er;
 pub mod doctor;
 pub mod environment;
 pub mod evaluation;
