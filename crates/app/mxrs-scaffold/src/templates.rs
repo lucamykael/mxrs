@@ -314,6 +314,29 @@ pub(crate) fn project_security(module_name: &str) -> String {
     )
 }
 
+/// Compiled fallback theme, byte-identical to the one mxrb's `design init`
+/// materializes (rendered from its `theme_compiled` template).
+pub(crate) const THEME_COMPILED: &str = include_str!("../assets/theme/theme.compiled.css");
+pub(crate) const THEME_SETTINGS: &str = include_str!("../assets/theme/settings.json");
+
+pub(crate) fn theme_custom_variables() -> String {
+    "// Project-specific Sass variables belong here. When Atlas Core is\n\
+     // installed, mxrs marketplace adds its legacy variable definitions.\n"
+        .to_string()
+}
+
+/// MXRB's `theme_main`: the custom-variables import followed by the whole
+/// compiled fallback, so a project renders before any Sass pipeline runs.
+pub(crate) fn theme_main() -> String {
+    format!("@import \"custom-variables\";\n\n{THEME_COMPILED}")
+}
+
+pub(crate) fn theme_exclusion_variables() -> String {
+    "// Atlas Core imports this file. Add Sass variables here to exclude\n\
+     // optional Atlas components from the compiled theme.\n"
+        .to_string()
+}
+
 /// Aggregates demo-user declarations. The build wires this `apply` after
 /// `security::apply`, so project security is always present — declared by
 /// the security scaffold or carried by an imported model — when these run.

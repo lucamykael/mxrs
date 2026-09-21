@@ -59,6 +59,7 @@ pub enum ArtifactKind {
     Repository,
     Security,
     DemoUser,
+    Design,
     Module,
     Presentation,
 }
@@ -226,6 +227,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         kind: ArtifactKind::DemoUser,
     },
     ScaffoldCommand {
+        name: "design",
+        action: "init",
+        argument: "",
+        summary: "Initialize the project theme and design assets",
+        destination: "theme",
+        kind: ArtifactKind::Design,
+    },
+    ScaffoldCommand {
         name: "validation",
         action: "new",
         argument: "<Module.Flow>",
@@ -266,6 +275,7 @@ impl ArtifactKind {
             Self::Repository => "repository",
             Self::Security => "security",
             Self::DemoUser => "demo-user",
+            Self::Design => "design",
             Self::Module => "module",
             Self::Presentation => "presentation",
         }
@@ -290,6 +300,7 @@ impl ArtifactKind {
             Self::Ci => "ci",
             Self::Repository => "repositories",
             Self::Security | Self::Module | Self::DemoUser => "security",
+            Self::Design => "design",
             Self::Presentation => "presentation",
         }
     }
@@ -311,7 +322,8 @@ impl ArtifactKind {
             | Self::Evaluation
             | Self::Ci
             | Self::Repository
-            | Self::DemoUser => {
+            | Self::DemoUser
+            | Self::Design => {
                 unreachable!("artifact is handled outside layered module families")
             }
         }
@@ -447,6 +459,8 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
         )?;
     } else if options.kind == ArtifactKind::DemoUser {
         create_demo_user(&mut transaction, &root, options)?;
+    } else if options.kind == ArtifactKind::Design {
+        create_design(&mut transaction, &root)?;
     } else if options.kind == ArtifactKind::Ci {
         if options.name != "github" {
             return Err(ScaffoldError::InvalidIdentifier {
@@ -892,6 +906,38 @@ fn env_key_present(source: &str, key: &str) -> bool {
     })
 }
 
+/// Ports mxrb's `design init` asset kit to the Cargo-native layout. Files
+/// already present are left untouched (mxrb's `ensure_file`), so re-running
+/// never clobbers an edited theme. The `design_system` Ruby DSL policy file
+/// mxrb also writes has no MXRS equivalent and is deliberately not faked.
+fn create_design(transaction: &mut Transaction, root: &Path) -> Result<()> {
+    for (relative, content) in [
+        (
+            "theme/web/custom-variables.scss",
+            templates::theme_custom_variables(),
+        ),
+        ("theme/web/main.scss", templates::theme_main()),
+        (
+            "theme/web/exclusion-variables.scss",
+            templates::theme_exclusion_variables(),
+        ),
+        (
+            "theme/web/settings.json",
+            templates::THEME_SETTINGS.to_string(),
+        ),
+        (
+            "theme-cache/web/theme.compiled.css",
+            templates::THEME_COMPILED.to_string(),
+        ),
+    ] {
+        let target = root.join(relative);
+        if transaction.content(&target)?.is_none() {
+            transaction.create(&target, content)?;
+        }
+    }
+    Ok(())
+}
+
 fn create_module_security(
     transaction: &mut Transaction,
     root: &Path,
@@ -1043,7 +1089,8 @@ fn create_artifact(
         ArtifactKind::Security
         | ArtifactKind::Module
         | ArtifactKind::Presentation
-        | ArtifactKind::DemoUser => {
+        | ArtifactKind::DemoUser
+        | ArtifactKind::Design => {
             unreachable!("handled by the caller")
         }
     };

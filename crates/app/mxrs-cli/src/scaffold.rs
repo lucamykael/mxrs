@@ -40,12 +40,22 @@ pub fn usage(kind: ArtifactKind) -> String {
         )
     } else if kind == ArtifactKind::DemoUser {
         (" [--entity Module.Entity] [--role ROLE]", "")
+    } else if kind == ArtifactKind::Design {
+        (
+            "",
+            " | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]",
+        )
     } else {
         ("", "")
     };
+    let argument = if command.argument.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", command.argument)
+    };
     format!(
-        "{} {} {}{page_options} [--target DIR] [--dry-run] [--json]{page_forms}",
-        command.name, command.action, command.argument
+        "{} {}{argument}{page_options} [--target DIR] [--dry-run] [--json]{page_forms}",
+        command.name, command.action
     )
 }
 
@@ -87,6 +97,22 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
         && entity.is_none()
     {
         print_page_templates(json);
+        return Ok(());
+    }
+    // `design init` names no artifact: the whole theme kit is the target.
+    if kind == ArtifactKind::Design {
+        if arguments.as_slice() != [expected.to_string()]
+            || !roles.is_empty()
+            || template.is_some()
+            || chain.is_some()
+            || entity.is_some()
+        {
+            return Err(format!("usage: mxrs {}", usage(kind)));
+        }
+        let outcome =
+            scaffold_artifact(&ArtifactScaffold::new(kind, "project", target).dry_run(dry_run))
+                .map_err(|error| error.to_string())?;
+        render(&outcome, json);
         return Ok(());
     }
     let page_only = template.is_some() || chain.is_some();

@@ -462,6 +462,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs move",
             "same-module unit relocation; MXRB additionally composes a cross-module move out of move+rename, which this refuses rather than half-performs",
         ),
+        "design" => (
+            Status::Verified,
+            "mxrs design",
+            "scan/migrate compared over the same theme assets (structured facts, applied files byte-identical) and init paired native/Cargo with byte-identical theme kits: xtask command-oracle design; the design_system Ruby DSL policy block is not ported; docs/commands/design.md",
+        ),
         "demo-user" => (
             Status::Partial,
             "mxrs demo-user new",

@@ -54,6 +54,7 @@ pub mod cargo_project;
 pub mod changelog;
 pub mod compare;
 pub mod database;
+pub mod design;
 pub mod doctor;
 pub mod environment;
 pub mod evaluation;

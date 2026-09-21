@@ -36,6 +36,7 @@ mxrs-refactor = { path = "../mxrs-refactor" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
+regex = "1"
 serde_json.workspace = true
 serde.workspace = true
 sha2 = "0.10"

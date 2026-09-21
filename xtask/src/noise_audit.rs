@@ -125,6 +125,7 @@ fn audit_scaffolded_project(workspace_root: &Path) -> Result<Vec<Finding>, Strin
             mxrs_scaffold::ArtifactKind::Evaluation => "GeneratedEvaluation".to_string(),
             mxrs_scaffold::ArtifactKind::Ci => "github".to_string(),
             mxrs_scaffold::ArtifactKind::DemoUser => "GeneratedDemoUser".to_string(),
+            mxrs_scaffold::ArtifactKind::Design => "project".to_string(),
             _ => format!("AuditModule.Generated{}", pascal_case(command.name)),
         };
         mxrs_scaffold::scaffold_artifact(&mxrs_scaffold::ArtifactScaffold::new(

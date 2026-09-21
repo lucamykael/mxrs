@@ -101,6 +101,7 @@ fn command_options(
             &["--dry-run", "--json"],
             &["--role"],
         ),
+        "design" => (&["--target"], &["--apply", "--dry-run", "--json"], &[]),
         "ci" | "constant" | "consumed-rest" | "entity" | "enumeration" | "evaluation"
         | "functional-test" | "integration" | "java-action" | "module" | "nanoflow"
         | "published-rest" | "repository" | "scheduled-event" | "security" | "use-case"
@@ -164,6 +165,7 @@ commands! {
     "consumed-rest", "new <Module.Client> [--target DIR] [--dry-run] [--json]", "Scaffold a consumed REST adapter microflow", run_consumed_rest;
     "demo-user", "new <Name> [--entity Module.Entity] [--role ROLE] [--target DIR] [--dry-run] [--json]", "Create a local Mendix demo user backed by an ignored .env secret", run_demo_user;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
+    "design", "init [--target DIR] [--dry-run] [--json] | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]", "Initialize, inventory, or migrate the project design system", run_design;
     "db", "<status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]", "Manage an isolated PostgreSQL workspace", run_db;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
@@ -883,6 +885,136 @@ fn run_demo_user(args: Vec<String>) -> ExitCode {
         mxrs_scaffold::ArtifactKind::DemoUser,
         args,
     ))
+}
+
+fn run_design(mut args: Vec<String>) -> ExitCode {
+    const USAGE: &str = "Usage: mxrs design init [--target DIR] [--dry-run] [--json] | \
+        scan <file.mpr> [--json] | \
+        migrate <file.mpr> <literal> <token> [--apply] [--json]";
+    match args.first().map(String::as_str) {
+        Some("init") => reported(mxrs_cli::scaffold::generate(
+            mxrs_scaffold::ArtifactKind::Design,
+            args,
+        )),
+        Some("scan") => {
+            args.remove(0);
+            let json = take_flag(&mut args, "--json");
+            let [source] = args.as_slice() else {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            };
+            match mxrs_cli::design::DesignSystem::scan(source) {
+                Ok(design) => {
+                    print_design_scan(&design, json);
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("migrate") => {
+            args.remove(0);
+            let json = take_flag(&mut args, "--json");
+            let apply = take_flag(&mut args, "--apply");
+            let [source, literal, token] = args.as_slice() else {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            };
+            let plan = match mxrs_cli::design::MigrationPlan::build(source, literal, token) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if apply && let Err(error) = plan.apply() {
+                eprintln!("[mxrs] error: {error}");
+                return ExitCode::FAILURE;
+            }
+            if json {
+                let payload = serde_json::json!({
+                    "applied": apply,
+                    "changes": plan.changes(),
+                    "occurrences": plan.occurrences(),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).expect("plan is serializable")
+                );
+            } else {
+                for change in plan.changes() {
+                    println!("{}\t{} replacements", change.path, change.occurrences);
+                }
+                let label = if apply { "Applied" } else { "Preview" };
+                println!(
+                    "[mxrs] {label}: {} replacements in {} files",
+                    plan.occurrences(),
+                    plan.changes().len()
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Some(action) => {
+            eprintln!("[mxrs] error: unknown design action {action:?}; use init, scan, or migrate");
+            ExitCode::FAILURE
+        }
+        None => {
+            eprintln!("{USAGE}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_design_scan(design: &mxrs_cli::design::DesignSystem, json: bool) {
+    if json {
+        let catalogs: serde_json::Map<String, serde_json::Value> = design
+            .catalogs()
+            .iter()
+            .map(|(path, parsed)| {
+                (
+                    path.clone(),
+                    parsed.clone().unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "tokens": design.tokens(),
+            "themes": design.themes(),
+            "catalogs": catalogs,
+            "unresolved_references": design.unresolved_references(),
+            "literal_colors": design
+                .literal_colors()
+                .iter()
+                .map(|token| token.name.clone())
+                .collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("scan payload is serializable")
+        );
+    } else {
+        println!("name\tvalue\tkind\ttheme\tlocation");
+        for token in design.tokens() {
+            println!(
+                "{}\t{}\t{}\t{}\t{}:{}",
+                token.name,
+                token.value,
+                token.kind,
+                token.theme.as_deref().unwrap_or("-"),
+                token.path,
+                token.line
+            );
+        }
+        println!(
+            "[mxrs] {} tokens, {} themes, {} literal colors, {} unresolved references",
+            design.tokens().len(),
+            design.themes().len(),
+            design.literal_colors().len(),
+            design.unresolved_references().len()
+        );
+    }
 }
 
 fn run_module(args: Vec<String>) -> ExitCode {
