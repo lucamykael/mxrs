@@ -197,7 +197,7 @@ commands! {
     "mda", "<inspect|compare> ...", "Inspect or compare Mendix deployment archives", run_mda;
     "migrate", "<check|plan> [DIR] [--json]", "Compare a Cargo-native build with its imported MPR snapshot", run_migrate;
     "modules", "<file.mpr> [--json | --names] [--no-progress]", "List modules with entity, page and microflow counts", run_modules;
-    "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a same-module unit move", run_move;
+    "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a unit move, composing rename across modules", run_move;
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
     "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
     "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;

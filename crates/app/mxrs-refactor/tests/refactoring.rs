@@ -289,8 +289,8 @@ fn moving_reports_the_containers_and_refuses_to_change_a_qualified_name() {
     assert_eq!(plan.before_container, plan.after_container);
     assert_eq!(plan.containment, "Documents");
 
-    // A destination in another module would change the artifact's qualified
-    // name, which is `rename`'s job.
+    // A destination in another module composes rename + relocation, exactly
+    // like mxrb's CrossModuleMovePlan.
     let mut builder = ProjectBuilder::new("11.12.1");
     builder.module("Sales", |module| {
         module.microflow("ACT_SubmitOrder", |_flow| {});
@@ -301,10 +301,10 @@ fn moving_reports_the_containers_and_refuses_to_change_a_qualified_name() {
     let cross_path = directory.path().join("Cross.mpr");
     mxrs_writer::write_project(&cross_path, &builder.build()).unwrap();
     let cross = open(&cross_path);
-    assert!(matches!(
-        plan_move(&cross, "Sales.ACT_SubmitOrder", "Billing"),
-        Err(RefactorError::CrossContainerRename { .. })
-    ));
+    let plan = plan_move(&cross, "Sales.ACT_SubmitOrder", "Billing").unwrap();
+    assert!(plan.rename.is_some());
+    assert!(!plan.is_empty());
+    assert_eq!(plan.target_name(), "Billing.ACT_SubmitOrder");
     assert!(matches!(
         plan_move(&cross, "Sales.ACT_SubmitOrder", "NoSuchModule"),
         Err(RefactorError::UnknownContainer(name)) if name == "NoSuchModule"
@@ -313,4 +313,99 @@ fn moving_reports_the_containers_and_refuses_to_change_a_qualified_name() {
     // already proved the no-op path, so this only checks the kind gate lets
     // it through rather than refusing it as "not a unit".
     assert!(plan_move(&project, "Sales.OrderOverview", "Sales").is_ok());
+}
+
+#[test]
+fn a_cross_module_move_relocates_and_rewrites_every_reference_in_one_apply() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("CrossMove.mpr");
+    // The standard fixture plus an empty destination module.
+    let mut builder = ProjectBuilder::new("11.12.1");
+    builder.module("Sales", |module| {
+        module.role("User", "Regular user");
+        module.microflow("ACT_SubmitOrder", |_flow| {});
+        module.layout("ApplicationLayout", |layout| {
+            layout.placeholder("Main");
+        });
+        module.page("OrderOverview", |page| {
+            page.layout("Sales.ApplicationLayout", "Main");
+            page.button("Submit", |button| {
+                button.call_microflow(mxrs_ir::MicroflowRef::<markers::ACT_SubmitOrder>::new());
+            });
+        });
+    });
+    builder.module("Billing", |module| {
+        module.microflow("ACT_Invoice", |_flow| {});
+    });
+    mxrs_writer::write_project(&path, &builder.build()).unwrap();
+
+    let mut project = open(&path);
+    let plan = plan_move(&project, "Sales.ACT_SubmitOrder", "Billing").unwrap();
+    assert_eq!(plan.target_name(), "Billing.ACT_SubmitOrder");
+    let rename = plan.rename.as_ref().expect("cross-module plan");
+    assert!(
+        rename
+            .changes
+            .iter()
+            .any(|change| change.before.contains("Sales.ACT_SubmitOrder")),
+        "the page reference is part of the plan: {:?}",
+        rename.changes
+    );
+    plan.apply(&mut project).unwrap();
+    drop(project);
+
+    let moved = open(&path);
+    let billing = moved
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|module| module.name.as_deref() == Some("Billing"))
+        .unwrap();
+    assert!(
+        billing
+            .microflows
+            .iter()
+            .any(|flow| flow.name.as_deref() == Some("ACT_SubmitOrder")),
+        "the unit now lives under Billing"
+    );
+    let sales = moved
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|module| module.name.as_deref() == Some("Sales"))
+        .unwrap();
+    assert!(
+        !sales
+            .microflows
+            .iter()
+            .any(|flow| flow.name.as_deref() == Some("ACT_SubmitOrder")),
+        "the unit left Sales"
+    );
+    // No string anywhere still spells the old qualified name, and the page
+    // now calls the new one.
+    let strings = all_strings(&moved);
+    assert!(
+        !strings
+            .iter()
+            .any(|value| value.contains("Sales.ACT_SubmitOrder")),
+        "old qualified name lingers"
+    );
+    assert!(
+        strings
+            .iter()
+            .any(|value| value.contains("Billing.ACT_SubmitOrder")),
+        "new qualified name referenced"
+    );
+
+    // A non-module destination is refused up front — mxrb's container-kind
+    // gate, which also rules out moving a unit into itself.
+    let reopened = open(&path);
+    assert!(matches!(
+        plan_move(
+            &reopened,
+            "Billing.ACT_SubmitOrder",
+            "Billing.ACT_SubmitOrder"
+        ),
+        Err(RefactorError::NotAContainer { .. })
+    ));
 }

@@ -89,6 +89,14 @@ pub enum RefactorError {
     #[error("Mendix artifact {0:?} already exists")]
     NameCollision(String),
 
+    #[error("cannot move {name} into its own descendant {container}")]
+    MoveIntoDescendant { name: String, container: String },
+
+    #[error(
+        "{kind} {name:?} cannot receive moved units; move destinations are modules (folders are not indexed artifacts)"
+    )]
+    NotAContainer { name: String, kind: &'static str },
+
     #[error(
         "{kind} {name:?} is not a removable or movable unit; it is part of another document, and changing it is a typed domain-model mutation"
     )]

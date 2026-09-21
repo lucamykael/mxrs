@@ -460,7 +460,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "move" => (
             Status::Partial,
             "mxrs move",
-            "same-module unit relocation; MXRB additionally composes a cross-module move out of move+rename, which this refuses rather than half-performs",
+            "same-module unit relocation plus MXRB's cross-module composition (rename with cross_module + relocation in one transaction, reference rewrites verified by test); folder destinations are refused because folders are not indexed artifacts",
         ),
         "design" => (
             Status::Verified,

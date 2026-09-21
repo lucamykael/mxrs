@@ -145,6 +145,26 @@ pub fn run_move(mut args: Vec<String>) -> ExitCode {
         let artifact = plan.artifact.clone();
         let (before, after) = (plan.before_container.clone(), plan.after_container.clone());
         let already_there = plan.is_empty();
+        let target_name = plan.target_name().to_string();
+        let rename_changes: Vec<serde_json::Value> = plan
+            .rename
+            .as_ref()
+            .map(|rename| {
+                rename
+                    .changes
+                    .iter()
+                    .map(|change| {
+                        serde_json::json!({
+                            "unit_id": change.unit_id,
+                            "path": change.path,
+                            "before": change.before,
+                            "after": change.after,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cross_module = plan.rename.is_some();
         if apply {
             plan.apply(&mut project)?;
         }
@@ -155,6 +175,9 @@ pub fn run_move(mut args: Vec<String>) -> ExitCode {
                     "artifact": artifact,
                     "before_container": before,
                     "after_container": after,
+                    "target_name": target_name,
+                    "cross_module": cross_module,
+                    "rename_changes": rename_changes,
                     "applied": apply && !already_there,
                 }))
                 .expect("a move plan is serializable")
@@ -165,6 +188,13 @@ pub fn run_move(mut args: Vec<String>) -> ExitCode {
                 artifact.qualified_name, artifact.kind
             );
             println!("Container : {before} -> {after}");
+            if cross_module {
+                println!(
+                    "Renamed   : {} -> {target_name} ({} reference rewrite(s))",
+                    artifact.qualified_name,
+                    rename_changes.len()
+                );
+            }
             println!(
                 "[mxrs] {}",
                 match (apply, already_there) {

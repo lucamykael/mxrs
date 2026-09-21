@@ -38,6 +38,12 @@ impl RenamePlan {
         self.documents.len()
     }
 
+    /// The rewritten unit documents an apply would write — the mover's
+    /// cross-module composition writes them inside its own transaction.
+    pub(crate) fn documents(&self) -> &BTreeMap<String, Document> {
+        &self.documents
+    }
+
     /// Writes every rewritten unit in one transaction. Consuming `self`
     /// enforces mxrb's "a plan was already applied" guard at compile time
     /// rather than at runtime.
@@ -61,9 +67,27 @@ impl RenamePlan {
 /// container: moving an artifact elsewhere is `move`'s job, and conflating the
 /// two is how a rename quietly becomes a move.
 pub fn plan_rename(project: &Project, name: &str, to: &str) -> Result<RenamePlan> {
+    plan_rename_scoped(project, name, to, false)
+}
+
+/// Like [`plan_rename`], but `cross_module: true` additionally allows the
+/// module prefix to change — mxrb's `Renamer#plan(..., cross_module: true)`,
+/// reachable only through the mover's compose-with-relocate path so a plain
+/// rename can never quietly relocate an artifact.
+pub(crate) fn plan_rename_scoped(
+    project: &Project,
+    name: &str,
+    to: &str,
+    cross_module: bool,
+) -> Result<RenamePlan> {
     let index = build_index(project)?;
     let source = resolve(&index, name)?;
-    let target = qualified_target(&source.qualified_name, source.kind.as_str(), to)?;
+    let target = qualified_target(
+        &source.qualified_name,
+        source.kind.as_str(),
+        to,
+        cross_module,
+    )?;
 
     // A collision check that ignored the artifact itself would reject
     // renaming `Order` to `Order`, which is a no-op rather than a conflict.
@@ -160,7 +184,12 @@ fn rewrite(
 
 /// Resolves the requested new name against the artifact's current one and
 /// rejects the shapes mxrb rejects.
-fn qualified_target(current: &str, kind: &'static str, requested: &str) -> Result<String> {
+fn qualified_target(
+    current: &str,
+    kind: &'static str,
+    requested: &str,
+    cross_module: bool,
+) -> Result<String> {
     let requested = requested.trim();
     if requested.is_empty() {
         return Err(RefactorError::EmptyName);
@@ -185,7 +214,8 @@ fn qualified_target(current: &str, kind: &'static str, requested: &str) -> Resul
             to: target,
         });
     }
-    if old_parts.len() > 1
+    if !cross_module
+        && old_parts.len() > 1
         && target_parts[..target_parts.len() - 1] != old_parts[..old_parts.len() - 1]
     {
         return Err(RefactorError::CrossContainerRename {
@@ -215,15 +245,15 @@ mod tests {
     #[test]
     fn a_bare_new_name_keeps_the_existing_container() {
         assert_eq!(
-            qualified_target("Sales.Order", "entity", "Invoice").unwrap(),
+            qualified_target("Sales.Order", "entity", "Invoice", false).unwrap(),
             "Sales.Invoice"
         );
         assert_eq!(
-            qualified_target("Sales.Order.Number", "attribute", "Reference").unwrap(),
+            qualified_target("Sales.Order.Number", "attribute", "Reference", false).unwrap(),
             "Sales.Order.Reference"
         );
         assert_eq!(
-            qualified_target("Sales", "module", "Billing").unwrap(),
+            qualified_target("Sales", "module", "Billing", false).unwrap(),
             "Billing"
         );
     }
@@ -231,21 +261,21 @@ mod tests {
     #[test]
     fn a_rename_that_would_relocate_or_reshape_the_name_is_refused() {
         assert!(matches!(
-            qualified_target("Sales.Order", "entity", "Billing.Order"),
+            qualified_target("Sales.Order", "entity", "Billing.Order", false),
             Err(RefactorError::CrossContainerRename { .. })
         ));
         assert!(matches!(
-            qualified_target("Sales.Order", "entity", "Sales.Order.Line"),
+            qualified_target("Sales.Order", "entity", "Sales.Order.Line", false),
             Err(RefactorError::QualificationDepthChanged { .. })
         ));
         assert!(matches!(
-            qualified_target("Sales.Order", "entity", "  "),
+            qualified_target("Sales.Order", "entity", "  ", false),
             Err(RefactorError::EmptyName)
         ));
         for invalid in ["9Lives", "has space", "has-dash", "$Order"] {
             assert!(
                 matches!(
-                    qualified_target("Sales.Order", "entity", invalid),
+                    qualified_target("Sales.Order", "entity", invalid, false),
                     Err(RefactorError::InvalidName(_))
                 ),
                 "{invalid} was accepted"
@@ -253,8 +283,18 @@ mod tests {
         }
         // A fully qualified name identical to the current container is fine.
         assert_eq!(
-            qualified_target("Sales.Order", "entity", "Sales.Invoice").unwrap(),
+            qualified_target("Sales.Order", "entity", "Sales.Invoice", false).unwrap(),
             "Sales.Invoice"
         );
+        // The mover's cross-module composition is the one caller allowed to
+        // change the prefix; depth still may not change.
+        assert_eq!(
+            qualified_target("Sales.Order", "entity", "Billing.Order", true).unwrap(),
+            "Billing.Order"
+        );
+        assert!(matches!(
+            qualified_target("Sales.Order", "entity", "Sales.Order.Line", true),
+            Err(RefactorError::QualificationDepthChanged { .. })
+        ));
     }
 }

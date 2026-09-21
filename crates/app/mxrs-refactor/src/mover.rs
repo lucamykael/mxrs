@@ -1,18 +1,20 @@
-//! Unit relocation. Ports `lib/mxrb/semantic/mover.rb`'s same-container half.
+//! Unit relocation. Ports `lib/mxrb/semantic/mover.rb`, both halves.
 //!
-//! mxrb's mover also handles the cross-module case by delegating to its
-//! renamer with `cross_module: true`, because moving an artifact between
-//! modules changes its qualified name and therefore every reference to it.
-//! That composition is available here too — `plan_move` refuses a
-//! cross-module target and names `rename` as the operation that changes a
-//! qualified name — rather than silently doing half of each. Doing both in one
-//! step is a worthwhile follow-up; doing it implicitly is not.
+//! A same-module move relocates one unit and touches nothing else. A
+//! cross-module move changes the artifact's qualified name — and therefore
+//! every reference to it — so, exactly like mxrb, it composes the renamer
+//! (`cross_module: true`) with the relocation and applies both inside one
+//! transaction: rewritten documents first, then the containment row. Neither
+//! half is ever done implicitly on its own.
 
 use mxrs_model::Project;
 
+use crate::renamer::{RenamePlan, plan_rename_scoped};
 use crate::{ArtifactSummary, RefactorError, Result, build_index, is_refactorable_unit, resolve};
 
-/// Where a unit currently sits and where it would sit.
+/// Where a unit currently sits and where it would sit. A cross-module move
+/// additionally carries the rename plan whose rewritten references keep the
+/// model consistent — mxrb's `CrossModuleMovePlan`.
 #[derive(Debug, Clone)]
 pub struct MovePlan {
     pub artifact: ArtifactSummary,
@@ -20,15 +22,27 @@ pub struct MovePlan {
     pub after_container: String,
     /// Containment slot the unit is filed under, e.g. `"Documents"`.
     pub containment: String,
+    /// `Some` iff the destination lives in another module.
+    pub rename: Option<RenamePlan>,
     unit_id: String,
 }
 
 impl MovePlan {
     /// A move to the container the artifact already sits in. mxrb reports
     /// this as "Already in container" rather than as an error, and so does
-    /// this: asking for a state that already holds is not a failure.
+    /// this: asking for a state that already holds is not a failure. A
+    /// cross-module move is never empty (mxrb's `CrossModuleMovePlan#empty?`
+    /// is always false).
     pub fn is_empty(&self) -> bool {
-        self.before_container == self.after_container
+        self.rename.is_none() && self.before_container == self.after_container
+    }
+
+    /// The artifact's qualified name after the move.
+    pub fn target_name(&self) -> &str {
+        self.rename
+            .as_ref()
+            .map(|rename| rename.target.as_str())
+            .unwrap_or(self.artifact.qualified_name.as_str())
     }
 
     pub fn apply(self, project: &mut Project) -> Result<()> {
@@ -37,6 +51,14 @@ impl MovePlan {
         }
         let mpr = project.mpr_mut();
         mpr.transaction(|mpr| {
+            // Rewritten references land first, then the containment row —
+            // the same single-transaction order as mxrb's
+            // `CrossModuleMovePlan#apply!`.
+            if let Some(rename) = &self.rename {
+                for (unit_id, document) in rename.documents() {
+                    mpr.update_unit(unit_id, document.clone())?;
+                }
+            }
             mpr.relocate_unit(&self.unit_id, &self.after_container, &self.containment)?;
             Ok(())
         })?;
@@ -74,18 +96,36 @@ pub fn plan_move(project: &Project, name: &str, container: &str) -> Result<MoveP
         .clone()
         .ok_or_else(|| RefactorError::UnknownContainer(container.to_string()))?;
 
-    // Moving between modules would change the artifact's qualified name, and
-    // every reference to it with it. That is a rename, and pretending
-    // otherwise would leave the model referring to a name nothing has.
-    if let (Some(from), Some(to)) = (artifact.module.as_deref(), module_of(&index, destination))
-        && from != to
-    {
-        return Err(RefactorError::CrossContainerRename {
-            kind: artifact.kind.as_str(),
-            from: artifact.qualified_name.clone(),
-            to: format!("{to}.{}", artifact.name),
+    // mxrb restricts destinations to modules and folders; folders are not
+    // indexed artifacts here, so a module is the only resolvable container.
+    if destination.kind != mxrs_semantic::ArtifactKind::Module {
+        return Err(RefactorError::NotAContainer {
+            name: destination.qualified_name.clone(),
+            kind: destination.kind.as_str(),
         });
     }
+
+    // Moving a unit under its own descendant would detach the subtree from
+    // the model graph — mxrb refuses it up front and so does this.
+    if descendant_ids(project, &unit_id)?.contains(&destination_id) {
+        return Err(RefactorError::MoveIntoDescendant {
+            name: artifact.qualified_name.clone(),
+            container: destination.qualified_name.clone(),
+        });
+    }
+
+    // Moving between modules changes the artifact's qualified name, and
+    // every reference to it with it — so the plan composes the renamer's
+    // cross-module mode with the relocation (mxrb's `plan_cross_module`).
+    let rename = match (artifact.module.as_deref(), module_of(&index, destination)) {
+        (Some(from), Some(to)) if from != to => Some(plan_rename_scoped(
+            project,
+            &artifact.qualified_name,
+            &format!("{to}.{}", artifact.name),
+            true,
+        )?),
+        _ => None,
+    };
 
     let unit = project
         .mpr()
@@ -100,8 +140,25 @@ pub fn plan_move(project: &Project, name: &str, container: &str) -> Result<MoveP
         before_container: unit.container_id.clone(),
         after_container: destination_id,
         containment: unit.containment_name.clone(),
+        rename,
         unit_id,
     })
+}
+
+/// Every unit stored beneath `root_id`, excluding `root_id` itself.
+fn descendant_ids(project: &Project, root_id: &str) -> Result<Vec<String>> {
+    let mpr = project.mpr();
+    let mut ids = Vec::new();
+    let mut frontier = vec![root_id.to_string()];
+    while let Some(parent) = frontier.pop() {
+        for child in mpr.children_of(&parent)? {
+            if !ids.contains(&child.unit_id) {
+                ids.push(child.unit_id.clone());
+                frontier.push(child.unit_id);
+            }
+        }
+    }
+    Ok(ids)
 }
 
 /// A module is its own module; anything else reports the module it lives in.
