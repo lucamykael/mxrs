@@ -95,8 +95,13 @@ fn command_options(
         "protocols" | "compare" | "diff" | "callees" | "callers" | "describe" | "impact"
         | "refs" | "tree" => (&[], &["--json", "--no-progress"], &[]),
         "export" => (&["-o"], &[], &[]),
+        "convert" => (
+            &["--output", "-o", "--mode", "--mxrs-workspace"],
+            &["--release", "--offline"],
+            &[],
+        ),
         "env" => (&["--environment"], &["--json"], &[]),
-        "import" => (&["--output", "-o", "--mxrs-workspace"], &[], &[]),
+        "import" => (&["--output", "-o", "--mode", "--mxrs-workspace"], &[], &[]),
         "javagen" => (&["--project-root"], &[], &[]),
         "new" => (
             &["--output", "-o", "--version", "--mxrs-workspace"],
@@ -186,6 +191,7 @@ commands! {
     "callers", "<file.mpr> <artifact> [--json]", "List distinct direct callers", run_callers;
     "changelog", "[VERSION] [--json]", "Show mxrs release notes from GitHub", run_changelog;
     "compare", "<left.mpr> <right.mpr> [--json]", "Compare structural model snapshots", run_compare;
+    "convert", "mendix-to-rust <file.mpr> --output <directory> [--mode axum|actix-web|rocket] [--mxrs-workspace <path>] | rust-to-mendix [directory] --output <file.mpr> [--release] [--offline]", "Convert between a Mendix MPR and a Cargo-native MXRS project", run_convert;
     "constant", "new <Module.Constant> [--target DIR] [--dry-run] [--json]", "Scaffold a string constant declaration", run_constant;
     "consumed-rest", "new <Module.Client> [--target DIR] [--dry-run] [--json]", "Scaffold a consumed REST adapter microflow", run_consumed_rest;
     "demo-user", "new <Name> [--entity Module.Entity] [--role ROLE] [--target DIR] [--dry-run] [--json]", "Create a local Mendix demo user backed by an ignored .env secret", run_demo_user;
@@ -206,7 +212,7 @@ commands! {
     "functional-instrument", "<writable.mpr> <suite.json> [--json]", "Instrument a disposable MPR with a functional test runner", run_functional_instrument;
     "help", "[command]", "Show command usage", run_help;
     "impact", "<file.mpr> <artifact> [--json]", "Find transitive incoming dependencies", run_impact;
-    "import", "<file.mpr> --output <directory> [--mxrs-workspace <path>]", "Import into a Cargo-native project", run_import;
+    "import", "<file.mpr> --output <directory> [--mode axum|actix-web|rocket] [--mxrs-workspace <path>]", "Import into a Cargo-native project", run_import;
     "inspect", "<file.mpr> [--json]", "Show a structural model snapshot", run_inspect;
     "integration", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Create an integration adapter microflow", run_integration;
     "java-action", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Scaffold a Java Action adapter microflow", run_java_action;
@@ -3031,25 +3037,81 @@ fn run_export(mut args: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_convert(mut args: Vec<String>) -> ExitCode {
+    let Some(direction) = args.first().cloned() else {
+        eprintln!(
+            "[mxrs] error: use `mxrs convert mendix-to-rust` or `mxrs convert rust-to-mendix`"
+        );
+        return ExitCode::FAILURE;
+    };
+    args.remove(0);
+    match direction.as_str() {
+        "mendix-to-rust" => run_import(args),
+        "rust-to-mendix" => {
+            let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
+            let release = take_flag(&mut args, "--release");
+            let offline = take_flag(&mut args, "--offline");
+            let root = match args.as_slice() {
+                [] => PathBuf::from("."),
+                [root] => PathBuf::from(root),
+                _ => {
+                    eprintln!(
+                        "[mxrs] error: usage: mxrs convert rust-to-mendix [directory] --output <file.mpr> [--release] [--offline]"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(output) = output else {
+                eprintln!("[mxrs] error: rust-to-mendix requires --output <file.mpr>");
+                return ExitCode::FAILURE;
+            };
+            match mxrs_cli::cargo_project::build(root.join("Cargo.toml"), &output, release, offline)
+            {
+                Ok(path) => {
+                    println!("[mxrs] converted Cargo project to {}", path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        _ => {
+            eprintln!("[mxrs] error: direction must be mendix-to-rust or rust-to-mendix");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run_import(mut args: Vec<String>) -> ExitCode {
     let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
     let workspace = take_value(&mut args, "--mxrs-workspace").map(std::path::PathBuf::from);
+    let mode = take_value(&mut args, "--mode").unwrap_or_else(|| "axum".to_string());
+    let Some(mode) = mxrs_exporter::ApiMode::parse(&mode) else {
+        eprintln!("[mxrs] error: --mode must be axum, actix-web, or rocket");
+        return ExitCode::FAILURE;
+    };
     if args.len() != 1 || output.is_none() {
         eprintln!(
-            "[mxrs] error: usage: mxrs import <file.mpr> --output <directory> [--mxrs-workspace <path>]"
+            "[mxrs] error: usage: mxrs import <file.mpr> --output <directory> [--mode axum|actix-web|rocket] [--mxrs-workspace <path>]"
         );
         return ExitCode::FAILURE;
     }
 
     let output = output.expect("validated above");
-    let imported =
-        match mxrs_exporter::import_cargo_project(&args[0], &output, workspace.as_deref()) {
-            Ok(imported) => imported,
-            Err(error) => {
-                eprintln!("[mxrs] error: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let imported = match mxrs_exporter::import_cargo_project_with_mode(
+        &args[0],
+        &output,
+        workspace.as_deref(),
+        mode,
+    ) {
+        Ok(imported) => imported,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     println!(
         "[mxrs] imported {} as Cargo package {} ({} model units, {} assets)",

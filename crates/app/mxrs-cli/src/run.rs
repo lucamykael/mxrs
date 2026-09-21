@@ -36,6 +36,8 @@ pub enum RunError {
     Persistence(#[from] mxrs_runtime_sqlite::SqliteRuntimeError),
     #[error(transparent)]
     Http(#[from] mxrs_runtime_http::HttpError),
+    #[error(transparent)]
+    Materialize(#[from] mxrs_materializers::MaterializeError),
     #[error("{0}")]
     Frontend(String),
     #[error("invalid scheduled event: {0}")]
@@ -98,10 +100,10 @@ pub fn resolve_target(root: &Path) -> Result<RunTarget, RunError> {
     };
     let web_root = build.join("web");
     if !web_root.is_dir() {
-        return Err(RunError::Target(format!(
-            "no web assets under {}; `cargo mxrs build` materializes them",
-            web_root.display()
-        )));
+        // `mxrs run` owns the native runtime lifecycle.  Materializing here
+        // keeps it usable for an MPR produced by `rust-to-mendix` even when
+        // the caller has not separately asked for a web bundle.
+        mxrs_materializers::materialize_mpr(&mpr, &web_root)?;
     }
     Ok(RunTarget {
         mpr,
@@ -550,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn resolving_a_target_requires_exactly_one_built_model_and_web_assets() {
+    fn resolving_a_target_requires_exactly_one_built_model_and_materializes_web_assets() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let missing = resolve_target(root).unwrap_err().to_string();
@@ -558,20 +560,23 @@ mod tests {
         assert!(missing.contains("cargo mxrs build"), "{missing}");
 
         std::fs::create_dir_all(root.join("build")).unwrap();
-        std::fs::write(root.join("build/app.mpr"), b"").unwrap();
-        let no_web = resolve_target(root).unwrap_err().to_string();
-        assert!(no_web.contains("no web assets"), "{no_web}");
-
-        std::fs::create_dir_all(root.join("build/web")).unwrap();
+        let mpr = root.join("build/app.mpr");
+        mxrs_writer::write_project(&mpr, &mxrs_dsl::ProjectBuilder::new("11.12.1").build())
+            .unwrap();
         let target = resolve_target(root).unwrap();
-        assert_eq!(target.mpr, root.join("build/app.mpr"));
+        assert_eq!(target.mpr, mpr);
         assert_eq!(target.web_root, root.join("build/web"));
+        assert!(target.web_root.join("index.html").is_file());
         assert_eq!(
             target.state_path,
             root.join(".mxrs").join("runtime").join("state.sqlite3")
         );
 
-        std::fs::write(root.join("build/other.mpr"), b"").unwrap();
+        mxrs_writer::write_project(
+            root.join("build/other.mpr"),
+            &mxrs_dsl::ProjectBuilder::new("11.12.1").build(),
+        )
+        .unwrap();
         let ambiguous = resolve_target(root).unwrap_err().to_string();
         assert!(ambiguous.contains("multiple .mpr files"), "{ambiguous}");
     }

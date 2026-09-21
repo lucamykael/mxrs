@@ -85,6 +85,34 @@ pub struct RoundTripGap {
     pub reason: String,
 }
 
+/// HTTP adapter emitted for an imported Cargo project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApiMode {
+    #[default]
+    Axum,
+    ActixWeb,
+    Rocket,
+}
+
+impl ApiMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "axum" => Some(Self::Axum),
+            "actix-web" | "actix" => Some(Self::ActixWeb),
+            "rocket" => Some(Self::Rocket),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Axum => "axum",
+            Self::ActixWeb => "actix-web",
+            Self::Rocket => "rocket",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
     #[error(transparent)]
@@ -178,6 +206,16 @@ pub fn import_cargo_project(
     destination: impl AsRef<Path>,
     mxrs_workspace: Option<&Path>,
 ) -> Result<CargoProjectImport> {
+    import_cargo_project_with_mode(mpr_path, destination, mxrs_workspace, ApiMode::default())
+}
+
+/// Same as [`import_cargo_project`], with an explicit HTTP adapter layout.
+pub fn import_cargo_project_with_mode(
+    mpr_path: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    mxrs_workspace: Option<&Path>,
+    api_mode: ApiMode,
+) -> Result<CargoProjectImport> {
     let destination = destination.as_ref();
     if destination.exists() {
         return Err(ExportError::DestinationExists(
@@ -185,7 +223,8 @@ pub fn import_cargo_project(
         ));
     }
     std::fs::create_dir_all(destination).map_err(|source| io_error(destination, source))?;
-    let result = import_cargo_project_inner(mpr_path.as_ref(), destination, mxrs_workspace);
+    let result =
+        import_cargo_project_inner(mpr_path.as_ref(), destination, mxrs_workspace, api_mode);
     if result.is_err() {
         let _ = std::fs::remove_dir_all(destination);
     }
@@ -196,6 +235,7 @@ fn import_cargo_project_inner(
     mpr_path: &Path,
     destination: &Path,
     mxrs_workspace: Option<&Path>,
+    api_mode: ApiMode,
 ) -> Result<CargoProjectImport> {
     let project = Project::open(mpr_path, true)?;
     let mendix_version = project.mendix_version()?.unwrap_or_default();
@@ -211,24 +251,22 @@ fn import_cargo_project_inner(
         &mut page_export,
     )?;
     let pages_module_source = page_export::render_pages_module(&converted_pages);
-    let entities_source = render(&mendix_version, &modules, &[]);
     let domain_source = render_domain_module();
     let application_source = render_application_module();
-    let presentation_source = render_presentation_module(&converted_pages);
+    let presentation_source = render_presentation_module(&converted_pages, api_mode);
+    let composition_source = render_composition_module(&mendix_version);
+    let infrastructure_source = render_infrastructure_module();
+    let persistence_source = render_persistence_module(&modules, &mendix_version);
     let converted_flows = flow_export::collect(&project, &modules)?;
-    let microflows_source = if converted_flows
-        .iter()
-        .any(|f| f.native_type == "Microflows$Microflow")
-    {
-        flow_export::render(&converted_flows, &mendix_version, false)
+    let microflow_files = flow_export::render_files(&converted_flows, &mendix_version, false);
+    let microflows_source = if !microflow_files.is_empty() {
+        render_flow_layer_index(&microflow_files)
     } else {
         render_microflows_module(&mendix_version, &modules)
     };
-    let nanoflows_source = if converted_flows
-        .iter()
-        .any(|f| f.native_type == "Microflows$Nanoflow")
-    {
-        flow_export::render(&converted_flows, &mendix_version, true)
+    let nanoflow_files = flow_export::render_files(&converted_flows, &mendix_version, true);
+    let nanoflows_source = if !nanoflow_files.is_empty() {
+        render_flow_layer_index(&nanoflow_files)
     } else {
         render_nanoflows_module(&mendix_version, &modules)
     };
@@ -263,13 +301,21 @@ fn import_cargo_project_inner(
     std::fs::create_dir_all(&domain_modules_directory)
         .map_err(|source| io_error(&domain_modules_directory, source))?;
     let application_directory = destination.join("src/application");
-    let microflows_directory = application_directory.join("microflows");
-    std::fs::create_dir_all(&microflows_directory)
-        .map_err(|source| io_error(&microflows_directory, source))?;
+    let dto_directory = application_directory.join("dto");
+    std::fs::create_dir_all(&dto_directory).map_err(|source| io_error(&dto_directory, source))?;
+    let use_cases_directory = application_directory.join("use_cases");
+    std::fs::create_dir_all(&use_cases_directory)
+        .map_err(|source| io_error(&use_cases_directory, source))?;
     let application_modules_directory = application_directory.join("modules");
     std::fs::create_dir_all(&application_modules_directory)
         .map_err(|source| io_error(&application_modules_directory, source))?;
     let presentation_directory = destination.join("src/presentation");
+    let controllers_directory = presentation_directory.join("controllers");
+    std::fs::create_dir_all(&controllers_directory)
+        .map_err(|source| io_error(&controllers_directory, source))?;
+    let routes_directory = presentation_directory.join("routes");
+    std::fs::create_dir_all(&routes_directory)
+        .map_err(|source| io_error(&routes_directory, source))?;
     let task_queues_directory = application_directory.join("task_queues");
     std::fs::create_dir_all(&task_queues_directory)
         .map_err(|source| io_error(&task_queues_directory, source))?;
@@ -288,10 +334,23 @@ fn import_cargo_project_inner(
     let documents_directory = domain_directory.join("documents");
     std::fs::create_dir_all(&documents_directory)
         .map_err(|source| io_error(&documents_directory, source))?;
+    for directory in [
+        domain_directory.join("services"),
+        domain_directory.join("ports"),
+        infrastructure_directory.join("repositories"),
+        infrastructure_directory.join("database"),
+        infrastructure_directory.join("adapters"),
+        infrastructure_directory.join("persistence"),
+        destination.join("src/utils"),
+    ] {
+        std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
+    }
+
+    write_entity_layer_sources(destination, &modules)?;
 
     write_text(
         &destination.join("Cargo.toml"),
-        &cargo_manifest(&package_name, mxrs_workspace),
+        &cargo_manifest(&package_name, mxrs_workspace, api_mode),
     )?;
     write_text(
         &destination.join("mxrs.toml"),
@@ -304,14 +363,23 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "// Required by the paths emitted inside the authoring macro.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    let mut project = application::build();\n    presentation::apply(&mut project);\n    project\n}}\n\n#[mxrs::application(version = {}, project = crate::build)]\npub struct Application;\n",
+            "// Internal aliases keep generated authoring declarations concise.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod application;\npub mod composition;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\npub mod utils;\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    composition::build()\n}}\n\n#[mxrs::application(version = {}, project = crate::build)]\npub struct Application;\n",
             rust_string(&manifest.mendix_version),
         ),
     )?;
     write_text(&destination.join("src/domain/mod.rs"), &domain_source)?;
+    write_text(&destination.join("src/composition.rs"), &composition_source)?;
     write_text(
         &destination.join("src/domain/modules/mod.rs"),
         &render_scaffold_modules_module(),
+    )?;
+    write_text(
+        &destination.join("src/domain/services/mod.rs"),
+        "//! Pure domain services belong here.\n",
+    )?;
+    write_text(
+        &destination.join("src/domain/ports/mod.rs"),
+        "//! Repository and external-service contracts belong here.\n",
     )?;
     write_text(
         &destination.join("src/application/mod.rs"),
@@ -322,13 +390,15 @@ fn import_cargo_project_inner(
         &presentation_source,
     )?;
     write_text(
-        &destination.join("src/domain/entities/mod.rs"),
-        &entities_source,
-    )?;
-    write_text(
-        &destination.join("src/application/microflows/mod.rs"),
+        &destination.join("src/application/use_cases/mod.rs"),
         &microflows_source,
     )?;
+    for flow in &microflow_files {
+        write_text(
+            &destination.join(format!("src/application/use_cases/{}.rs", flow.file_name)),
+            &flow.source,
+        )?;
+    }
     write_text(
         &destination.join("src/application/task_queues/mod.rs"),
         &task_queues_source,
@@ -341,6 +411,12 @@ fn import_cargo_project_inner(
         &destination.join("src/presentation/nanoflows/mod.rs"),
         &nanoflows_source,
     )?;
+    for flow in &nanoflow_files {
+        write_text(
+            &destination.join(format!("src/presentation/nanoflows/{}.rs", flow.file_name)),
+            &flow.source,
+        )?;
+    }
     write_text(
         &destination.join("src/domain/security/mod.rs"),
         &security_source,
@@ -352,6 +428,14 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/presentation/modules/mod.rs"),
         &render_scaffold_modules_module(),
+    )?;
+    write_text(
+        &destination.join("src/presentation/controllers/mod.rs"),
+        "//! Framework-neutral presentation controllers.\n\npub fn apply(_project: &mut ::mxrs_ir::ProjectDecl) {}\n",
+    )?;
+    write_text(
+        &destination.join("src/presentation/routes/mod.rs"),
+        &render_routes_module(api_mode),
     )?;
     write_text(
         &destination.join("src/domain/documents/mod.rs"),
@@ -368,11 +452,31 @@ fn import_cargo_project_inner(
     }
     write_text(
         &destination.join("src/main.rs"),
-        &build_binary_source(&crate_name, &manifest.project_name),
+        &build_binary_source(&crate_name, &manifest.project_name, api_mode),
     )?;
     write_text(
         &destination.join("src/infrastructure/mod.rs"),
-        "//! Generated marker types used for checked model references.\n\npub mod markers;\n",
+        &infrastructure_source,
+    )?;
+    write_text(
+        &destination.join("src/infrastructure/persistence/mod.rs"),
+        &persistence_source,
+    )?;
+    write_text(
+        &destination.join("src/infrastructure/repositories/mod.rs"),
+        "//! Implement `domain::ports` against the selected database here.\n",
+    )?;
+    write_text(
+        &destination.join("src/infrastructure/database/mod.rs"),
+        "//! Connection pools, migrations and database adapters belong here.\n",
+    )?;
+    write_text(
+        &destination.join("src/infrastructure/adapters/mod.rs"),
+        "//! External services and Mendix-specific adapters belong here.\n",
+    )?;
+    write_text(
+        &destination.join("src/utils/mod.rs"),
+        "//! Small framework-independent utilities.\n",
     )?;
     write_text(
         &destination.join("src/infrastructure/markers.rs"),
@@ -397,47 +501,48 @@ fn import_cargo_project_inner(
     })
 }
 
-/// Builds the server-independent model. Runtime orchestration is applied by
-/// `src/application/mod.rs`; UI behavior is applied by
-/// `src/presentation/mod.rs`.
+/// Builds the domain layer. Composition is owned by `src/composition.rs`, so
+/// this layer never depends outward on application, infrastructure or UI.
 fn render_domain_module() -> String {
-    "//! Editable model declarations shared by server and client code.\n\n\
+    "//! Business entities, domain services and ports.\n\n\
      pub mod documents;\n\
      pub mod entities;\n\
      pub mod modules;\n\
+     pub mod ports;\n\
      pub mod security;\n\n\
-     pub fn build() -> ::mxrs_ir::ProjectDecl {\n\
-         let mut project = entities::build();\n\
-         documents::apply(&mut project);\n\
-         modules::apply(&mut project);\n\
-         security::apply(&mut project);\n\
-         project\n\
+     pub mod services;\n\n\
+     pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+         entities::apply(project);\n\
+         documents::apply(project);\n\
+         modules::apply(project);\n\
+         security::apply(project);\n\
      }\n"
     .to_string()
 }
 
 fn render_application_module() -> String {
-    "//! Server-side application orchestration.\n\n\
+    "//! Application use cases and boundary DTOs.\n\n\
+     pub mod dto;\n\
      pub mod task_queues;\n\
-     pub mod microflows;\n\
      pub mod modules;\n\n\
-     pub fn build() -> ::mxrs_ir::ProjectDecl {\n\
-         let mut project = crate::domain::build();\n\
-         microflows::apply(&mut project);\n\
-         task_queues::apply(&mut project);\n\
-         modules::apply(&mut project);\n\
-         project\n\
+     pub mod use_cases;\n\n\
+     pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+         dto::apply(project);\n\
+         use_cases::apply(project);\n\
+         task_queues::apply(project);\n\
+         modules::apply(project);\n\
      }\n"
     .to_string()
 }
 
-fn render_presentation_module(pages: &[page_export::ConvertedPage]) -> String {
+fn render_presentation_module(pages: &[page_export::ConvertedPage], api_mode: ApiMode) -> String {
     let mut source = String::from(
-        "//! Client-side UI declarations and orchestration.\n\n\
+        "//! Presentation controllers, routes and client-side UI behavior.\n\n\
+         pub mod controllers;\n\
          pub mod nanoflows;\n\
          pub mod navigation;\n",
     );
-    source.push_str("pub mod modules;\n");
+    source.push_str("pub mod modules;\npub mod routes;\n");
     if !pages.is_empty() {
         source.push_str("pub mod pages;\n");
     }
@@ -445,14 +550,108 @@ fn render_presentation_module(pages: &[page_export::ConvertedPage]) -> String {
     for page in pages {
         let _ = writeln!(
             source,
-            "    project.modules.iter_mut().find(|m| m.name == {:?}).expect(\"module {} exists\").pages.push(pages::{}());",
-            page.module_name, page.module_name, page.function_name,
+            "    if !project.modules.iter().any(|m| m.name == {:?}) {{\n        let mut module = ::mxrs_ir::ModuleDecl::default();\n        module.name = {:?}.to_string();\n        project.modules.push(module);\n    }}\n    project.modules.iter_mut().find(|m| m.name == {:?}).expect(\"page module exists\").pages.push(pages::{}());",
+            page.module_name, page.module_name, page.module_name, page.function_name,
         );
     }
     source.push_str(
-        "    nanoflows::apply(project);\n    navigation::apply(project);\n    modules::apply(project);\n}\n",
+        "    controllers::apply(project);\n    nanoflows::apply(project);\n    routes::apply(project);\n    modules::apply(project);\n}\n",
+    );
+    let _ = writeln!(
+        source,
+        "\n// HTTP adapter selected during import: `{}`.",
+        api_mode.name()
     );
     source
+}
+
+fn render_composition_module(mendix_version: &str) -> String {
+    format!(
+        "//! The only layer allowed to compose Clean Architecture dependencies.\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    let mut project = ::mxrs::ProjectBuilder::new({}).build();\n    crate::domain::apply(&mut project);\n    crate::application::apply(&mut project);\n    crate::infrastructure::apply(&mut project);\n    crate::presentation::apply(&mut project);\n    project\n}}\n",
+        rust_string(mendix_version)
+    )
+}
+
+fn render_infrastructure_module() -> String {
+    "//! Database, repository and Mendix adapter implementations.\n\npub mod adapters;\npub mod database;\npub mod markers;\npub mod persistence;\npub mod repositories;\n\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n    persistence::apply(project);\n}\n"
+        .to_string()
+}
+
+fn render_routes_module(api_mode: ApiMode) -> String {
+    let server = match api_mode {
+        ApiMode::Axum => {
+            "use axum::{Router, routing::get};\n\npub fn router() -> Router {\n    Router::new().route(\"/health\", get(|| async { \"ok\" }))\n}\n\npub async fn serve() -> Result<(), Box<dyn std::error::Error>> {\n    let listener = tokio::net::TcpListener::bind(\"0.0.0.0:3000\").await?;\n    axum::serve(listener, router()).await?;\n    Ok(())\n}\n"
+        }
+        ApiMode::ActixWeb => {
+            "use actix_web::{App, HttpResponse, HttpServer, web};\n\nasync fn health() -> HttpResponse {\n    HttpResponse::Ok().body(\"ok\")\n}\n\npub async fn serve() -> std::io::Result<()> {\n    HttpServer::new(|| App::new().route(\"/health\", web::get().to(health)))\n        .bind((\"0.0.0.0\", 3000))?\n        .run()\n        .await\n}\n"
+        }
+        ApiMode::Rocket => {
+            "#[rocket::get(\"/health\")]\nfn health() -> &'static str {\n    \"ok\"\n}\n\npub async fn serve() -> Result<(), rocket::Error> {\n    rocket::build().mount(\"/\", rocket::routes![health]).launch().await?;\n    Ok(())\n}\n"
+        }
+    };
+    format!(
+        "//! {} HTTP routes.\n\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n    crate::presentation::navigation::apply(project);\n}}\n\npub mod server {{\n{}\n}}\n",
+        api_mode.name(),
+        indent(server, 4)
+    )
+}
+
+fn render_persistence_module(modules: &[Module], mendix_version: &str) -> String {
+    let has_sources = modules.iter().any(|module| {
+        module.artifact_units.iter().any(|document| {
+            document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+        })
+    });
+    let mutable = if has_sources { "mut " } else { "" };
+    let mut out = format!(
+        "//! Infrastructure adapter for Mendix module metadata.\n\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n    let {mutable}declarations = ::mxrs::ProjectBuilder::new({});\n",
+        rust_string(mendix_version)
+    );
+    for module in modules {
+        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        let mut sources = module
+            .artifact_units
+            .iter()
+            .filter(|document| {
+                document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by_key(|document| document.get_str("Name").unwrap_or_default());
+        if sources.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "    declarations.module({module_name:?}, |module| {{");
+        for source in sources {
+            let name = source.get_str("Name").unwrap_or("Unnamed");
+            let query = source.get_str("Oql").unwrap_or_default();
+            let documentation = source.get_str("Documentation").unwrap_or_default();
+            let excluded = source.get_bool("Excluded").unwrap_or(false);
+            let export_level = source.get_str("ExportLevel").unwrap_or("Hidden");
+            let has_options = !documentation.is_empty() || excluded || export_level == "Published";
+            let parameter = if has_options { "source" } else { "_source" };
+            let _ = writeln!(
+                out,
+                "        module.oql_view_source({name:?}, {query:?}, |{parameter}| {{"
+            );
+            if !documentation.is_empty() {
+                let _ = writeln!(out, "            source.documentation({documentation:?});");
+            }
+            if excluded {
+                out.push_str("            source.excluded(true);\n");
+            }
+            if export_level == "Published" {
+                out.push_str(
+                    "            source.export_level(::mxrs_ir::ExportLevel::Published);\n",
+                );
+            }
+            out.push_str("        });\n");
+        }
+        out.push_str("    });\n");
+    }
+    out.push_str(
+        "    for declared in declarations.build().modules { project.merge_module(declared); }\n}\n",
+    );
+    out
 }
 
 fn render_scaffold_modules_module() -> String {
@@ -2344,7 +2543,7 @@ fn marker_manifest(modules: &[Module]) -> mxrs_typegen::Manifest {
     mxrs_typegen::Manifest { modules }
 }
 
-fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>) -> String {
+fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>, api_mode: ApiMode) -> String {
     let dependency = match mxrs_workspace {
         Some(workspace) => format!(
             "{{ path = {} }}",
@@ -2352,17 +2551,44 @@ fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>) -> String {
         ),
         None => "{ git = \"https://github.com/lucamykael/mxrs\" }".to_string(),
     };
+    let api_dependencies = match api_mode {
+        ApiMode::Axum => {
+            "axum = \"0.8\"\ntokio = { version = \"1\", features = [\"macros\", \"rt-multi-thread\", \"net\"] }\n"
+        }
+        ApiMode::ActixWeb => "actix-web = \"4\"\n",
+        ApiMode::Rocket => "rocket = \"0.5\"\n",
+    };
     format!(
-        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nmxrs = {dependency}\n",
+        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nmxrs = {dependency}\n{api_dependencies}",
     )
 }
 
-fn build_binary_source(crate_name: &str, project_name: &str) -> String {
+fn build_binary_source(crate_name: &str, project_name: &str, api_mode: ApiMode) -> String {
     let default_output = format!("build/{project_name}.mpr");
+    let serve = match api_mode {
+        ApiMode::Axum => format!(
+            "#[tokio::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        return {crate_name}::presentation::routes::server::serve().await;\n    }}\n    build()\n}}\n"
+        ),
+        ApiMode::ActixWeb => format!(
+            "#[actix_web::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::presentation::routes::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
+        ),
+        ApiMode::Rocket => format!(
+            "#[rocket::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::presentation::routes::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
+        ),
+    };
     format!(
-        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let root = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"));\n    mxrs::replace_imported_project(root.join(\"model/imported\"), &output, &{crate_name}::Application::build())?;\n    mxrs::materialize_project_assets(root.join(\"assets\"), &output)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n",
+        "fn build() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let root = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"));\n    mxrs::replace_imported_project(root.join(\"model/imported\"), &output, &{crate_name}::Application::build())?;\n    mxrs::materialize_project_assets(root.join(\"assets\"), &output)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n\n{serve}",
         serde_json::to_string(&default_output).expect("a string always serializes"),
     )
+}
+
+fn indent(source: &str, spaces: usize) -> String {
+    let prefix = " ".repeat(spaces);
+    source
+        .lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportReport) -> String {
@@ -2376,7 +2602,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. Editable model concepts live under `src/domain/`; server orchestration and task queues under `src/application/`; pages, navigation, and client orchestration under `src/presentation/`; generated public marker types under `src/infrastructure/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. `src/application/microflows/mod.rs` contains reconstructed supported linear server-side microflows and new declarations; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Supported linear bodies are reconstructed as typed builders. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\ncargo check\ncargo test\ncargo mxrs diff\ncargo mxrs build --output build/{project_name}.mpr\nmxrs portability build/{project_name}.mpr --verify-round-trip\n# The build also materializes the embedded React shell at build/web.\n\n# Explicit frontend customization (the normal build needs no Node):\ncargo mxrs frontend-dev --output frontend\nnpm ci --prefix frontend\nnpm run build --prefix frontend\n```\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a flat, Clean Architecture layout: persisted entities are individual files under `src/domain/entities/`; view and non-persistable entities are DTO files under `src/application/dto/`; each supported server flow is an individual use-case under `src/application/use_cases/`; HTTP controllers and routes live under `src/presentation/`; repositories, database adapters, and imported-model persistence live under `src/infrastructure/`. Mendix modules remain metadata, rather than becoming nested Rust folders. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. Supported server-side microflows are reconstructed as typed use cases; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -2547,7 +2773,8 @@ fn round_trip_gaps(modules: &[Module]) -> Vec<RoundTripGap> {
                 .all_associations()
                 .filter(|association| association.from_entity_id.as_deref() == entity.id.as_deref())
                 .collect::<Vec<_>>();
-            if !access_rules_renderable(entity, &entity_associations) {
+            if !access_rules_renderable(entity, &entity_associations, &entity_qualified_name_by_id)
+            {
                 gaps.push(RoundTripGap {
                     path: format!("{module_name}.{entity_name}.access_rules"),
                     reason: "access rule contains an unresolved member or rights value".to_string(),
@@ -2693,7 +2920,28 @@ fn member_rights_variant(value: &str) -> Option<&'static str> {
     }
 }
 
-fn access_rules_renderable(entity: &Entity, associations: &[&Association]) -> bool {
+fn association_target_name(
+    association: &Association,
+    entity_qualified_name_by_id: &HashMap<String, String>,
+) -> Option<String> {
+    association.to_entity_id.as_deref().and_then(|id_or_name| {
+        entity_qualified_name_by_id
+            .get(id_or_name)
+            .cloned()
+            .or_else(|| {
+                entity_qualified_name_by_id
+                    .values()
+                    .find(|qualified_name| qualified_name.as_str() == id_or_name)
+                    .cloned()
+            })
+    })
+}
+
+fn access_rules_renderable(
+    entity: &Entity,
+    associations: &[&Association],
+    entity_qualified_name_by_id: &HashMap<String, String>,
+) -> bool {
     let qualified_entity = entity.qualified_name.as_deref().unwrap_or_default();
     let module_name = qualified_entity.split('.').next().unwrap_or_default();
     entity.access_rules.iter().all(|rule| {
@@ -2716,6 +2964,16 @@ fn access_rules_renderable(entity: &Entity, associations: &[&Association]) -> bo
                             associations.iter().any(|association| {
                                 association.name.as_deref() == Some(&member.name)
                                     && member.reference == format!("{module_name}.{}", member.name)
+                                    // A rule refers to the marker type that the association
+                                    // declaration creates.  Do not emit a typed rule for an
+                                    // association whose target remains only in the lossless
+                                    // native model; otherwise `project!` references a marker
+                                    // which is never generated.
+                                    && association_target_name(
+                                        association,
+                                        entity_qualified_name_by_id,
+                                    )
+                                    .is_some()
                             })
                         }
                     }
@@ -3057,17 +3315,7 @@ fn render_entity(
     sorted_associations.sort_by_key(|a| a.name.clone());
     for association in sorted_associations {
         let assoc_name = association.name.as_deref().unwrap_or("Unnamed");
-        let target = association.to_entity_id.as_deref().and_then(|id_or_name| {
-            entity_qualified_name_by_id
-                .get(id_or_name)
-                .cloned()
-                .or_else(|| {
-                    entity_qualified_name_by_id
-                        .values()
-                        .find(|qualified_name| qualified_name.as_str() == id_or_name)
-                        .cloned()
-                })
-        });
+        let target = association_target_name(association, entity_qualified_name_by_id);
         let Some(target) = target else {
             continue;
         };
@@ -3192,7 +3440,7 @@ fn render_entity(
 
     if entity.access_rules.is_empty() {
         let _ = writeln!(out, "                clear_access_rules;");
-    } else if access_rules_renderable(entity, associations) {
+    } else if access_rules_renderable(entity, associations, entity_qualified_name_by_id) {
         for rule in &entity.access_rules {
             let roles = rule
                 .roles
@@ -3267,6 +3515,288 @@ fn project_attr_keyword(attribute_type: AttributeType) -> Option<&'static str> {
     }
 }
 
+/// Emits one independently editable Rust source file for a Mendix entity.
+///
+/// The previous import shape placed the entire model in one `project!` macro.
+/// That was compact, but it gave a Cargo project the same ergonomics as a
+/// generated schema dump.  This renderer deliberately targets the public IR
+/// structures instead: each declaration can live in its architectural layer
+/// and composition merges its module into the project.  The IR is still the
+/// exact authoring boundary consumed by `mxrs-writer`.
+fn render_entity_file(
+    module_name: &str,
+    entity: &Entity,
+    known_microflows: &std::collections::HashSet<String>,
+) -> String {
+    let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
+    let mut out = String::from("//! Editable Mendix entity declaration.\n\n");
+    let _ = writeln!(out, "pub fn declaration() -> ::mxrs_ir::ModuleDecl {{");
+    let _ = writeln!(
+        out,
+        "    let mut entity = ::mxrs_ir::EntityDecl::new({entity_name:?});"
+    );
+    if !entity.documentation.is_empty() {
+        let _ = writeln!(
+            out,
+            "    entity.documentation = {:?}.to_string();",
+            entity.documentation
+        );
+    }
+    let _ = writeln!(
+        out,
+        "    entity.persistable = {};",
+        entity.persistable && !entity.oql_view()
+    );
+    match entity.image.as_deref().filter(|image| !image.is_empty()) {
+        Some(image) => {
+            let _ = writeln!(
+                out,
+                "    entity.image = Some(::mxrs_ir::EntityImageDecl::Reference({image:?}.to_string()));"
+            );
+        }
+        None => out.push_str("    entity.image = Some(::mxrs_ir::EntityImageDecl::None);\n"),
+    }
+    if entity.oql_view() {
+        if let Some(source) = entity.oql_source_document() {
+            let _ = writeln!(
+                out,
+                "    entity.source = Some(::mxrs_ir::EntitySourceDecl::OqlView {{ source_document: {source:?}.to_string() }});"
+            );
+        }
+    } else {
+        out.push_str("    entity.source = Some(::mxrs_ir::EntitySourceDecl::Stored);\n");
+    }
+
+    let mut attributes = entity.attributes.clone();
+    attributes.sort_by(|left, right| left.name.cmp(&right.name));
+    for attribute in attributes {
+        let Some(attribute_type) = project_attr_keyword(attribute.attribute_type) else {
+            continue;
+        };
+        let attribute_name = attribute.name.as_deref().unwrap_or("Unnamed");
+        let _ = writeln!(
+            out,
+            "    entity.attributes.push(::mxrs_ir::AttributeDecl {{"
+        );
+        let _ = writeln!(out, "        name: {attribute_name:?}.to_string(),");
+        let _ = writeln!(
+            out,
+            "        documentation: {:?}.to_string(),",
+            attribute.documentation
+        );
+        let _ = writeln!(
+            out,
+            "        attribute_type: ::mxrs_ir::AttributeType::{},",
+            match attribute_type {
+                "string" => "String",
+                "integer" => "Integer",
+                "long" => "Long",
+                "float" => "Float",
+                "decimal" => "Decimal",
+                "boolean" => "Boolean",
+                "datetime" => "DateTime",
+                "autonumber" => "AutoNumber",
+                "hash_string" => "HashString",
+                "binary" => "Binary",
+                "enumeration" => "Enumeration",
+                _ => unreachable!("known attribute keyword"),
+            }
+        );
+        let _ = writeln!(
+            out,
+            "        default_value: {},",
+            rust_option_string(attribute.default_value.as_deref())
+        );
+        let _ = writeln!(out, "        length: {:?},", attribute.length);
+        let _ = writeln!(out, "        localize_date: {:?},", attribute.localize_date);
+        let _ = writeln!(
+            out,
+            "        enumeration: {},",
+            rust_option_string(attribute.enumeration.as_deref())
+        );
+        let _ = writeln!(out, "        required: {},", attribute.required);
+        let _ = writeln!(out, "        unique: {},", attribute.unique);
+        out.push_str("    });\n");
+    }
+
+    if entity.indexes.is_empty() {
+        out.push_str("    entity.indexes = Some(vec![]);\n");
+    } else if entity.indexes.iter().all(|index| {
+        index.members.iter().all(|member| {
+            !matches!(
+                member.kind,
+                mxrs_model::entity::IndexMemberKind::Unresolved(_)
+            )
+        })
+    }) {
+        out.push_str("    entity.indexes = Some(vec![\n");
+        for index in &entity.indexes {
+            out.push_str("        ::mxrs_ir::EntityIndexDecl { members: vec![\n");
+            for member in &index.members {
+                match &member.kind {
+                    mxrs_model::entity::IndexMemberKind::Attribute(name) => {
+                        let name = name.rsplit('.').next().unwrap_or(name);
+                        let _ = writeln!(
+                            out,
+                            "            ::mxrs_ir::IndexMemberDecl::Attribute {{ name: {name:?}.to_string(), ascending: {} }},",
+                            member.ascending
+                        );
+                    }
+                    mxrs_model::entity::IndexMemberKind::System(system) => {
+                        let system = match system.native_name() {
+                            "CreatedDate" => "CreatedDate",
+                            "ChangedDate" => "ChangedDate",
+                            "Owner" => "Owner",
+                            "ChangedBy" => "ChangedBy",
+                            _ => unreachable!("known system member"),
+                        };
+                        let _ = writeln!(
+                            out,
+                            "            ::mxrs_ir::IndexMemberDecl::System {{ member: ::mxrs_ir::SystemMember::{system}, ascending: {} }},",
+                            member.ascending
+                        );
+                    }
+                    mxrs_model::entity::IndexMemberKind::Unresolved(_) => {
+                        unreachable!("checked above")
+                    }
+                }
+            }
+            let _ = writeln!(
+                out,
+                "        ], include_offline: {} }},",
+                index.include_offline
+            );
+        }
+        out.push_str("    ]);\n");
+    }
+
+    let lifecycle_complete = entity.lifecycle.iter().all(|callback| {
+        matches!(
+            callback.event.as_str(),
+            "before_commit" | "after_commit" | "before_delete" | "after_delete"
+        ) && known_microflows.contains(&callback.handler)
+    });
+    if entity.lifecycle.is_empty() {
+        out.push_str("    entity.lifecycle = Some(vec![]);\n");
+    } else if lifecycle_complete {
+        out.push_str("    entity.lifecycle = Some(vec![\n");
+        for callback in &entity.lifecycle {
+            let event = match callback.event.as_str() {
+                "before_commit" => "BeforeCommit",
+                "after_commit" => "AfterCommit",
+                "before_delete" => "BeforeDelete",
+                "after_delete" => "AfterDelete",
+                _ => unreachable!("checked above"),
+            };
+            let _ = writeln!(
+                out,
+                "        ::mxrs_ir::LifecycleDecl {{ event: ::mxrs_ir::LifecycleEvent::{event}, handler: {:?}.to_string(), pass_event_object: {}, raise_error_on_false: {} }},",
+                callback.handler, callback.pass_event_object, callback.raise_error_on_false
+            );
+        }
+        out.push_str("    ]);\n");
+    }
+
+    let _ = writeln!(
+        out,
+        "    let mut module = ::mxrs_ir::ModuleDecl::default();"
+    );
+    let _ = writeln!(out, "    module.name = {module_name:?}.to_string();");
+    out.push_str("    module.entities.push(entity);\n    module\n}\n");
+    out
+}
+
+fn layer_file_stem(module_name: &str, entity_name: &str, dto: bool) -> String {
+    let mut stem = format!(
+        "{}_{}",
+        sanitize_ident(module_name),
+        sanitize_ident(entity_name)
+    );
+    stem.make_ascii_lowercase();
+    if dto && !stem.ends_with("_dto") {
+        stem.push_str("_dto");
+    }
+    stem
+}
+
+fn render_entity_layer_index(entries: &[(String, String)]) -> String {
+    let mut out = String::from("//! Individually editable model declarations for this layer.\n\n");
+    for (module, _) in entries {
+        let _ = writeln!(out, "pub mod {module};");
+    }
+    let project = if entries.is_empty() {
+        "_project"
+    } else {
+        "project"
+    };
+    let _ = writeln!(
+        out,
+        "\npub fn apply({project}: &mut ::mxrs_ir::ProjectDecl) {{"
+    );
+    for (module, _) in entries {
+        let _ = writeln!(out, "    project.merge_module({module}::declaration());");
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn render_flow_layer_index(entries: &[flow_export::RenderedFlowSource]) -> String {
+    let mut out = String::from("//! Individually editable application use cases.\n\n");
+    for entry in entries {
+        let _ = writeln!(out, "pub mod {};", entry.file_name);
+    }
+    out.push_str("\npub fn apply(project: &mut mxrs::ProjectDecl) {\n");
+    for entry in entries {
+        let _ = writeln!(out, "    {}::apply(project);", entry.file_name);
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Writes each persisted entity to `domain/entities` and every non-persisted
+/// Mendix object to `application/dto`.  File names are deliberately flat:
+/// Mendix modules remain model metadata, not a second Rust package hierarchy.
+fn write_entity_layer_sources(destination: &Path, modules: &[Module]) -> Result<()> {
+    let microflows = known_microflows(modules);
+    let mut entities = Vec::new();
+    let mut dtos = Vec::new();
+
+    for module in modules {
+        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        let mut module_entities = module.entities().iter().collect::<Vec<_>>();
+        module_entities.sort_by(|left, right| left.name.cmp(&right.name));
+        for entity in module_entities {
+            let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
+            let dto = !entity.persistable || entity.oql_view();
+            let stem = layer_file_stem(module_name, entity_name, dto);
+            let source = render_entity_file(module_name, entity, &microflows);
+            let directory = if dto {
+                destination.join("src/application/dto")
+            } else {
+                destination.join("src/domain/entities")
+            };
+            write_text(&directory.join(format!("{stem}.rs")), &source)?;
+            let entry = (stem, format!("{module_name}.{entity_name}"));
+            if dto {
+                dtos.push(entry);
+            } else {
+                entities.push(entry);
+            }
+        }
+    }
+    entities.sort();
+    dtos.sort();
+    write_text(
+        &destination.join("src/domain/entities/mod.rs"),
+        &render_entity_layer_index(&entities),
+    )?;
+    write_text(
+        &destination.join("src/application/dto/mod.rs"),
+        &render_entity_layer_index(&dtos),
+    )?;
+    Ok(())
+}
+
 /// A defensive, not exhaustive, Mendix-name → Rust-identifier sanitizer:
 /// non-alphanumeric/underscore characters become `_`, and a leading digit
 /// (or an empty name) gets an `_` prefix. Doesn't raw-identifier-escape
@@ -3315,17 +3845,18 @@ mod tests {
             assert!(!domain.contains(outer), "domain must not declare {outer}");
         }
 
-        // The application layer composes the domain and stops there: applying
-        // presentation from here is what made the first attempt at this split
-        // depend outward.
+        // Application owns use cases and DTOs.  The composition root is the
+        // sole place that can depend on every architectural layer.
         let application = render_application_module();
-        assert!(application.contains("crate::domain::build()"));
-        assert!(application.contains("microflows::apply(&mut project);"));
+        assert!(application.contains("pub mod dto;"));
+        assert!(application.contains("pub mod use_cases;"));
+        assert!(application.contains("use_cases::apply(project);"));
+        assert!(!application.contains("crate::domain"));
         assert!(!application.contains("crate::presentation"));
         assert!(!application.contains("pub mod nanoflows;"));
         assert!(!application.contains("pub mod pages;"));
 
-        let presentation = render_presentation_module(&[]);
+        let presentation = render_presentation_module(&[], ApiMode::Axum);
         assert!(presentation.contains("pub mod nanoflows;"));
         assert!(presentation.contains("pub mod navigation;"));
         // Presentation contributes through `apply`, never through its own
@@ -3342,6 +3873,28 @@ mod tests {
         // modules into, so a scaffold never has to invent one.
         for layer in [&domain, &application, &presentation] {
             assert!(layer.contains("pub mod modules;"));
+        }
+
+        let composition = render_composition_module("11.12.1");
+        assert!(composition.contains("crate::domain::apply(&mut project);"));
+        assert!(composition.contains("crate::application::apply(&mut project);"));
+        assert!(composition.contains("crate::infrastructure::apply(&mut project);"));
+        assert!(composition.contains("crate::presentation::apply(&mut project);"));
+    }
+
+    #[test]
+    fn api_modes_generate_their_own_server_and_dependency_surface() {
+        for (mode, dependency, server_marker) in [
+            (ApiMode::Axum, "axum =", "axum::serve"),
+            (ApiMode::ActixWeb, "actix-web =", "HttpServer::new"),
+            (ApiMode::Rocket, "rocket =", "rocket::build"),
+        ] {
+            let manifest = cargo_manifest("sample", None, mode);
+            let routes = render_routes_module(mode);
+            let binary = build_binary_source("sample", "Sample", mode);
+            assert!(manifest.contains(dependency), "{}", mode.name());
+            assert!(routes.contains(server_marker), "{}", mode.name());
+            assert!(binary.contains("presentation::routes::server::serve"));
         }
     }
 
@@ -3392,6 +3945,86 @@ mod tests {
         assert_eq!(sanitize_ident("2FA"), "_2FA");
         assert_eq!(sanitize_ident(""), "_");
         assert_eq!(sanitize_ident("Order"), "Order");
+    }
+
+    #[test]
+    fn access_rule_with_unrenderable_association_is_not_typed() {
+        use mxrs_model::association::{AssociationType, Owner, StorageFormat};
+        use mxrs_model::entity::{
+            AccessMember, AccessMemberKind, AccessRule, Location, SystemMembers,
+        };
+
+        let entity = Entity {
+            id: Some("order-id".to_string()),
+            name: Some("Order".to_string()),
+            qualified_name: Some("Sales.Order".to_string()),
+            documentation: String::new(),
+            persistable: true,
+            location: Location { x: 0, y: 0 },
+            data_storage_guid: None,
+            image: None,
+            export_level: String::new(),
+            generalization: None,
+            access_rules: vec![AccessRule {
+                id: None,
+                roles: vec!["Sales.User".to_string()],
+                create: true,
+                delete: true,
+                documentation: String::new(),
+                default_rights: "ReadWrite".to_string(),
+                members: vec![AccessMember {
+                    id: None,
+                    name: "Order_Customer".to_string(),
+                    reference: "Sales.Order_Customer".to_string(),
+                    rights: "ReadWrite".to_string(),
+                    kind: AccessMemberKind::Association,
+                    raw: mxrs_bson::Document::new(),
+                }],
+                xpath: String::new(),
+                xpath_caption: None,
+                raw: mxrs_bson::Document::new(),
+            }],
+            indexes: Vec::new(),
+            system_members: SystemMembers::default(),
+            lifecycle: Vec::new(),
+            validation_rules: Vec::new(),
+            source: None,
+            oql_query: None,
+            native_type: None,
+            attributes: Vec::new(),
+        };
+        let association = Association {
+            id: None,
+            name: Some("Order_Customer".to_string()),
+            documentation: String::new(),
+            from_entity_id: Some("order-id".to_string()),
+            to_entity_id: Some("missing-customer-id".to_string()),
+            association_type: AssociationType::Reference,
+            owner: Owner::Default,
+            storage_format: StorageFormat::Column,
+            source: None,
+            guid: None,
+            delete_behavior: None,
+            export_level: String::new(),
+        };
+        let associations = [&association];
+        let known_entities = HashMap::new();
+
+        assert!(!access_rules_renderable(
+            &entity,
+            &associations,
+            &known_entities
+        ));
+
+        let known_entities = HashMap::from([(
+            "missing-customer-id".to_string(),
+            "Sales.Customer".to_string(),
+        )]);
+        assert!(access_rules_renderable(
+            &entity,
+            &associations,
+            &known_entities
+        ));
     }
 
     #[test]
@@ -3905,11 +4538,8 @@ mod tests {
         assert!(generated.join("src/domain/documents/mod.rs").is_file());
         assert!(generated.join("src/domain/security/mod.rs").is_file());
         assert!(generated.join("src/application/mod.rs").is_file());
-        assert!(
-            generated
-                .join("src/application/microflows/mod.rs")
-                .is_file()
-        );
+        assert!(generated.join("src/application/dto/mod.rs").is_file());
+        assert!(generated.join("src/application/use_cases/mod.rs").is_file());
         assert!(generated.join("src/presentation/mod.rs").is_file());
         assert!(
             generated
@@ -3946,47 +4576,47 @@ mod tests {
         assert!(domain_source.contains("pub mod entities;"));
         assert!(domain_source.contains("pub mod documents;"));
         assert!(domain_source.contains("pub mod security;"));
-        assert!(domain_source.contains("documents::apply(&mut project);"));
-        assert!(domain_source.contains("security::apply(&mut project);"));
+        assert!(domain_source.contains("documents::apply(project);"));
+        assert!(domain_source.contains("security::apply(project);"));
         let application_source =
             std::fs::read_to_string(generated.join("src/application/mod.rs")).unwrap();
-        assert!(application_source.contains("microflows::apply(&mut project);"));
+        assert!(application_source.contains("pub mod dto;"));
+        assert!(application_source.contains("use_cases::apply(project);"));
         assert!(!application_source.contains("crate::presentation"));
         let presentation_source =
             std::fs::read_to_string(generated.join("src/presentation/mod.rs")).unwrap();
         assert!(presentation_source.contains("nanoflows::apply(project);"));
-        assert!(presentation_source.contains("navigation::apply(project);"));
+        assert!(presentation_source.contains("routes::apply(project);"));
         assert!(presentation_source.contains("pub mod pages;"));
         assert!(presentation_source.contains("pages::home()"));
         let entities_source =
-            std::fs::read_to_string(generated.join("src/domain/entities/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/domain/entities/sales_order.rs")).unwrap();
         assert!(
-            entities_source.contains("documentation \"External order number\";"),
+            entities_source.contains("External order number"),
             "{entities_source}"
         );
-        assert!(entities_source.contains("length 80;"));
-        assert!(entities_source.contains("required true;"));
-        assert!(entities_source.contains("unique true;"));
-        assert!(entities_source.contains("localize_date false;"));
-        assert!(entities_source.contains("system_members {"));
-        assert!(entities_source.contains("owner true;"));
-        assert!(entities_source.contains("attribute Number;"));
-        assert!(entities_source.contains("system CreatedDate ascending false;"));
-        assert!(entities_source.contains("include_offline true;"));
-        assert!(
-            entities_source
-                .contains("before_commit crate::infrastructure::markers::Sales::ACT_Ping")
-        );
-        assert!(entities_source.contains("pass_event_object false;"));
-        assert!(entities_source.contains("image \"Sales.OrderIcon\";"));
-        assert!(entities_source.contains("oql_view Sales::OrderSource;"));
-        assert!(entities_source.contains("access_rule [\"User\"]"));
-        assert!(entities_source.contains("attribute Number ReadOnly;"));
-        assert!(entities_source.contains("xpath_caption \"Orders with a number\";"));
-        assert!(entities_source.contains("oql_view_source OrderSource"));
-        assert!(entities_source.contains("documentation \"Order projection\";"));
-        assert!(entities_source.contains("excluded true;"));
-        assert!(entities_source.contains("export_level Published;"));
+        assert!(entities_source.contains("length: Some(80)"));
+        assert!(entities_source.contains("required: true"));
+        assert!(entities_source.contains("unique: true"));
+        assert!(entities_source.contains("localize_date: Some(false)"));
+        assert!(entities_source.contains("IndexMemberDecl::Attribute"));
+        assert!(entities_source.contains("SystemMember::CreatedDate"));
+        assert!(entities_source.contains("include_offline: true"));
+        assert!(entities_source.contains("LifecycleEvent::BeforeCommit"));
+        assert!(entities_source.contains("pass_event_object: false"));
+        assert!(entities_source.contains("Sales.OrderIcon"));
+        let report_dto =
+            std::fs::read_to_string(generated.join("src/application/dto/sales_orderreport_dto.rs"))
+                .unwrap();
+        assert!(report_dto.contains("OqlView"));
+        assert!(report_dto.contains("Sales.OrderSource"));
+        let persistence =
+            std::fs::read_to_string(generated.join("src/infrastructure/persistence/mod.rs"))
+                .unwrap();
+        assert!(persistence.contains("oql_view_source(\"OrderSource\""));
+        assert!(persistence.contains("Order projection"));
+        assert!(persistence.contains("source.excluded(true)"));
+        assert!(persistence.contains("ExportLevel::Published"));
         let documents =
             std::fs::read_to_string(generated.join("src/domain/documents/mod.rs")).unwrap();
         assert!(documents.contains("module.enumeration(\"Status\""));
@@ -4006,15 +4636,15 @@ mod tests {
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_GetOrder"));
         assert!(markers.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
         let microflows =
-            std::fs::read_to_string(generated.join("src/application/microflows/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/application/use_cases/mod.rs")).unwrap();
         assert!(!microflows.contains("snapshot-backed"));
-        assert!(microflows.contains("declarations.microflow_module("));
-        assert!(microflows.contains("project.merge_module(module);"));
+        assert!(microflows.contains("pub mod sales_act_ping;"));
+        assert!(microflows.contains("sales_act_ping::apply(project);"));
         assert!(!microflows.contains("nanoflow"));
         let nanoflows =
             std::fs::read_to_string(generated.join("src/presentation/nanoflows/mod.rs")).unwrap();
-        assert!(nanoflows.contains("declarations.nanoflow_module("));
-        assert!(nanoflows.contains("project.merge_module(module);"));
+        assert!(nanoflows.contains("pub mod sales_nf_validate;"));
+        assert!(nanoflows.contains("sales_nf_validate::apply(project);"));
         assert!(!nanoflows.contains("microflow"));
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
@@ -4029,15 +4659,12 @@ mod tests {
         let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
         assert!(crate_root.contains("pub mod infrastructure;"));
         assert!(!crate_root.contains("pub mod generated"));
-        // The crate root is the only composition root: it names every layer,
-        // applies presentation on top of the application build, and points
-        // `#[mxrs::application]` at itself rather than at `domain::build`.
+        // The crate root exposes layers; composition belongs to its own file.
         assert!(crate_root.contains("pub mod application;"));
         assert!(crate_root.contains("pub mod domain;"));
         assert!(crate_root.contains("pub mod presentation;"));
         assert!(crate_root.contains("pub fn build() -> ::mxrs_ir::ProjectDecl"));
-        assert!(crate_root.contains("let mut project = application::build();"));
-        assert!(crate_root.contains("presentation::apply(&mut project);"));
+        assert!(crate_root.contains("composition::build()"));
         assert!(crate_root.contains("project = crate::build"));
         // Every layer ships the aggregator `mxrs add` wires scaffolded modules
         // into, so a later scaffold never has to invent one.
@@ -4049,7 +4676,7 @@ mod tests {
             assert!(generated.join(relative).is_file(), "{relative} is missing");
         }
         assert!(domain_source.contains("pub mod modules;"));
-        assert!(application_source.contains("modules::apply(&mut project);"));
+        assert!(application_source.contains("modules::apply(project);"));
         assert!(presentation_source.contains("modules::apply(project);"));
         // The pre-split layout must not survive alongside the layered one:
         // two homes for the same concept is exactly the ambiguity the split

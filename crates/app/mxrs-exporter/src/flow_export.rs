@@ -20,6 +20,11 @@ pub(crate) struct ConvertedFlow {
     source: Vec<String>,
 }
 
+pub(crate) struct RenderedFlowSource {
+    pub file_name: String,
+    pub source: String,
+}
+
 struct AttributeInfo {
     marker: String,
     value_type: Ty,
@@ -873,6 +878,7 @@ fn same_semantics(old: &Document, fresh: &Document) -> bool {
             })
 }
 
+#[allow(dead_code)]
 pub(crate) fn render(flows: &[ConvertedFlow], version: &str, nanoflow: bool) -> String {
     let kind = if nanoflow { "nanoflow" } else { "microflow" };
     let native = if nanoflow {
@@ -921,4 +927,72 @@ pub(crate) fn render(flows: &[ConvertedFlow], version: &str, nanoflow: bool) -> 
         "    for module in declarations.build().modules { project.merge_module(module); }\n}\n",
     );
     output
+}
+
+/// Renders each recovered flow as its own application/use-case source file.
+/// Mendix module names are kept in the declaration metadata; they do not
+/// become nested Rust folders.
+pub(crate) fn render_files(
+    flows: &[ConvertedFlow],
+    version: &str,
+    nanoflow: bool,
+) -> Vec<RenderedFlowSource> {
+    let native = if nanoflow {
+        "Microflows$Nanoflow"
+    } else {
+        "Microflows$Microflow"
+    };
+    let kind = if nanoflow { "nanoflow" } else { "microflow" };
+    let mut selected = flows
+        .iter()
+        .filter(|flow| flow.native_type == native)
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        (&left.module, &left.declaration.name).cmp(&(&right.module, &right.declaration.name))
+    });
+    selected
+        .into_iter()
+        .map(|flow| {
+            let imports = if flow.source.iter().any(|line| line.contains("model::")) {
+                "use crate::infrastructure::markers as model;\n\n"
+            } else {
+                ""
+            };
+            let parameter = if flow.source.is_empty() { "_flow" } else { "flow" };
+            let mut source = format!(
+                "//! Editable {kind} use case.\n\n{imports}#[allow(non_snake_case)]\npub fn apply(project: &mut mxrs::ProjectDecl) {{\n    let mut declarations = mxrs::ProjectBuilder::new({});\n    declarations.{kind}_module({}, |module| {{\n        module.{kind}({}, |{parameter}| {{\n",
+                rust_string(version),
+                rust_string(&flow.module),
+                rust_string(&flow.declaration.name),
+            );
+            for line in &flow.source {
+                writeln!(source, "            {line}").unwrap();
+            }
+            source.push_str("        });\n    });\n    for module in declarations.build().modules { project.merge_module(module); }\n}\n");
+            RenderedFlowSource {
+                file_name: flow_file_name(&flow.module, &flow.declaration.name),
+                source,
+            }
+        })
+        .collect()
+}
+
+fn flow_file_name(module: &str, name: &str) -> String {
+    let mut result = String::new();
+    for character in format!("{module}_{name}").chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            result.push(character.to_ascii_lowercase());
+        } else if !result.ends_with('_') {
+            result.push('_');
+        }
+    }
+    if result.is_empty()
+        || result
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+    {
+        result.insert(0, '_');
+    }
+    result.trim_end_matches('_').to_string()
 }
