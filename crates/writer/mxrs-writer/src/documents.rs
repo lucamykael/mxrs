@@ -317,6 +317,9 @@ pub(crate) fn synchronize_pages_with_identity(
         return Ok(());
     }
     let catalog = Rc::new(mxrs_forms::Catalog::for_version(mendix_version)?);
+    // mxrb's write-time widget-schema synchronization roots the MPK lookup
+    // at the target's own directory (`WidgetPackage.find(File.dirname(@path))`).
+    let packages_root = mpr.path().parent().map(std::path::Path::to_path_buf);
 
     let existing_by_name: HashMap<String, String> = mpr
         .children_of(module_id)?
@@ -338,7 +341,7 @@ pub(crate) fn synchronize_pages_with_identity(
         let id = existing_id.clone().unwrap_or_else(|| {
             identity.artifact_id(ArtifactKind::Page, &format!("{module_name}.{}", decl.name))
         });
-        let mut document = page_compiler::compile_page(&catalog, decl)?;
+        let mut document = page_compiler::compile_page(&catalog, decl, packages_root.as_deref())?;
         document.insert("$ID", id.clone());
         match existing_id {
             Some(id) => {

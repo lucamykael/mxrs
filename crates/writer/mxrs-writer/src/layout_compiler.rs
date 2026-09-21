@@ -15,7 +15,11 @@ use mxrs_mpr::MprFile;
 
 use crate::{Result, WriterError, page_compiler};
 
-pub fn compile_layout(catalog: &Rc<Catalog>, decl: &LayoutDecl) -> Result<Document> {
+pub fn compile_layout(
+    catalog: &Rc<Catalog>,
+    decl: &LayoutDecl,
+    packages_root: Option<&std::path::Path>,
+) -> Result<Document> {
     if decl.canvas_width <= 0 || decl.canvas_height <= 0 {
         return Err(WriterError::InvalidLayoutCanvas(decl.name.clone()));
     }
@@ -79,7 +83,9 @@ pub fn compile_layout(catalog: &Rc<Catalog>, decl: &LayoutDecl) -> Result<Docume
         Value::List(
             decl.widgets
                 .iter()
-                .map(|widget| page_compiler::compile_widget(catalog, widget, &mut counter))
+                .map(|widget| {
+                    page_compiler::compile_widget(catalog, widget, &mut counter, packages_root)
+                })
                 .collect::<Result<Vec<_>>>()?,
         ),
     )?;
@@ -143,6 +149,7 @@ pub(crate) fn synchronize_layouts_with_identity(
         return Ok(());
     }
     let catalog = Rc::new(Catalog::for_version(mendix_version)?);
+    let packages_root = mpr.path().parent().map(std::path::Path::to_path_buf);
     let mut seen = HashSet::new();
     let compiled = layouts
         .iter()
@@ -150,7 +157,10 @@ pub(crate) fn synchronize_layouts_with_identity(
             if !seen.insert(&layout.name) {
                 return Err(WriterError::DuplicateLayout(layout.name.clone()));
             }
-            Ok((layout, compile_layout(&catalog, layout)?))
+            Ok((
+                layout,
+                compile_layout(&catalog, layout, packages_root.as_deref())?,
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     let mut existing = HashMap::new();
@@ -372,7 +382,7 @@ mod tests {
     #[test]
     fn native_layouts_encode_metadata_widgets_and_named_parameters_through_the_real_forms_codec() {
         let catalog = catalog();
-        let document = compile_layout(&catalog, &layout()).unwrap();
+        let document = compile_layout(&catalog, &layout(), None).unwrap();
         assert_eq!(document.get_str("$Type").unwrap(), "Forms$Layout");
         assert_eq!(document.get_i64("CanvasWidth").unwrap(), 1000);
         assert_eq!(document.get_i64("CanvasHeight").unwrap(), 700);
@@ -407,7 +417,7 @@ mod tests {
             let mut decl = layout();
             decl.kind = kind;
             assert_eq!(
-                compile_layout(&self::catalog(), &decl)
+                compile_layout(&self::catalog(), &decl, None)
                     .unwrap()
                     .get_document("Content")
                     .unwrap()
@@ -423,7 +433,7 @@ mod tests {
             .button("Close", |button| {
                 button.close_page();
             });
-        assert!(compile_layout(&self::catalog(), &shell.into_decl()).is_ok());
+        assert!(compile_layout(&self::catalog(), &shell.into_decl(), None).is_ok());
     }
 
     #[test]
@@ -432,7 +442,7 @@ mod tests {
             let mut layout = LayoutBuilder::new("Invalid");
             layout.placeholder(name);
             assert!(matches!(
-                compile_layout(&catalog(), &layout.into_decl()),
+                compile_layout(&catalog(), &layout.into_decl(), None),
                 Err(WriterError::InvalidLayoutPlaceholder { .. })
             ));
         }
@@ -441,7 +451,7 @@ mod tests {
             container.placeholder("Main");
         });
         assert!(matches!(
-            compile_layout(&catalog(), &duplicate.into_decl()),
+            compile_layout(&catalog(), &duplicate.into_decl(), None),
             Err(WriterError::InvalidLayoutPlaceholder { .. })
         ));
         for (width, height) in [(0, 600), (800, -1)] {
@@ -449,7 +459,7 @@ mod tests {
             invalid.canvas_width = width;
             invalid.canvas_height = height;
             assert!(matches!(
-                compile_layout(&catalog(), &invalid),
+                compile_layout(&catalog(), &invalid, None),
                 Err(WriterError::InvalidLayoutCanvas(_))
             ));
         }
@@ -459,7 +469,7 @@ mod tests {
             container.placeholder("Main");
         });
         assert!(matches!(
-            page_compiler::compile_page(&catalog(), &page.into_decl()),
+            page_compiler::compile_page(&catalog(), &page.into_decl(), None),
             Err(WriterError::PlaceholderOutsideLayout { .. })
         ));
     }
@@ -470,7 +480,8 @@ mod tests {
             let mut page = PageBuilder::new("Home");
             page.layout("Main.ApplicationLayout", parameter)
                 .text("Hello");
-            let document = page_compiler::compile_page(&catalog(), &page.into_decl()).unwrap();
+            let document =
+                page_compiler::compile_page(&catalog(), &page.into_decl(), None).unwrap();
             let argument = document
                 .get_document("FormCall")
                 .unwrap()
@@ -487,7 +498,7 @@ mod tests {
             let mut page = PageBuilder::new("Invalid");
             page.layout("Main.ApplicationLayout", parameter);
             assert!(matches!(
-                page_compiler::compile_page(&catalog(), &page.into_decl()),
+                page_compiler::compile_page(&catalog(), &page.into_decl(), None),
                 Err(WriterError::InvalidLayoutParameterReference { .. })
             ));
         }
@@ -661,7 +672,7 @@ mod application_shell_tests {
             layout.application_shell("My application", navigation);
             let mut decl = layout.into_decl();
             assert_eq!(placeholder_names(&decl).unwrap(), ["Main"]);
-            let doc = compile_layout(&catalog, &decl).unwrap();
+            let doc = compile_layout(&catalog, &decl, None).unwrap();
             let mut actual = Vec::new();
             types(&Bson::Document(doc), &mut actual);
             for kind in ["ScrollContainer", "DynamicText", "Placeholder"] {
@@ -679,7 +690,7 @@ mod application_shell_tests {
             decl.widgets.push(WidgetDecl::LayoutPlaceholder {
                 name: "Main".into(),
             });
-            assert!(compile_layout(&catalog, &decl).is_err());
+            assert!(compile_layout(&catalog, &decl, None).is_err());
             let mut page = mxrs_ir::PageDecl::new("Page");
             page.widgets.push(WidgetDecl::ApplicationShell {
                 title: "x".into(),
@@ -689,7 +700,7 @@ mod application_shell_tests {
                 qualified_name: "Main.ApplicationLayout".into(),
                 parameter: "Main".into(),
             });
-            assert!(page_compiler::compile_page(&catalog, &page).is_err());
+            assert!(page_compiler::compile_page(&catalog, &page, None).is_err());
         }
     }
 }

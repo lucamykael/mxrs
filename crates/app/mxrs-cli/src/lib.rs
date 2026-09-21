@@ -68,3 +68,4 @@ pub mod scaffold;
 pub mod team_server;
 pub mod uml;
 pub mod validate;
+pub mod widgets;

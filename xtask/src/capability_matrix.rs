@@ -477,6 +477,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs uml",
             "byte-identical class/activity/sequence Mermaid and PlantUML exports and shared refusals: xtask command-oracle uml; the interactive browser viewer is not ported and is refused explicitly; docs/commands/uml.md",
         ),
+        "widgets" => (
+            Status::Partial,
+            "mxrs widgets",
+            "sync ports write-time MPK schema synchronization (mxrs-widget-package + the writer's packages_root, tested against fixture packages); new/build drive Mendix's official npm generator with honest tool detection and are not offline-verifiable against mxrb",
+        ),
         _ => (Status::Missing, "—", "no equivalent surface implemented"),
     }
 }

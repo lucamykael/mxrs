@@ -47,19 +47,21 @@
 //! needs its own official and browser acceptance evidence.
 //!
 //! **Pluggable widgets (`WidgetDecl::DataGrid2`/`Gallery`/`ComboBox`) via
-//! `mxrs-pluggable`, name/class only — a real, checked blocker on more, not
-//! an unfinished-breadth cut.** `mxrs_pluggable::encode_widget` can build a
+//! `mxrs-pluggable`, name/class plus write-time package-schema
+//! synchronization.** `mxrs_pluggable::encode_widget` can build a
 //! from-scratch `CustomWidgets$CustomWidget` two ways: with an inline
 //! property *schema* (`WidgetType::object_type`), or without one — Data
 //! Grid 2/Gallery/ComboBox's *real* schemas (dozens of properties each,
 //! e.g. Data Grid 2's `columns`/`datasource`/`itemSelection`) only exist
 //! inside the actual widget package Studio Pro installs into a project.
-//! This authoring compiler does not yet accept a project package registry,
-//! although the read-only compiler has been exercised against real packages.
 //! In the oracle, `lib/mxrb/writer.rb#pluggable_widget_doc` calls
-//! `WidgetPackage.find(...)` first and only reaches its own
-//! `configure_data_grid2!`/`configure_combo_box!` property-filling logic
-//! when that lookup succeeds. When it doesn't, mxrb's own fallback
+//! `WidgetPackage.find(...)` first: when the widget's `.mpk` is installed
+//! next to the target, the embedded type carries that package's full
+//! schema and the object carries default-valued properties
+//! (`WidgetPackage.template`). This compiler now ports that path through
+//! `mxrs-widget-package` (see `pluggable_widget_value`/
+//! `default_object_node` below and the `packages_root` parameter). When
+//! the lookup misses, mxrb's own fallback
 //! (`configure_fallback_data_grid!`/`configure_fallback_combo_box!`) emits
 //! an **empty** inline schema (`ObjectType` with zero `PropertyTypes`) so
 //! Studio Pro can recognize the widget by its real `WidgetId` and
@@ -84,12 +86,13 @@
 //! `Forms$GridDeleteButton` — the schema's real names, per
 //! `mxrs-forms::storage_naming`'s `TYPE_ALIASES`, are `GridColumn`/
 //! `DataGridRemoveButton`) — exactly the "risky BSON shape" this
-//! project's own rules say not to guess at. Entity/attribute/column/data-source
-//! configuration for these three widgets is therefore a real, separately
-//! trackable follow-up, blocked on either a genuine widget-package schema
-//! source or a deliberate decision to accept an unverified shape.
+//! project's own rules say not to guess at. With the package-schema source
+//! now in place, entity/attribute/column/data-source *configuration* (an
+//! IR richer than name/class assigning real values into that schema)
+//! remains the separately trackable follow-up.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::rc::Rc;
 
 use mxrs_bson::Document;
@@ -99,14 +102,24 @@ use mxrs_forms::values::{AttributeReference, Reference, Text, Translation};
 use mxrs_ir::page::{
     ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, PageDecl, WidgetDecl,
 };
-use mxrs_pluggable::{ObjectNode, ObjectType, WidgetNode, WidgetType};
+use mxrs_pluggable::{Assignment, ObjectNode, ObjectType, PropertyType, WidgetNode, WidgetType};
 
 use crate::error::{Result, WriterError};
 
 /// Compiles a page into a `Forms$Page` document. The returned document's
 /// `$ID` is a fresh random UUID (from `MprCodec::encode`) — callers that
 /// need a stable identity must overwrite it, see this module's doc comment.
-pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> {
+///
+/// `packages_root` is the directory holding the target project's
+/// `widgets/*.mpk` packages (the `.mpr`'s own directory in practice) —
+/// mxrb's write-time `WidgetPackage.find(File.dirname(@path), id)` schema
+/// synchronization. `None` compiles pluggable widgets with the empty-schema
+/// fallback only.
+pub fn compile_page(
+    catalog: &Rc<Catalog>,
+    decl: &PageDecl,
+    packages_root: Option<&Path>,
+) -> Result<Document> {
     if decl.layout.is_none() && !decl.widgets.is_empty() {
         return Err(WriterError::PageWidgetsRequireLayout(decl.name.clone()));
     }
@@ -191,7 +204,7 @@ pub fn compile_page(catalog: &Rc<Catalog>, decl: &PageDecl) -> Result<Document> 
         let widgets = decl
             .widgets
             .iter()
-            .map(|widget| compile_widget(catalog, widget, &mut counter))
+            .map(|widget| compile_widget(catalog, widget, &mut counter, packages_root))
             .collect::<Result<Vec<_>>>()?;
         argument.set("widgets", Value::List(widgets))?;
         layout_call.set("arguments", Value::List(vec![Value::Node(argument)]))?;
@@ -298,6 +311,7 @@ pub(crate) fn compile_widget(
     catalog: &Rc<Catalog>,
     widget: &WidgetDecl,
     counter: &mut u32,
+    packages_root: Option<&Path>,
 ) -> Result<Value> {
     match widget {
         WidgetDecl::ApplicationShell { title, navigation } => {
@@ -330,7 +344,7 @@ pub(crate) fn compile_widget(
             }
             let compiled = children
                 .iter()
-                .map(|child| compile_widget(catalog, child, counter))
+                .map(|child| compile_widget(catalog, child, counter, packages_root))
                 .collect::<Result<Vec<_>>>()?;
             node.set("widgets", Value::List(compiled))?;
             Ok(Value::Node(node))
@@ -343,7 +357,7 @@ pub(crate) fn compile_widget(
             )?;
             let compiled_rows = rows
                 .iter()
-                .map(|row| compile_layout_grid_row(catalog, row, counter))
+                .map(|row| compile_layout_grid_row(catalog, row, counter, packages_root))
                 .collect::<Result<Vec<_>>>()?;
             node.set("rows", Value::List(compiled_rows))?;
             Ok(Value::Node(node))
@@ -392,7 +406,7 @@ pub(crate) fn compile_widget(
             )?;
             let compiled = children
                 .iter()
-                .map(|child| compile_widget(catalog, child, counter))
+                .map(|child| compile_widget(catalog, child, counter, packages_root))
                 .collect::<Result<Vec<_>>>()?;
             node.set("widgets", Value::List(compiled))?;
             Ok(Value::Node(node))
@@ -433,6 +447,7 @@ pub(crate) fn compile_widget(
         ),
         WidgetDecl::DataGrid2 { name, class } => pluggable_widget_value(
             catalog,
+            packages_root,
             data_grid_2_widget_type(),
             "dataGrid2",
             name,
@@ -441,6 +456,7 @@ pub(crate) fn compile_widget(
         ),
         WidgetDecl::Gallery { name, class } => pluggable_widget_value(
             catalog,
+            packages_root,
             gallery_widget_type(),
             "gallery",
             name,
@@ -449,6 +465,7 @@ pub(crate) fn compile_widget(
         ),
         WidgetDecl::ComboBox { name, class } => pluggable_widget_value(
             catalog,
+            packages_root,
             combo_box_widget_type(),
             "comboBox",
             name,
@@ -521,24 +538,39 @@ fn empty_pluggable_widget_type(
     }
 }
 
-/// Builds a `Value::Pluggable` for an empty-schema custom widget — the
-/// same mechanism `mxrs-forms::node::Value::Pluggable` uses for any
-/// pluggable widget embedded in a page's widget list (verified round-trip
-/// coverage in `mxrs-forms/tests/native_page.rs`). `Name`/`Appearance` are
-/// set via `extra` (see `mxrs_pluggable::WidgetNode::extra`'s doc comment)
-/// rather than through the (empty) pluggable property schema, reusing this
-/// file's own `widget_name`/`appearance_node` — not duplicated — encoded
-/// through the same schema-driven `MprCodec` the rest of this compiler
-/// uses, rather than hand-rolled BSON.
+/// Builds a `Value::Pluggable` for a custom widget — the same mechanism
+/// `mxrs-forms::node::Value::Pluggable` uses for any pluggable widget
+/// embedded in a page's widget list (verified round-trip coverage in
+/// `mxrs-forms/tests/native_page.rs`). `Name`/`Appearance` are set via
+/// `extra` (see `mxrs_pluggable::WidgetNode::extra`'s doc comment) rather
+/// than through the pluggable property schema, reusing this file's own
+/// `widget_name`/`appearance_node` — not duplicated — encoded through the
+/// same schema-driven `MprCodec` the rest of this compiler uses, rather
+/// than hand-rolled BSON.
+///
+/// When the widget's real package is installed next to the target
+/// (`packages_root`, mxrb's `WidgetPackage.find`), the widget carries that
+/// package's full property schema plus a default-valued object — mxrb's
+/// `WidgetPackage.template`. Otherwise it falls back to the empty-schema
+/// shell described in this module's doc comment.
 fn pluggable_widget_value(
     catalog: &Rc<Catalog>,
-    widget_type: WidgetType,
+    packages_root: Option<&Path>,
+    fallback: WidgetType,
     default_prefix: &str,
     name: &Option<String>,
     class: &Option<String>,
     counter: &mut u32,
 ) -> Result<Value> {
-    let mut widget = WidgetNode::new(widget_type, ObjectNode::new());
+    let (widget_type, object) =
+        match packages_root.and_then(|root| mxrs_widget_package::find(root, &fallback.id)) {
+            Some(definition) => {
+                let object = default_object_node(catalog, &definition.object_type)?;
+                (definition, object)
+            }
+            None => (fallback, ObjectNode::new()),
+        };
+    let mut widget = WidgetNode::new(widget_type, object);
     widget
         .extra
         .insert("Name", widget_name(name, default_prefix, counter));
@@ -549,6 +581,93 @@ fn pluggable_widget_value(
             .insert("Appearance", codec.encode(&appearance)?);
     }
     Ok(Value::Pluggable(Box::new(widget)))
+}
+
+/// Ports the value side of `Mxrb::WidgetPackage.template`
+/// (`property_pair`/`widget_value`/`default_widget_value`): every
+/// non-system property gets an assignment carrying its schema default.
+/// Kinds mxrb leaves at the `WidgetValue` baseline (references, data
+/// sources, nested objects/widget lists) are `Value::Null` here — the
+/// pluggable codec's `empty_widget_value` IS that baseline — except
+/// `Action`, whose baseline `Forms$NoAction` must be stated explicitly
+/// because `Null` means "explicitly no action" for that kind.
+fn default_object_node(
+    catalog: &Rc<Catalog>,
+    object_type: &ObjectType,
+) -> Result<ObjectNode<Node>> {
+    let mut object = ObjectNode::new();
+    for property in &object_type.properties {
+        if property.is_system() {
+            continue;
+        }
+        object.push(Assignment {
+            property: property.clone(),
+            value: default_property_value(catalog, property)?,
+            source_variable: None,
+        });
+    }
+    Ok(object)
+}
+
+fn default_property_value(
+    catalog: &Rc<Catalog>,
+    property: &PropertyType,
+) -> Result<mxrs_pluggable::Value<Node>> {
+    let value_type = &property.value_type;
+    let default = value_type.default_value.as_str();
+    Ok(match value_type.kind.as_str() {
+        "Boolean" => mxrs_pluggable::Value::Boolean(default == "true"),
+        "Integer" => mxrs_pluggable::Value::Integer(if default.is_empty() {
+            0
+        } else {
+            default
+                .parse()
+                .map_err(|_| WriterError::InvalidWidgetPropertyDefault {
+                    property: property.key.clone(),
+                    default: default.to_string(),
+                })?
+        }),
+        "String" | "Decimal" | "Enumeration" => {
+            mxrs_pluggable::Value::Primitive(default.to_string())
+        }
+        "Expression" => mxrs_pluggable::Value::Expression(default.to_string()),
+        "Selection" => mxrs_pluggable::Value::Selection(if default.is_empty() {
+            value_type
+                .selection_types
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "None".to_string())
+        } else {
+            default.to_string()
+        }),
+        "TextTemplate"
+            if value_type.required
+                || !default.is_empty()
+                || !value_type.translations.is_empty() =>
+        {
+            let mut template = Node::new("ClientTemplate", catalog.clone())?;
+            template.set(
+                "template",
+                Value::Text(Text::from_translations(
+                    value_type
+                        .translations
+                        .iter()
+                        .map(|translation| Translation {
+                            language: Some(translation.language.clone()),
+                            text: translation.text.clone(),
+                        })
+                        .collect(),
+                )),
+            )?;
+            mxrs_pluggable::Value::TextTemplate(template)
+        }
+        "Action" => {
+            let mut action = Node::new("NoClientAction", catalog.clone())?;
+            action.set("disabledDuringExecution", Value::Boolean(true))?;
+            mxrs_pluggable::Value::Action(action)
+        }
+        _ => mxrs_pluggable::Value::Null,
+    })
 }
 
 /// Shared shape behind `TextBox`/`CheckBox`/`DatePicker`/`DropDown`: all
@@ -634,12 +753,13 @@ fn compile_layout_grid_row(
     catalog: &Rc<Catalog>,
     row: &LayoutGridRowDecl,
     counter: &mut u32,
+    packages_root: Option<&Path>,
 ) -> Result<Value> {
     let mut node = Node::new("LayoutGridRow", catalog.clone())?;
     let columns = row
         .columns
         .iter()
-        .map(|column| compile_layout_grid_column(catalog, column, counter))
+        .map(|column| compile_layout_grid_column(catalog, column, counter, packages_root))
         .collect::<Result<Vec<_>>>()?;
     node.set("columns", Value::List(columns))?;
     Ok(Value::Node(node))
@@ -649,13 +769,14 @@ fn compile_layout_grid_column(
     catalog: &Rc<Catalog>,
     column: &LayoutGridColumnDecl,
     counter: &mut u32,
+    packages_root: Option<&Path>,
 ) -> Result<Value> {
     let mut node = Node::new("LayoutGridColumn", catalog.clone())?;
     node.set("weight", Value::Integer(i64::from(column.weight)))?;
     let children = column
         .children
         .iter()
-        .map(|child| compile_widget(catalog, child, counter))
+        .map(|child| compile_widget(catalog, child, counter, packages_root))
         .collect::<Result<Vec<_>>>()?;
     node.set("widgets", Value::List(children))?;
     Ok(Value::Node(node))
@@ -909,7 +1030,7 @@ mod tests {
             caption: "hi".into(),
             class: None,
         });
-        let error = compile_page(&catalog(), &decl).unwrap_err();
+        let error = compile_page(&catalog(), &decl, None).unwrap_err();
         assert!(
             matches!(error, WriterError::PageWidgetsRequireLayout(name) if name == "OrderOverview")
         );
@@ -918,7 +1039,7 @@ mod tests {
     #[test]
     fn a_page_with_no_widgets_compiles_without_a_layout() {
         let decl = PageDecl::new("Empty");
-        let document = compile_page(&catalog(), &decl).unwrap();
+        let document = compile_page(&catalog(), &decl, None).unwrap();
         assert_eq!(document.get_str("$Type").unwrap(), "Forms$Page");
         assert_eq!(document.get_str("Name").unwrap(), "Empty");
     }
@@ -959,7 +1080,7 @@ mod tests {
                 _ => {}
             }
         }
-        let document = compile_page(&catalog(), &decl).unwrap();
+        let document = compile_page(&catalog(), &decl, None).unwrap();
         let mut actual = Vec::new();
         translations(&mxrs_bson::Bson::Document(document), &mut actual);
         actual.sort();
@@ -1001,7 +1122,7 @@ mod tests {
             }],
         });
 
-        let document = compile_page(&catalog, &decl).unwrap();
+        let document = compile_page(&catalog, &decl, None).unwrap();
         assert_eq!(document.get_str("$Type").unwrap(), "Forms$Page");
 
         let codec = mxrs_forms::MprCodec::new(catalog);
@@ -1023,7 +1144,7 @@ mod tests {
         decl.excluded = true;
         decl.export_level = "API".into();
 
-        let document = compile_page(&catalog(), &decl).unwrap();
+        let document = compile_page(&catalog(), &decl, None).unwrap();
         let page = mxrs_model::page::Page::from_bson(&document);
         assert_eq!(page.appearance_class, "page-order");
         assert_eq!(page.appearance_style, "max-width: 80rem");
@@ -1078,7 +1199,7 @@ mod tests {
             ],
         });
 
-        let document = compile_page(&catalog, &decl).unwrap();
+        let document = compile_page(&catalog, &decl, None).unwrap();
         let codec = mxrs_forms::MprCodec::new(catalog);
         let node = codec.decode(&document).unwrap();
         let re_encoded = codec.encode(&node).unwrap();
@@ -1110,7 +1231,7 @@ mod tests {
             ],
         });
 
-        let document = compile_page(&catalog, &decl).unwrap();
+        let document = compile_page(&catalog, &decl, None).unwrap();
         let mut action_types = Vec::new();
         fn collect(value: &mxrs_bson::Bson, out: &mut Vec<String>) {
             if let mxrs_bson::Bson::Document(document) = value {
@@ -1159,7 +1280,7 @@ mod tests {
             children: vec![],
         });
 
-        let document = compile_page(&catalog, &decl).unwrap();
+        let document = compile_page(&catalog, &decl, None).unwrap();
         let codec = mxrs_forms::MprCodec::new(catalog);
         let node = codec.decode(&document).unwrap();
         let re_encoded = codec.encode(&node).unwrap();
@@ -1191,7 +1312,7 @@ mod tests {
             }],
         });
 
-        let document = compile_page(&catalog, &decl).unwrap();
+        let document = compile_page(&catalog, &decl, None).unwrap();
         let model = mxrs_model::page::Page::from_bson(&document);
         assert_eq!(model.parameters[0].get_str("Name").unwrap(), "Order");
         assert_eq!(
@@ -1226,7 +1347,7 @@ mod tests {
             children: vec![],
         });
         assert!(matches!(
-            compile_page(&catalog(), &decl),
+            compile_page(&catalog(), &decl, None),
             Err(WriterError::UnknownPageParameter { parameter, .. }) if parameter == "Order"
         ));
 
@@ -1237,7 +1358,7 @@ mod tests {
             default_value: None,
         });
         assert!(matches!(
-            compile_page(&catalog(), &decl),
+            compile_page(&catalog(), &decl, None),
             Err(WriterError::PageParameterEntityMismatch { actual, expected, .. })
                 if actual == "Sales.Customer" && expected == "Sales.Order"
         ));
@@ -1261,7 +1382,7 @@ mod tests {
             class: None,
         });
 
-        let document = compile_page(&catalog, &decl).unwrap();
+        let document = compile_page(&catalog, &decl, None).unwrap();
         let codec = mxrs_forms::MprCodec::new(catalog);
         let node = codec.decode(&document).unwrap();
         let re_encoded = codec.encode(&node).unwrap();
@@ -1302,6 +1423,96 @@ mod tests {
                 .get_str("WidgetId")
                 .unwrap(),
             "com.mendix.widget.web.combobox.Combobox"
+        );
+    }
+
+    #[test]
+    fn an_installed_widget_package_supplies_the_real_schema_and_default_values() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let widgets_directory = directory.path().join("widgets");
+        std::fs::create_dir_all(&widgets_directory).unwrap();
+        let file = std::fs::File::create(widgets_directory.join("DataGrid.mpk")).unwrap();
+        let mut package = zip::ZipWriter::new(file);
+        package
+            .start_file("DataGrid.xml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        package
+            .write_all(
+                br#"<widget id="com.mendix.widget.web.datagrid.Datagrid" pluginWidget="true">
+                    <name>Data grid 2</name><description/>
+                    <properties><propertyGroup caption="General">
+                        <property key="showPaging" type="boolean" defaultValue="true">
+                            <caption>Show paging</caption><description/></property>
+                        <property key="pageSize" type="integer" defaultValue="10">
+                            <caption>Page size</caption><description/></property>
+                        <property key="onClick" type="action" required="false">
+                            <caption>On click</caption><description/></property>
+                        <systemProperty key="Visibility"/>
+                    </propertyGroup></properties></widget>"#,
+            )
+            .unwrap();
+        package.finish().unwrap();
+
+        let catalog = catalog();
+        let mut decl = PageDecl::new("Dashboard");
+        decl.layout = Some(LayoutRef::new("Atlas_Core.ApplicationLayout", "Main"));
+        decl.widgets.push(WidgetDecl::DataGrid2 {
+            name: Some("ordersGrid".into()),
+            class: None,
+        });
+        let document = compile_page(&catalog, &decl, Some(directory.path())).unwrap();
+
+        // The full round trip through the typed codec still holds with a
+        // real (non-empty) schema and default-valued object.
+        let codec = mxrs_forms::MprCodec::new(catalog);
+        let node = codec.decode(&document).unwrap();
+        let re_decoded = codec.decode(&codec.encode(&node).unwrap()).unwrap();
+        assert_eq!(node, re_decoded);
+
+        let layout_call = document.get_document("FormCall").unwrap();
+        let arguments = layout_call.get_array("Arguments").unwrap();
+        let widgets = arguments[1]
+            .as_document()
+            .unwrap()
+            .get_array("Widgets")
+            .unwrap();
+        let grid = widgets[1].as_document().unwrap();
+        assert_eq!(grid.get_str("Name").unwrap(), "ordersGrid");
+        let widget_type = grid.get_document("Type").unwrap();
+        assert_eq!(widget_type.get_str("WidgetName").unwrap(), "Data grid 2");
+        let property_types = widget_type
+            .get_document("ObjectType")
+            .unwrap()
+            .get_array("PropertyTypes")
+            .unwrap();
+        // Marker at index 0; three real properties plus the system slot.
+        assert_eq!(property_types.len(), 5);
+
+        // The object assigns package defaults to every non-system property.
+        let properties = grid
+            .get_document("Object")
+            .unwrap()
+            .get_array("Properties")
+            .unwrap();
+        assert_eq!(properties.len(), 4);
+        let value_of = |index: usize| {
+            properties[index]
+                .as_document()
+                .unwrap()
+                .get_document("Value")
+                .unwrap()
+        };
+        assert_eq!(value_of(1).get_str("PrimitiveValue").unwrap(), "true");
+        assert_eq!(value_of(2).get_str("PrimitiveValue").unwrap(), "10");
+        assert_eq!(
+            value_of(3)
+                .get_document("Action")
+                .unwrap()
+                .get_str("$Type")
+                .unwrap(),
+            "Forms$NoAction"
         );
     }
 }

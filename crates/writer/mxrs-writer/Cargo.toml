@@ -18,6 +18,7 @@ mxrs-identity = { path = "../mxrs-identity" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
 mxrs-pluggable = { path = "../../model/mxrs-pluggable" }
+mxrs-widget-package = { path = "../../model/mxrs-widget-package" }
 mxrs-schema = { path = "../../model/mxrs-schema" }
 thiserror.workspace = true
 uuid = { version = "1", features = ["v4"] }
@@ -26,3 +27,5 @@ uuid = { version = "1", features = ["v4"] }
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
 mxrs-expr = { path = "../../authoring/mxrs-expr" }
 tempfile = "3.27.0"
+# Builds fixture .mpk widget packages for the package-schema sync tests.
+zip = { version = "2", default-features = false, features = ["deflate"] }

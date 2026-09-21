@@ -8,6 +8,7 @@
 //! single-file front end onto `compare`'s existing snapshot machinery.
 
 use mxrs_cli::arguments::{take_flag, take_value, take_values, validate_options};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -102,6 +103,7 @@ fn command_options(
             &["--role"],
         ),
         "design" => (&["--target"], &["--apply", "--dry-run", "--json"], &[]),
+        "widgets" => (&["--project"], &[], &[]),
         "ci" | "constant" | "consumed-rest" | "entity" | "enumeration" | "evaluation"
         | "functional-test" | "integration" | "java-action" | "module" | "nanoflow"
         | "published-rest" | "repository" | "scheduled-event" | "security" | "use-case"
@@ -224,6 +226,7 @@ commands! {
     "validate", "<file.mpr> [--json]", "Check storage-format integrity", run_validate;
     "validation", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create an application validation microflow", run_validation;
     "verify-package", "<archive.tar>", "Verify archive paths and content hashes", run_verify_package;
+    "widgets", "new <Name> [DIR] | build <DIR> [--project MENDIX_PROJECT_DIR] | sync <project> <file.mpr>", "Create, build, or synchronize pluggable widget packages", run_widgets;
 }
 
 fn run_changelog(mut args: Vec<String>) -> ExitCode {
@@ -1014,6 +1017,93 @@ fn print_design_scan(design: &mxrs_cli::design::DesignSystem, json: bool) {
             design.literal_colors().len(),
             design.unresolved_references().len()
         );
+    }
+}
+
+fn run_widgets(mut args: Vec<String>) -> ExitCode {
+    const USAGE: &str = "Usage: mxrs widgets new <Name> [DIR] | \
+        build <DIR> [--project MENDIX_PROJECT_DIR] | \
+        sync <project> <file.mpr>";
+    match args.first().map(String::as_str) {
+        Some("new") => {
+            args.remove(0);
+            let (name, directory) = match args.as_slice() {
+                [name] => (name.clone(), std::env::current_dir().unwrap_or_default()),
+                [name, directory] => (name.clone(), PathBuf::from(directory)),
+                _ => {
+                    eprintln!("{USAGE}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match mxrs_cli::widgets::WidgetDevelopment::new().create(&name, &directory) {
+                Ok(created) => {
+                    println!("[mxrs] Widget project: {}", created.display());
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("build") => {
+            args.remove(0);
+            let project = take_value(&mut args, "--project").map(PathBuf::from);
+            let [directory] = args.as_slice() else {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            };
+            match mxrs_cli::widgets::WidgetDevelopment::new()
+                .build(Path::new(directory), project.as_deref())
+            {
+                Ok(packages) => {
+                    for package in packages {
+                        println!("[mxrs] Built {}", package.display());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("sync") => {
+            args.remove(0);
+            let [source, target] = args.as_slice() else {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            };
+            // The mxrs analog of mxrb's Ruby definition is the Cargo-native
+            // project; accept its directory or its manifest directly.
+            let source = Path::new(source);
+            let manifest = if source.is_dir() {
+                source.join("Cargo.toml")
+            } else {
+                source.to_path_buf()
+            };
+            // mxrb generates twice so the second pass sees every MPK the
+            // first one put next to the target; the writer's package-schema
+            // lookup does the rest.
+            for _ in 0..2 {
+                if let Err(error) = mxrs_cli::cargo_project::build(&manifest, target, false, false)
+                {
+                    eprintln!("[mxrs] error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            println!("[mxrs] Synchronized widget schemas with native MPK schemas");
+            println!("[mxrs] Generated {target}");
+            ExitCode::SUCCESS
+        }
+        Some(action) => {
+            eprintln!("[mxrs] error: unknown widgets action {action:?}; use new, build, or sync");
+            ExitCode::FAILURE
+        }
+        None => {
+            eprintln!("{USAGE}");
+            ExitCode::FAILURE
+        }
     }
 }
 

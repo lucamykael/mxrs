@@ -74,5 +74,5 @@
   "use-case": "partial",
   "validate": "partial",
   "validation": "partial",
-  "widgets": "missing"
+  "widgets": "partial"
 }

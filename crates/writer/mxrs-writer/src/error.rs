@@ -29,6 +29,11 @@ pub enum WriterError {
     #[error("newly created .mpr has no root unit")]
     MissingRootUnit,
 
+    #[error(
+        "widget property {property:?} declares non-numeric default {default:?} for an Integer property"
+    )]
+    InvalidWidgetPropertyDefault { property: String, default: String },
+
     #[error("association target {0:?} does not match any entity declared in this module")]
     UnknownAssociationTarget(String),
 

@@ -254,7 +254,10 @@ fn reproduces_source(page: &Page, decl: &PageDecl, catalog: &Rc<mxrs_forms::Cata
     {
         return false;
     }
-    mxrs_writer::page_compiler::compile_page(catalog, decl).is_ok_and(|compiled| {
+    // `None`: reproduction is judged against the fallback empty-schema
+    // shape this exporter's own `PageDecl`s compile to; a widget carrying a
+    // real package schema will simply stay opaque (lossless), same as today.
+    mxrs_writer::page_compiler::compile_page(catalog, decl, None).is_ok_and(|compiled| {
         let mut identities = HashMap::new();
         collect_identities(page.raw_document(), &compiled, &mut identities)
             && preserves_document(page.raw_document(), &compiled, &identities)
@@ -1388,7 +1391,8 @@ mod tests {
         });
         let catalog = Rc::new(mxrs_forms::Catalog::for_version("11.12.1").unwrap());
         Page::from_bson(
-            &mxrs_writer::page_compiler::compile_page(&catalog, &builder.into_decl()).unwrap(),
+            &mxrs_writer::page_compiler::compile_page(&catalog, &builder.into_decl(), None)
+                .unwrap(),
         )
     }
 
@@ -1504,7 +1508,7 @@ mod tests {
             children: vec![],
         });
         let catalog = Rc::new(mxrs_forms::Catalog::for_version("11.12.1").unwrap());
-        let original = mxrs_writer::page_compiler::compile_page(&catalog, &decl).unwrap();
+        let original = mxrs_writer::page_compiler::compile_page(&catalog, &decl, None).unwrap();
         assert!(reproduces_source(
             &Page::from_bson(&original),
             &decl,

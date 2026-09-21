@@ -1,0 +1,22 @@
+[package]
+name = "mxrs-widget-package"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Reads pluggable-widget schemas from installed MPK packages into the typed CustomWidgets model."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-pluggable = { path = "../mxrs-pluggable" }
+# Same pinning rationale as mxrs-marketplace: an .mpk is a zip and its
+# widget definition files are (namespaced) XML.
+quick-xml = "0.38"
+thiserror.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"

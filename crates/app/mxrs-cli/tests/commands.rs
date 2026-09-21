@@ -1256,3 +1256,31 @@ fn marketplace_is_discoverable_and_its_options_are_validated() {
     let output = marketplace(&["marketplace", "search", "x", "--not-an-option"]);
     assert!(!output.status.success());
 }
+
+#[test]
+fn widgets_actions_validate_their_inputs_before_touching_any_toolchain() {
+    let bare = cli(&["widgets"]);
+    assert!(!bare.status.success());
+    let stderr = String::from_utf8_lossy(&bare.stderr);
+    assert!(stderr.contains("Usage: mxrs widgets"), "{stderr}");
+
+    let unknown = cli(&["widgets", "publish"]);
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(stderr.contains("unknown widgets action"), "{stderr}");
+
+    let hostile = cli(&["widgets", "new", "; rm -rf /"]);
+    assert!(!hostile.status.success());
+    let stderr = String::from_utf8_lossy(&hostile.stderr);
+    assert!(stderr.contains("widget name"), "{stderr}");
+
+    let missing = cli(&["widgets", "build", "/nonexistent-widget"]);
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("widget package not found"), "{stderr}");
+
+    let no_project = cli(&["widgets", "sync", "/nonexistent-project", "/tmp/out.mpr"]);
+    assert!(!no_project.status.success());
+    let stderr = String::from_utf8_lossy(&no_project.stderr);
+    assert!(stderr.contains("does not exist"), "{stderr}");
+}
