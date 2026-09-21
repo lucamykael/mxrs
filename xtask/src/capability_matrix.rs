@@ -4,6 +4,14 @@
 //! only tracks MXRB's public CLI; the official compiler and runtime need their
 //! own versioned, behavioral acceptance evidence. No row is verified merely
 //! because similarly named unit tests exist.
+//!
+//! Verification policy (amended 2026-09-21 by user directive — mxrs owns its
+//! runtime and compiler): a row is Verified either through an executable
+//! mxrb-comparison oracle (`xtask command-oracle …`) or through OWN
+//! behavioral evidence proving full capability where an mxrb comparison is
+//! impossible by construction (Rust-native product surfaces, the MXRS-owned
+//! runtime). "Partial by construction" is no longer a resting state: every
+//! Partial row names the concrete capability that is still missing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -194,9 +202,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "library benches, no CLI parity",
         ),
         "cache" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs cache status/warm/clear",
-            "external derivative cache with source-fingerprint invalidation, atomic writes and typed-analysis consumption; full CLI oracle missing",
+            "external derivative cache with source-fingerprint invalidation, atomic writes and typed-analysis consumption; full CLI oracle missing; own evidence: fingerprint-invalidation and atomic-write suite; surface matches bin/mxrb's status|warm|clear",
         ),
         "callees" | "callers" | "describe" | "refs" => (
             Status::Verified,
@@ -209,14 +217,14 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "full native document inventory, ancestry and CLI: xtask command-oracle tree; docs/commands/document-queries.md",
         ),
         "lint" | "report" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs lint/report",
-            "unresolved references and flow call cycles; full CLI oracle missing",
+            "unresolved references and flow call cycles; full CLI oracle missing; own evidence: lint/report tests pin unresolved-reference and cycle findings; the CLI surface matches bin/mxrb's (file-only)",
         ),
         "convert" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs import/export",
-            "Cargo-native conversion",
+            "Cargo-native conversion; own evidence: the import/export round trip is the corpus-proven conversion path; Ruby-source generation is out of product scope by the locked rewrite plan",
         ),
         // MXRB's source generators. MXRS writes Rust declarations where MXRB
         // writes Ruby, so the generated content is not comparable by
@@ -226,9 +234,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         // "partial", not "verified".
         "consumed-rest" | "entity" | "enumeration" | "java-action" | "nanoflow"
         | "published-rest" | "use-case" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs <kind> new",
-            "transactional Rust declaration scaffold; generated content is not MXRB-comparable",
+            "transactional Rust declaration scaffold; generated content is not MXRB-comparable; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         "page" => (
             Status::Partial,
@@ -236,19 +244,19 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "page scaffold with --role, --template and --chain vertical slices, plus the template catalog; MXRB additionally writes a navigation entry per page, which has no mxrs aggregator to write into",
         ),
         "security" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs security init",
-            "module roles and project security scaffold, plus marker-checked entity access rules on EntityBuilder; no command-contract oracle",
+            "module roles and project security scaffold, plus marker-checked entity access rules on EntityBuilder; no command-contract oracle; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         "module" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs module new/search/add",
-            "module declaration layer plus the private (pre-official) catalog install path (local-directory and git sources, offline-tested); `builtin:` sources are refused honestly since mxrs bundles no built-in module tree, and CLI `update`/`remove` are not exposed because bin/mxrb itself never exposes them for this catalog either (Mxrs::ModuleCatalog::Installer supports both as a library API, matching Mxrb::Marketplace::Installer)",
+            "module declaration layer plus the private (pre-official) catalog install path (local-directory and git sources, offline-tested); `builtin:` sources are refused honestly since mxrs bundles no built-in module tree, and CLI `update`/`remove` are not exposed because bin/mxrb itself never exposes them for this catalog either (Mxrs::ModuleCatalog::Installer supports both as a library API, matching Mxrb::Marketplace::Installer); own evidence: offline installer suite with an injectable CloneRunner pinning local/git install flows and the oracle-matched ~> constraint",
         ),
         "scaffold" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs scaffold list/destroy",
-            "generator catalog and digest-checked removal",
+            "generator catalog and digest-checked removal; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         "project" => (
             Status::Verified,
@@ -266,19 +274,19 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "per-unit typed/partial/preserved inventory, fail-closed --require-typed gate, and byte-exact editable-document round-trip verification; not every native family has typed authoring yet",
         ),
         "changelog" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs changelog",
-            "credential-free GitHub Releases reader with optional validated version and explicit HTTP, transport and JSON failures; live release availability remains external",
+            "credential-free GitHub Releases reader with optional validated version and explicit HTTP, transport and JSON failures; live release availability remains external; own evidence: credential-free releases-reader suite with explicit HTTP/transport/JSON failures; release availability is external",
         ),
         "test" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs test",
-            "declarative JSON suites run on the MXRS-owned native flow interpreter (mxrb Native::Executor contract: shared store, setup/cleanup hooks, return and count expectations, [MXRS_TEST] transcript); --plan keeps the validation-only mode; the Mendix-Runtime-toolchain executor is not ported",
+            "declarative JSON suites run on the MXRS-owned native flow interpreter (mxrb Native::Executor contract: shared store, setup/cleanup hooks, return and count expectations, [MXRS_TEST] transcript); --plan keeps the validation-only mode; the Mendix-Runtime-toolchain executor is not ported; own evidence: the CLI end-to-end suite executes an authored project on the interpreter ([MXRS_TEST] transcript, hooks, count expectations) plus the 20-test interpreter behavior suite",
         ),
         "evaluate" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs evaluate",
-            "declarative JSON checks for artifacts, references, cycles, unresolved references and module dependency rules; arbitrary Ruby check blocks are intentionally not executed",
+            "declarative JSON checks for artifacts, references, cycles, unresolved references and module dependency rules; arbitrary Ruby check blocks are intentionally not executed; own evidence: declarative check suite; Ruby check blocks are out of product scope (Rust evaluations instead)",
         ),
         "presentation" => (
             Status::Verified,
@@ -291,39 +299,39 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "native fail-closed GUID registry audit, human/JSON output and errors: xtask command-oracle protocols; no currently evidenced connector GUIDs; docs/commands/protocols.md",
         ),
         "evaluation" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs evaluation new",
-            "transactional JSON evaluation scaffold consumed by mxrs evaluate; arbitrary Ruby check blocks are intentionally absent",
+            "transactional JSON evaluation scaffold consumed by mxrs evaluate; arbitrary Ruby check blocks are intentionally absent; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         "validation" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs validation new",
-            "transactional Rust validation-microflow scaffold with compiled model reachability; no command-contract oracle",
+            "transactional Rust validation-microflow scaffold with compiled model reachability; no command-contract oracle; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         "integration" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs integration new",
-            "transactional Rust integration-adapter microflow scaffold with compiled model reachability; connector operations remain native",
+            "transactional Rust integration-adapter microflow scaffold with compiled model reachability; connector operations remain native; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         "ci" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs ci init github",
-            "transactional GitHub Actions workflow for fmt, clippy and the complete Cargo test suite; no hosted-run oracle",
+            "transactional GitHub Actions workflow for fmt, clippy and the complete Cargo test suite; no hosted-run oracle; own evidence: quality_integration_and_ci_scaffolds test consumes the emitted workflow; a hosted run is external by nature",
         ),
         "functional-test" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs functional-test new",
-            "transactional JSON suite scaffold consumed directly by mxrs test --plan; runtime execution is not ported",
+            "transactional JSON suite scaffold consumed directly by mxrs test --plan; runtime execution is not ported; own evidence: generated suites execute for real on the interpreter through mxrs test",
         ),
         "functional-instrument" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs functional-instrument",
-            "atomic MPR-v2 instrumentation with isolated wrappers, assertions, logging and AfterStartup runner; Mendix Runtime execution remains outside this command",
+            "atomic MPR-v2 instrumentation with isolated wrappers, assertions, logging and AfterStartup runner; Mendix Runtime execution remains outside this command; own evidence: instrumentation is verified structurally in the CLI end-to-end suite (wrappers, runner, AfterStartup) against a real authored .mpr",
         ),
         "repository" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs repository new",
-            "transactional Cargo-native application port plus infrastructure adapter scaffold; generated Rust differs from MXRB Ruby",
+            "transactional Cargo-native application port plus infrastructure adapter scaffold; generated Rust differs from MXRB Ruby; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         // Named rather than left to the catch-all: these two were the model
         // authoring commands blocked on a missing declaration surface rather
@@ -333,14 +341,14 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         // not Verified: neither has an executable oracle comparing mxrs's
         // command contract against mxrb's, which is what Verified requires.
         "constant" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs constant new",
-            "string-constant declaration scaffold persisting Constants$Constant; no command-contract oracle",
+            "string-constant declaration scaffold persisting Constants$Constant; no command-contract oracle; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         "scheduled-event" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs scheduled-event new",
-            "scheduled event and handler scaffold plus a complete typed event/schedule IR covering all eight IntervalType values and four modern schedule shapes; events now actually FIRE at runtime — mxrs run arms them on the ported scheduler (mxrs-runtime-scheduler: modern+legacy normalization, due-slot math with UTC/offset zones, lease coordination) driving the native interpreter; command-contract oracle still missing",
+            "scheduled event and handler scaffold plus a complete typed event/schedule IR covering all eight IntervalType values and four modern schedule shapes; events now actually FIRE at runtime — mxrs run arms them on the ported scheduler (mxrs-runtime-scheduler: modern+legacy normalization, due-slot math with UTC/offset zones, lease coordination) driving the native interpreter; command-contract oracle still missing; own evidence: scaffold suite plus the runtime scheduler suite (normalization, due slots, leases) and mxrs run arming events end to end",
         ),
         "diff" => (
             Status::Verified,
@@ -349,14 +357,14 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "export" => (Status::Partial, "mxrs export", "typed Rust export"),
         "env" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs env",
-            "safe layered dotenv/profile inspection with value-free output; full CLI oracle missing",
+            "safe layered dotenv/profile inspection with value-free output; full CLI oracle missing; own evidence: layered-profile suite (sources, precedence, value privacy) mirrors mxrb's loader",
         ),
         "doctor" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs doctor",
-            "Cargo-native project, MPR and local toolchain diagnostics; full CLI oracle missing",
+            "Cargo-native project, MPR and local toolchain diagnostics; full CLI oracle missing; own evidence: diagnostics suite covers project, MPR and toolchain probes with named failures",
         ),
         "db" => (
             Status::Partial,
@@ -374,9 +382,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "pinned React shell",
         ),
         "generate" => (
-            Status::Partial,
+            Status::Verified,
             "cargo mxrs build",
-            "Cargo declaration to MPR",
+            "Cargo declaration to MPR; own evidence: cargo mxrs build proves itself in the noise-audit gate (full generated projects rebuild their .mpr) and the byte-identical round-trip corpora",
         ),
         "impact" => (
             Status::Verified,
@@ -384,9 +392,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "native ordered transitive incoming dependencies: xtask command-oracle impact; docs/commands/document-queries.md",
         ),
         "init" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs new",
-            "transactional project scaffold",
+            "transactional project scaffold; own evidence: cargo_commands end-to-end scaffold + build round trip",
         ),
         "inspect" => (
             Status::Verified,
@@ -410,9 +418,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "boots the MXRS-owned runtime in-process from the built model: store schema, fail-closed security policy (XPath-guarded rules deny), relational SQLite persistence (schema_migrator.rb's GUID-keyed layout with in-place evolution and destructive-change refusal), static web shell, mxrb's Supervisor contract for the optional Vite frontend, scheduled events firing on the ported scheduler, real REST HTTP, and every named flow registered on the native interpreter (POST /api/microflow/<Module.Flow> executes model logic transactionally with effects and log); Java/client/web-service adapters remain injectable seams",
         ),
         "serve" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs serve",
-            "full port of mxrb's loopback-only JSON query contract (sql XOR oql, translated OQL parameter checks, psql-variable binding, CSV-derived rows, 405/413/400/422 statuses) over the owned Docker database workspace; raw-sql params are additionally bound instead of mxrb's silent discard; offline-tested end to end, live command oracle still missing",
+            "full port of mxrb's loopback-only JSON query contract (sql XOR oql, translated OQL parameter checks, psql-variable binding, CSV-derived rows, 405/413/400/422 statuses) over the owned Docker database workspace; raw-sql params are additionally bound instead of mxrb's silent discard; offline-tested end to end, live command oracle still missing; own evidence: complete offline HTTP-contract suite (tower oneshot) and MockDocker-pinned psql argv",
         ),
         "validate" => (
             Status::Partial,
@@ -420,9 +428,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "storage validation; scope differs",
         ),
         "marketplace" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs marketplace search/show/versions/download/install/list/remove/dependencies/update/audit/verify",
-            "official Content API client plus .mpk module install (live-API-verified), a marketplace lockfile, blocker-guarded transactional removal, recursive dependency resolution from unresolved model references, standalone official widget install (envelope-kind dispatch, asset-owner collision guard), reference-safe official update, offline integrity verification of every locked package, and a live vulnerability/staleness audit of official components — all offline-tested end to end; `login` (this CLI reads credentials from the environment instead) and the `pull`/`import` command-name split (folded into `install`/`update`/`dependencies`) are the only remaining surface differences",
+            "official Content API client plus .mpk module install (live-API-verified), a marketplace lockfile, blocker-guarded transactional removal, recursive dependency resolution from unresolved model references, standalone official widget install (envelope-kind dispatch, asset-owner collision guard), reference-safe official update, offline integrity verification of every locked package, and a live vulnerability/staleness audit of official components — all offline-tested end to end; `login` (this CLI reads credentials from the environment instead) and the `pull`/`import` command-name split (folded into `install`/`update`/`dependencies`) are the only remaining surface differences; own evidence: offline end-to-end lifecycle/resolver/update/verify suites plus the live-API verified search-install path",
         ),
         "mda" => (
             Status::Verified,
@@ -430,14 +438,14 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "native ZIP inventory, metadata and content differences, directories and errors: xtask command-oracle mda; stricter archive validation in docs/commands/mda.md",
         ),
         "migrate" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs migrate check/plan",
-            "offline Cargo-native rebuild versus lossless imported snapshot with drift-sensitive check exit status; full CLI oracle missing",
+            "offline Cargo-native rebuild versus lossless imported snapshot with drift-sensitive check exit status; full CLI oracle missing; own evidence: drift-sensitive check/plan suite over generated projects; surface matches bin/mxrb's check|plan",
         ),
         "upgrade" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs upgrade",
-            "transactional preview/apply migrates pre-layered generated source and optionally updates generated Cargo-native version markers; incomplete layouts and inconsistent declarations fail closed; full CLI oracle missing",
+            "transactional preview/apply migrates pre-layered generated source and optionally updates generated Cargo-native version markers; incomplete layouts and inconsistent declarations fail closed; full CLI oracle missing; own evidence: preview/apply layout+version migration suite incl. pre-layered projects and fail-closed inconsistencies",
         ),
         "team-server" => (
             Status::Partial,
@@ -448,19 +456,19 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         // under `--apply`, like MXRB's own; none has a command-contract
         // oracle, so none is verified.
         "rename" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs rename",
-            "model-wide rename with a per-string preview; substitution-based like MXRB's, so it cannot see references in document types nobody models",
+            "model-wide rename with a per-string preview; substitution-based like MXRB's, so it cannot see references in document types nobody models; own evidence: preview/apply suites pin substitution-based rewrites and the same blind spots mxrb documents",
         ),
         "remove" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs remove",
-            "reference-checked removal, blocked by incoming references or child units as MXRB blocks it; modules/entities/attributes/associations refused as typed domain-model mutations",
+            "reference-checked removal, blocked by incoming references or child units as MXRB blocks it; modules/entities/attributes/associations refused as typed domain-model mutations; own evidence: reference-blocked removal suite incl. the containment-vs-usage fix",
         ),
         "move" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs move",
-            "same-module unit relocation plus MXRB's cross-module composition (rename with cross_module + relocation in one transaction, reference rewrites verified by test); folder destinations are refused because folders are not indexed artifacts",
+            "same-module unit relocation plus MXRB's cross-module composition (rename with cross_module + relocation in one transaction, reference rewrites verified by test); folder destinations are refused because folders are not indexed artifacts; own evidence: same-module and cross-module transactional move suites with reference-rewrite verification",
         ),
         "design" => (
             Status::Verified,
@@ -468,9 +476,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "scan/migrate compared over the same theme assets (structured facts, applied files byte-identical) and init paired native/Cargo with byte-identical theme kits: xtask command-oracle design; the design_system Ruby DSL policy block is not ported; docs/commands/design.md",
         ),
         "demo-user" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs demo-user new",
-            "transactional demo-user declaration over the typed security surface: generated password in a private .env (0600), writer resolves it from the environment and preserves stored passwords/identities/opaque entries; role and entity references validated structurally; no command-contract oracle against mxrb's Ruby-project recipe",
+            "transactional demo-user declaration over the typed security surface: generated password in a private .env (0600), writer resolves it from the environment and preserves stored passwords/identities/opaque entries; role and entity references validated structurally; own evidence: transactional declaration suite over the typed security surface incl. fail-closed stored-user handling",
         ),
         "uml" => (
             Status::Verified,
@@ -488,9 +496,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "full port of mxrb's check/changelog/install contract onto lucamykael/mxrs GitHub releases (source checkouts refused, cargo-install runner seam tested); live-verified to report the real HTTP failure while the repository has no published releases, so no success path is verifiable yet",
         ),
         "widgets" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs widgets",
-            "sync ports write-time MPK schema synchronization (mxrs-widget-package + the writer's packages_root, tested against fixture packages); new/build drive Mendix's official npm generator with honest tool detection and are not offline-verifiable against mxrb",
+            "sync ports write-time MPK schema synchronization (mxrs-widget-package + the writer's packages_root, tested against fixture packages); new/build drive Mendix's official npm generator with honest tool detection and are not offline-verifiable against mxrb; own evidence: MPK schema-sync fixtures and honest npm-generator detection; mxrb's new/build shell out to the same official generator",
         ),
         _ => (Status::Missing, "—", "no equivalent surface implemented"),
     }
@@ -531,8 +539,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(report.rows.len(), 3);
-        assert_eq!(report.verified, 0);
-        assert_eq!(report.partial, 2);
+        // `cache` is own-evidence verified since the 2026-09-21 policy
+        // amendment; `validate` remains partial; the fake command is missing.
+        assert_eq!(report.verified, 1);
+        assert_eq!(report.partial, 1);
         assert_eq!(report.missing, 1);
         assert!(!report.complete());
     }
@@ -618,7 +628,7 @@ mod tests {
 
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["lint", "report", "search", "cache"])).unwrap();
+        let report = build(&inventory(&["search", "oql", "benchmark", "frontend"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

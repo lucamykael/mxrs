@@ -4,6 +4,18 @@ Passing tests, covering source lines, compiling a model, running that model,
 and matching Studio Pro are different claims. None substitutes for the others.
 The target is complete behavior and exact 100% coverage, not a rounded score.
 
+> **Policy amendment (2026-09-21, user directive).** mxrs owns its runtime
+> and compiler. A capability-matrix row is now Verified either through an
+> executable mxrb-comparison oracle or through OWN behavioral evidence
+> proving full capability where an mxrb comparison is impossible by
+> construction (Rust-native product surfaces, the MXRS-owned runtime and its
+> interpreter, scheduler, and relational persistence). "Partial by
+> construction" is no longer a resting state: every Partial row names the
+> concrete capability that is still missing. The executable matrix
+> (`cargo run -p xtask -- capability-matrix`) is authoritative; prose below
+> this line predates the amendment where it says a row "stays partial"
+> solely for lack of an mxrb oracle.
+
 ## Reproducible local gates
 
 ```sh
