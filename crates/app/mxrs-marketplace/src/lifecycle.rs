@@ -118,6 +118,9 @@ fn io_error(path: &Path) -> impl Fn(std::io::Error) -> MarketplaceError + '_ {
 pub struct OfficialProvenance {
     pub content_id: Option<String>,
     pub version_id: Option<String>,
+    /// The official version number — the fallback when the package's own
+    /// manifest is empty or `unknown`, mirroring mxrb's `resolved_package`.
+    pub version: Option<String>,
     pub source: Option<String>,
     pub repository: Option<String>,
 }
@@ -134,7 +137,16 @@ pub fn install_module(
     provenance: &OfficialProvenance,
 ) -> Result<InstallReport> {
     let target = resolve_target(mpr_path, target_root)?;
-    let inventory = ModulePackageInventory::read(package_path)?;
+    let mut inventory = ModulePackageInventory::read(package_path)?;
+    // The manifest's version wins unless it is empty/`unknown`, in which
+    // case the official version fills in — mxrb's `resolved_package`.
+    let manifest_version = inventory
+        .version
+        .as_deref()
+        .filter(|version| !version.is_empty() && *version != "unknown");
+    if manifest_version.is_none() {
+        inventory.version = provenance.version.clone();
+    }
     let (originals, created_backups) = preserve_asset_originals(&target, &inventory)?;
     let plan = plan_install(package_path, mpr_path, Some(&target), allow_model_upgrade)?;
     let report = match plan.apply() {
@@ -641,11 +653,13 @@ fn remove_atlas_variables(target: &Path) -> Result<()> {
         return Ok(());
     }
     let content = std::fs::read_to_string(&path).map_err(io_error(&path))?;
-    let filtered: Vec<&str> = content
-        .lines()
-        .filter(|line| line.trim() != ATLAS_VARIABLES_IMPORT)
+    // Filter whole lines with their own terminators so the file's line
+    // endings survive untouched.
+    let filtered: String = content
+        .split_inclusive('\n')
+        .filter(|line| line.trim_end_matches(['\r', '\n']).trim() != ATLAS_VARIABLES_IMPORT)
         .collect();
-    std::fs::write(&path, format!("{}\n", filtered.join("\n"))).map_err(io_error(&path))
+    std::fs::write(&path, filtered).map_err(io_error(&path))
 }
 
 // ── Rollback snapshots ─────────────────────────────────────────────────

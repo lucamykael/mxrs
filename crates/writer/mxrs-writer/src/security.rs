@@ -236,6 +236,27 @@ fn lower_demo_users(
                 .push(user);
         }
     }
+    // mxrb's `MemberIdentity#reject_ambiguous_changes!` refuses prior
+    // members no declaration accounts for; the equivalent here is refusing
+    // stored `DemoUserImpl` entries the declared list would silently drop
+    // (the exporter deliberately emits no demo-user declarations, so an
+    // imported project would otherwise lose its users on the first build).
+    let declared: HashSet<&str> = declaration
+        .demo_users
+        .iter()
+        .map(|user| user.name.as_str())
+        .collect();
+    let mut orphaned: Vec<String> = by_name
+        .keys()
+        .filter(|name| !declared.contains(name.as_str()))
+        .cloned()
+        .collect();
+    if !orphaned.is_empty() {
+        orphaned.sort();
+        return Err(WriterError::UndeclaredStoredDemoUsers {
+            names: orphaned.join(", "),
+        });
+    }
     let mut users = Vec::with_capacity(declaration.demo_users.len());
     for user in &declaration.demo_users {
         let matches = by_name.get(user.name.as_str());

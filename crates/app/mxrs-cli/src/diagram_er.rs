@@ -312,15 +312,16 @@ pub fn plan_layout(path: &Path, payload: &Value) -> Result<LayoutPlan, String> {
 pub fn apply_layout(path: &Path, plan: LayoutPlan) -> Result<usize, String> {
     let mut mpr = mxrs_mpr::MprFile::open(path, false).map_err(|error| error.to_string())?;
     let unit_changes: usize = plan.unit_changes.iter().map(|(_, _, count)| count).sum();
-    mpr.transaction(|mpr| {
-        for (unit_id, doc, _) in plan.unit_changes {
-            mpr.update_unit(&unit_id, doc)?;
-        }
-        Ok(())
-    })
-    .map_err(|error| error.to_string())?;
+    // One transaction covers both the unit documents and the sidecar anchor
+    // rows — mxrb's `LayoutWriter#apply!` wraps both the same way, so a
+    // failed sidecar write can never leave a half-applied layout behind.
     let anchor_changes = mpr
-        .write_domain_diagram_anchors(&plan.metadata_anchors)
+        .transaction(|mpr| {
+            for (unit_id, doc, _) in plan.unit_changes {
+                mpr.update_unit(&unit_id, doc)?;
+            }
+            mpr.write_domain_diagram_anchors(&plan.metadata_anchors)
+        })
         .map_err(|error| error.to_string())?;
     Ok(unit_changes + anchor_changes)
 }

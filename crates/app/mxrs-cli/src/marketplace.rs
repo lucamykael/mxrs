@@ -395,6 +395,16 @@ fn remove(
     let target = target_root.unwrap_or_else(|| Path::new("."));
     let plan = lifecycle::plan_remove(target, identifier, mpr)?;
     let safe = plan.safe();
+    let action = plan.action;
+    let name = plan.name.clone();
+    let installed_version = plan.installed_version.clone();
+    let changes = plan.changes.clone();
+    let blockers = plan.blockers.clone();
+    // Apply happens BEFORE any "applied" is printed: a failed apply must
+    // surface as the error it is, never after a success line.
+    if apply && safe {
+        plan.apply()?;
+    }
     let state = if !safe {
         "blocked"
     } else if apply {
@@ -404,24 +414,21 @@ fn remove(
     };
     if json {
         print_json(&serde_json::json!({
-            "action": plan.action,
-            "name": plan.name,
-            "installedVersion": plan.installed_version,
+            "action": action,
+            "name": name,
+            "installedVersion": installed_version,
             "state": state,
-            "changes": plan.changes,
-            "blockers": plan.blockers,
+            "changes": changes,
+            "blockers": blockers,
         }));
     } else {
-        println!("[mxrs] {} {}: {state}", plan.action, plan.name);
-        for change in &plan.changes {
+        println!("[mxrs] {action} {name}: {state}");
+        for change in &changes {
             println!("  change: {change}");
         }
-        for blocker in &plan.blockers {
+        for blocker in &blockers {
             println!("  blocker: {blocker}");
         }
-    }
-    if apply && safe {
-        plan.apply()?;
     }
     if safe {
         Ok(())

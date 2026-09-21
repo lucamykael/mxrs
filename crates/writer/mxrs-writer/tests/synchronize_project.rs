@@ -1027,3 +1027,49 @@ fn an_empty_demo_user_declaration_list_leaves_stored_demo_users_untouched() {
         "no declaration, no rewrite"
     );
 }
+
+#[test]
+fn a_stored_demo_user_no_declaration_covers_fails_closed_instead_of_vanishing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |module| {
+        module.role("User", "App user");
+    });
+    initial.security(|security| {
+        security
+            .clear_roles()
+            .role("Administrator", |role| {
+                role.administrator(true).module_role("Sales.User");
+            })
+            .role("User", |role| {
+                role.module_role("Sales.User");
+            });
+    });
+    mxrs_writer::write_project(&path, &initial.build()).unwrap();
+    // An imported project's stored user the new declaration does not name.
+    plant_stored_demo_user(&path, "Legacy", "imported-secret");
+
+    let declaration = secured_project(|user| {
+        user.role("User")
+            .password_from_env("MXRS_TEST_DEMO_USER_STILL_UNSET");
+    });
+    let error = mxrs_writer::synchronize_project(&path, &declaration).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            mxrs_writer::WriterError::UndeclaredStoredDemoUsers { ref names } if names == "Legacy"
+        ),
+        "{error}"
+    );
+    // Nothing was dropped: the stored user is still there.
+    let security = document_by_type(&path, "Security$ProjectSecurity");
+    let Some(mxrs_bson::Bson::Array(raw)) = security.get("DemoUsers") else {
+        panic!("DemoUsers array missing")
+    };
+    let users = mxrs_bson::parse_array(Some(raw)).items;
+    assert!(users.iter().any(|user| matches!(
+        user,
+        mxrs_bson::Bson::Document(doc) if doc.get_str("UserName").ok() == Some("Legacy")
+    )));
+}

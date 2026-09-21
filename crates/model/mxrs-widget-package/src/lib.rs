@@ -101,14 +101,21 @@ impl WidgetPackage {
 
 /// First matching definition across every `widgets/*.mpk` under `root`, in
 /// sorted path order — mirrors `Mxrb::WidgetPackage.find`, including
-/// skipping unreadable packages rather than failing the lookup.
-pub fn find(root: impl AsRef<Path>, widget_id: &str) -> Option<WidgetType> {
+/// skipping unreadable packages (corrupt zip, malformed XML) rather than
+/// failing the lookup. A package that *does* carry the widget but declares
+/// a property type this crate cannot represent is a loud error, not a
+/// miss — swallowing it would either silently drop the schema or report an
+/// installed widget as absent.
+pub fn find(root: impl AsRef<Path>, widget_id: &str) -> Result<Option<WidgetType>> {
     for path in mpk_paths(&root.as_ref().join("widgets")) {
-        if let Ok(Some(definition)) = WidgetPackage::new(path).definition(widget_id) {
-            return Some(definition);
+        match WidgetPackage::new(path).definition(widget_id) {
+            Ok(Some(definition)) => return Ok(Some(definition)),
+            Ok(None) => {}
+            Err(WidgetPackageError::Package { .. }) | Err(WidgetPackageError::Xml { .. }) => {}
+            Err(error) => return Err(error),
         }
     }
-    None
+    Ok(None)
 }
 
 fn mpk_paths(directory: &Path) -> Vec<PathBuf> {

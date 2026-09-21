@@ -252,3 +252,57 @@ fn removal_refuses_unknown_packages_and_blocks_on_local_edits_and_references() {
     // A wrong --mpr never matches the lock.
     assert!(plan_remove(root, "Toolkit", Some(Path::new("/tmp/other.mpr"))).is_err());
 }
+
+#[test]
+fn a_package_may_not_overwrite_assets_owned_by_another_locked_package() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mpr = target(root);
+    let first = package(
+        root,
+        "Toolkit",
+        &[("vendorlib/shared.jar", "toolkit's jar")],
+    );
+    install_module(
+        &first,
+        &mpr,
+        Some(root),
+        false,
+        &OfficialProvenance::default(),
+    )
+    .unwrap();
+
+    // A second package shipping the same file is refused at plan time.
+    let second = package(root, "Other", &[("vendorlib/shared.jar", "other's jar")]);
+    let error = install_module(
+        &second,
+        &mpr,
+        Some(root),
+        false,
+        &OfficialProvenance::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, MarketplaceError::ProtectedPackagePath(ref path) if path == "vendorlib/shared.jar"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("vendorlib/shared.jar")).unwrap(),
+        "toolkit's jar"
+    );
+    // The guard never blocks the owner itself: reinstalling Toolkit fails
+    // only because its module already exists in the target MPR, not on the
+    // protected path.
+    let error = install_module(
+        &first,
+        &mpr,
+        Some(root),
+        false,
+        &OfficialProvenance::default(),
+    )
+    .unwrap_err();
+    assert!(
+        !matches!(error, MarketplaceError::ProtectedPackagePath(_)),
+        "{error}"
+    );
+}

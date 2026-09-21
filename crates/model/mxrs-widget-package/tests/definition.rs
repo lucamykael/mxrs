@@ -242,10 +242,33 @@ fn find_scans_widgets_mpks_in_sorted_order_and_skips_unreadable_packages() {
     );
     write_mpk(&widgets.join("ccc.mpk"), &[("Rating.xml", WIDGET_XML)]);
 
-    let found = mxrs_widget_package::find(directory.path(), "com.example.rating.Rating").unwrap();
+    let found = mxrs_widget_package::find(directory.path(), "com.example.rating.Rating")
+        .unwrap()
+        .unwrap();
     assert_eq!(found.name, "Rating");
-    assert!(mxrs_widget_package::find(directory.path(), "com.example.Missing").is_none());
+    assert!(
+        mxrs_widget_package::find(directory.path(), "com.example.Missing")
+            .unwrap()
+            .is_none()
+    );
     // No `widgets/` directory at all is simply a miss.
     let empty = tempfile::tempdir().unwrap();
-    assert!(mxrs_widget_package::find(empty.path(), "com.example.rating.Rating").is_none());
+    assert!(
+        mxrs_widget_package::find(empty.path(), "com.example.rating.Rating")
+            .unwrap()
+            .is_none()
+    );
+    // A matching widget whose schema cannot be represented is loud, even
+    // through `find`.
+    write_mpk(
+        &widgets.join("ddd.mpk"),
+        &[(
+            "Bad.xml",
+            r#"<widget id="com.example.Bad"><properties>
+                 <property key="x" type="hologram"><caption/><description/></property>
+               </properties></widget>"#,
+        )],
+    );
+    let error = mxrs_widget_package::find(directory.path(), "com.example.Bad").unwrap_err();
+    assert!(error.to_string().contains("hologram"), "{error}");
 }

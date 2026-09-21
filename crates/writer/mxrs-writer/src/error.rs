@@ -34,6 +34,14 @@ pub enum WriterError {
     )]
     InvalidWidgetPropertyDefault { property: String, default: String },
 
+    #[error(
+        "stored demo user(s) {names} are not covered by the declared demo users; re-declare them (or remove them from the model explicitly) — dropping stored users silently is not a merge"
+    )]
+    UndeclaredStoredDemoUsers { names: String },
+
+    #[error("widget package error: {0}")]
+    WidgetPackage(String),
+
     #[error("association target {0:?} does not match any entity declared in this module")]
     UnknownAssociationTarget(String),
 

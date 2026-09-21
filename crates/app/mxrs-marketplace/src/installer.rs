@@ -179,11 +179,24 @@ pub fn plan_install(
 
     let units = collect_module_units(&source, &descriptor.module_name)?;
     validate_target(&mut target, &descriptor.module_name, &units)?;
+    let lock = crate::lock::read_lock(&target_root)?;
 
+    // Assets owned by a *different* locked package are protected: a package
+    // may not silently overwrite what another install put there — mxrb's
+    // `protected_package_assets` guard.
+    let protected: std::collections::BTreeSet<&String> = lock
+        .packages
+        .iter()
+        .filter(|(name, _)| name.as_str() != descriptor.module_name)
+        .flat_map(|(_, entry)| entry.files.iter())
+        .collect();
     let files = descriptor
         .files
         .iter()
         .map(|relative| {
+            if protected.contains(relative) {
+                return Err(MarketplaceError::ProtectedPackagePath(relative.clone()));
+            }
             let destination = safe_destination(&target_root, relative)?;
             Ok((relative.clone(), destination.is_file()))
         })

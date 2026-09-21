@@ -13,7 +13,7 @@
 //! content id to fetch manually, unmapped ones mirror mxrb's "no verified
 //! official Marketplace widget mapping".
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::lifecycle::{self, ModulePackageInventory, OfficialProvenance, with_rollback};
@@ -134,6 +134,7 @@ impl DependencyPlan {
                     .map(|package| OfficialProvenance {
                         content_id: Some(package.content.content_id.to_string()),
                         version_id: Some(package.version.version_id.clone()),
+                        version: Some(package.version.version_number.clone()),
                         source: Some("mendix".into()),
                         repository: None,
                     })
@@ -182,12 +183,12 @@ pub fn plan_dependencies<T: Transport>(
         downloads: downloads.path().to_path_buf(),
         project_modules: project_module_names(&mpr)?,
         required_widget_ids: widget_ids(&mpr)?,
-        resolved: BTreeMap::new(),
+        resolved: Vec::new(),
         visited: BTreeSet::new(),
         blockers: Vec::new(),
     };
     resolver.visit(&root, &root_archive)?;
-    resolver.widget_blockers();
+    resolver.widget_blockers()?;
     let mut seen = BTreeSet::new();
     let blockers: Vec<String> = resolver
         .blockers
@@ -196,7 +197,7 @@ pub fn plan_dependencies<T: Transport>(
         .collect();
     Ok(DependencyPlan {
         root,
-        dependencies: resolver.resolved.into_values().collect(),
+        dependencies: resolver.resolved,
         blockers,
         target,
         mpr,
@@ -211,7 +212,7 @@ struct Resolver<'api, T: Transport> {
     downloads: PathBuf,
     project_modules: Vec<String>,
     required_widget_ids: BTreeSet<String>,
-    resolved: BTreeMap<String, ResolvedDependency>,
+    resolved: Vec<ResolvedDependency>,
     visited: BTreeSet<String>,
     blockers: Vec<String>,
 }
@@ -243,11 +244,19 @@ impl<T: Transport> Resolver<'_, T> {
             };
             let name = dependency.module_name.clone();
             let archive = dependency.archive.clone();
-            let installed = read_lock(&self.target)?.packages.contains_key(&name);
-            if !installed {
-                self.resolved.entry(name.clone()).or_insert(dependency);
-            }
+            // Recurse first, record after — post-order, so the deepest
+            // dependency installs before whatever needs it (mxrb's
+            // `visit` inserts into `@resolved` after recursing).
             self.visit(&name, &archive)?;
+            let installed = read_lock(&self.target)?.packages.contains_key(&name);
+            if !installed
+                && !self
+                    .resolved
+                    .iter()
+                    .any(|existing| existing.module_name == name)
+            {
+                self.resolved.push(dependency);
+            }
         }
         Ok(())
     }
@@ -401,9 +410,15 @@ impl<T: Transport> Resolver<'_, T> {
     /// `DependencyResolver#resolve_widget_dependencies`, honestly scoped:
     /// every required-but-missing widget bundle is a blocker (see the
     /// module doc comment).
-    fn widget_blockers(&mut self) {
+    fn widget_blockers(&mut self) -> Result<()> {
         for widget_id in std::mem::take(&mut self.required_widget_ids) {
-            if mxrs_widget_package::find(&self.target, &widget_id).is_some() {
+            let installed = mxrs_widget_package::find(&self.target, &widget_id)
+                .map_err(|error| MarketplaceError::InvalidPackage {
+                    path: self.target.join("widgets").display().to_string(),
+                    message: error.to_string(),
+                })?
+                .is_some();
+            if installed {
                 continue;
             }
             match official_widget_content_id(&widget_id) {
@@ -417,6 +432,7 @@ impl<T: Transport> Resolver<'_, T> {
                 )),
             }
         }
+        Ok(())
     }
 }
 

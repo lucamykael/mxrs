@@ -562,14 +562,18 @@ fn pluggable_widget_value(
     class: &Option<String>,
     counter: &mut u32,
 ) -> Result<Value> {
-    let (widget_type, object) =
-        match packages_root.and_then(|root| mxrs_widget_package::find(root, &fallback.id)) {
-            Some(definition) => {
-                let object = default_object_node(catalog, &definition.object_type)?;
-                (definition, object)
-            }
-            None => (fallback, ObjectNode::new()),
-        };
+    let found = match packages_root {
+        Some(root) => mxrs_widget_package::find(root, &fallback.id)
+            .map_err(|error| WriterError::WidgetPackage(error.to_string()))?,
+        None => None,
+    };
+    let (widget_type, object) = match found {
+        Some(definition) => {
+            let object = default_object_node(catalog, &definition.object_type)?;
+            (definition, object)
+        }
+        None => (fallback, ObjectNode::new()),
+    };
     let mut widget = WidgetNode::new(widget_type, object);
     widget
         .extra

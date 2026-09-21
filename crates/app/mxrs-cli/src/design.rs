@@ -99,12 +99,15 @@ impl DesignSystem {
             .into_iter()
             .map(|path| {
                 let relative = relative_path(&root, &path);
-                let parsed = std::fs::read(&path)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-                (relative, parsed)
+                // An unreadable catalog is an I/O failure and loud (mxrb's
+                // File.read raises); one that is not valid JSON stays null,
+                // matching mxrb's parse rescue.
+                let bytes = std::fs::read(&path)
+                    .map_err(|error| format!("cannot read {relative}: {error}"))?;
+                let parsed = serde_json::from_slice(&bytes).ok();
+                Ok((relative, parsed))
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
             root,
             tokens,
