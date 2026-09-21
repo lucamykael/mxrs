@@ -34,6 +34,7 @@ fn boots_the_real_fixture_projects_end_to_end() {
         assert_eq!(boot.entities, named_entities, "{name}");
         let named_flows: usize = modules
             .iter()
+            .filter(|module| module.name.is_some())
             .map(|module| {
                 module
                     .microflows
@@ -44,7 +45,7 @@ fn boots_the_real_fixture_projects_end_to_end() {
                     .count()
             })
             .sum();
-        assert!(boot.documents <= named_flows, "{name}");
+        assert_eq!(boot.documents, named_flows, "{name}");
 
         // mxrb scaffolds projects at SecurityLevel CheckNothing; the derived
         // policy must agree instead of failing closed on a healthy fixture.

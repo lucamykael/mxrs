@@ -231,6 +231,9 @@ async fn dispatch(State(executor): State<Arc<dyn QueryRows>>, request: Request) 
             }),
         );
     }
+    // `to_bytes` with a limit fails either because the limit tripped or the
+    // connection broke mid-body; both are unusable requests and the limit is
+    // by far the common cause, so the honest-enough answer is 413.
     let bytes = match to_bytes(request.into_body(), MAX_BODY_BYTES + 1).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -252,7 +255,14 @@ async fn dispatch(State(executor): State<Arc<dyn QueryRows>>, request: Request) 
             );
         }
     };
-    let result = tokio::task::block_in_place(|| execute(executor.as_ref(), &payload));
+    let result =
+        match tokio::task::spawn_blocking(move || execute(executor.as_ref(), &payload)).await {
+            Ok(result) => result,
+            Err(_) => json!({
+                "ok": false,
+                "error": { "code": "query_failed", "message": "query execution panicked" },
+            }),
+        };
     let status = if result["ok"] == Value::Bool(true) {
         StatusCode::OK
     } else if result["error"]["code"] == "invalid_request" {

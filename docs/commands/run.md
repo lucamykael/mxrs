@@ -27,10 +27,19 @@ plus `MXRS_ENV`/`MXRS_API_PORT`. Interrupting terminates it (TERM, then
 reap); the frontend exiting non-zero on its own stops the run with
 `frontend process exited with status N`.
 
-## What is not ported yet
+## Flow execution
 
-Flow *execution*. Invoking a microflow answers `unknown_action` — stated in
-the boot banner — until the native flow interpreter (mxrb's
-`runtime/native.rb`, executor and access-control evaluation) lands. mxrb's
-external-backend presets (`flymetothemoon`/`onrails`) are Ruby-stack
-concepts with no mxrs equivalent.
+Every named microflow/nanoflow/rule is registered on the native interpreter
+(`mxrs-runtime-flows`, the port of mxrb's `runtime/native.rb`):
+`POST /api/microflow/<Module.Flow>` runs the model's own logic inside
+`Runtime::invoke`'s document authorization + transaction, and answers
+`{result, effects, log}` — client-facing activities (messages, page
+navigation, downloads, unadapted client actions) surface as `effects`.
+Java custom actions and web-service/mapping/document activities require
+explicitly registered adapters and fail with named errors otherwise.
+
+## What is not ported
+
+mxrb's external-backend presets (`flymetothemoon`/`onrails`) are Ruby-stack
+concepts with no mxrs equivalent, and the Mendix-Runtime-toolchain path
+(deployment build + real Runtime boot) stays outside this command.

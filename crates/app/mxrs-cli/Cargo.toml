@@ -37,6 +37,7 @@ mxrs-query-server = { path = "../mxrs-query-server" }
 mxrs-refactor = { path = "../mxrs-refactor" }
 mxrs-runtime = { path = "../mxrs-runtime" }
 mxrs-runtime-boot = { path = "../mxrs-runtime-boot" }
+mxrs-runtime-flows = { path = "../mxrs-runtime-flows" }
 mxrs-runtime-http = { path = "../mxrs-runtime-http" }
 mxrs-runtime-sqlite = { path = "../mxrs-runtime-sqlite" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }

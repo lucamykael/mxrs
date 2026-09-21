@@ -1,0 +1,19 @@
+[package]
+name = "mxrs-runtime-flows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Native microflow/nanoflow interpreter for the MXRS runtime: expression engine, graph execution, and data activities over the runtime store."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-runtime = { path = "../mxrs-runtime" }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }

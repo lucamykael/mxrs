@@ -764,6 +764,7 @@ dependencies = [
  "mxrs-refactor",
  "mxrs-runtime",
  "mxrs-runtime-boot",
+ "mxrs-runtime-flows",
  "mxrs-runtime-http",
  "mxrs-runtime-sqlite",
  "mxrs-scaffold",
@@ -1143,6 +1144,18 @@ dependencies = [
  "mxrs-runtime",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "mxrs-runtime-flows"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-model",
+ "mxrs-runtime",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

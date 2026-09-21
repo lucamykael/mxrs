@@ -272,8 +272,8 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "test" => (
             Status::Partial,
-            "mxrs test --plan",
-            "declarative JSON suite parsing plus exact microflow, parameter, hook and count-entity validation; runtime flow execution and reports are not ported",
+            "mxrs test",
+            "declarative JSON suites run on the MXRS-owned native flow interpreter (mxrb Native::Executor contract: shared store, setup/cleanup hooks, return and count expectations, [MXRS_TEST] transcript); --plan keeps the validation-only mode; the Mendix-Runtime-toolchain executor is not ported",
         ),
         "evaluate" => (
             Status::Partial,
@@ -407,12 +407,12 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "run" => (
             Status::Partial,
             "mxrs run",
-            "boots the MXRS-owned runtime in-process from the built model: store schema, fail-closed security policy (XPath-guarded rules deny), SQLite persistence, static web shell, and mxrb's Supervisor contract for the optional Vite frontend; flow execution stays an honest unknown action until the native interpreter is ported",
+            "boots the MXRS-owned runtime in-process from the built model: store schema, fail-closed security policy (XPath-guarded rules deny), SQLite persistence, static web shell, mxrb's Supervisor contract for the optional Vite frontend, and every named flow registered on the native interpreter (POST /api/microflow/<Module.Flow> executes model logic transactionally with effects and log); adapters for Java/client/web-service activities remain injectable seams",
         ),
         "serve" => (
             Status::Partial,
             "mxrs serve",
-            "full port of mxrb's loopback-only JSON query contract (sql XOR oql, translated OQL parameter checks, psql-variable binding, CSV-derived rows, 405/413/400/422 statuses) over the owned Docker database workspace; offline-tested end to end, live command oracle still missing",
+            "full port of mxrb's loopback-only JSON query contract (sql XOR oql, translated OQL parameter checks, psql-variable binding, CSV-derived rows, 405/413/400/422 statuses) over the owned Docker database workspace; raw-sql params are additionally bound instead of mxrb's silent discard; offline-tested end to end, live command oracle still missing",
         ),
         "validate" => (
             Status::Partial,

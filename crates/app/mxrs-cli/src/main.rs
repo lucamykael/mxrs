@@ -239,7 +239,7 @@ commands! {
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
     "translate-oql", "<query> [--dialect postgresql|sql_server|ansi]", "Translate the supported safe OQL subset", run_translate_oql;
     "team-server", "login --pat-file FILE [--json] | status DIR [--json]", "Configure a PAT pointer or inspect a local Team Server repository", run_team_server;
-    "test", "<file.mpr> <suite.json> --plan [--json]", "Validate a functional runtime test plan", run_test;
+    "test", "<file.mpr> <suite.json> [--plan] [--json]", "Run a functional test suite on the MXRS runtime, or validate its plan", run_test;
     "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
     "uml", "<file.mpr> --export class|activity|sequence [--format mermaid|plantuml] [--module NAME] [--microflow Module.Flow] [--root NAME] [--depth N]", "Export class, activity, or sequence diagrams as Mermaid or PlantUML", run_uml;
     "units", "<file.mpr>", "List native units and storage metadata", run_units;
@@ -1562,14 +1562,40 @@ fn run_test(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let plan_only = take_flag(&mut args, "--plan");
     let [project, definition] = args.as_slice() else {
-        eprintln!("Usage: mxrs test <file.mpr> <suite.json> --plan [--json]");
+        eprintln!("Usage: mxrs test <file.mpr> <suite.json> [--plan] [--json]");
         return ExitCode::FAILURE;
     };
     if !plan_only {
-        eprintln!(
-            "[mxrs] error: functional flow execution is not implemented; use --plan to validate the suite"
-        );
-        return ExitCode::FAILURE;
+        return match mxrs_cli::functional::execute(project, definition) {
+            Ok(report) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report)
+                            .expect("functional report is serializable")
+                    );
+                } else {
+                    print!("{}", report.transcript);
+                    for test in report.tests.iter().filter(|test| !test.passed) {
+                        println!("- {}: {}", test.name, test.message);
+                    }
+                    println!(
+                        "[mxrs] {}/{} test(s) passed",
+                        report.tests.iter().filter(|test| test.passed).count(),
+                        report.tests.len()
+                    );
+                }
+                if report.passed {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                ExitCode::FAILURE
+            }
+        };
     }
     match mxrs_cli::functional::plan(project, definition) {
         Ok(plan) => {
@@ -2314,22 +2340,22 @@ fn run_run(mut args: Vec<String>) -> ExitCode {
 /// mxrb's `run` accepts compatibility aliases for both ports but refuses a
 /// command line that names the same port twice.
 fn exclusive_port(args: &mut Vec<String>, names: &[&str], fallback: u16) -> Result<u16, String> {
-    let mut found: Option<String> = None;
+    let mut found: Option<(&str, String)> = None;
     for name in names {
         if let Some(value) = take_value(args, name) {
             if found.is_some() {
                 return Err(format!("use only one of {}", names.join(" or ")));
             }
-            found = Some(value);
+            found = Some((name, value));
         }
     }
     match found {
         None => Ok(fallback),
-        Some(value) => value
+        Some((flag, value)) => value
             .parse::<u16>()
             .ok()
             .filter(|port| *port > 0)
-            .ok_or_else(|| format!("{} requires an integer from 1 to 65535", names[0])),
+            .ok_or_else(|| format!("{flag} requires an integer from 1 to 65535")),
     }
 }
 

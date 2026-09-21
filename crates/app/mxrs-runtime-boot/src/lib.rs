@@ -5,9 +5,8 @@
 //! native executor performs): the domain model becomes a
 //! [`StoreSchema`], `Security$ProjectSecurity` plus per-entity access rules
 //! become a [`SecurityPolicy`], and every flow document lands in the policy's
-//! document inventory. Flow *execution* is deliberately not here — until the
-//! native flow interpreter is ported, an invoked flow fails honestly as an
-//! unknown action instead of pretending to run.
+//! document inventory. Flow *execution* deliberately lives elsewhere
+//! (`mxrs-runtime-flows`); this crate stays derivation-only.
 //!
 //! Security mapping is fail-closed in both directions mxrb is: a present
 //! security unit with an unknown `SecurityLevel` counts as enabled, and an
@@ -42,6 +41,9 @@ pub enum BootError {
 pub struct Boot {
     pub schema: StoreSchema,
     pub security: SecurityPolicy,
+    /// The decoded modules the schema and policy were derived from, kept so
+    /// callers (the flow engine, `mxrs run`) never re-open the project.
+    pub modules: Vec<Module>,
     pub entities: usize,
     pub documents: usize,
     /// `Entity.QualifiedName: xpath` pairs whose access rules were skipped
@@ -57,7 +59,7 @@ pub fn boot(path: impl AsRef<Path>) -> Result<Boot, BootError> {
         .modules()
         .map_err(|error| BootError::Model(error.to_string()))?;
     let security = project_security(&project)?;
-    build(&modules, security.as_ref())
+    build(modules, security.as_ref())
 }
 
 /// The first `Security$ProjectSecurity` unit, parsed. mxrb locates it the
@@ -78,13 +80,13 @@ fn project_security(project: &Project) -> Result<Option<Document>, BootError> {
     Ok(None)
 }
 
-pub fn build(modules: &[Module], security: Option<&Document>) -> Result<Boot, BootError> {
+pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, BootError> {
     let mut schema = StoreSchema::default();
     let mut entities = 0;
     let mut documents = BTreeMap::new();
     let mut entity_rules: BTreeMap<String, Vec<EntityRule>> = BTreeMap::new();
     let mut skipped_xpath_rules = Vec::new();
-    for module in modules {
+    for module in &modules {
         let Some(module_name) = module.name.as_deref() else {
             continue;
         };
@@ -120,13 +122,11 @@ pub fn build(modules: &[Module], security: Option<&Document>) -> Result<Boot, Bo
                     module_roles: rule.roles.iter().cloned().collect(),
                     create: rule.create,
                     delete: rule.delete,
-                    default_member_right: member_right(&rule.default_rights),
+                    default_member_right: Some(member_right(&rule.default_rights)),
                     member_rights: rule
                         .members
                         .iter()
-                        .filter_map(|member| {
-                            member_right(&member.rights).map(|right| (member.name.clone(), right))
-                        })
+                        .map(|member| (member.name.clone(), member_right(&member.rights)))
                         .collect(),
                 });
             }
@@ -164,6 +164,7 @@ pub fn build(modules: &[Module], security: Option<&Document>) -> Result<Boot, Bo
     Ok(Boot {
         schema,
         security: policy,
+        modules,
         entities,
         documents: document_count,
         skipped_xpath_rules,
@@ -206,14 +207,14 @@ fn apply_project_security(policy: &mut SecurityPolicy, security: &Document) {
 }
 
 /// mxrb's `AccessControl::RIGHTS`: `None`/`ReadOnly`/`ReadWrite`, matched
-/// case-insensitively; anything else carries no explicit right and falls
-/// back to the rule's default.
-fn member_right(rights: &str) -> Option<MemberRight> {
+/// case-insensitively. Anything else — including a missing or corrupted
+/// value — is a **denial** (`RIGHTS.fetch(…, :none)` in mxrb), never a
+/// fallback to broader rights.
+fn member_right(rights: &str) -> MemberRight {
     match rights.to_ascii_lowercase().as_str() {
-        "none" => Some(MemberRight::None),
-        "readonly" => Some(MemberRight::Read),
-        "readwrite" => Some(MemberRight::Write),
-        _ => None,
+        "readonly" => MemberRight::Read,
+        "readwrite" => MemberRight::Write,
+        _ => MemberRight::None,
     }
 }
 
@@ -323,7 +324,7 @@ mod tests {
             attribute("Open", AttributeType::Boolean, "TRUE"),
             attribute("Placed", AttributeType::DateTime, ""),
         ];
-        let boot = build(&[module_with("Sales", vec![order])], None).unwrap();
+        let boot = build(vec![module_with("Sales", vec![order])], None).unwrap();
         assert_eq!(boot.entities, 1);
         assert!(boot.schema.contains("Sales.Order"));
         let mut store = mxrs_runtime::Store::new(boot.schema.clone());
@@ -336,7 +337,7 @@ mod tests {
 
         let mut broken = entity("Sales", "Broken");
         broken.attributes = vec![attribute("Count", AttributeType::Integer, "many")];
-        let error = build(&[module_with("Sales", vec![broken])], None).unwrap_err();
+        let error = build(vec![module_with("Sales", vec![broken])], None).unwrap_err();
         assert!(matches!(error, BootError::InvalidDefault { .. }));
         assert!(error.to_string().contains("Sales.Broken"));
     }
@@ -359,14 +360,24 @@ mod tests {
                 delete: false,
                 documentation: String::new(),
                 default_rights: "ReadOnly".to_string(),
-                members: vec![AccessMember {
-                    id: None,
-                    name: "Total".to_string(),
-                    reference: String::new(),
-                    rights: "ReadWrite".to_string(),
-                    kind: AccessMemberKind::Attribute,
-                    raw: doc! {},
-                }],
+                members: vec![
+                    AccessMember {
+                        id: None,
+                        name: "Total".to_string(),
+                        reference: String::new(),
+                        rights: "ReadWrite".to_string(),
+                        kind: AccessMemberKind::Attribute,
+                        raw: doc! {},
+                    },
+                    AccessMember {
+                        id: None,
+                        name: "Notes".to_string(),
+                        reference: String::new(),
+                        rights: "Corrupted".to_string(),
+                        kind: AccessMemberKind::Attribute,
+                        raw: doc! {},
+                    },
+                ],
                 xpath: String::new(),
                 xpath_caption: None,
                 raw: doc! {},
@@ -403,7 +414,7 @@ mod tests {
                 }),
             ], 2),
         };
-        let boot = build(&[module_with("Sales", vec![order])], Some(&security)).unwrap();
+        let boot = build(vec![module_with("Sales", vec![order])], Some(&security)).unwrap();
         assert!(boot.security.enabled);
         assert_eq!(
             boot.skipped_xpath_rules,
@@ -433,6 +444,14 @@ mod tests {
             Some("Total"),
             &sales_user
         ));
+        // An unknown member right is a denial (mxrb's RIGHTS.fetch(…, :none)),
+        // never a fall-through to the rule's default.
+        assert!(!boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Read,
+            Some("Notes"),
+            &sales_user
+        ));
         // The XPath-guarded owner rule was skipped: an owner-role context
         // gains nothing rather than everything.
         let owner = SecurityContext {
@@ -458,9 +477,9 @@ mod tests {
             ("SomethingNew", true),
         ] {
             let security = doc! { "SecurityLevel": level };
-            let boot = build(&[], Some(&security)).unwrap();
+            let boot = build(Vec::new(), Some(&security)).unwrap();
             assert_eq!(boot.security.enabled, enabled, "{level}");
         }
-        assert!(!build(&[], None).unwrap().security.enabled);
+        assert!(!build(Vec::new(), None).unwrap().security.enabled);
     }
 }

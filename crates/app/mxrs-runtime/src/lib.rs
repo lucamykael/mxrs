@@ -321,6 +321,23 @@ impl Store {
         }
     }
 
+    /// Whether an object has ever been committed. Lifecycle semantics need
+    /// this distinction: committing a fresh object fires create events,
+    /// committing an already-committed one fires update events.
+    pub fn is_committed(&self, entity: &str, id: &str) -> bool {
+        self.committed
+            .get(entity)
+            .is_some_and(|records| records.contains_key(id))
+    }
+
+    /// Completes a root unit of work for callers that manage their own
+    /// snapshot/rollback instead of using [`Store::transaction`]: uncommitted
+    /// new records disappear and uncommitted changes revert, exactly like the
+    /// end of a successful transaction.
+    pub fn end_unit_of_work(&mut self) {
+        self.discard_uncommitted();
+    }
+
     fn discard_uncommitted(&mut self) {
         if self.dirty.is_empty() {
             return;

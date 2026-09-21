@@ -1,10 +1,11 @@
-//! Declarative functional-test planning for existing Mendix projects.
+//! Declarative functional tests for existing Mendix projects.
 //!
-//! This is the executable, read-only half of `mxrb test --plan`: suites are
-//! JSON rather than Ruby, and every target, hook, argument set, and count
-//! entity is checked against the MPR before a plan is accepted. Executing the
-//! model flow graph remains a separate runtime capability and is never
-//! inferred from a successful plan.
+//! `plan` is the read-only half of `mxrb test --plan`: suites are JSON
+//! rather than Ruby, and every target, hook, argument set, and count entity
+//! is checked against the MPR before a plan is accepted. `execute` ports
+//! mxrb's `Native::Executor`: the same suite runs on the MXRS-owned flow
+//! interpreter — one shared store across the suite, per-test setup/cleanup
+//! hooks, return and count expectations, and a `[MXRS_TEST]` transcript.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,8 @@ pub enum FunctionalError {
     Empty,
     #[error("functional test {test:?}: {message}")]
     Invalid { test: String, message: String },
+    #[error("cannot boot the runtime: {0}")]
+    Boot(#[from] mxrs_runtime_boot::BootError),
 }
 
 pub type Result<T> = std::result::Result<T, FunctionalError>;
@@ -137,6 +140,136 @@ pub fn plan(
         mendix_version: prepared.mendix_version,
         tests,
         execution_supported: false,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TestOutcome {
+    pub name: String,
+    pub passed: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExecutionReport {
+    pub project: PathBuf,
+    pub definition: PathBuf,
+    pub mendix_version: Option<String>,
+    pub tests: Vec<TestOutcome>,
+    pub transcript: String,
+    pub passed: bool,
+}
+
+/// Runs the suite on the MXRS flow interpreter. mxrb's `Native::Executor`
+/// contract: one interpreter and one store shared across the whole suite
+/// (each root call is its own unit of work), setup hook → call →
+/// expectations → cleanup hook, and any error fails that test with its
+/// message instead of aborting the suite.
+pub fn execute(
+    project_path: impl AsRef<Path>,
+    definition_path: impl AsRef<Path>,
+) -> Result<ExecutionReport> {
+    use mxrs_runtime_flows::{Expression, FlowEngine, NoObjects, Variables};
+
+    let prepared = prepare(project_path.as_ref(), definition_path.as_ref())?;
+    let boot = mxrs_runtime_boot::boot(&prepared.project)?;
+    let engine = FlowEngine::from_modules(&boot.modules);
+    let mut store = mxrs_runtime::Store::new(boot.schema.clone());
+    let expression = Expression::new();
+    let evaluated = |arguments: &BTreeMap<String, String>| {
+        let mut variables = Variables::new();
+        for (name, source) in arguments {
+            let value = expression
+                .evaluate(source, &Variables::new(), None, &NoObjects)
+                .map_err(|error| FunctionalError::Invalid {
+                    test: name.clone(),
+                    message: error.to_string(),
+                })?;
+            variables.insert(name.clone(), value);
+        }
+        Ok::<_, FunctionalError>(variables)
+    };
+    let mut tests = Vec::new();
+    for test in &prepared.definition.tests {
+        let outcome: std::result::Result<Vec<String>, String> = (|| {
+            let run_hook = |hook: &Option<Hook>, store: &mut mxrs_runtime::Store| {
+                if let Some(hook) = hook {
+                    engine
+                        .call(store, &hook.call, evaluated(&hook.arguments)?, None)
+                        .map_err(|error| FunctionalError::Invalid {
+                            test: hook.call.clone(),
+                            message: error.to_string(),
+                        })?;
+                }
+                Ok::<_, FunctionalError>(())
+            };
+            run_hook(&test.before, &mut store).map_err(|error| error.to_string())?;
+            let (actual, _) = engine
+                .call(
+                    &mut store,
+                    &test.call,
+                    evaluated(&test.arguments).map_err(|error| error.to_string())?,
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+            let mut failures = Vec::new();
+            if let Some(expected) = &test.expect.return_value {
+                let expected = expression
+                    .evaluate(expected, &Variables::new(), None, &NoObjects)
+                    .map_err(|error| error.to_string())?;
+                if !actual.equals(&expected) {
+                    failures.push(format!(
+                        "return {:?}, expected {:?}",
+                        actual.mendix_string(),
+                        expected.mendix_string()
+                    ));
+                }
+            }
+            for expectation in &test.expect.count {
+                let actual_count = engine
+                    .count(&store, &expectation.entity, expectation.xpath.as_deref())
+                    .map_err(|error| error.to_string())?;
+                if actual_count as u64 != expectation.equals {
+                    failures.push(format!(
+                        "{} count {actual_count}, expected {}",
+                        expectation.entity, expectation.equals
+                    ));
+                }
+            }
+            run_hook(&test.after, &mut store).map_err(|error| error.to_string())?;
+            Ok(failures)
+        })();
+        let (passed, message) = match outcome {
+            Ok(failures) if failures.is_empty() => (true, "passed".to_string()),
+            Ok(failures) => (false, failures.join("; ")),
+            Err(message) => (false, message),
+        };
+        tests.push(TestOutcome {
+            name: test.name.trim().to_string(),
+            passed,
+            message,
+        });
+    }
+    let mut transcript = tests
+        .iter()
+        .map(|test| {
+            format!(
+                "[MXRS_TEST] {} {}",
+                if test.passed { "PASS" } else { "FAIL" },
+                test.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    transcript.push_str("\n[MXRS_TEST] DONE\n");
+    let passed = tests.iter().all(|test| test.passed);
+    Ok(ExecutionReport {
+        project: prepared.project,
+        definition: prepared.definition_path,
+        mendix_version: prepared.mendix_version,
+        tests,
+        transcript,
+        passed,
     })
 }
 

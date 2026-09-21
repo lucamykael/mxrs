@@ -8,9 +8,10 @@
 //! the built `.mpr`, state persists through SQLite under `.mxrs/runtime/`,
 //! and [`mxrs_runtime_http::RuntimeHttp`] serves the built web shell.
 //!
-//! Flow execution is not pretended: until the native flow interpreter is
-//! ported, invoking a microflow over HTTP fails as an unknown action, and
-//! the boot banner says so.
+//! Every named flow is registered on [`mxrs_runtime_flows::FlowEngine`] —
+//! the native interpreter — so `POST /api/microflow/<Module.Flow>` executes
+//! the model's own logic inside `Runtime::invoke`'s transaction, returning
+//! the result plus the client effects and log the flow emitted.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -128,12 +129,12 @@ pub fn frontend_command(root: &Path, options: &RunOptions) -> Result<Command, Ru
             directory.display()
         )));
     }
-    if !directory.join("node_modules").is_dir() {
-        return Err(RunError::Frontend(
-            "frontend dependencies missing; run `npm install --prefix frontend`".to_string(),
-        ));
-    }
     let npm = std::env::var("MXRS_NPM").unwrap_or_else(|_| "npm".to_string());
+    if !directory.join("node_modules").is_dir() {
+        return Err(RunError::Frontend(format!(
+            "frontend dependencies missing; run `{npm} install --prefix frontend`"
+        )));
+    }
     let mut command = Command::new(npm);
     command
         .args(["run", "dev", "--"])
@@ -154,6 +155,48 @@ fn bind_address(options: &RunOptions) -> Result<SocketAddr, RunError> {
         })?,
     };
     Ok(SocketAddr::new(ip, options.server_port))
+}
+
+/// One model flow exposed as a runtime action: `Runtime::invoke` owns the
+/// document authorization and the transaction; the engine executes inside
+/// that unit of work and returns the result plus client effects and log.
+struct FlowAction {
+    engine: Arc<mxrs_runtime_flows::FlowEngine>,
+    name: String,
+    context: mxrs_runtime::SecurityContext,
+}
+
+impl mxrs_runtime::Action for FlowAction {
+    fn execute(
+        &self,
+        store: &mut Store,
+        arguments: &serde_json::Value,
+    ) -> mxrs_runtime::Result<serde_json::Value> {
+        let mut variables = mxrs_runtime_flows::Variables::new();
+        if let serde_json::Value::Object(map) = arguments {
+            for (name, value) in map {
+                variables.insert(
+                    name.clone(),
+                    mxrs_runtime_flows::FlowValue::from_member(value),
+                );
+            }
+        }
+        let mut execution = self.engine.new_execution(Some(self.context.clone()));
+        match self
+            .engine
+            .call_in_unit(store, &mut execution, &self.name, variables)
+        {
+            Ok(value) => Ok(serde_json::json!({
+                "result": value.to_json_shallow(),
+                "effects": execution.effects,
+                "log": execution.log,
+            })),
+            Err(mxrs_runtime_flows::FlowError::Runtime(error)) => Err(error),
+            Err(mxrs_runtime_flows::FlowError::Native(message)) => {
+                Err(mxrs_runtime::RuntimeError::Transaction(message))
+            }
+        }
+    }
 }
 
 /// What stopped the server: the interrupt signal, or the frontend process
@@ -182,7 +225,22 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     let restored = persistence
         .load(&mut store)
         .map_err(RunError::Persistence)?;
-    let runtime = Runtime::new(store, boot.security.clone());
+    let mut runtime = Runtime::new(store, boot.security.clone());
+    let engine = Arc::new(
+        mxrs_runtime_flows::FlowEngine::from_modules(&boot.modules)
+            .with_policy(boot.security.clone()),
+    );
+    let flow_names: Vec<String> = engine.flow_names().map(str::to_string).collect();
+    for name in &flow_names {
+        runtime.register_action(
+            name.clone(),
+            FlowAction {
+                engine: engine.clone(),
+                name: name.clone(),
+                context: mxrs_runtime::SecurityContext::default(),
+            },
+        );
+    }
     let http = RuntimeHttp::new(runtime, &target.web_root);
     let runtime_handle = http.runtime_handle();
 
@@ -201,7 +259,8 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
         );
     }
     println!(
-        "[mxrs] Flow execution is not ported yet: invoking a microflow answers unknown action"
+        "[mxrs] {} flow(s) registered on the native interpreter (POST /api/microflow/<Module.Flow>)",
+        flow_names.len()
     );
     println!(
         "[mxrs] Runtime server: http://{}:{}",
@@ -274,24 +333,24 @@ fn serve(http: RuntimeHttp, address: SocketAddr, frontend: Option<Child>) -> Res
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stop);
     };
-    tokio_runtime.block_on(http.serve_with_shutdown(address, shutdown))?;
+    // The server outcome is held, not propagated: a bind failure must still
+    // terminate an already-spawned frontend (mxrb's `ensure shutdown`), or a
+    // failed `mxrs run` leaks a Vite process holding the client port.
+    let served = tokio_runtime.block_on(http.serve_with_shutdown(address, shutdown));
     let stop = stop_reason
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    match stop {
+    let outcome = match stop {
         Some(Stop::Frontend(status)) => match status {
             Some(status) if status.success() => Ok(()),
-            Some(status) => Err(RunError::Frontend(match status.code() {
-                Some(code) => format!("frontend process exited with status {code}"),
-                None => "frontend process exited with a signal".to_string(),
-            })),
+            Some(status) => Err(RunError::Frontend(frontend_exit_message(status))),
             None => Err(RunError::Frontend(
                 "frontend process could not be awaited".to_string(),
             )),
         },
         _ => {
-            // Interrupt (or a server-side stop): terminate the frontend the
+            // Interrupt or a server-side stop: terminate the frontend the
             // way mxrb does, TERM then reap. std's `Child::kill` sends
             // SIGKILL, so the graceful signal goes through the system `kill`.
             if let Some(pid) = frontend_pid {
@@ -301,7 +360,23 @@ fn serve(http: RuntimeHttp, address: SocketAddr, frontend: Option<Child>) -> Res
             }
             Ok(())
         }
+    };
+    served?;
+    outcome
+}
+
+fn frontend_exit_message(status: ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("frontend process exited with status {code}");
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("frontend process exited with signal {signal}");
+        }
+    }
+    "frontend process exited with a signal".to_string()
 }
 
 #[cfg(test)]

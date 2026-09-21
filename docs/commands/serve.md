@@ -33,6 +33,10 @@ or `{ok: false, error: {code, message}, elapsed_ms}` with
 
 ## What differs from mxrb
 
+With raw `sql`, mxrb's server silently discards `params`; mxrs binds and
+validates them exactly as it does for OQL — strictly more useful, and a
+malformed set fails loudly instead of vanishing.
+
 mxrb enforces read-only access with a dedicated PostgreSQL reader role;
 this workspace has a single owner role, so the same guarantee comes from
 `PGOPTIONS=-c default_transaction_read_only=on` on every query plus the
