@@ -38,6 +38,17 @@ navigation, downloads, unadapted client actions) surface as `effects`.
 Java custom actions and web-service/mapping/document activities require
 explicitly registered adapters and fail with named errors otherwise.
 
+## Scheduled events
+
+Enabled `ScheduledEvents$ScheduledEvent` documents are armed on the ported
+scheduler (`mxrs-runtime-scheduler`, mxrb's `runtime/scheduler.rb`): modern
+Minute/Hour/Day/Week schedules and the legacy `IntervalType` pair, start
+dates, UTC and numeric-offset time zones (IANA names fail explicitly, like
+mxrb without tzinfo; `local` is treated as UTC), per-slot lease claims so a
+slot never fires twice, and a 1-second poll that executes due microflows on
+the native interpreter as system calls. Failures are logged per event; a
+scheduler-level failure stops the ticker, mirroring mxrb's run loop.
+
 ## What is not ported
 
 mxrb's external-backend presets (`flymetothemoon`/`onrails`) are Ruby-stack

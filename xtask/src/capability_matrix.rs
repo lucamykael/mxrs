@@ -340,7 +340,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "scheduled-event" => (
             Status::Partial,
             "mxrs scheduled-event new",
-            "scheduled event and handler scaffold plus a complete typed event/schedule IR covering all eight IntervalType values and four modern schedule shapes; command-contract oracle still missing",
+            "scheduled event and handler scaffold plus a complete typed event/schedule IR covering all eight IntervalType values and four modern schedule shapes; events now actually FIRE at runtime — mxrs run arms them on the ported scheduler (mxrs-runtime-scheduler: modern+legacy normalization, due-slot math with UTC/offset zones, lease coordination) driving the native interpreter; command-contract oracle still missing",
         ),
         "diff" => (
             Status::Verified,

@@ -38,6 +38,8 @@ pub enum RunError {
     Http(#[from] mxrs_runtime_http::HttpError),
     #[error("{0}")]
     Frontend(String),
+    #[error("invalid scheduled event: {0}")]
+    Scheduler(String),
     #[error("cannot access {path}: {source}")]
     Io {
         path: String,
@@ -243,6 +245,13 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     }
     let http = RuntimeHttp::new(runtime, &target.web_root);
     let runtime_handle = http.runtime_handle();
+    let jobs = mxrs_runtime_scheduler::jobs_from_modules(&boot.modules)
+        .map_err(|error| RunError::Scheduler(error.to_string()))?;
+    let scheduler = (!jobs.is_empty()).then(|| SchedulerTask {
+        scheduler: mxrs_runtime_scheduler::Scheduler::new(jobs),
+        engine: engine.clone(),
+        runtime: runtime_handle.clone(),
+    });
 
     println!("[mxrs] Environment: {}", profile.environment);
     println!(
@@ -262,6 +271,12 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
         "[mxrs] {} flow(s) registered on the native interpreter (POST /api/microflow/<Module.Flow>)",
         flow_names.len()
     );
+    if let Some(task) = &scheduler {
+        println!(
+            "[mxrs] {} scheduled event(s) armed (1s poll)",
+            task.scheduler.jobs().len()
+        );
+    }
     println!(
         "[mxrs] Runtime server: http://{}:{}",
         options.host, options.server_port
@@ -284,7 +299,7 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
         None
     };
 
-    let outcome = serve(http, address, frontend);
+    let outcome = serve(http, address, frontend, scheduler);
     let store_snapshot = runtime_handle
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -296,7 +311,64 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     Ok(())
 }
 
-fn serve(http: RuntimeHttp, address: SocketAddr, frontend: Option<Child>) -> Result<(), RunError> {
+/// The scheduler's runtime wiring: every tick locks the runtime and executes
+/// due flows on the interpreter as system calls (no security context — mxrb's
+/// scheduler executor does the same).
+struct SchedulerTask {
+    scheduler: mxrs_runtime_scheduler::Scheduler,
+    engine: Arc<mxrs_runtime_flows::FlowEngine>,
+    runtime: Arc<Mutex<mxrs_runtime::Runtime>>,
+}
+
+impl SchedulerTask {
+    async fn run(mut self) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs_f64())
+                .unwrap_or(0.0);
+            let engine = self.engine.clone();
+            let runtime = self.runtime.clone();
+            let mut executor = move |flow: &str| {
+                let mut runtime = runtime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                engine
+                    .call(
+                        runtime.store_mut(),
+                        flow,
+                        mxrs_runtime_flows::Variables::new(),
+                        None,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            };
+            match self.scheduler.tick(now, &mut executor) {
+                Ok(_) => {}
+                Err(error) => {
+                    // mxrb's run loop stops on a scheduler failure after
+                    // logging it; ticking on would repeat the same error
+                    // every second.
+                    eprintln!("[mxrs] scheduler failed: {error}");
+                    return;
+                }
+            }
+            for (job, message) in self.scheduler.errors.drain(..) {
+                eprintln!("[mxrs] scheduled event {job} failed: {message}");
+            }
+        }
+    }
+}
+
+fn serve(
+    http: RuntimeHttp,
+    address: SocketAddr,
+    frontend: Option<Child>,
+    scheduler: Option<SchedulerTask>,
+) -> Result<(), RunError> {
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -336,7 +408,14 @@ fn serve(http: RuntimeHttp, address: SocketAddr, frontend: Option<Child>) -> Res
     // The server outcome is held, not propagated: a bind failure must still
     // terminate an already-spawned frontend (mxrb's `ensure shutdown`), or a
     // failed `mxrs run` leaks a Vite process holding the client port.
-    let served = tokio_runtime.block_on(http.serve_with_shutdown(address, shutdown));
+    let served = tokio_runtime.block_on(async {
+        let ticker = scheduler.map(|task| tokio::spawn(task.run()));
+        let served = http.serve_with_shutdown(address, shutdown).await;
+        if let Some(ticker) = ticker {
+            ticker.abort();
+        }
+        served
+    });
     let stop = stop_reason
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

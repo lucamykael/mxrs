@@ -766,6 +766,7 @@ dependencies = [
  "mxrs-runtime-boot",
  "mxrs-runtime-flows",
  "mxrs-runtime-http",
+ "mxrs-runtime-scheduler",
  "mxrs-runtime-sqlite",
  "mxrs-scaffold",
  "mxrs-semantic",
@@ -1171,6 +1172,16 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "mxrs-runtime-scheduler"
+version = "0.1.0"
+dependencies = [
+ "mxrs-bson",
+ "mxrs-model",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

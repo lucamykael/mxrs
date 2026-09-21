@@ -1,0 +1,17 @@
+[package]
+name = "mxrs-runtime-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Scheduled-event runner for the MXRS runtime: schedule normalization, due-slot computation, and lease-coordinated dispatch."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-model = { path = "../../model/mxrs-model" }
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }

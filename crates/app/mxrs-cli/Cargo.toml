@@ -39,6 +39,7 @@ mxrs-runtime = { path = "../mxrs-runtime" }
 mxrs-runtime-boot = { path = "../mxrs-runtime-boot" }
 mxrs-runtime-flows = { path = "../mxrs-runtime-flows" }
 mxrs-runtime-http = { path = "../mxrs-runtime-http" }
+mxrs-runtime-scheduler = { path = "../mxrs-runtime-scheduler" }
 mxrs-runtime-sqlite = { path = "../mxrs-runtime-sqlite" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
@@ -49,7 +50,7 @@ serde.workspace = true
 sha2 = "0.10"
 tempfile = "3.27.0"
 thiserror.workspace = true
-tokio = { version = "1.52.0", features = ["rt-multi-thread", "signal"] }
+tokio = { version = "1.52.0", features = ["rt-multi-thread", "signal", "time"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 uuid = { version = "1", features = ["v4"] }
 
