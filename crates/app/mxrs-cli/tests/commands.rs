@@ -1284,3 +1284,22 @@ fn widgets_actions_validate_their_inputs_before_touching_any_toolchain() {
     let stderr = String::from_utf8_lossy(&no_project.stderr);
     assert!(stderr.contains("does not exist"), "{stderr}");
 }
+
+#[test]
+fn update_flags_are_mutually_exclusive_and_arguments_are_validated() {
+    let both = cli(&["update", "--check", "--changelog"]);
+    assert!(!both.status.success());
+    let stderr = String::from_utf8_lossy(&both.stderr);
+    assert!(
+        stderr.contains("only one of --check or --changelog"),
+        "{stderr}"
+    );
+
+    let extra = cli(&["update", "now"]);
+    assert!(!extra.status.success());
+    let stderr = String::from_utf8_lossy(&extra.stderr);
+    assert!(stderr.contains("Usage: mxrs update"), "{stderr}");
+
+    let unknown = cli(&["update", "--force"]);
+    assert!(!unknown.status.success());
+}

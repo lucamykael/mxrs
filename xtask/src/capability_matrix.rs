@@ -477,6 +477,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs uml",
             "byte-identical class/activity/sequence Mermaid and PlantUML exports and shared refusals: xtask command-oracle uml; the interactive browser viewer is not ported and is refused explicitly; docs/commands/uml.md",
         ),
+        "update" => (
+            Status::Partial,
+            "mxrs update",
+            "full port of mxrb's check/changelog/install contract onto lucamykael/mxrs GitHub releases (source checkouts refused, cargo-install runner seam tested); live-verified to report the real HTTP failure while the repository has no published releases, so no success path is verifiable yet",
+        ),
         "widgets" => (
             Status::Partial,
             "mxrs widgets",

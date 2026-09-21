@@ -103,6 +103,7 @@ fn command_options(
             &["--role"],
         ),
         "design" => (&["--target"], &["--apply", "--dry-run", "--json"], &[]),
+        "update" => (&[], &["--check", "--changelog"], &[]),
         "widgets" => (&["--project"], &[], &[]),
         "ci" | "constant" | "consumed-rest" | "entity" | "enumeration" | "evaluation"
         | "functional-test" | "integration" | "java-action" | "module" | "nanoflow"
@@ -221,6 +222,7 @@ commands! {
     "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
     "uml", "<file.mpr> --export class|activity|sequence [--format mermaid|plantuml] [--module NAME] [--microflow Module.Flow] [--root NAME] [--depth N]", "Export class, activity, or sequence diagrams as Mermaid or PlantUML", run_uml;
     "units", "<file.mpr>", "List native units and storage metadata", run_units;
+    "update", "[--check | --changelog]", "Check for or install the latest published mxrs release", run_update;
     "upgrade", "[--mendix VERSION] [--target DIR] [--apply] [--json]", "Preview or apply a generated layout and optional version upgrade", run_upgrade;
     "use-case", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold an application use-case microflow", run_use_case;
     "validate", "<file.mpr> [--json]", "Check storage-format integrity", run_validate;
@@ -1102,6 +1104,67 @@ fn run_widgets(mut args: Vec<String>) -> ExitCode {
         }
         None => {
             eprintln!("{USAGE}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_update(mut args: Vec<String>) -> ExitCode {
+    let check = take_flag(&mut args, "--check");
+    let show_changelog = take_flag(&mut args, "--changelog");
+    if check && show_changelog {
+        eprintln!("[mxrs] error: use only one of --check or --changelog");
+        return ExitCode::FAILURE;
+    }
+    if !args.is_empty() {
+        eprintln!("Usage: mxrs update [--check | --changelog]");
+        return ExitCode::FAILURE;
+    }
+    if show_changelog {
+        return match mxrs_cli::changelog::fetch(None) {
+            Ok(release) => {
+                println!(
+                    "{}\n\n{}\n\n{}",
+                    release.title,
+                    release.body.unwrap_or_default(),
+                    release.url
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: could not load the changelog: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let installed = env!("CARGO_PKG_VERSION");
+    let status = match mxrs_cli::update::status(installed) {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("[mxrs] error: could not check the latest published version: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if check {
+        if status.available() {
+            println!("[mxrs] Update available: {installed} -> {}", status.latest);
+            println!("[mxrs] Review it with `mxrs changelog`; install it with `mxrs update`.");
+        } else {
+            println!("[mxrs] {installed} is the latest published version.");
+        }
+        return ExitCode::SUCCESS;
+    }
+    if !status.available() {
+        println!("[mxrs] {installed} is already the latest published version.");
+        return ExitCode::SUCCESS;
+    }
+    match mxrs_cli::update::Updater::new().install(&status) {
+        Ok(()) => {
+            println!("[mxrs] Updated mxrs from {installed} to {}.", status.latest);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
             ExitCode::FAILURE
         }
     }

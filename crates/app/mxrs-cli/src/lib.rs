@@ -67,5 +67,6 @@ pub mod refactor;
 pub mod scaffold;
 pub mod team_server;
 pub mod uml;
+pub mod update;
 pub mod validate;
 pub mod widgets;

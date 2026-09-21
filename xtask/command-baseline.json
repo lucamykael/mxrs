@@ -69,7 +69,7 @@
   "test": "partial",
   "tree": "verified",
   "uml": "verified",
-  "update": "missing",
+  "update": "partial",
   "upgrade": "partial",
   "use-case": "partial",
   "validate": "partial",
