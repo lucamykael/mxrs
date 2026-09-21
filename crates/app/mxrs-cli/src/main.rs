@@ -2366,10 +2366,17 @@ fn run_oql(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let rows = queries
-        .iter()
-        .map(|query| (query, mxrs_oql::translate(&query.oql, dialect)))
-        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(queries.len());
+    for query in &queries {
+        let projection = match mxrs_oql::translate_project(&query.oql, dialect, &project) {
+            Ok(projection) => projection,
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        rows.push((query, projection));
+    }
     if json {
         let values = rows
             .iter()

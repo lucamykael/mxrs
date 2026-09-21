@@ -244,7 +244,8 @@ npm run build --prefix frontend
 mxrs package build/ExistingApp.mpr --web build/web --output build/ExistingApp.mxrs.tar
 mxrs verify-package build/ExistingApp.mxrs.tar
 
-# Inspect native OQL or project one safe query to logical SQL:
+# Inspect native OQL as physical runtime SQL, or project one safe ad-hoc query
+# to logical SQL:
 mxrs oql build/ExistingApp.mpr --dialect postgresql
 mxrs translate-oql 'SELECT o/Number FROM Sales.Order o'
 

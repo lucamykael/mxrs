@@ -1043,9 +1043,11 @@ name = "mxrs-oql"
 version = "0.1.0"
 dependencies = [
  "mxrs-dsl",
+ "mxrs-ir",
  "mxrs-model",
  "mxrs-writer",
  "serde",
+ "sha2",
  "tempfile",
  "thiserror",
 ]

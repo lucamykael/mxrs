@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OqlError {
@@ -40,6 +41,151 @@ pub struct Query {
     pub qualified_name: String,
     pub oql: String,
     pub parameters: Vec<String>,
+}
+
+/// The relational names used by the MXRS runtime for one association. They
+/// are derived from storage identities, never from display names, so renaming
+/// a model artifact does not change a query's physical target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssociationRelation {
+    pub qualified_name: String,
+    pub table: String,
+    pub from_entity: String,
+    pub from_table: String,
+    pub to_entity: String,
+    pub to_table: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EntityRelation {
+    qualified_name: String,
+    table: String,
+    columns: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RuntimeCatalog {
+    entities: BTreeMap<String, EntityRelation>,
+    associations: Vec<AssociationRelation>,
+}
+
+/// Derives the association tables using the same stable SHA-256 naming
+/// contract as `mxrs-runtime-sqlite`. Keeping this data explicit is the
+/// prerequisite for translating OQL association paths without guessing.
+pub fn association_relations(project: &mxrs_model::Project) -> Result<Vec<AssociationRelation>> {
+    Ok(runtime_catalog(project)?.associations)
+}
+
+fn runtime_catalog(project: &mxrs_model::Project) -> Result<RuntimeCatalog> {
+    let modules = project.modules()?;
+    let mut entity_names = BTreeMap::new();
+    let mut entities = BTreeMap::new();
+    for module in &modules {
+        let Some(module_name) = module.name.as_deref() else {
+            continue;
+        };
+        for entity in module.entities() {
+            let Some(name) = entity.qualified_name.clone().or_else(|| {
+                entity
+                    .name
+                    .as_ref()
+                    .map(|name| format!("{module_name}.{name}"))
+            }) else {
+                continue;
+            };
+            if let Some(id) = entity.id.as_ref() {
+                entity_names.insert(id.clone(), name.clone());
+            }
+            entity_names.insert(name.clone(), name.clone());
+            if !entity.persistable || entity.oql_view() {
+                continue;
+            }
+            let storage_key = entity
+                .data_storage_guid
+                .as_ref()
+                .filter(|key| !key.is_empty())
+                .cloned()
+                .or_else(|| entity.id.as_ref().filter(|key| !key.is_empty()).cloned())
+                .unwrap_or_else(|| name.clone());
+            let columns = entity
+                .attributes
+                .iter()
+                .filter_map(|attribute| {
+                    let name = attribute.name.as_ref()?.clone();
+                    let key = attribute
+                        .data_storage_guid
+                        .as_ref()
+                        .filter(|key| !key.is_empty())
+                        .cloned()
+                        .or_else(|| attribute.id.as_ref().filter(|key| !key.is_empty()).cloned())
+                        .unwrap_or_else(|| format!("{storage_key}:{name}"));
+                    Some((name.to_ascii_lowercase(), physical_name("attribute", &key)))
+                })
+                .collect();
+            entities.insert(
+                name.clone(),
+                EntityRelation {
+                    qualified_name: name,
+                    table: physical_name("entity", &storage_key),
+                    columns,
+                },
+            );
+        }
+    }
+
+    let mut relations = Vec::new();
+    for module in &modules {
+        let Some(module_name) = module.name.as_deref() else {
+            continue;
+        };
+        for association in module.associations() {
+            let Some(name) = association.name.as_deref() else {
+                continue;
+            };
+            let Some(from) = association
+                .from_entity_id
+                .as_ref()
+                .and_then(|id| entity_names.get(id))
+            else {
+                continue;
+            };
+            let Some(to) = association
+                .to_entity_id
+                .as_ref()
+                .and_then(|target| entity_names.get(target))
+            else {
+                continue;
+            };
+            let (Some(from_relation), Some(to_relation)) = (entities.get(from), entities.get(to))
+            else {
+                continue;
+            };
+            let qualified_name = format!("{module_name}.{name}");
+            let storage_key = association
+                .id
+                .clone()
+                .unwrap_or_else(|| qualified_name.clone());
+            relations.push(AssociationRelation {
+                qualified_name,
+                table: physical_name("association", &storage_key),
+                from_entity: from.clone(),
+                from_table: from_relation.table.clone(),
+                to_entity: to.clone(),
+                to_table: to_relation.table.clone(),
+            });
+        }
+    }
+    relations.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
+    Ok(RuntimeCatalog {
+        entities,
+        associations: relations,
+    })
+}
+
+fn physical_name(kind: &str, key: &str) -> String {
+    let digest = Sha256::digest(key.as_bytes());
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("mxrb_{kind}_{}", &hex[..20])
 }
 
 pub fn catalog(project: &mxrs_model::Project) -> Result<Vec<Query>> {
@@ -114,12 +260,34 @@ pub fn parameters(source: &str) -> Vec<String> {
 }
 
 pub fn translate(source: &str, dialect: Dialect) -> Projection {
+    translate_with_catalog(source, dialect, None)
+}
+
+/// Projects OQL stored in an MPR onto the physical tables created by MXRS's
+/// SQLite runtime. Unlike [`translate`], this mode has the storage identities
+/// needed to expand an association-path `JOIN` without guessing.
+pub fn translate_project(
+    source: &str,
+    dialect: Dialect,
+    project: &mxrs_model::Project,
+) -> Result<Projection> {
+    let catalog = runtime_catalog(project)?;
+    Ok(translate_with_catalog(source, dialect, Some(&catalog)))
+}
+
+type Aliases = BTreeMap<String, Option<EntityRelation>>;
+
+fn translate_with_catalog(
+    source: &str,
+    dialect: Dialect,
+    catalog: Option<&RuntimeCatalog>,
+) -> Projection {
     let original_parameters = parameters(source);
     let mut tokens = tokenize(source);
     if let Some(warning) = validate(&tokens) {
         return unsupported(dialect, original_parameters, warning);
     }
-    if has_association_source(&tokens) {
+    if catalog.is_none() && has_association_source(&tokens) {
         return unsupported(
             dialect,
             original_parameters,
@@ -127,8 +295,27 @@ pub fn translate(source: &str, dialect: Dialect) -> Projection {
         );
     }
     reorder_from_first(&mut tokens);
-    let aliases = translate_entities(&mut tokens, dialect);
-    translate_attributes(&mut tokens, dialect, &aliases);
+    let mut aliases = match translate_entities(&mut tokens, dialect, catalog) {
+        Ok(aliases) => aliases,
+        Err(warning) => return unsupported(dialect, original_parameters, &warning),
+    };
+    if let Some(catalog) = catalog {
+        if let Err(warning) =
+            translate_association_joins(&mut tokens, dialect, catalog, &mut aliases)
+        {
+            return unsupported(dialect, original_parameters, &warning);
+        }
+        if has_association_source(&tokens) {
+            return unsupported(
+                dialect,
+                original_parameters,
+                "association paths in FROM sources are not supported; use an aliased JOIN path",
+            );
+        }
+    }
+    if let Err(warning) = translate_attributes(&mut tokens, dialect, &aliases) {
+        return unsupported(dialect, original_parameters, &warning);
+    }
     for token in &mut tokens {
         if token.kind == TokenKind::Parameter {
             let name = token.text.trim_start_matches('$');
@@ -148,10 +335,19 @@ pub fn translate(source: &str, dialect: Dialect) -> Projection {
                 .to_string(),
         ),
         dialect,
-        confidence: "logical".to_string(),
-        warnings: vec![
-            "Logical projection only; Mendix Runtime storage mappings are not applied.".to_string(),
-        ],
+        confidence: if catalog.is_some() {
+            "physical".to_string()
+        } else {
+            "logical".to_string()
+        },
+        warnings: if catalog.is_some() {
+            Vec::new()
+        } else {
+            vec![
+                "Logical projection only; Mendix Runtime storage mappings are not applied."
+                    .to_string(),
+            ]
+        },
         parameters: original_parameters,
     }
 }
@@ -235,7 +431,11 @@ fn reorder_from_first(tokens: &mut Vec<Token>) {
     *tokens = reordered;
 }
 
-fn translate_entities(tokens: &mut [Token], dialect: Dialect) -> BTreeMap<String, String> {
+fn translate_entities(
+    tokens: &mut [Token],
+    dialect: Dialect,
+    catalog: Option<&RuntimeCatalog>,
+) -> std::result::Result<Aliases, String> {
     let mut aliases = BTreeMap::new();
     let indices = significant(tokens);
     for (position, index) in indices.iter().copied().enumerate() {
@@ -259,7 +459,22 @@ fn translate_entities(tokens: &mut [Token], dialect: Dialect) -> BTreeMap<String
         }
         let module = identifier_text(&tokens[first]);
         let entity_name = identifier_text(&tokens[entity]);
-        tokens[first].text = quote(&format!("{module}${entity_name}"), dialect);
+        let relation = catalog
+            .map(|catalog| {
+                catalog
+                    .entities
+                    .get(&format!("{module}.{entity_name}"))
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("no physical runtime table for entity {module}.{entity_name}")
+                    })
+            })
+            .transpose()?;
+        let table = relation
+            .as_ref()
+            .map(|relation| relation.table.clone())
+            .unwrap_or_else(|| format!("{module}${entity_name}"));
+        tokens[first].text = quote(&table, dialect);
         tokens[dot].text.clear();
         tokens[entity].text.clear();
         let alias_index = indices.get(position + 4).copied().and_then(|next| {
@@ -274,16 +489,16 @@ fn translate_entities(tokens: &mut [Token], dialect: Dialect) -> BTreeMap<String
             .map(|next| identifier_text(&tokens[next]))
             .filter(|value| !stop_word(value))
             .unwrap_or_else(|| entity_name.clone());
-        aliases.insert(alias.to_ascii_lowercase(), entity_name);
+        aliases.insert(alias.to_ascii_lowercase(), relation);
     }
-    aliases
+    Ok(aliases)
 }
 
 fn translate_attributes(
     tokens: &mut [Token],
     dialect: Dialect,
-    aliases: &BTreeMap<String, String>,
-) {
+    aliases: &Aliases,
+) -> std::result::Result<(), String> {
     let indices = significant(tokens);
     for window in indices.windows(3) {
         let [left, separator, attribute] = *window else {
@@ -295,11 +510,182 @@ fn translate_attributes(
         {
             continue;
         }
-        if aliases.contains_key(&identifier_text(&tokens[left]).to_ascii_lowercase()) {
+        if let Some(relation) = aliases.get(&identifier_text(&tokens[left]).to_ascii_lowercase()) {
             tokens[separator].text = ".".to_string();
-            tokens[attribute].text = quote(&identifier_text(&tokens[attribute]), dialect);
+            let attribute_name = identifier_text(&tokens[attribute]);
+            let column = relation
+                .as_ref()
+                .map(|relation| {
+                    if attribute_name.eq_ignore_ascii_case("id") {
+                        Ok("id".to_string())
+                    } else {
+                        relation
+                            .columns
+                            .get(&attribute_name.to_ascii_lowercase())
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!(
+                                    "unknown attribute {} on entity {}",
+                                    attribute_name, relation.qualified_name
+                                )
+                            })
+                    }
+                })
+                .transpose()?
+                .unwrap_or(attribute_name);
+            tokens[attribute].text = quote(&column, dialect);
         }
     }
+    Ok(())
+}
+
+/// Expands `JOIN source_alias/Module.Association [AS] target_alias` into the
+/// two concrete runtime joins. The grammar intentionally excludes an explicit
+/// `ON` clause: association paths already carry the only valid join condition.
+fn translate_association_joins(
+    tokens: &mut [Token],
+    dialect: Dialect,
+    catalog: &RuntimeCatalog,
+    aliases: &mut Aliases,
+) -> std::result::Result<(), String> {
+    let indices = significant(tokens);
+    let mut generated = 0_usize;
+    for (position, join) in indices.iter().copied().enumerate() {
+        if tokens[join].kind != TokenKind::Word || !tokens[join].text.eq_ignore_ascii_case("JOIN") {
+            continue;
+        }
+        let Some(source) = indices.get(position + 1).copied() else {
+            continue;
+        };
+        let Some(slash) = indices.get(position + 2).copied() else {
+            continue;
+        };
+        if tokens[slash].text != "/" || !identifier(&tokens[source]) {
+            continue;
+        }
+        let (Some(module), Some(dot), Some(association)) = (
+            indices.get(position + 3).copied(),
+            indices.get(position + 4).copied(),
+            indices.get(position + 5).copied(),
+        ) else {
+            return Err("association JOIN is missing its qualified association name".to_string());
+        };
+        if tokens[dot].text != "."
+            || !identifier(&tokens[module])
+            || !identifier(&tokens[association])
+        {
+            return Err("association JOIN must name Module.Association".to_string());
+        }
+        let source_alias = identifier_text(&tokens[source]);
+        let Some(Some(source_entity)) = aliases.get(&source_alias.to_ascii_lowercase()) else {
+            return Err(format!(
+                "association JOIN source alias {source_alias} is unknown"
+            ));
+        };
+        let association_name = format!(
+            "{}.{}",
+            identifier_text(&tokens[module]),
+            identifier_text(&tokens[association])
+        );
+        let Some(relation) = catalog
+            .associations
+            .iter()
+            .find(|relation| relation.qualified_name == association_name)
+        else {
+            return Err(format!("unknown association {association_name}"));
+        };
+        let (target_entity, target_table, source_column, target_column) =
+            if source_entity.qualified_name == relation.from_entity {
+                (
+                    relation.to_entity.clone(),
+                    relation.to_table.clone(),
+                    "source_id",
+                    "target_id",
+                )
+            } else if source_entity.qualified_name == relation.to_entity {
+                (
+                    relation.from_entity.clone(),
+                    relation.from_table.clone(),
+                    "target_id",
+                    "source_id",
+                )
+            } else {
+                return Err(format!(
+                    "association {association_name} does not connect source entity {}",
+                    source_entity.qualified_name
+                ));
+            };
+        let target_relation = catalog
+            .entities
+            .get(&target_entity)
+            .cloned()
+            .ok_or_else(|| format!("no physical runtime table for entity {target_entity}"))?;
+        let mut last = association;
+        let alias_candidate = indices.get(position + 6).copied();
+        let alias_index = alias_candidate.and_then(|candidate| {
+            if tokens[candidate].text.eq_ignore_ascii_case("AS") {
+                let next = indices.get(position + 7).copied();
+                last = next.unwrap_or(candidate);
+                next
+            } else {
+                Some(candidate)
+            }
+        });
+        let target_alias = alias_index
+            .filter(|candidate| {
+                identifier(&tokens[*candidate]) && !stop_word(&identifier_text(&tokens[*candidate]))
+            })
+            .map(|candidate| {
+                last = candidate;
+                identifier_text(&tokens[candidate])
+            })
+            .unwrap_or_else(|| {
+                target_entity
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&target_entity)
+                    .to_string()
+            });
+        if aliases.contains_key(&target_alias.to_ascii_lowercase()) {
+            return Err(format!(
+                "association JOIN alias {target_alias} is already in use"
+            ));
+        }
+        if let Some(next) = indices
+            .iter()
+            .copied()
+            .skip_while(|index| *index != last)
+            .nth(1)
+            && tokens[next].text.eq_ignore_ascii_case("ON")
+        {
+            return Err("association JOIN paths cannot include an explicit ON clause".to_string());
+        }
+        let bridge = format!("_mxrs_assoc_{generated}");
+        generated += 1;
+        tokens[join].text = format!(
+            "JOIN {} AS {} ON {}.{} = {}.{} JOIN {} AS {} ON {}.{} = {}.{}",
+            quote(&relation.table, dialect),
+            quote(&bridge, dialect),
+            source_alias,
+            quote("id", dialect),
+            quote(&bridge, dialect),
+            quote(source_column, dialect),
+            quote(&target_table, dialect),
+            target_alias,
+            quote(&bridge, dialect),
+            quote(target_column, dialect),
+            target_alias,
+            quote("id", dialect),
+        );
+        for index in indices.iter().copied().skip(position + 1) {
+            tokens[index].text.clear();
+            if index == last {
+                break;
+            }
+        }
+        aliases.insert(target_alias.to_ascii_lowercase(), Some(target_relation));
+    }
+    Ok(())
 }
 
 fn top_level_keyword(tokens: &[Token], keyword: &str, after: usize) -> Option<usize> {
@@ -526,6 +912,58 @@ fn finding(rule: &str, severity: &str, fragment: &str, message: &str) -> Finding
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mxrs_dsl::ProjectBuilder;
+    use mxrs_model::Project;
+
+    #[allow(non_camel_case_types)]
+    mod model {
+        pub struct Order;
+        impl mxrs_ir::EntityMarker for Order {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "Order";
+        }
+
+        pub struct Customer;
+        impl mxrs_ir::EntityMarker for Customer {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "Customer";
+        }
+
+        pub struct Order_Customer;
+        impl mxrs_ir::AssociationMarker for Order_Customer {
+            type From = Order;
+            type To = Customer;
+            const NAME: &'static str = "Order_Customer";
+            const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
+        }
+    }
+
+    fn physical_catalog() -> RuntimeCatalog {
+        let order = EntityRelation {
+            qualified_name: "Sales.Order".to_string(),
+            table: "mxrb_entity_order".to_string(),
+            columns: BTreeMap::from([("number".to_string(), "mxrb_attribute_number".to_string())]),
+        };
+        let customer = EntityRelation {
+            qualified_name: "Sales.Customer".to_string(),
+            table: "mxrb_entity_customer".to_string(),
+            columns: BTreeMap::from([("name".to_string(), "mxrb_attribute_name".to_string())]),
+        };
+        RuntimeCatalog {
+            entities: BTreeMap::from([
+                (order.qualified_name.clone(), order.clone()),
+                (customer.qualified_name.clone(), customer.clone()),
+            ]),
+            associations: vec![AssociationRelation {
+                qualified_name: "Sales.Order_Customer".to_string(),
+                table: "mxrb_association_order_customer".to_string(),
+                from_entity: order.qualified_name.clone(),
+                from_table: order.table.clone(),
+                to_entity: customer.qualified_name.clone(),
+                to_table: customer.table.clone(),
+            }],
+        }
+    }
 
     #[test]
     fn parameters_ignore_strings_comments_and_deduplicate() {
@@ -561,6 +999,82 @@ mod tests {
         assert!(!translate("DELETE FROM Sales.Order", Dialect::Ansi).supported());
         assert!(!translate("SELECT * FROM Sales.Order; SELECT 1", Dialect::Ansi).supported());
         assert!(!translate("SELECT * FROM Sales.Order/Customer", Dialect::Ansi).supported());
+    }
+
+    #[test]
+    fn project_projection_uses_physical_storage_and_expands_association_joins() {
+        let projection = translate_with_catalog(
+            "SELECT c/Name FROM Sales.Order o JOIN o/Sales.Order_Customer c",
+            Dialect::PostgreSql,
+            Some(&physical_catalog()),
+        );
+        assert_eq!(projection.confidence, "physical");
+        assert_eq!(projection.warnings, Vec::<String>::new());
+        let sql = projection.sql.unwrap();
+        assert!(sql.contains("FROM \"mxrb_entity_order\" o"), "{sql}");
+        assert!(
+            sql.contains("JOIN \"mxrb_association_order_customer\" AS \"_mxrs_assoc_0\""),
+            "{sql}"
+        );
+        assert!(sql.contains("JOIN \"mxrb_entity_customer\" AS c"), "{sql}");
+        assert!(sql.contains("c.\"mxrb_attribute_name\""), "{sql}");
+    }
+
+    #[test]
+    fn project_projection_rejects_unknown_physical_attributes_and_explicit_path_conditions() {
+        let unknown = translate_with_catalog(
+            "SELECT o/Missing FROM Sales.Order o",
+            Dialect::Ansi,
+            Some(&physical_catalog()),
+        );
+        assert!(!unknown.supported());
+        assert!(unknown.warnings[0].contains("unknown attribute Missing"));
+        let explicit_condition = translate_with_catalog(
+            "SELECT c/Name FROM Sales.Order o JOIN o/Sales.Order_Customer c ON c/id = o/id",
+            Dialect::Ansi,
+            Some(&physical_catalog()),
+        );
+        assert!(!explicit_condition.supported());
+        assert!(explicit_condition.warnings[0].contains("explicit ON"));
+    }
+
+    #[test]
+    fn project_projection_matches_runtime_storage_derived_from_a_real_mpr() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Oql.mpr");
+        let mut source = ProjectBuilder::new("11.12.1");
+        source.module("Sales", |module| {
+            module.entity("Customer", |entity| {
+                entity.string("Name");
+            });
+            module.entity("Order", |entity| {
+                entity.string("Number");
+                entity.association::<model::Order_Customer>();
+            });
+        });
+        mxrs_writer::write_project(&path, &source.build()).unwrap();
+        let project = Project::open(&path, true).unwrap();
+        let relation = association_relations(&project).unwrap().pop().unwrap();
+        let projection = translate_project(
+            "SELECT c/Name FROM Sales.Order o JOIN o/Sales.Order_Customer c",
+            Dialect::PostgreSql,
+            &project,
+        )
+        .unwrap();
+        let sql = projection.sql.unwrap();
+        assert_eq!(projection.confidence, "physical");
+        assert!(
+            sql.contains(&quote(&relation.table, Dialect::PostgreSql)),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&quote(&relation.from_table, Dialect::PostgreSql)),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&quote(&relation.to_table, Dialect::PostgreSql)),
+            "{sql}"
+        );
     }
 
     #[test]
