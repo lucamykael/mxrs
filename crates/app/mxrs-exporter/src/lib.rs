@@ -2937,7 +2937,14 @@ fn render_entity(
             entity.documentation
         );
     }
-    let _ = writeln!(out, "                persistable {};", entity.persistable);
+    // `oql_view` is non-persistable by definition in the authoring DSL. Some
+    // native projects still carry a contradictory legacy flag, which must not
+    // make the generated Cargo project fail to compile.
+    let _ = writeln!(
+        out,
+        "                persistable {};",
+        entity.persistable && !entity.oql_view()
+    );
     if let Some(image) = entity.image.as_deref().filter(|image| !image.is_empty()) {
         let _ = writeln!(out, "                image {image:?};");
     } else {
@@ -3575,6 +3582,33 @@ mod tests {
             module_roles: vec![],
             artifact_units: vec![],
         }
+    }
+
+    #[test]
+    fn contradictory_native_oql_view_is_rendered_as_non_persistable_rust() {
+        let report = entity(
+            "Report",
+            "Sales.Report",
+            mxrs_bson::doc! {
+                "persistable": true,
+                "source": {
+                    "$Type": "DomainModels$OqlViewEntitySource",
+                    "SourceDocument": "Sales.ReportSource",
+                },
+            },
+        );
+        let rendered = render_entity(
+            "Sales",
+            &report,
+            &[],
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+        assert!(rendered.contains("persistable false;"), "{rendered}");
+        assert!(
+            rendered.contains("oql_view Sales::ReportSource;"),
+            "{rendered}"
+        );
     }
 
     #[test]
