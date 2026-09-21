@@ -422,7 +422,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "marketplace" => (
             Status::Partial,
             "mxrs marketplace search/show/versions/download/install/list/remove/dependencies",
-            "official Content API client plus .mpk module install (live-API-verified), a marketplace lockfile, blocker-guarded transactional removal, recursive dependency resolution from unresolved model references, and standalone official widget install (envelope-kind dispatch, asset-owner collision guard, offline-tested end to end including the live-candidate resolve/download/verify path); `update`/`audit`/`verify` remain unported and are reported honestly",
+            "official Content API client plus .mpk module install (live-API-verified), a marketplace lockfile, blocker-guarded transactional removal, recursive dependency resolution from unresolved model references, standalone official widget install (envelope-kind dispatch, asset-owner collision guard), and reference-safe official update (resolve/download/replace-units/restore-obsolete-assets/replace-cache, offline-tested end to end); `audit`/`verify` remain unported and are reported honestly",
         ),
         "mda" => (
             Status::Verified,

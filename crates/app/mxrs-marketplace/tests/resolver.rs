@@ -400,3 +400,98 @@ fn a_required_standalone_widget_resolves_downloads_verifies_and_installs() {
     assert!(plan.safe(), "{:?}", plan.blockers);
     assert!(plan.widget_dependencies.is_empty());
 }
+
+/// Serves a fixed content id's search-independent detail/versions for an
+/// update, and downloads a caller-supplied archive.
+struct FakeUpdateContentApi {
+    content_id: &'static str,
+    version_number: &'static str,
+    archive: PathBuf,
+}
+
+impl Transport for FakeUpdateContentApi {
+    fn get(&self, url: &str, _authorization: &str) -> mxrs_marketplace::Result<String> {
+        if url.contains(&format!("/content/{}/versions", self.content_id)) {
+            return Ok(format!(
+                r#"{{"items":[{{"name":"Toolkit","versionId":"v2","versionNumber":"{}","minSupportedMendixVersion":"9.0.0","versionType":"Regular"}}]}}"#,
+                self.version_number
+            ));
+        }
+        if url.contains(&format!("/content/{}", self.content_id)) {
+            return Ok(format!(
+                r#"{{"contentId":{},"publisher":"Mendix","type":"Module","isPrivate":false,"isCompanyApproved":true,"latestVersion":{{"name":"Toolkit","versionId":"v2","versionNumber":"{}"}}}}"#,
+                self.content_id, self.version_number
+            ));
+        }
+        Err(mxrs_marketplace::MarketplaceError::Status {
+            status: 404,
+            url: url.to_string(),
+        })
+    }
+
+    fn download(
+        &self,
+        _url: &str,
+        _authorization: Option<&str>,
+        destination: &Path,
+    ) -> mxrs_marketplace::Result<Download> {
+        std::fs::copy(&self.archive, destination).unwrap();
+        Ok(Download::Written(
+            std::fs::metadata(destination).unwrap().len(),
+        ))
+    }
+}
+
+#[test]
+fn plan_update_official_resolves_downloads_and_updates_the_installed_module() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mpr = target(root);
+    let build_dir = root.join(format!("build-{}", next_id()));
+    std::fs::create_dir_all(&build_dir).unwrap();
+    let mut builder = mxrs_dsl::ProjectBuilder::new(SUPPORTED_VERSION);
+    builder.module("Toolkit", |module| {
+        module.microflow("ACT_Original", |_flow| {});
+    });
+    mxrs_writer::write_project(build_dir.join("project.mpr"), &builder.build()).unwrap();
+    let v1 = zip_project(root, "Toolkit", &build_dir);
+    install_module(
+        &v1,
+        &mpr,
+        Some(root),
+        false,
+        &mxrs_marketplace::lifecycle::OfficialProvenance {
+            content_id: Some("777".into()),
+            version: Some("1.0.0".into()),
+            source: Some("mendix".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let v2 = zip_project(root, "Toolkit", &build_dir);
+    let api = ContentApi::new(
+        FakeUpdateContentApi {
+            content_id: "777",
+            version_number: "2.0.0",
+            archive: v2,
+        },
+        Pat::new("test-token").unwrap(),
+    );
+
+    let plan = mxrs_marketplace::resolver::plan_update_official(
+        root,
+        "Toolkit",
+        None,
+        Some(SUPPORTED_VERSION),
+        &api,
+    )
+    .unwrap();
+    assert!(plan.safe(), "{:?}", plan.blockers);
+    assert_eq!(plan.installed_version.as_deref(), Some("1.0.0"));
+    assert_eq!(plan.target_version, "2.0.0");
+    plan.apply().unwrap();
+
+    let lock = mxrs_marketplace::lock::read_lock(root).unwrap();
+    assert_eq!(lock.packages["Toolkit"].version.as_deref(), Some("2.0.0"));
+}

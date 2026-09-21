@@ -1345,4 +1345,17 @@ fn marketplace_lifecycle_actions_validate_offline_inputs() {
     assert!(!dependencies.status.success());
     let stderr = String::from_utf8_lossy(&dependencies.stderr);
     assert!(stderr.contains("not installed"), "{stderr}");
+
+    // `update` needs a credential unconditionally, unlike `dependencies`,
+    // which still runs (and reports blockers) without one.
+    let update = cli_with_envs(
+        &["marketplace", "update", "Ghost", "--target-root", &root],
+        &[
+            (mxrs_marketplace::credentials::PAT_ENV, "".as_ref()),
+            (mxrs_marketplace::credentials::PAT_FILE_ENV, "".as_ref()),
+        ],
+    );
+    assert!(!update.status.success());
+    let stderr = String::from_utf8_lossy(&update.stderr);
+    assert!(stderr.contains("no Mendix credential"), "{stderr}");
 }

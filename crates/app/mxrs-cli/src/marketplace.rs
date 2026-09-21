@@ -20,7 +20,7 @@ use mxrs_marketplace::{
 
 use crate::arguments::{take_flag, take_value};
 
-pub const USAGE: &str = "usage: mxrs marketplace <search|show|versions|download|install|list|remove|dependencies> [arguments]";
+pub const USAGE: &str = "usage: mxrs marketplace <search|show|versions|download|install|list|remove|dependencies|update> [arguments]";
 
 pub fn run(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
@@ -69,6 +69,13 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
             identifier,
             target_root.as_deref().map(Path::new),
             mpr_option.as_deref().map(Path::new),
+            apply,
+            json,
+        ),
+        ("update", [identifier]) => update(
+            identifier,
+            target_root.as_deref().map(Path::new),
+            mendix_version.as_deref(),
             apply,
             json,
         ),
@@ -375,6 +382,80 @@ fn dependencies(
     }
     if apply && safe {
         plan.apply()?;
+    }
+    if safe {
+        Ok(())
+    } else {
+        Err(MarketplaceError::PlanBlocked(
+            "rerun after resolving the blockers above".into(),
+        ))
+    }
+}
+
+/// `name[@version]` — mxrb's `identifier.split('@', 2)`.
+fn split_versioned(identifier: &str) -> (&str, Option<&str>) {
+    match identifier.split_once('@') {
+        Some((name, version)) => (name, Some(version)),
+        None => (identifier, None),
+    }
+}
+
+fn update(
+    identifier: &str,
+    target_root: Option<&Path>,
+    mendix_version: Option<&str>,
+    apply: bool,
+    json: bool,
+) -> Result<(), MarketplaceError> {
+    let (name, version) = split_versioned(identifier);
+    let target = target_root.unwrap_or_else(|| Path::new("."));
+    let api = client()?;
+    let plan = mxrs_marketplace::resolver::plan_update_official(
+        target,
+        name,
+        version,
+        mendix_version,
+        &api,
+    )?;
+    let safe = plan.safe();
+    let plan_name = plan.name.clone();
+    let installed_version = plan.installed_version.clone();
+    let target_version = plan.target_version.clone();
+    let changes = plan.changes.clone();
+    let blockers = plan.blockers.clone();
+    // Apply happens BEFORE any "applied" is printed: a failed apply must
+    // surface as the error it is, never after a success line.
+    if apply && safe {
+        plan.apply()?;
+    }
+    let state = if !safe {
+        "blocked"
+    } else if apply {
+        "applied"
+    } else {
+        "preview"
+    };
+    if json {
+        print_json(&serde_json::json!({
+            "action": "update",
+            "name": plan_name,
+            "installedVersion": installed_version,
+            "targetVersion": target_version,
+            "state": state,
+            "changes": changes,
+            "blockers": blockers,
+        }));
+    } else {
+        println!(
+            "[mxrs] update {plan_name} {} -> {target_version}: {state}",
+            installed_version.as_deref().unwrap_or("-")
+        );
+        for change in &changes {
+            println!("  change: {change}");
+        }
+        for blocker in &blockers {
+            println!("  blocker: {blocker}");
+        }
     }
     if safe {
         Ok(())

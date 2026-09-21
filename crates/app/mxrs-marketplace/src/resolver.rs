@@ -231,6 +231,53 @@ impl DependencyPlan {
     }
 }
 
+/// Resolves, downloads, and previews an official update for an installed
+/// module — ports `Installer#update_official` +
+/// `Lifecycle#plan_update`.
+pub fn plan_update_official<T: Transport>(
+    target: &Path,
+    identifier: &str,
+    version: Option<&str>,
+    mendix_version: Option<&str>,
+    api: &ContentApi<T>,
+) -> Result<lifecycle::UpdatePlan> {
+    let target_absolute =
+        std::path::absolute(target).map_err(|source| MarketplaceError::PackageIo {
+            path: target.display().to_string(),
+            source,
+        })?;
+    let (_name, entry) = lifecycle::installed(&target_absolute, identifier)?;
+    let content_id = entry
+        .content_id
+        .clone()
+        .unwrap_or_else(|| identifier.to_string());
+    let mpr = safe_target_path(&target_absolute, &entry.destination)?;
+    let detected_mendix_version = mxrs_mpr::MprFile::open(&mpr, true)?.mendix_version()?;
+    let mendix_version = mendix_version.or(detected_mendix_version.as_deref());
+    let package = api.resolve(&content_id, version, mendix_version)?;
+    if !DOWNLOADABLE_CONTENT_TYPES.contains(&package.content.content_type.as_str()) {
+        return Err(MarketplaceError::WidgetInstall(format!(
+            "Marketplace content {:?} is {}, not a Module, Service, or Widget",
+            package.name(),
+            package.content.content_type
+        )));
+    }
+    let downloads = tempfile::tempdir().map_err(|source| MarketplaceError::PackageIo {
+        path: "temporary directory".into(),
+        source,
+    })?;
+    let archive = downloads.path().join("package.mpk");
+    api.download(&package, &archive)?;
+    let plan = lifecycle::plan_update(
+        &target_absolute,
+        identifier,
+        &archive,
+        &package.version.version_number,
+        provenance_for(&package),
+    )?;
+    Ok(lifecycle::attach_download(plan, downloads))
+}
+
 /// Whether any locked package (module or widget) already carries this
 /// content id — mxrb's `package_installed?`.
 fn content_id_installed(target: &Path, content_id: &str) -> Result<bool> {

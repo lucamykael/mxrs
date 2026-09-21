@@ -401,13 +401,7 @@ pub fn plan_remove(
     let inventory = cached_inventory(&target, &entry)?;
     let lock = read_lock(&target)?;
     let shared = shared_files(&lock, &name);
-    let mut blockers = Vec::new();
-    if inventory.module_id != entry.module_id {
-        blockers.push("locked module identity does not match cached package".into());
-    }
-    if entry.units != unit_ids.len() {
-        blockers.push("locked unit count does not match target module tree".into());
-    }
+    let mut blockers = base_blockers(&entry, &inventory, &unit_ids);
     if inventory.name != name {
         blockers.push(format!(
             "locked module name does not match cached package {}",
@@ -439,6 +433,23 @@ pub fn plan_remove(
         unit_ids,
         removable_files,
     })
+}
+
+/// Checks shared between removal and update: the cached package must still
+/// match what the lock recorded about it — mxrb's `base_blockers`.
+fn base_blockers(
+    entry: &LockEntry,
+    inventory: &ModulePackageInventory,
+    ids: &[String],
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if inventory.module_id != entry.module_id {
+        blockers.push("locked module identity does not match cached package".into());
+    }
+    if entry.units != ids.len() {
+        blockers.push("locked unit count does not match target module tree".into());
+    }
+    blockers
 }
 
 fn cached_inventory(target: &Path, entry: &LockEntry) -> Result<ModulePackageInventory> {
@@ -598,11 +609,188 @@ fn apply_remove(plan: &LifecyclePlan) -> Result<()> {
         }
         let archive = safe_target_path(&plan.target, &plan.entry.archive)?;
         let _ = std::fs::remove_file(archive);
-        delete_asset_backups(&plan.target, &plan.entry)?;
+        delete_asset_backups(
+            &plan.target,
+            &plan.entry,
+            &plan
+                .entry
+                .asset_originals
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )?;
         let mut lock = read_lock(&plan.target)?;
         lock.packages.remove(&plan.name);
         write_lock(&plan.target, &lock)
     })
+}
+
+// ── Update ─────────────────────────────────────────────────────────────
+
+/// Preview of a reference-safe official update — ports the update half of
+/// `LifecyclePlan` + `Lifecycle#plan_update`.
+#[derive(Debug)]
+pub struct UpdatePlan {
+    pub name: String,
+    pub installed_version: Option<String>,
+    pub target_version: String,
+    pub changes: Vec<String>,
+    pub blockers: Vec<String>,
+    target: PathBuf,
+    mpr: PathBuf,
+    entry: LockEntry,
+    unit_ids: Vec<String>,
+    obsolete_files: Vec<String>,
+    archive: PathBuf,
+    provenance: OfficialProvenance,
+    /// Keeps a downloaded candidate's temporary directory alive until
+    /// `apply`, when the caller resolved it over the network rather than
+    /// pointing at an already-local archive.
+    _download: Option<tempfile::TempDir>,
+}
+
+impl UpdatePlan {
+    pub fn safe(&self) -> bool {
+        self.blockers.is_empty()
+    }
+
+    /// Replaces the installed module with the downloaded replacement inside
+    /// one rollback scope — `Lifecycle#apply_update`.
+    pub fn apply(self) -> Result<()> {
+        if !self.safe() {
+            return Err(MarketplaceError::PlanBlocked(self.blockers.join("; ")));
+        }
+        let old_cache = safe_target_path(&self.target, &self.entry.archive)?;
+        let mut paths = vec![
+            self.mpr.clone(),
+            self.mpr
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("mprcontents"),
+            crate::lock::lock_path(&self.target),
+            self.target.join("theme/web/custom-variables.scss"),
+            self.target.join(ORIGINALS_RELATIVE),
+            old_cache.clone(),
+        ];
+        for relative in &self.obsolete_files {
+            paths.push(safe_target_path(&self.target, relative)?);
+        }
+        with_rollback(&paths, || {
+            delete_units(&self.mpr, &self.unit_ids)?;
+            // Re-runs the same lock-recording install `lifecycle::install_module`
+            // performs for a first install — the still-present lock entry
+            // (only the MPR units were deleted above) lets its own asset-backup
+            // reuse carry surviving files' originals forward untouched.
+            install_module(
+                &self.archive,
+                &self.mpr,
+                Some(&self.target),
+                true,
+                &self.provenance,
+            )?;
+            restore_assets(&self.target, &self.entry, &self.obsolete_files)?;
+            delete_asset_backups(&self.target, &self.entry, &self.obsolete_files)?;
+            let new_cache = read_lock(&self.target)?
+                .packages
+                .get(&self.name)
+                .map(|entry| safe_target_path(&self.target, &entry.archive))
+                .transpose()?;
+            if new_cache.as_deref() != Some(old_cache.as_path()) {
+                let _ = std::fs::remove_file(&old_cache);
+            }
+            Ok(())
+        })
+    }
+}
+
+/// `Lifecycle#plan_update` — `archive` is the already-downloaded
+/// replacement package, `official_version` the Content API's own version
+/// number for it (compared against the archive's own manifest).
+pub fn plan_update(
+    target: &Path,
+    identifier: &str,
+    archive: &Path,
+    official_version: &str,
+    provenance: OfficialProvenance,
+) -> Result<UpdatePlan> {
+    let target = std::path::absolute(target).map_err(io_error(target))?;
+    let (name, entry) = installed(&target, identifier)?;
+    let mpr = safe_target_path(&target, &entry.destination)?;
+    let current_ids = target_unit_ids(&mpr, &entry)?;
+    let current = cached_inventory(&target, &entry)?;
+    let replacement = ModulePackageInventory::read(archive)?;
+    let missing_ids: Vec<String> = current_ids
+        .iter()
+        .filter(|id| !replacement.unit_ids.contains(id))
+        .cloned()
+        .collect();
+    let mut blockers = base_blockers(&entry, &current, &current_ids);
+    if replacement.name != name {
+        blockers.push(format!(
+            "replacement module name changed from {name} to {}",
+            replacement.name
+        ));
+    }
+    if replacement.module_id != entry.module_id {
+        blockers.push("replacement module identity changed".into());
+    }
+    let manifest_version = replacement.version.as_deref().unwrap_or("");
+    if !manifest_version.is_empty()
+        && manifest_version != "unknown"
+        && manifest_version != official_version
+    {
+        blockers.push(format!(
+            "downloaded package version {manifest_version} does not match {official_version}"
+        ));
+    }
+    if entry.version.as_deref() == Some(official_version) {
+        blockers.push(format!("version {official_version} is already installed"));
+    }
+    blockers.extend(external_reference_blockers(&mpr, &missing_ids)?);
+    let lock = read_lock(&target)?;
+    let shared = shared_files(&lock, &name);
+    blockers.extend(modified_asset_blockers(&target, &current, &shared)?);
+    let obsolete_files: Vec<String> = current
+        .files
+        .keys()
+        .filter(|relative| {
+            !replacement.files.contains_key(relative.as_str()) && !shared.contains(*relative)
+        })
+        .cloned()
+        .collect();
+    let changes = vec![
+        format!(
+            "replace {} MPR units with {}",
+            current_ids.len(),
+            replacement.unit_ids.len()
+        ),
+        format!("install {} package assets", replacement.files.len()),
+        format!("delete {} obsolete package assets", obsolete_files.len()),
+        "replace cache and lock metadata".to_string(),
+    ];
+    Ok(UpdatePlan {
+        name,
+        installed_version: entry.version.clone(),
+        target_version: official_version.to_string(),
+        changes,
+        blockers,
+        target,
+        mpr,
+        entry,
+        unit_ids: current_ids,
+        obsolete_files,
+        archive: archive.to_path_buf(),
+        provenance,
+        _download: None,
+    })
+}
+
+/// Attaches ownership of a downloaded candidate's temporary directory to a
+/// plan built over it, so the file it points at outlives the call that
+/// resolved it — set by [`crate::resolver::plan_update_official`].
+pub fn attach_download(mut plan: UpdatePlan, download: tempfile::TempDir) -> UpdatePlan {
+    plan._download = Some(download);
+    plan
 }
 
 fn delete_units(mpr_path: &Path, ids: &[String]) -> Result<()> {
@@ -640,10 +828,14 @@ fn restore_assets(target: &Path, entry: &LockEntry, files: &[String]) -> Result<
     Ok(())
 }
 
-fn delete_asset_backups(target: &Path, entry: &LockEntry) -> Result<()> {
-    for backup in entry.asset_originals.values().flatten() {
-        let path = safe_target_path(target, backup)?;
-        let _ = std::fs::remove_file(path);
+/// Deletes the backups for exactly `files` — an update's obsolete set, so
+/// backups a surviving/reused lock entry still references are left alone.
+fn delete_asset_backups(target: &Path, entry: &LockEntry, files: &[String]) -> Result<()> {
+    for relative in files {
+        if let Some(Some(backup)) = entry.asset_originals.get(relative) {
+            let path = safe_target_path(target, backup)?;
+            let _ = std::fs::remove_file(path);
+        }
     }
     Ok(())
 }

@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use mxrs_marketplace::MarketplaceError;
-use mxrs_marketplace::lifecycle::{OfficialProvenance, install_module, plan_remove};
+use mxrs_marketplace::lifecycle::{OfficialProvenance, install_module, plan_remove, plan_update};
 use mxrs_marketplace::lock::read_lock;
 
 const SUPPORTED_VERSION: &str = "11.12.1";
@@ -34,11 +34,13 @@ fn walk(directory: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Same fake-package construction as `tests/install.rs` — a real
-/// `mxrs-writer` project zipped with a manifest and assets.
-fn package(directory: &Path, module_name: &str, assets: &[(&str, &str)]) -> PathBuf {
-    let unique = next_id();
-    let build_dir = directory.join(format!("build-{unique}"));
+/// Builds a real `mxrs-writer` project for `module_name`, without zipping
+/// it yet — split out from [`package`] so an update test can zip the SAME
+/// built project twice with different declared assets, keeping the
+/// module's identity (`$ID`) fixed across "versions" the way a real
+/// version bump with no model changes does.
+fn build_project(directory: &Path, module_name: &str) -> (PathBuf, PathBuf) {
+    let build_dir = directory.join(format!("build-{}", next_id()));
     std::fs::create_dir_all(&build_dir).unwrap();
     let project_path = build_dir.join("project.mpr");
     let mut builder = mxrs_dsl::ProjectBuilder::new(SUPPORTED_VERSION);
@@ -48,7 +50,18 @@ fn package(directory: &Path, module_name: &str, assets: &[(&str, &str)]) -> Path
         });
     });
     mxrs_writer::write_project(&project_path, &builder.build()).unwrap();
+    (build_dir, project_path)
+}
 
+/// Zips an already-built project (see [`build_project`]) as a `.mpk` with
+/// the given declared assets.
+fn zip_package(
+    directory: &Path,
+    module_name: &str,
+    build_dir: &Path,
+    project_path: &Path,
+    assets: &[(&str, &str)],
+) -> PathBuf {
     let files: String = assets
         .iter()
         .map(|(path, _)| format!("      <file path=\"{path}\" />\n"))
@@ -64,7 +77,7 @@ fn package(directory: &Path, module_name: &str, assets: &[(&str, &str)]) -> Path
          </package>\n"
     );
 
-    let archive_path = directory.join(format!("{module_name}-{unique}.mpk"));
+    let archive_path = directory.join(format!("{module_name}-{}.mpk", next_id()));
     let file = std::fs::File::create(&archive_path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
     let options: zip::write::FileOptions<'_, ()> =
@@ -72,11 +85,11 @@ fn package(directory: &Path, module_name: &str, assets: &[(&str, &str)]) -> Path
     zip.start_file("package.xml", options).unwrap();
     zip.write_all(package_xml.as_bytes()).unwrap();
     zip.start_file("project.mpr", options).unwrap();
-    zip.write_all(&std::fs::read(&project_path).unwrap())
+    zip.write_all(&std::fs::read(project_path).unwrap())
         .unwrap();
     let sidecar = build_dir.join("mprcontents");
     for file in walk(&sidecar) {
-        let relative = file.strip_prefix(&build_dir).unwrap();
+        let relative = file.strip_prefix(build_dir).unwrap();
         zip.start_file(relative.to_str().unwrap().replace('\\', "/"), options)
             .unwrap();
         zip.write_all(&std::fs::read(&file).unwrap()).unwrap();
@@ -87,6 +100,13 @@ fn package(directory: &Path, module_name: &str, assets: &[(&str, &str)]) -> Path
     }
     zip.finish().unwrap();
     archive_path
+}
+
+/// Same fake-package construction as `tests/install.rs` — a real
+/// `mxrs-writer` project zipped with a manifest and assets.
+fn package(directory: &Path, module_name: &str, assets: &[(&str, &str)]) -> PathBuf {
+    let (build_dir, project_path) = build_project(directory, module_name);
+    zip_package(directory, module_name, &build_dir, &project_path, assets)
 }
 
 fn target(directory: &Path) -> PathBuf {
@@ -304,5 +324,106 @@ fn a_package_may_not_overwrite_assets_owned_by_another_locked_package() {
     assert!(
         !matches!(error, MarketplaceError::ProtectedPackagePath(_)),
         "{error}"
+    );
+}
+
+#[test]
+fn an_update_replaces_units_keeps_shared_assets_and_restores_obsolete_ones() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mpr = target(root);
+    // A file present in both versions, and a per-version file that changes.
+    let shared_asset = root.join("vendorlib/shared.jar");
+    std::fs::create_dir_all(shared_asset.parent().unwrap()).unwrap();
+    std::fs::write(&shared_asset, "pre-existing before either version").unwrap();
+
+    let (build_dir, project_path) = build_project(root, "Toolkit");
+    let v1 = zip_package(
+        root,
+        "Toolkit",
+        &build_dir,
+        &project_path,
+        &[
+            ("vendorlib/shared.jar", "shared v1"),
+            ("javasource/toolkit/Old.java", "class Old {}"),
+        ],
+    );
+    install_module(
+        &v1,
+        &mpr,
+        Some(root),
+        false,
+        &OfficialProvenance {
+            content_id: Some("999".into()),
+            version: Some("1.0.0".into()),
+            source: Some("mendix".into()),
+            ..OfficialProvenance::default()
+        },
+    )
+    .unwrap();
+    let old_cache = read_lock(root).unwrap().packages["Toolkit"].archive.clone();
+
+    // v2 keeps the same shared asset (unchanged content this time) and
+    // drops Old.java in favor of New.java.
+    let v2 = zip_package(
+        root,
+        "Toolkit",
+        &build_dir,
+        &project_path,
+        &[
+            ("vendorlib/shared.jar", "shared v1"),
+            ("javasource/toolkit/New.java", "class New {}"),
+        ],
+    );
+    let provenance = OfficialProvenance {
+        content_id: Some("999".into()),
+        version: Some("2.0.0".into()),
+        source: Some("mendix".into()),
+        ..OfficialProvenance::default()
+    };
+    let plan = plan_update(root, "Toolkit", &v2, "2.0.0", provenance).unwrap();
+    assert!(plan.safe(), "{:?}", plan.blockers);
+    assert_eq!(plan.installed_version.as_deref(), Some("1.0.0"));
+    assert_eq!(plan.target_version, "2.0.0");
+    plan.apply().unwrap();
+
+    assert!(root.join("javasource/toolkit/New.java").is_file());
+    assert!(
+        !root.join("javasource/toolkit/Old.java").exists(),
+        "obsolete asset was removed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&shared_asset).unwrap(),
+        "shared v1",
+        "an asset present in both versions is left as the new package wrote it"
+    );
+    let lock = read_lock(root).unwrap();
+    let entry = &lock.packages["Toolkit"];
+    assert_eq!(entry.version.as_deref(), Some("2.0.0"));
+    assert!(root.join(&entry.archive).is_file());
+    assert_ne!(
+        entry.archive, old_cache,
+        "the cache path moved to the new version"
+    );
+    assert!(
+        !root.join(&old_cache).exists(),
+        "the old cache was cleaned up"
+    );
+
+    // Re-running the same update again is refused: the version already matches.
+    let provenance = OfficialProvenance {
+        content_id: Some("999".into()),
+        version: Some("2.0.0".into()),
+        source: Some("mendix".into()),
+        ..OfficialProvenance::default()
+    };
+    let plan = plan_update(root, "Toolkit", &v2, "2.0.0", provenance).unwrap();
+    assert!(!plan.safe());
+    assert!(
+        plan.blockers
+            .iter()
+            .any(|blocker| blocker.contains("already installed")),
+        "{:?}",
+        plan.blockers
     );
 }
