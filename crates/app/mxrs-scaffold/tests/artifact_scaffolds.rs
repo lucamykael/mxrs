@@ -743,6 +743,18 @@ fn a_page_chain_generates_a_slice_that_compiles_and_reaches_the_written_model() 
         .filter_map(|entity| entity.name.as_deref())
         .collect::<Vec<_>>();
     assert_eq!(entities, ["OrderOverview"]);
+    let navigation = project.navigation().unwrap();
+    let responsive = navigation
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "Responsive")
+        .expect("the generated application has a Responsive profile");
+    let item = responsive
+        .menu_items
+        .iter()
+        .find(|item| item.caption.get("en_US") == Some(&"Order Overview".to_string()))
+        .expect("the page chain is reachable from navigation");
+    assert!(item.page.is_some());
     let attributes = module.entities()[0]
         .attributes
         .iter()

@@ -964,12 +964,9 @@ fn create_module_security(
 /// A `--template`/`--chain` page is not one file but a slice: optionally a
 /// backing entity and loader, the refresh flow(s) the chain names, and the
 /// page itself. Mirrors mxrb's `scaffold_templated_page`/`page_support_specs`
-/// with one deliberate omission: mxrb also writes a navigation entry per page
-/// into `app/navigation/responsive/`, and mxrs has no navigation aggregator to
-/// write into — its `mxrs new` scaffold declares navigation inline in
-/// `build()`. Appending to that by hand is the guessing this crate refuses to
-/// do elsewhere (see [`ScaffoldError::UnrecognizedProjectBuild`]), so the
-/// generated page is reachable by reference but not linked into a menu.
+/// with a generated navigation aggregator. Each templated/chain page gets a
+/// small typed entry which extends the existing Responsive profile rather than
+/// replacing its home page or any items the application already declared.
 fn create_page_slice(
     transaction: &mut Transaction,
     root: &Path,
@@ -1045,6 +1042,40 @@ fn create_page_slice(
             refresh,
             &options.page_roles,
         ),
+    )?;
+    create_page_navigation(transaction, root, module_name, artifact_name)
+}
+
+fn create_page_navigation(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    artifact_name: &str,
+) -> Result<()> {
+    let navigation = root.join("src/presentation/navigation/mod.rs");
+    if transaction.content(&navigation)?.is_none() {
+        transaction.create(&navigation, templates::page_navigation_aggregator())?;
+        let presentation = root.join("src/presentation/mod.rs");
+        declare_child_module(transaction, &presentation, "navigation")?;
+        connect_layer_apply(
+            transaction,
+            &presentation,
+            "navigation::apply(project);",
+            "\n}\n",
+        )?;
+    }
+    let stem = snake_case(artifact_name);
+    let entry = navigation.with_file_name(format!("{stem}.rs"));
+    transaction.create(
+        &entry,
+        templates::page_navigation_entry(module_name, artifact_name),
+    )?;
+    declare_child_module(transaction, &navigation, &stem)?;
+    connect_layer_apply(
+        transaction,
+        &navigation,
+        &format!("{stem}::apply(project);"),
+        "\n}\n",
     )
 }
 

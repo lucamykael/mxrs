@@ -239,9 +239,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "transactional Rust declaration scaffold; generated content is not MXRB-comparable; own evidence: scaffold_commands end-to-end suite (generation, registry, dispatcher-usage byte sync, transactional refusal); generated declarations compile in the nested-project gates",
         ),
         "page" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs page new/templates",
-            "page scaffold with --role, --template and --chain vertical slices, plus the template catalog; MXRB additionally writes a navigation entry per page, which has no mxrs aggregator to write into",
+            "page scaffold with --role, --template and --chain vertical slices, template catalog, and generated Responsive-navigation entries that preserve existing profile state; own evidence: transactional scaffold and generated-project compilation suites",
         ),
         "security" => (
             Status::Verified,

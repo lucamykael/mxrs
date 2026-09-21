@@ -571,5 +571,12 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
             "{layer}/{relative}: {rendered}"
         );
     }
+    let navigation = root.join("src/presentation/navigation/order_overview.rs");
+    assert!(rendered.contains(&format!("  create  {}", navigation.display())));
+    assert!(
+        std::fs::read_to_string(navigation)
+            .unwrap()
+            .contains("Sales.OrderOverview")
+    );
     assert!(text(&scaffold(&root, &["scaffold", "list"])).contains("page:Sales.OrderOverview"));
 }
