@@ -179,6 +179,8 @@ pub fn install_module(
             asset_original: None,
             content_id: provenance.content_id.clone(),
             version_id: provenance.version_id.clone(),
+            widget_name: None,
+            widget_ids: None,
         },
     );
     write_lock(&target, &lock)?;

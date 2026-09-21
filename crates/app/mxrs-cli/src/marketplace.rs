@@ -20,7 +20,7 @@ use mxrs_marketplace::{
 
 use crate::arguments::{take_flag, take_value};
 
-pub const USAGE: &str = "usage: mxrs marketplace <search|show|versions|download|install|list|remove|dependencies|update> [arguments]";
+pub const USAGE: &str = "usage: mxrs marketplace <search|show|versions|download|install|list|remove|dependencies|update|audit|verify> [arguments]";
 
 pub fn run(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
@@ -79,6 +79,12 @@ pub fn run(mut args: Vec<String>) -> ExitCode {
             apply,
             json,
         ),
+        ("audit", []) => audit(
+            target_root.as_deref().map(Path::new),
+            mendix_version.as_deref(),
+            json,
+        ),
+        ("verify", []) => verify(target_root.as_deref().map(Path::new), json),
         _ => {
             eprintln!("[mxrs] error: {USAGE}");
             return ExitCode::FAILURE;
@@ -306,6 +312,111 @@ fn install(
         );
     }
     Ok(())
+}
+
+fn audit(
+    target_root: Option<&Path>,
+    mendix_version: Option<&str>,
+    json: bool,
+) -> Result<(), MarketplaceError> {
+    let target = target_root.unwrap_or_else(|| Path::new("."));
+    // A credential is resolved only when there is actually something to
+    // audit — an empty (or entirely local/GitHub-sourced) lock needs no
+    // Marketplace access at all, matching mxrb's own lazy `ContentApi.new`.
+    let needs_credential = mxrs_marketplace::lock::read_lock(target)?
+        .packages
+        .values()
+        .any(|entry| entry.source.as_deref() == Some("mendix") && entry.content_id.is_some());
+    let results = if needs_credential {
+        let api = client()?;
+        mxrs_marketplace::verify::audit(target, mendix_version, &api)?
+    } else {
+        Vec::new()
+    };
+    let all_valid = results.iter().all(|result| result.valid);
+    if json {
+        print_json(&serde_json::Value::Array(
+            results
+                .iter()
+                .map(|result| {
+                    serde_json::json!({
+                        "name": result.name,
+                        "installedVersion": result.installed_version,
+                        "latestVersion": result.latest_version,
+                        "versionType": result.version_type,
+                        "issues": result.issues,
+                        "outdated": result.outdated,
+                        "valid": result.valid,
+                    })
+                })
+                .collect(),
+        ));
+    } else {
+        for result in &results {
+            let state = if !result.valid {
+                if result.version_type == "Unknown" {
+                    "unknown"
+                } else {
+                    "vulnerable"
+                }
+            } else if result.outdated {
+                "update"
+            } else {
+                "ok"
+            };
+            println!(
+                "{state}\t{}\t{}\t{}\t{}\t{}",
+                result.name,
+                result.installed_version,
+                result.latest_version,
+                result.version_type,
+                result.issues.join(",")
+            );
+        }
+        println!(
+            "[mxrs] {} official Marketplace package(s) audited",
+            results.len()
+        );
+    }
+    if all_valid {
+        Ok(())
+    } else {
+        Err(MarketplaceError::PlanBlocked(
+            "one or more locked packages are outdated, unverifiable, or vulnerable".into(),
+        ))
+    }
+}
+
+fn verify(target_root: Option<&Path>, json: bool) -> Result<(), MarketplaceError> {
+    let target = target_root.unwrap_or_else(|| Path::new("."));
+    let results = mxrs_marketplace::verify::verify(target)?;
+    let all_valid = results.iter().all(|(_, result)| result.valid);
+    if json {
+        print_json(&serde_json::Value::Array(
+            results
+                .iter()
+                .map(|(name, result)| {
+                    serde_json::json!({
+                        "name": name,
+                        "valid": result.valid,
+                        "expected": result.expected,
+                        "actual": result.actual,
+                    })
+                })
+                .collect(),
+        ));
+    } else {
+        for (name, result) in &results {
+            println!("{}\t{name}", if result.valid { "ok" } else { "changed" });
+        }
+    }
+    if all_valid {
+        Ok(())
+    } else {
+        Err(MarketplaceError::PlanBlocked(
+            "one or more locked packages no longer match the lock".into(),
+        ))
+    }
 }
 
 fn list(target_root: Option<&Path>, json: bool) -> Result<(), MarketplaceError> {

@@ -427,3 +427,40 @@ fn an_update_replaces_units_keeps_shared_assets_and_restores_obsolete_ones() {
         plan.blockers
     );
 }
+
+#[test]
+fn verify_reports_healthy_for_a_real_install_and_catches_a_removed_asset() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mpr = target(root);
+    let archive = package(
+        root,
+        "Toolkit",
+        &[("javasource/toolkit/Helper.java", "class Helper {}")],
+    );
+    install_module(
+        &archive,
+        &mpr,
+        Some(root),
+        false,
+        &OfficialProvenance::default(),
+    )
+    .unwrap();
+
+    let results = mxrs_marketplace::verify::verify(root).unwrap();
+    assert_eq!(results.len(), 1);
+    let (name, result) = &results[0];
+    assert_eq!(name, "Toolkit");
+    assert!(result.valid, "{result:?}");
+
+    // Deleting a declared asset the lock still expects is caught.
+    std::fs::remove_file(root.join("javasource/toolkit/Helper.java")).unwrap();
+    let results = mxrs_marketplace::verify::verify(root).unwrap();
+    assert!(!results[0].1.valid);
+    match &results[0].1.detail {
+        mxrs_marketplace::verify::VerifyDetail::Module { files_present, .. } => {
+            assert!(!files_present);
+        }
+        other => panic!("expected Module detail, got {other:?}"),
+    }
+}

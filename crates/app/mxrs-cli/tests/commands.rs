@@ -1358,4 +1358,32 @@ fn marketplace_lifecycle_actions_validate_offline_inputs() {
     assert!(!update.status.success());
     let stderr = String::from_utf8_lossy(&update.stderr);
     assert!(stderr.contains("no Mendix credential"), "{stderr}");
+
+    // `verify` never touches the network and succeeds on an empty lock.
+    let verified = cli(&["marketplace", "verify", "--target-root", &root]);
+    assert!(verified.status.success(), "{:?}", verified.stderr);
+
+    // `audit` on an empty lock needs no credential either — there is
+    // nothing to check against the Content API.
+    let audited = cli(&["marketplace", "audit", "--target-root", &root]);
+    assert!(audited.status.success(), "{:?}", audited.stderr);
+
+    // A locked, official (Mendix-sourced) package DOES need a credential.
+    let lock_dir = directory.path().join(".mxrs");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    std::fs::write(
+        lock_dir.join("marketplace.lock.json"),
+        r#"{"packages":{"CommunityCommons":{"kind":"module","source":"mendix","content_id":"170","version":"10.0.0"}}}"#,
+    )
+    .unwrap();
+    let audited = cli_with_envs(
+        &["marketplace", "audit", "--target-root", &root],
+        &[
+            (mxrs_marketplace::credentials::PAT_ENV, "".as_ref()),
+            (mxrs_marketplace::credentials::PAT_FILE_ENV, "".as_ref()),
+        ],
+    );
+    assert!(!audited.status.success());
+    let stderr = String::from_utf8_lossy(&audited.stderr);
+    assert!(stderr.contains("no Mendix credential"), "{stderr}");
 }

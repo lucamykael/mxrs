@@ -29,6 +29,7 @@ pub mod package;
 pub mod resolver;
 mod transport;
 pub mod ureq_transport;
+pub mod verify;
 pub mod widget_package;
 
 pub use credentials::{Credentials, Pat};
@@ -303,6 +304,16 @@ pub struct Version {
     pub version_type: Option<String>,
     #[serde(default)]
     pub download_url: Option<String>,
+    /// Known-issue codes the API records for this exact version — used by
+    /// `verify::audit`, not required for install/resolve.
+    #[serde(default)]
+    pub vulnerabilities: Vec<VersionIssue>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct VersionIssue {
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 /// A resolved content + version pair, ready to download.
@@ -698,6 +709,7 @@ mod tests {
             publication_date: None,
             version_type: None,
             download_url: None,
+            vulnerabilities: Vec::new(),
         };
         // The case string ordering gets wrong: "10.24.0" < "9.0.0" as text.
         assert!(ensure_compatible(&version("10.24.0"), "11.12.1").is_ok());

@@ -421,8 +421,8 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "marketplace" => (
             Status::Partial,
-            "mxrs marketplace search/show/versions/download/install/list/remove/dependencies",
-            "official Content API client plus .mpk module install (live-API-verified), a marketplace lockfile, blocker-guarded transactional removal, recursive dependency resolution from unresolved model references, standalone official widget install (envelope-kind dispatch, asset-owner collision guard), and reference-safe official update (resolve/download/replace-units/restore-obsolete-assets/replace-cache, offline-tested end to end); `audit`/`verify` remain unported and are reported honestly",
+            "mxrs marketplace search/show/versions/download/install/list/remove/dependencies/update/audit/verify",
+            "official Content API client plus .mpk module install (live-API-verified), a marketplace lockfile, blocker-guarded transactional removal, recursive dependency resolution from unresolved model references, standalone official widget install (envelope-kind dispatch, asset-owner collision guard), reference-safe official update, offline integrity verification of every locked package, and a live vulnerability/staleness audit of official components — all offline-tested end to end; `login` (this CLI reads credentials from the environment instead) and the `pull`/`import` command-name split (folded into `install`/`update`/`dependencies`) are the only remaining surface differences",
         ),
         "mda" => (
             Status::Verified,

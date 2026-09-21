@@ -380,6 +380,8 @@ pub fn install_widget(
             asset_original,
             content_id: provenance.content_id.clone(),
             version_id: provenance.version_id.clone(),
+            widget_name: Some(inventory.name.clone()),
+            widget_ids: Some(inventory.widget_ids.clone()),
         };
         lock.packages.insert(inventory.name.clone(), entry.clone());
         write_lock(&target, &lock)?;

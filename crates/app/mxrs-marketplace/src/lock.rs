@@ -55,6 +55,15 @@ pub struct LockEntry {
     pub content_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_id: Option<String>,
+    /// Widget entries only — the `clientModule` name, kept separately from
+    /// the lock's own package-name key so a rename between versions is
+    /// still detectable (mxrb's `entry['widget_name']`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub widget_name: Option<String>,
+    /// Widget entries only — every `WidgetId` the installed package
+    /// declares (mxrb's `entry['widget_ids']`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub widget_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
