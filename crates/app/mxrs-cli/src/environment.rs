@@ -105,6 +105,15 @@ impl EnvironmentProfile {
         self.values.keys().map(String::as_str)
     }
 
+    /// Every profile variable, for injection into processes this CLI spawns
+    /// on the user's behalf (`mxrs run`'s frontend dev server). Values must
+    /// never reach logs or error messages; keys-only inspection is `keys()`.
+    pub fn variables(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     #[cfg(test)]
     fn get(&self, key: &str) -> Option<&str> {
         self.values.get(key).map(String::as_str)

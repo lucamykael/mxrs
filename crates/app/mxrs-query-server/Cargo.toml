@@ -1,0 +1,23 @@
+[package]
+name = "mxrs-query-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Loopback-only JSON API for read-only SQL and OQL queries against a project database."
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = "0.8.7"
+mxrs-oql = { path = "../../compiler/mxrs-oql" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.52.0", features = ["net", "rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+http-body-util = "0.1.3"
+tokio = { version = "1.52.0", features = ["macros", "io-util", "time"] }
+tower = { version = "0.5.2", features = ["util"] }

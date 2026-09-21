@@ -406,13 +406,13 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "run" => (
             Status::Partial,
-            "RuntimeHttp",
-            "library adapter; orchestration missing",
+            "mxrs run",
+            "boots the MXRS-owned runtime in-process from the built model: store schema, fail-closed security policy (XPath-guarded rules deny), SQLite persistence, static web shell, and mxrb's Supervisor contract for the optional Vite frontend; flow execution stays an honest unknown action until the native interpreter is ported",
         ),
         "serve" => (
             Status::Partial,
-            "RuntimeHttp",
-            "loopback-capable library; CLI missing",
+            "mxrs serve",
+            "full port of mxrb's loopback-only JSON query contract (sql XOR oql, translated OQL parameter checks, psql-variable binding, CSV-derived rows, 405/413/400/422 statuses) over the owned Docker database workspace; offline-tested end to end, live command oracle still missing",
         ),
         "validate" => (
             Status::Partial,

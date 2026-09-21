@@ -1,0 +1,466 @@
+//! Boots MXRS' own runtime from a Mendix project model.
+//!
+//! Ports the model-derivation half of mxrb's pure-Ruby runtime
+//! (`lib/mxrb/runtime/access_control.rb` plus the store bootstrapping its
+//! native executor performs): the domain model becomes a
+//! [`StoreSchema`], `Security$ProjectSecurity` plus per-entity access rules
+//! become a [`SecurityPolicy`], and every flow document lands in the policy's
+//! document inventory. Flow *execution* is deliberately not here — until the
+//! native flow interpreter is ported, an invoked flow fails honestly as an
+//! unknown action instead of pretending to run.
+//!
+//! Security mapping is fail-closed in both directions mxrb is: a present
+//! security unit with an unknown `SecurityLevel` counts as enabled, and an
+//! access rule guarded by an XPath constraint grants nothing (mxrb evaluates
+//! supported XPath; evaluating none is the conservative subset — skipped
+//! rules are reported, never silently dropped).
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+use mxrs_bson::{Bson, Document, parse_array};
+use mxrs_model::{Attribute, AttributeType, Module, Project};
+use mxrs_runtime::{EntityRule, MemberRight, SecurityPolicy, StoreSchema};
+use serde_json::Value;
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootError {
+    #[error("cannot read project model: {0}")]
+    Model(String),
+    #[error("entity {entity} attribute {attribute}: invalid {kind:?} default {value:?}")]
+    InvalidDefault {
+        entity: String,
+        attribute: String,
+        kind: AttributeType,
+        value: String,
+    },
+}
+
+/// Everything the runtime needs from the model, plus an honest inventory of
+/// what was and was not carried over.
+#[derive(Debug)]
+pub struct Boot {
+    pub schema: StoreSchema,
+    pub security: SecurityPolicy,
+    pub entities: usize,
+    pub documents: usize,
+    /// `Entity.QualifiedName: xpath` pairs whose access rules were skipped
+    /// because their XPath constraint cannot be evaluated yet. Skipping
+    /// denies; it never over-grants.
+    pub skipped_xpath_rules: Vec<String>,
+}
+
+pub fn boot(path: impl AsRef<Path>) -> Result<Boot, BootError> {
+    let project =
+        Project::open(path.as_ref(), true).map_err(|error| BootError::Model(error.to_string()))?;
+    let modules = project
+        .modules()
+        .map_err(|error| BootError::Model(error.to_string()))?;
+    let security = project_security(&project)?;
+    build(&modules, security.as_ref())
+}
+
+/// The first `Security$ProjectSecurity` unit, parsed. mxrb locates it the
+/// same way: a lazy scan over every unit's `$Type`.
+fn project_security(project: &Project) -> Result<Option<Document>, BootError> {
+    for unit in project
+        .all_units()
+        .map_err(|error| BootError::Model(error.to_string()))?
+    {
+        let doc = project
+            .mpr()
+            .parse_contents(&unit)
+            .map_err(|error| BootError::Model(error.to_string()))?;
+        if doc.get_str("$Type").ok() == Some("Security$ProjectSecurity") {
+            return Ok(Some(doc));
+        }
+    }
+    Ok(None)
+}
+
+pub fn build(modules: &[Module], security: Option<&Document>) -> Result<Boot, BootError> {
+    let mut schema = StoreSchema::default();
+    let mut entities = 0;
+    let mut documents = BTreeMap::new();
+    let mut entity_rules: BTreeMap<String, Vec<EntityRule>> = BTreeMap::new();
+    let mut skipped_xpath_rules = Vec::new();
+    for module in modules {
+        let Some(module_name) = module.name.as_deref() else {
+            continue;
+        };
+        for entity in module.entities() {
+            let Some(entity_name) = entity.name.as_deref() else {
+                continue;
+            };
+            let qualified = entity
+                .qualified_name
+                .clone()
+                .unwrap_or_else(|| format!("{module_name}.{entity_name}"));
+            let mut defaults = BTreeMap::new();
+            for attribute in &entity.attributes {
+                let (Some(name), Some(default)) = (
+                    attribute.name.as_deref(),
+                    attribute.default_value.as_deref(),
+                ) else {
+                    continue;
+                };
+                if let Some(value) = typed_default(attribute, default, &qualified)? {
+                    defaults.insert(name.to_string(), value);
+                }
+            }
+            schema = schema.entity(qualified.clone(), defaults, !entity.persistable);
+            entities += 1;
+            let mut rules = Vec::new();
+            for rule in &entity.access_rules {
+                if !rule.xpath.trim().is_empty() {
+                    skipped_xpath_rules.push(format!("{qualified}: {}", rule.xpath.trim()));
+                    continue;
+                }
+                rules.push(EntityRule {
+                    module_roles: rule.roles.iter().cloned().collect(),
+                    create: rule.create,
+                    delete: rule.delete,
+                    default_member_right: member_right(&rule.default_rights),
+                    member_rights: rule
+                        .members
+                        .iter()
+                        .filter_map(|member| {
+                            member_right(&member.rights).map(|right| (member.name.clone(), right))
+                        })
+                        .collect(),
+                });
+            }
+            if !rules.is_empty() {
+                entity_rules.insert(qualified, rules);
+            }
+        }
+        for flow in module
+            .microflows
+            .iter()
+            .chain(&module.nanoflows)
+            .chain(&module.rules)
+        {
+            let Some(flow_name) = flow.name.as_deref() else {
+                continue;
+            };
+            documents.insert(
+                format!("{module_name}.{flow_name}"),
+                flow.allowed_module_roles.iter().cloned().collect(),
+            );
+        }
+    }
+    let mut policy = SecurityPolicy {
+        enabled: false,
+        administrator_roles: BTreeSet::new(),
+        user_role_modules: BTreeMap::new(),
+        documents: BTreeMap::new(),
+        entities: entity_rules,
+    };
+    let document_count = documents.len();
+    policy.documents = documents;
+    if let Some(security) = security {
+        apply_project_security(&mut policy, security);
+    }
+    Ok(Boot {
+        schema,
+        security: policy,
+        entities,
+        documents: document_count,
+        skipped_xpath_rules,
+    })
+}
+
+fn apply_project_security(policy: &mut SecurityPolicy, security: &Document) {
+    let level = security.get_str("SecurityLevel").unwrap_or_default();
+    // mxrb: enabled unless the level names one of the known "off" values —
+    // an unknown or missing level on a present unit fails closed as enabled.
+    policy.enabled = !matches!(level, "CheckNothing" | "Off" | "None");
+    let configured_administrator = security.get_str("AdminUserRole").unwrap_or_default();
+    let roles = match security.get("UserRoles") {
+        Some(Bson::Array(items)) => parse_array(Some(items)).items,
+        _ => Vec::new(),
+    };
+    for role in roles {
+        let Bson::Document(role) = role else { continue };
+        let Ok(name) = role.get_str("Name") else {
+            continue;
+        };
+        let module_roles = match role.get("ModuleRoles") {
+            Some(Bson::Array(items)) => parse_array(Some(items))
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Bson::String(value) => Some(value),
+                    _ => None,
+                })
+                .collect(),
+            _ => BTreeSet::new(),
+        };
+        if name == configured_administrator || role.get_bool("ManageAllRoles").unwrap_or(false) {
+            policy.administrator_roles.insert(name.to_string());
+        }
+        policy
+            .user_role_modules
+            .insert(name.to_string(), module_roles);
+    }
+}
+
+/// mxrb's `AccessControl::RIGHTS`: `None`/`ReadOnly`/`ReadWrite`, matched
+/// case-insensitively; anything else carries no explicit right and falls
+/// back to the rule's default.
+fn member_right(rights: &str) -> Option<MemberRight> {
+    match rights.to_ascii_lowercase().as_str() {
+        "none" => Some(MemberRight::None),
+        "readonly" => Some(MemberRight::Read),
+        "readwrite" => Some(MemberRight::Write),
+        _ => None,
+    }
+}
+
+/// A stored default is a string; the runtime store serves JSON. String-family
+/// defaults stay verbatim (including empty), numeric and boolean defaults are
+/// parsed, and an empty non-string default simply means "no default".
+fn typed_default(
+    attribute: &Attribute,
+    default: &str,
+    entity: &str,
+) -> Result<Option<Value>, BootError> {
+    let invalid = || BootError::InvalidDefault {
+        entity: entity.to_string(),
+        attribute: attribute.name.clone().unwrap_or_default(),
+        kind: attribute.attribute_type,
+        value: default.to_string(),
+    };
+    Ok(match attribute.attribute_type {
+        AttributeType::String
+        | AttributeType::HashString
+        | AttributeType::Enum
+        | AttributeType::DateTime
+        | AttributeType::Binary => Some(Value::String(default.to_string())),
+        AttributeType::Integer | AttributeType::Long | AttributeType::AutoNumber => {
+            if default.is_empty() {
+                None
+            } else {
+                Some(Value::from(default.parse::<i64>().map_err(|_| invalid())?))
+            }
+        }
+        AttributeType::Float | AttributeType::Decimal => {
+            if default.is_empty() {
+                None
+            } else {
+                let number = default
+                    .parse::<f64>()
+                    .ok()
+                    .and_then(serde_json::Number::from_f64);
+                Some(Value::Number(number.ok_or_else(invalid)?))
+            }
+        }
+        AttributeType::Boolean => {
+            if default.is_empty() {
+                None
+            } else if default.eq_ignore_ascii_case("true") {
+                Some(Value::Bool(true))
+            } else if default.eq_ignore_ascii_case("false") {
+                Some(Value::Bool(false))
+            } else {
+                return Err(invalid());
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use mxrs_bson::doc;
+    use mxrs_model::entity::{AccessMember, AccessMemberKind, AccessRule, Entity};
+    use mxrs_runtime::{EntityAction, SecurityContext};
+
+    use super::*;
+
+    fn entity(module: &str, name: &str) -> Entity {
+        let mut entity = Entity::from_bson(&doc! {
+            "$Type": "DomainModels$Entity",
+            "Name": name,
+        });
+        entity.qualified_name = Some(format!("{module}.{name}"));
+        entity
+    }
+
+    fn module_with(name: &str, entities: Vec<Entity>) -> Module {
+        Module {
+            id: String::new(),
+            name: Some(name.to_string()),
+            sort_index: None,
+            from_app_store: false,
+            app_store_guid: None,
+            app_store_version: None,
+            export_level: String::new(),
+            domain_model: Some(mxrs_model::DomainModel {
+                id: None,
+                native_type: None,
+                documentation: String::new(),
+                entities,
+                associations: Vec::new(),
+                cross_associations: Vec::new(),
+            }),
+            pages: Vec::new(),
+            microflows: Vec::new(),
+            nanoflows: Vec::new(),
+            rules: Vec::new(),
+            menus: Vec::new(),
+            module_roles: Vec::new(),
+            artifact_units: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn defaults_become_typed_json_values_and_bad_defaults_fail_closed() {
+        let mut order = entity("Sales", "Order");
+        order.attributes = vec![
+            attribute("Label", AttributeType::String, ""),
+            attribute("Total", AttributeType::Decimal, "12.5"),
+            attribute("Count", AttributeType::Integer, "3"),
+            attribute("Open", AttributeType::Boolean, "TRUE"),
+            attribute("Placed", AttributeType::DateTime, ""),
+        ];
+        let boot = build(&[module_with("Sales", vec![order])], None).unwrap();
+        assert_eq!(boot.entities, 1);
+        assert!(boot.schema.contains("Sales.Order"));
+        let mut store = mxrs_runtime::Store::new(boot.schema.clone());
+        let created = store.create("Sales.Order").unwrap();
+        assert_eq!(created.members["Label"], Value::String(String::new()));
+        assert_eq!(created.members["Total"], serde_json::json!(12.5));
+        assert_eq!(created.members["Count"], serde_json::json!(3));
+        assert_eq!(created.members["Open"], Value::Bool(true));
+        assert_eq!(created.members["Placed"], Value::String(String::new()));
+
+        let mut broken = entity("Sales", "Broken");
+        broken.attributes = vec![attribute("Count", AttributeType::Integer, "many")];
+        let error = build(&[module_with("Sales", vec![broken])], None).unwrap_err();
+        assert!(matches!(error, BootError::InvalidDefault { .. }));
+        assert!(error.to_string().contains("Sales.Broken"));
+    }
+
+    fn attribute(name: &str, kind: AttributeType, default: &str) -> Attribute {
+        let mut attribute = Attribute::from_bson(&doc! { "Name": name });
+        attribute.attribute_type = kind;
+        attribute.default_value = Some(default.to_string());
+        attribute
+    }
+
+    #[test]
+    fn access_rules_map_to_entity_rules_and_xpath_rules_deny_instead_of_overgranting() {
+        let mut order = entity("Sales", "Order");
+        order.access_rules = vec![
+            AccessRule {
+                id: None,
+                roles: vec!["Sales.User".to_string()],
+                create: true,
+                delete: false,
+                documentation: String::new(),
+                default_rights: "ReadOnly".to_string(),
+                members: vec![AccessMember {
+                    id: None,
+                    name: "Total".to_string(),
+                    reference: String::new(),
+                    rights: "ReadWrite".to_string(),
+                    kind: AccessMemberKind::Attribute,
+                    raw: doc! {},
+                }],
+                xpath: String::new(),
+                xpath_caption: None,
+                raw: doc! {},
+            },
+            AccessRule {
+                id: None,
+                roles: vec!["Sales.Owner".to_string()],
+                create: true,
+                delete: true,
+                documentation: String::new(),
+                default_rights: "ReadWrite".to_string(),
+                members: vec![],
+                xpath: "[Owner = $currentUser]".to_string(),
+                xpath_caption: None,
+                raw: doc! {},
+            },
+        ];
+        let security = doc! {
+            "$Type": "Security$ProjectSecurity",
+            "SecurityLevel": "CheckEverything",
+            "AdminUserRole": "Administrator",
+            "UserRoles": mxrs_bson::build_array(vec![
+                Bson::Document(doc! {
+                    "$Type": "Security$UserRole",
+                    "Name": "User",
+                    "ManageAllRoles": false,
+                    "ModuleRoles": mxrs_bson::build_array(vec![Bson::String("Sales.User".to_string())], 1),
+                }),
+                Bson::Document(doc! {
+                    "$Type": "Security$UserRole",
+                    "Name": "Administrator",
+                    "ManageAllRoles": true,
+                    "ModuleRoles": mxrs_bson::build_array(vec![], 1),
+                }),
+            ], 2),
+        };
+        let boot = build(&[module_with("Sales", vec![order])], Some(&security)).unwrap();
+        assert!(boot.security.enabled);
+        assert_eq!(
+            boot.skipped_xpath_rules,
+            ["Sales.Order: [Owner = $currentUser]"]
+        );
+        assert!(boot.security.administrator_roles.contains("Administrator"));
+        let sales_user = SecurityContext {
+            user: Some("alice".to_string()),
+            user_roles: ["User".to_string()].into(),
+            module_roles: BTreeSet::new(),
+        };
+        assert!(boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Create,
+            None,
+            &sales_user
+        ));
+        assert!(!boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Delete,
+            None,
+            &sales_user
+        ));
+        assert!(boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Write,
+            Some("Total"),
+            &sales_user
+        ));
+        // The XPath-guarded owner rule was skipped: an owner-role context
+        // gains nothing rather than everything.
+        let owner = SecurityContext {
+            user: Some("bob".to_string()),
+            user_roles: BTreeSet::new(),
+            module_roles: ["Sales.Owner".to_string()].into(),
+        };
+        assert!(
+            !boot
+                .security
+                .entity_allowed("Sales.Order", EntityAction::Delete, None, &owner)
+        );
+    }
+
+    #[test]
+    fn a_present_security_unit_with_an_unknown_level_counts_as_enabled() {
+        for (level, enabled) in [
+            ("CheckNothing", false),
+            ("Off", false),
+            ("None", false),
+            ("CheckEverything", true),
+            ("CheckFormsAndMicroflows", true),
+            ("SomethingNew", true),
+        ] {
+            let security = doc! { "SecurityLevel": level };
+            let boot = build(&[], Some(&security)).unwrap();
+            assert_eq!(boot.security.enabled, enabled, "{level}");
+        }
+        assert!(!build(&[], None).unwrap().security.enabled);
+    }
+}

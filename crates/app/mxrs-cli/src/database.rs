@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 const FORMAT: u32 = 1;
@@ -39,6 +40,13 @@ pub enum DatabaseError {
     },
     #[error("invalid MPR: {0}")]
     InvalidMpr(String),
+    /// A malformed online query or parameter set. Distinct from operational
+    /// failures so `mxrs serve` can blame the request (HTTP 400), not the
+    /// database (HTTP 422).
+    #[error("{0}")]
+    Query(String),
+    #[error("PostgreSQL returned invalid CSV: {0}")]
+    InvalidCsv(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -169,6 +177,55 @@ impl DatabaseWorkspace {
             ),
             password,
         })
+    }
+
+    /// Runs one read-only `SELECT`/`WITH` statement and returns its rows as
+    /// column-name maps. Ports mxrb's `DatabaseWorkspace#query_rows`: named
+    /// `:parameter`s bind through psql variables (never string interpolation),
+    /// results stream out as CSV, and a SQL `NULL` becomes `Value::Null`
+    /// while an empty string stays `""`. mxrb enforces read-only access with
+    /// a dedicated reader role; this workspace has a single owner role, so
+    /// the same guarantee comes from `default_transaction_read_only` plus the
+    /// single-statement validation.
+    pub fn query_rows(
+        &self,
+        sql: &str,
+        params: &Map<String, Value>,
+    ) -> Result<Vec<Map<String, Value>>, DatabaseError> {
+        self.query_rows_with(&CommandDocker, sql, params)
+    }
+
+    fn query_rows_with(
+        &self,
+        docker: &impl Docker,
+        sql: &str,
+        params: &Map<String, Value>,
+    ) -> Result<Vec<Map<String, Value>>, DatabaseError> {
+        let statement = read_only_statement(sql)?;
+        let (statement, variables) = bind_parameters(&statement, params)?;
+        let mut arguments = vec![
+            "exec".to_string(),
+            "--env".to_string(),
+            "PGOPTIONS=-c default_transaction_read_only=on".to_string(),
+            self.container.clone(),
+            "psql".to_string(),
+            "--no-psqlrc".to_string(),
+            "--set".to_string(),
+            "ON_ERROR_STOP=1".to_string(),
+        ];
+        arguments.extend(variables);
+        arguments.extend([
+            "--username".to_string(),
+            USER.to_string(),
+            "--dbname".to_string(),
+            DATABASE.to_string(),
+            "--csv".to_string(),
+            "--quiet".to_string(),
+            "--command".to_string(),
+            format!("COPY ({statement}) TO STDOUT WITH CSV HEADER"),
+        ]);
+        let output = docker.run(&arguments)?;
+        parse_csv_rows(&output)
     }
 
     fn status_with(&self, docker: &impl Docker) -> Result<DatabaseStatus, DatabaseError> {
@@ -466,6 +523,265 @@ fn io(path: &Path, source: std::io::Error) -> DatabaseError {
     }
 }
 
+/// Ports mxrb's `read_only_statement`: one statement, no NUL bytes, no `;`,
+/// and it must start with `SELECT` or `WITH`. Error messages match mxrb's so
+/// the served contract stays recognizable across both tools.
+fn read_only_statement(sql: &str) -> Result<String, DatabaseError> {
+    if sql.contains('\0') {
+        return Err(DatabaseError::Query("SQL contains a NUL byte".to_string()));
+    }
+    let statement = sql.trim();
+    if statement.is_empty() {
+        return Err(DatabaseError::Query("SQL must not be empty".to_string()));
+    }
+    let read_only_keyword = ["SELECT", "WITH"].iter().any(|keyword| {
+        statement.len() >= keyword.len()
+            && statement[..keyword.len()].eq_ignore_ascii_case(keyword)
+            && statement[keyword.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '_')
+    });
+    if !read_only_keyword || statement.contains(';') {
+        return Err(DatabaseError::Query(
+            "online queries must be one read-only SELECT or WITH statement".to_string(),
+        ));
+    }
+    Ok(statement.to_string())
+}
+
+/// The `:name` references a statement binds, first-seen order, unique. A `::`
+/// type cast never introduces a parameter, exactly like mxrb's
+/// `(?<!:):([A-Za-z][A-Za-z0-9_]*)` scan.
+fn statement_parameters(statement: &str) -> Vec<String> {
+    let bytes = statement.as_bytes();
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b':'
+            && (index == 0 || bytes[index - 1] != b':')
+            && bytes.get(index + 1).is_some_and(u8::is_ascii_alphabetic)
+        {
+            let mut end = index + 1;
+            while bytes
+                .get(end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                end += 1;
+            }
+            let name = statement[index + 1..end].to_string();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    names
+}
+
+fn bind_parameters(
+    statement: &str,
+    params: &Map<String, Value>,
+) -> Result<(String, Vec<String>), DatabaseError> {
+    if params.is_empty() {
+        return Ok((statement.to_string(), Vec::new()));
+    }
+    validate_parameter_names(params, statement)?;
+    let bound = replace_parameters(statement, params);
+    Ok((bound, parameter_arguments(params)?))
+}
+
+fn validate_parameter_names(
+    params: &Map<String, Value>,
+    statement: &str,
+) -> Result<(), DatabaseError> {
+    let invalid: Vec<&str> = params
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !valid_parameter_name(name))
+        .collect();
+    parameter_error("invalid parameter names", &invalid)?;
+    let expected = statement_parameters(statement);
+    let missing: Vec<&str> = expected
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !params.contains_key(*name))
+        .collect();
+    parameter_error("missing query parameter", &missing)?;
+    let unused: Vec<&str> = params
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !expected.iter().any(|expected| expected == name))
+        .collect();
+    parameter_error("unused query parameters", &unused)
+}
+
+fn parameter_error(label: &str, names: &[&str]) -> Result<(), DatabaseError> {
+    if names.is_empty() {
+        Ok(())
+    } else {
+        Err(DatabaseError::Query(format!(
+            "{label}: {}",
+            names.join(", ")
+        )))
+    }
+}
+
+fn valid_parameter_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && characters.all(|rest| rest.is_ascii_alphanumeric() || rest == '_')
+}
+
+fn replace_parameters(statement: &str, params: &Map<String, Value>) -> String {
+    let bytes = statement.as_bytes();
+    let mut bound = String::with_capacity(statement.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b':'
+            && (index == 0 || bytes[index - 1] != b':')
+            && bytes.get(index + 1).is_some_and(u8::is_ascii_alphabetic)
+        {
+            let mut end = index + 1;
+            while bytes
+                .get(end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                end += 1;
+            }
+            let name = &statement[index + 1..end];
+            match params.get(name) {
+                Some(Value::Null) => bound.push_str("NULL"),
+                _ => bound.push_str(&format!(":'mxrs_{name}'")),
+            }
+            index = end;
+        } else {
+            // A `:` is always ASCII, so byte indexing stays on character
+            // boundaries only while copying byte by byte through a helper.
+            let character_end = statement[index..]
+                .chars()
+                .next()
+                .map_or(index + 1, |character| index + character.len_utf8());
+            bound.push_str(&statement[index..character_end]);
+            index = character_end;
+        }
+    }
+    bound
+}
+
+fn parameter_arguments(params: &Map<String, Value>) -> Result<Vec<String>, DatabaseError> {
+    let mut arguments = Vec::new();
+    for (name, value) in params {
+        let rendered = match value {
+            Value::Null => continue,
+            Value::String(value) => value.clone(),
+            Value::Number(value) => value.to_string(),
+            Value::Bool(value) => value.to_string(),
+            Value::Array(_) | Value::Object(_) => {
+                return Err(DatabaseError::Query(format!(
+                    "unsupported parameter value for {name}"
+                )));
+            }
+        };
+        arguments.push("--set".to_string());
+        arguments.push(format!("mxrs_{name}={rendered}"));
+    }
+    Ok(arguments)
+}
+
+/// Parses psql's CSV output. Distinguishing a quoted empty field (`""`, an
+/// empty string) from an unquoted one (SQL `NULL`) matters, so this cannot be
+/// a naive `split(',')`.
+fn parse_csv_rows(output: &str) -> Result<Vec<Map<String, Value>>, DatabaseError> {
+    let records = parse_csv(output)?;
+    let Some((header, rows)) = records.split_first() else {
+        return Ok(Vec::new());
+    };
+    Ok(rows
+        .iter()
+        .map(|row| {
+            header
+                .iter()
+                .enumerate()
+                .map(|(column, name)| {
+                    let value = row.get(column).map_or(Value::Null, |field| {
+                        if field.quoted || !field.text.is_empty() {
+                            Value::String(field.text.clone())
+                        } else {
+                            Value::Null
+                        }
+                    });
+                    (name.text.clone(), value)
+                })
+                .collect()
+        })
+        .collect())
+}
+
+struct CsvField {
+    text: String,
+    quoted: bool,
+}
+
+fn parse_csv(input: &str) -> Result<Vec<Vec<CsvField>>, DatabaseError> {
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut text = String::new();
+    let mut quoted = false;
+    let mut in_quotes = false;
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        if in_quotes {
+            if character == '"' {
+                if characters.peek() == Some(&'"') {
+                    text.push('"');
+                    characters.next();
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                text.push(character);
+            }
+            continue;
+        }
+        match character {
+            '"' if text.is_empty() && !quoted => {
+                in_quotes = true;
+                quoted = true;
+            }
+            ',' => {
+                record.push(CsvField {
+                    text: std::mem::take(&mut text),
+                    quoted: std::mem::take(&mut quoted),
+                });
+            }
+            '\r' if characters.peek() == Some(&'\n') => {}
+            '\n' => {
+                record.push(CsvField {
+                    text: std::mem::take(&mut text),
+                    quoted: std::mem::take(&mut quoted),
+                });
+                records.push(std::mem::take(&mut record));
+            }
+            _ => text.push(character),
+        }
+    }
+    if in_quotes {
+        return Err(DatabaseError::InvalidCsv(
+            "unterminated quoted field".to_string(),
+        ));
+    }
+    if !text.is_empty() || quoted || !record.is_empty() {
+        record.push(CsvField { text, quoted });
+        records.push(record);
+    }
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -624,6 +940,134 @@ mod tests {
             io(Path::new("state.json"), std::io::Error::other("denied"))
                 .to_string()
                 .contains("state.json")
+        );
+    }
+
+    #[test]
+    fn query_rows_binds_parameters_through_psql_variables_and_enforces_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+        let docker = MockDocker::new(vec![output(
+            true,
+            "name,total\nSales,\"\"\n,\"a\"\"b\"\n",
+            "",
+        )]);
+        let mut params = Map::new();
+        params.insert("minimum".to_string(), Value::from(5));
+        params.insert("label".to_string(), Value::Null);
+        let rows = workspace
+            .query_rows_with(
+                &docker,
+                "  SELECT name, total FROM orders WHERE total > :minimum AND label IS :label ",
+                &params,
+            )
+            .unwrap();
+        let call = &docker.calls.borrow()[0];
+        assert_eq!(
+            call[..8],
+            [
+                "exec",
+                "--env",
+                "PGOPTIONS=-c default_transaction_read_only=on",
+                workspace.container.as_str(),
+                "psql",
+                "--no-psqlrc",
+                "--set",
+                "ON_ERROR_STOP=1",
+            ]
+        );
+        assert_eq!(call[8..10], ["--set", "mxrs_minimum=5"]);
+        assert!(!call.iter().any(|argument| argument.contains("mxrs_label")));
+        assert_eq!(
+            call.last().unwrap(),
+            "COPY (SELECT name, total FROM orders WHERE total > :'mxrs_minimum' AND label IS NULL) TO STDOUT WITH CSV HEADER"
+        );
+        assert_eq!(call[call.len() - 4..call.len() - 2], ["--csv", "--quiet"]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], Value::String("Sales".to_string()));
+        assert_eq!(rows[0]["total"], Value::String(String::new()));
+        assert_eq!(rows[1]["name"], Value::Null);
+        assert_eq!(rows[1]["total"], Value::String("a\"b".to_string()));
+    }
+
+    #[test]
+    fn query_rows_rejects_everything_that_is_not_one_read_only_statement() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+        let empty = Map::new();
+        for (sql, message) in [
+            ("SELECT 1\0", "SQL contains a NUL byte"),
+            ("   ", "SQL must not be empty"),
+            (
+                "DELETE FROM orders",
+                "online queries must be one read-only SELECT or WITH statement",
+            ),
+            (
+                "SELECTED review",
+                "online queries must be one read-only SELECT or WITH statement",
+            ),
+            (
+                "SELECT 1; DROP TABLE orders",
+                "online queries must be one read-only SELECT or WITH statement",
+            ),
+        ] {
+            let error = workspace
+                .query_rows_with(&MockDocker::new(vec![]), sql, &empty)
+                .unwrap_err();
+            assert!(
+                matches!(&error, DatabaseError::Query(actual) if actual == message),
+                "{sql:?}: {error}"
+            );
+        }
+        assert!(
+            workspace
+                .query_rows_with(
+                    &MockDocker::new(vec![output(true, "", "")]),
+                    "WITH t AS (SELECT 1) SELECT * FROM t",
+                    &empty
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn query_parameters_must_match_the_statement_exactly() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+        let case = |params: &[(&str, Value)], sql: &str| {
+            let params = params
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), value.clone()))
+                .collect::<Map<String, Value>>();
+            workspace
+                .query_rows_with(&MockDocker::new(vec![]), sql, &params)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            case(&[("1bad", Value::from(1))], "SELECT :minimum"),
+            "invalid parameter names: 1bad"
+        );
+        assert_eq!(
+            case(&[("other", Value::from(1))], "SELECT :minimum, :other"),
+            "missing query parameter: minimum"
+        );
+        assert_eq!(
+            case(
+                &[("minimum", Value::from(1)), ("extra", Value::from(2))],
+                "SELECT :minimum"
+            ),
+            "unused query parameters: extra"
+        );
+        assert_eq!(
+            case(&[("minimum", serde_json::json!([1]))], "SELECT :minimum"),
+            "unsupported parameter value for minimum"
+        );
+        // A `::` cast is not a parameter reference.
+        assert_eq!(
+            case(&[("minimum", Value::from(1))], "SELECT '5'::int, :minimum"),
+            case(&[("minimum", Value::from(1))], "SELECT :minimum"),
         );
     }
 

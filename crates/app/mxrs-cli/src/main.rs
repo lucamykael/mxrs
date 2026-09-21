@@ -2,8 +2,9 @@
 //! `bin/mxrb`'s `when "validate"`/`when "compare"`/`when "inspect"`/
 //! `when "sql"`/... cases, narrowed the same way the library crate is (see
 //! `lib.rs`'s doc comment for exactly what each command covers and what's
-//! not ported yet — many of the 76 audited MXRB commands depend on engines
-//! mxrs hasn't built yet, e.g. `db`/`run` need runtime orchestration).
+//! not ported yet — `run` boots the MXRS-owned runtime and `serve` the
+//! loopback query server, while flow execution awaits the native
+//! interpreter).
 //! `inspect` has no `bin/mxrb` equivalent under that name — it's a new
 //! single-file front end onto `compare`'s existing snapshot machinery.
 
@@ -74,6 +75,19 @@ fn command_options(
         "functional-instrument" => (&[], &["--json"], &[]),
         "cache" => (&[], &["--json"], &[]),
         "db" => (&["--port"], &["--json"], &[]),
+        "serve" => (&["--port", "--db-port"], &["--no-up"], &[]),
+        "run" => (
+            &[
+                "--host",
+                "--server-port",
+                "--api-port",
+                "--client-port",
+                "--port",
+                "--environment",
+            ],
+            &["--no-frontend"],
+            &[],
+        ),
         "doctor" => (&[], &["--json"], &[]),
         "modules" => (&[], &["--json", "--names", "--no-progress"], &[]),
         "dump-unit" | "units" | "sql" => (&[], &["--no-progress"], &[]),
@@ -216,10 +230,12 @@ commands! {
     "rename", "<file.mpr> <old-name> <new-name> [--apply] [--json]", "Preview or apply a model-wide rename", run_rename;
     "repository", "new <Module.Name> [--target DIR] [--dry-run] [--json]", "Scaffold a repository port and infrastructure adapter", run_repository;
     "report", "<file.mpr> [--json]", "Summarize explicit-reference lint and module dependencies", run_report;
+    "run", "[DIR] [--host HOST] [--server-port PORT] [--client-port PORT] [--environment NAME] [--no-frontend]", "Run the built project on the MXRS runtime with its web shell", run_run;
     "scaffold", "<list|destroy> [<kind:name>] [--target DIR]", "List generators or remove a registered scaffold", run_scaffold;
     "scheduled-event", "new <Module.Event> [--target DIR] [--dry-run] [--json]", "Scaffold a scheduled event and its handler microflow", run_scheduled_event;
     "search", "<file.mpr> <query> [--limit N] [--json]", "Search artifact names and documentation", run_semantic_search;
     "security", "init <Module> [--target DIR] [--dry-run] [--json]", "Scaffold module roles and project security", run_security;
+    "serve", "<file.mpr> [--port PORT] [--db-port PORT] [--no-up]", "Serve loopback read-only SQL and OQL queries over the project database", run_serve;
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
     "translate-oql", "<query> [--dialect postgresql|sql_server|ansi]", "Translate the supported safe OQL subset", run_translate_oql;
     "team-server", "login --pat-file FILE [--json] | status DIR [--json]", "Configure a PAT pointer or inspect a local Team Server repository", run_team_server;
@@ -2246,6 +2262,148 @@ fn run_oql(mut args: Vec<String>) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn run_run(mut args: Vec<String>) -> ExitCode {
+    let root = if args
+        .first()
+        .is_some_and(|argument| !argument.starts_with("--"))
+    {
+        PathBuf::from(args.remove(0))
+    } else {
+        PathBuf::from(".")
+    };
+    let environment = take_value(&mut args, "--environment");
+    let host = take_value(&mut args, "--host").unwrap_or_else(|| "127.0.0.1".to_string());
+    let server_port = match exclusive_port(&mut args, &["--server-port", "--api-port"], 9292) {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let client_port = match exclusive_port(&mut args, &["--client-port", "--port"], 5173) {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let frontend = !take_flag(&mut args, "--no-frontend");
+    if !args.is_empty() {
+        eprintln!("[mxrs] error: unknown arguments: {}", args.join(" "));
+        return ExitCode::FAILURE;
+    }
+    let options = mxrs_cli::run::RunOptions {
+        root,
+        host,
+        server_port,
+        client_port,
+        frontend,
+        environment,
+    };
+    match mxrs_cli::run::start(&options) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// mxrb's `run` accepts compatibility aliases for both ports but refuses a
+/// command line that names the same port twice.
+fn exclusive_port(args: &mut Vec<String>, names: &[&str], fallback: u16) -> Result<u16, String> {
+    let mut found: Option<String> = None;
+    for name in names {
+        if let Some(value) = take_value(args, name) {
+            if found.is_some() {
+                return Err(format!("use only one of {}", names.join(" or ")));
+            }
+            found = Some(value);
+        }
+    }
+    match found {
+        None => Ok(fallback),
+        Some(value) => value
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| format!("{} requires an integer from 1 to 65535", names[0])),
+    }
+}
+
+fn run_serve(mut args: Vec<String>) -> ExitCode {
+    let port = match take_value(&mut args, "--port")
+        .as_deref()
+        .unwrap_or("4567")
+        .parse::<u16>()
+    {
+        Ok(port) if port > 0 => port,
+        _ => {
+            eprintln!("[mxrs] error: --port requires an integer from 1 to 65535");
+            return ExitCode::FAILURE;
+        }
+    };
+    let database_port = match take_value(&mut args, "--db-port")
+        .as_deref()
+        .unwrap_or("55432")
+        .parse::<u16>()
+    {
+        Ok(port) if port > 0 => port,
+        _ => {
+            eprintln!("[mxrs] error: --db-port requires an integer from 1 to 65535");
+            return ExitCode::FAILURE;
+        }
+    };
+    let prepare = !take_flag(&mut args, "--no-up");
+    if args.len() != 1 {
+        eprintln!("Usage: mxrs serve <file.mpr> [--port PORT] [--db-port PORT] [--no-up]");
+        return ExitCode::FAILURE;
+    }
+    let workspace = match mxrs_cli::database::DatabaseWorkspace::open(&args[0], database_port) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if prepare && let Err(error) = workspace.up() {
+        eprintln!("[mxrs] error: {error}");
+        return ExitCode::FAILURE;
+    }
+    let server = match mxrs_query_server::QueryServer::new(
+        std::sync::Arc::new(mxrs_cli::serve::WorkspaceQueries(workspace)),
+        "127.0.0.1",
+        port,
+    ) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("[mxrs] Read-only query server: http://127.0.0.1:{port}/query");
+    println!("[mxrs] Accepts POST JSON with an sql or oql field");
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[mxrs] error: cannot start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(server.serve_with_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_translate_oql(mut args: Vec<String>) -> ExitCode {

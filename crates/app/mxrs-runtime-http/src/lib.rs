@@ -96,6 +96,13 @@ impl RuntimeHttp {
         Ok(self)
     }
 
+    /// A shared handle to the underlying runtime. The serve methods consume
+    /// `self`, so callers that must flush state after a graceful shutdown
+    /// (e.g. persisting the store) take this handle first.
+    pub fn runtime_handle(&self) -> Arc<Mutex<Runtime>> {
+        self.state.runtime.clone()
+    }
+
     pub fn router(&self) -> Result<Router> {
         let files = static_files::Snapshot::load(&self.web_root)?;
         Ok(Router::new()

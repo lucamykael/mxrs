@@ -33,7 +33,12 @@ mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-oql = { path = "../../compiler/mxrs-oql" }
 mxrs-project = { path = "../mxrs-project" }
+mxrs-query-server = { path = "../mxrs-query-server" }
 mxrs-refactor = { path = "../mxrs-refactor" }
+mxrs-runtime = { path = "../mxrs-runtime" }
+mxrs-runtime-boot = { path = "../mxrs-runtime-boot" }
+mxrs-runtime-http = { path = "../mxrs-runtime-http" }
+mxrs-runtime-sqlite = { path = "../mxrs-runtime-sqlite" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
@@ -43,6 +48,7 @@ serde.workspace = true
 sha2 = "0.10"
 tempfile = "3.27.0"
 thiserror.workspace = true
+tokio = { version = "1.52.0", features = ["rt-multi-thread", "signal"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 uuid = { version = "1", features = ["v4"] }
 
