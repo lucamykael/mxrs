@@ -5,13 +5,18 @@
 //! package's own model, verify Content API candidates against the MPK's
 //! module identity, and preview the whole install chain before writing.
 //!
-//! Honest scope: module dependencies resolve and install end to end;
-//! required *widget bundles* are detected the same way mxrb detects them
-//! (every `WidgetId` in the model, checked against the project's installed
-//! `widgets/*.mpk`) but their installation is not ported yet, so a missing
-//! widget bundle is always a named blocker — mapped ones name the official
-//! content id to fetch manually, unmapped ones mirror mxrb's "no verified
-//! official Marketplace widget mapping".
+//! Module dependencies and required widget bundles both resolve and
+//! install end to end — every `WidgetId` in the model is checked against
+//! the project's installed `widgets/*.mpk`; a missing one is resolved
+//! against its mapped official content id (`official_widget_content_id`),
+//! downloaded, verified to actually provide the required ids
+//! (`WidgetBundleInventory`), and installed through the same envelope-kind
+//! dispatch mxrb's `install_official_archive` uses — a `Widget`-kind
+//! archive through [`crate::widget_package::install_widget`], a
+//! `Module`-kind bundle (e.g. Data Widgets) through
+//! [`lifecycle::install_module`] like any other module dependency. An
+//! unmapped widget id stays a named blocker, mirroring mxrb's own "no
+//! verified official Marketplace widget mapping".
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -20,7 +25,15 @@ use crate::lifecycle::{self, ModulePackageInventory, OfficialProvenance, with_ro
 use crate::lock::{ORIGINALS_RELATIVE, read_lock, safe_target_path};
 use crate::package::ModulePackage;
 use crate::transport::Transport;
+use crate::widget_package::{
+    PackageKind, WidgetBundleInventory, WidgetPackageInventory, envelope_kind, install_widget,
+};
 use crate::{ContentApi, MarketplaceError, Package, Result, SearchQuery};
+
+/// `Installer::DOWNLOADABLE_CONTENT_TYPES` — one wider than
+/// `IMPORTABLE_CONTENT_TYPES`, since a standalone widget cannot be
+/// imported as a module but can still be pulled and installed.
+const DOWNLOADABLE_CONTENT_TYPES: [&str; 3] = ["Module", "Service", "Widget"];
 
 /// `DependencyResolver::PLATFORM_MODULES`.
 const PLATFORM_MODULES: [&str; 1] = ["System"];
@@ -68,12 +81,33 @@ pub struct ResolvedDependency {
     pub archive: PathBuf,
 }
 
+/// One resolved widget bundle the plan would install — ports
+/// `WidgetDependency`.
+#[derive(Debug)]
+pub struct ResolvedWidgetDependency {
+    pub content_id: String,
+    pub package: Package,
+    pub archive: PathBuf,
+    pub widget_ids: Vec<String>,
+}
+
+fn provenance_for(package: &Package) -> OfficialProvenance {
+    OfficialProvenance {
+        content_id: Some(package.content.content_id.to_string()),
+        version_id: Some(package.version.version_id.clone()),
+        version: Some(package.version.version_number.clone()),
+        source: Some("mendix".into()),
+        repository: None,
+    }
+}
+
 /// Preview for a recursively verified dependency installation — ports
 /// `DependencyPlan`.
 #[derive(Debug)]
 pub struct DependencyPlan {
     pub root: String,
     pub dependencies: Vec<ResolvedDependency>,
+    pub widget_dependencies: Vec<ResolvedWidgetDependency>,
     pub blockers: Vec<String>,
     target: PathBuf,
     mpr: PathBuf,
@@ -100,6 +134,13 @@ impl DependencyPlan {
                         .unwrap_or_else(|| "(cached)".into())
                 )
             })
+            .chain(self.widget_dependencies.iter().map(|dependency| {
+                format!(
+                    "install widget bundle {} {}",
+                    dependency.package.name(),
+                    dependency.package.version.version_number
+                )
+            }))
             .collect()
     }
 
@@ -126,18 +167,26 @@ impl DependencyPlan {
                 paths.push(safe_target_path(&self.target, relative)?);
             }
         }
+        for dependency in &self.widget_dependencies {
+            if envelope_kind(&dependency.archive)? == PackageKind::Widget {
+                let inventory = WidgetPackageInventory::read(&dependency.archive)?;
+                paths.push(safe_target_path(
+                    &self.target,
+                    &format!("widgets/{}", inventory.project_filename),
+                )?);
+            } else {
+                let inventory = ModulePackageInventory::read(&dependency.archive)?;
+                for relative in inventory.files.keys() {
+                    paths.push(safe_target_path(&self.target, relative)?);
+                }
+            }
+        }
         with_rollback(&paths, || {
             for dependency in &self.dependencies {
                 let provenance = dependency
                     .package
                     .as_ref()
-                    .map(|package| OfficialProvenance {
-                        content_id: Some(package.content.content_id.to_string()),
-                        version_id: Some(package.version.version_id.clone()),
-                        version: Some(package.version.version_number.clone()),
-                        source: Some("mendix".into()),
-                        repository: None,
-                    })
+                    .map(provenance_for)
                     .unwrap_or_default();
                 lifecycle::install_module(
                     &dependency.archive,
@@ -149,9 +198,46 @@ impl DependencyPlan {
                     &provenance,
                 )?;
             }
+            for dependency in &self.widget_dependencies {
+                // `package_installed?` — a candidate already installed by
+                // an earlier module dependency (e.g. bundled the same
+                // widget) needs no separate install.
+                if content_id_installed(&self.target, &dependency.content_id)? {
+                    continue;
+                }
+                let provenance = provenance_for(&dependency.package);
+                match envelope_kind(&dependency.archive)? {
+                    PackageKind::Widget => {
+                        install_widget(
+                            &dependency.archive,
+                            &self.target,
+                            &dependency.package.version.version_number,
+                            &provenance,
+                        )?;
+                    }
+                    PackageKind::Module => {
+                        lifecycle::install_module(
+                            &dependency.archive,
+                            &self.mpr,
+                            Some(&self.target),
+                            true,
+                            &provenance,
+                        )?;
+                    }
+                }
+            }
             Ok(())
         })
     }
+}
+
+/// Whether any locked package (module or widget) already carries this
+/// content id — mxrb's `package_installed?`.
+fn content_id_installed(target: &Path, content_id: &str) -> Result<bool> {
+    Ok(read_lock(target)?
+        .packages
+        .values()
+        .any(|entry| entry.content_id.as_deref() == Some(content_id)))
 }
 
 pub fn plan_dependencies<T: Transport>(
@@ -186,9 +272,10 @@ pub fn plan_dependencies<T: Transport>(
         resolved: Vec::new(),
         visited: BTreeSet::new(),
         blockers: Vec::new(),
+        widget_archives: std::collections::BTreeMap::new(),
     };
     resolver.visit(&root, &root_archive)?;
-    resolver.widget_blockers()?;
+    let widget_dependencies = resolver.resolve_widget_dependencies()?;
     let mut seen = BTreeSet::new();
     let blockers: Vec<String> = resolver
         .blockers
@@ -198,6 +285,7 @@ pub fn plan_dependencies<T: Transport>(
     Ok(DependencyPlan {
         root,
         dependencies: resolver.resolved,
+        widget_dependencies,
         blockers,
         target,
         mpr,
@@ -215,6 +303,10 @@ struct Resolver<'api, T: Transport> {
     resolved: Vec<ResolvedDependency>,
     visited: BTreeSet<String>,
     blockers: Vec<String>,
+    /// Content id → already-resolved (package, downloaded archive), so a
+    /// widget content the module-dependency walk already touched is never
+    /// re-resolved or re-downloaded.
+    widget_archives: std::collections::BTreeMap<String, (Package, PathBuf)>,
 }
 
 impl<T: Transport> Resolver<'_, T> {
@@ -407,10 +499,14 @@ impl<T: Transport> Resolver<'_, T> {
         }))
     }
 
-    /// `DependencyResolver#resolve_widget_dependencies`, honestly scoped:
-    /// every required-but-missing widget bundle is a blocker (see the
-    /// module doc comment).
-    fn widget_blockers(&mut self) -> Result<()> {
+    /// `DependencyResolver#resolve_widget_dependencies` — every
+    /// required-but-missing widget id is grouped by its mapped official
+    /// content id, then each group is resolved, downloaded, and verified
+    /// to actually provide every required id in that group. An unmapped
+    /// id, or a group whose resolution fails, becomes a named blocker
+    /// instead of failing the whole plan.
+    fn resolve_widget_dependencies(&mut self) -> Result<Vec<ResolvedWidgetDependency>> {
+        let mut missing: Vec<String> = Vec::new();
         for widget_id in std::mem::take(&mut self.required_widget_ids) {
             let installed = mxrs_widget_package::find(&self.target, &widget_id)
                 .map_err(|error| MarketplaceError::InvalidPackage {
@@ -418,21 +514,103 @@ impl<T: Transport> Resolver<'_, T> {
                     message: error.to_string(),
                 })?
                 .is_some();
-            if installed {
-                continue;
+            if !installed {
+                missing.push(widget_id);
             }
+        }
+        let mut grouped: std::collections::BTreeMap<&'static str, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for widget_id in missing {
             match official_widget_content_id(&widget_id) {
-                Some(content_id) => self.blockers.push(format!(
-                    "widget content {content_id}: official widget bundle installation is not \
-                     ported; download it with `mxrs marketplace download {content_id}` and \
-                     install the .mpk into widgets/ manually"
-                )),
+                Some(content_id) => grouped.entry(content_id).or_default().push(widget_id),
                 None => self.blockers.push(format!(
                     "{widget_id}: no verified official Marketplace widget mapping"
                 )),
             }
         }
-        Ok(())
+        let mut resolved = Vec::new();
+        for (content_id, mut required_ids) in grouped {
+            required_ids.sort();
+            match self.resolve_widget_dependency(content_id, &required_ids) {
+                Ok(Some(dependency)) => resolved.push(dependency),
+                Ok(None) => {}
+                Err(error) => self
+                    .blockers
+                    .push(format!("widget content {content_id}: {error}")),
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// `DependencyResolver#resolve_widget_dependency`.
+    fn resolve_widget_dependency(
+        &mut self,
+        content_id: &str,
+        required_ids: &[String],
+    ) -> Result<Option<ResolvedWidgetDependency>> {
+        if content_id_installed(&self.target, content_id)? {
+            return Err(MarketplaceError::WidgetInstall(format!(
+                "locked official package is present but does not provide {}",
+                required_ids.join(", ")
+            )));
+        }
+        let Some(api) = self.api else {
+            self.blockers.push(format!(
+                "widget content {content_id}: a Mendix credential is required to resolve \
+                 Marketplace widget dependencies"
+            ));
+            return Ok(None);
+        };
+        let existing = self
+            .widget_archives
+            .get(content_id)
+            .map(|(package, archive)| (package.clone(), archive.clone()));
+        let (package, archive) = match existing {
+            Some(found) => found,
+            None => {
+                let package = api.resolve(content_id, None, self.mendix_version)?;
+                if !DOWNLOADABLE_CONTENT_TYPES.contains(&package.content.content_type.as_str()) {
+                    return Err(MarketplaceError::WidgetInstall(format!(
+                        "Marketplace content {:?} is {}, not a Module, Service, or Widget",
+                        package.name(),
+                        package.content.content_type
+                    )));
+                }
+                let destination = self.downloads.join(format!(
+                    "{}-{}.mpk",
+                    package.content.content_id, package.version.version_id
+                ));
+                if !destination.is_file() {
+                    api.download(&package, &destination)?;
+                }
+                self.widget_archives.insert(
+                    content_id.to_string(),
+                    (package.clone(), destination.clone()),
+                );
+                (package, destination)
+            }
+        };
+        let inventory = WidgetBundleInventory::read(&archive)?;
+        let missing: Vec<&String> = required_ids
+            .iter()
+            .filter(|id| !inventory.widget_ids.contains(id))
+            .collect();
+        if !missing.is_empty() {
+            return Err(MarketplaceError::WidgetInstall(format!(
+                "downloaded package does not provide {}",
+                missing
+                    .iter()
+                    .map(|id| id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        Ok(Some(ResolvedWidgetDependency {
+            content_id: content_id.to_string(),
+            package,
+            archive,
+            widget_ids: inventory.widget_ids,
+        }))
     }
 }
 

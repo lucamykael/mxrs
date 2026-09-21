@@ -1,8 +1,10 @@
 //! Offline dependency resolution: dependencies are discovered from the
 //! unresolved references inside the installed package's own model, already
 //! locked modules satisfy them from the local cache, missing ones without
-//! a credential become named blockers instead of guesses, and required
-//! widget bundles surface as honest blockers naming the official content.
+//! a credential become named blockers instead of guesses, required widget
+//! bundles without a credential surface as honest blockers naming the
+//! official content, and — with a fake Content API — a required standalone
+//! widget resolves, downloads, is verified to provide the id, and installs.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,7 +13,7 @@ use mxrs_dsl::CallArgument;
 use mxrs_ir::MicroflowRef;
 use mxrs_marketplace::lifecycle::{OfficialProvenance, install_module};
 use mxrs_marketplace::resolver::plan_dependencies;
-use mxrs_marketplace::{Download, Transport};
+use mxrs_marketplace::{ContentApi, Download, Pat, Transport};
 
 const SUPPORTED_VERSION: &str = "11.12.1";
 
@@ -165,6 +167,14 @@ fn target(directory: &Path) -> PathBuf {
             entity.string("Number");
         });
     });
+    // Every real project ships Atlas_Core out of the box; the fixture pages
+    // built below reference `Atlas_Core.ApplicationLayout`, and this keeps
+    // that a locally satisfied reference rather than an extra dependency.
+    builder.module("Atlas_Core", |module| {
+        module.layout("ApplicationLayout", |layout| {
+            layout.placeholder("Main");
+        });
+    });
     mxrs_writer::write_project(&path, &builder.build()).unwrap();
     path
 }
@@ -259,13 +269,134 @@ fn required_widget_bundles_surface_as_honest_blockers() {
     )
     .unwrap();
 
+    // Without a credential the required widget bundle is a named, honest
+    // blocker rather than a silent skip or a guess.
     let plan =
         plan_dependencies::<Unreachable>(root, "Grids", None, Some(SUPPORTED_VERSION)).unwrap();
     assert!(
         plan.blockers
             .iter()
-            .any(|blocker| blocker.contains("116540") && blocker.contains("not ported")),
+            .any(|blocker| blocker.contains("116540") && blocker.contains("credential")),
         "{:?}",
         plan.blockers
     );
+}
+
+/// Serves the well-known Combobox widget content (id 219304) so the
+/// resolver's live candidate path can be exercised offline.
+struct FakeWidgetContentApi {
+    archive: PathBuf,
+}
+
+impl Transport for FakeWidgetContentApi {
+    fn get(&self, url: &str, _authorization: &str) -> mxrs_marketplace::Result<String> {
+        if url.contains("/content/219304/versions") {
+            return Ok(r#"{"items":[{"name":"Combo box","versionId":"v1","versionNumber":"2.9.0","minSupportedMendixVersion":"9.0.0","versionType":"Regular"}]}"#.into());
+        }
+        if url.contains("/content/219304") {
+            return Ok(r#"{"contentId":219304,"publisher":"Mendix","type":"Widget","isPrivate":false,"isCompanyApproved":true,"latestVersion":{"name":"Combo box","versionId":"v1","versionNumber":"2.9.0"}}"#.into());
+        }
+        Err(mxrs_marketplace::MarketplaceError::Status {
+            status: 404,
+            url: url.to_string(),
+        })
+    }
+
+    fn download(
+        &self,
+        _url: &str,
+        _authorization: Option<&str>,
+        destination: &Path,
+    ) -> mxrs_marketplace::Result<Download> {
+        std::fs::copy(&self.archive, destination).unwrap();
+        Ok(Download::Written(
+            std::fs::metadata(destination).unwrap().len(),
+        ))
+    }
+}
+
+fn combobox_widget_archive(path: &Path) {
+    let package_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.mendix.com/package/1.0/">
+  <clientModule name="Combobox" version="2.9.0" xmlns="http://www.mendix.com/clientModule/1.0/">
+    <widgetFiles><widgetFile path="Combobox.xml" /></widgetFiles>
+  </clientModule>
+</package>"#;
+    let widget_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<widget id="com.mendix.widget.web.combobox.Combobox" pluginWidget="true" xmlns="http://www.mendix.com/widget/1.0/">
+  <name>Combo box</name>
+</widget>"#;
+    let file = std::fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("package.xml", options).unwrap();
+    zip.write_all(package_xml.as_bytes()).unwrap();
+    zip.start_file("Combobox.xml", options).unwrap();
+    zip.write_all(widget_xml.as_bytes()).unwrap();
+    zip.finish().unwrap();
+}
+
+#[test]
+fn a_required_standalone_widget_resolves_downloads_verifies_and_installs() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mpr = target(root);
+    // A package whose page embeds a real Combo box pluggable widget.
+    let build_dir = root.join(format!("build-{}", next_id()));
+    std::fs::create_dir_all(&build_dir).unwrap();
+    let mut builder = mxrs_dsl::ProjectBuilder::new(SUPPORTED_VERSION);
+    builder.module("Forms", |module| {
+        module.page("Entry", |page| {
+            page.layout("Atlas_Core.ApplicationLayout", "Main");
+            page.combo_box(|_combo_box| {});
+        });
+    });
+    mxrs_writer::write_project(build_dir.join("project.mpr"), &builder.build()).unwrap();
+    let archive = zip_project(root, "Forms", &build_dir);
+    install_module(
+        &archive,
+        &mpr,
+        Some(root),
+        false,
+        &OfficialProvenance::default(),
+    )
+    .unwrap();
+
+    let widget_archive = root.join("combobox-candidate.mpk");
+    combobox_widget_archive(&widget_archive);
+    let api = ContentApi::new(
+        FakeWidgetContentApi {
+            archive: widget_archive,
+        },
+        Pat::new("test-token").unwrap(),
+    );
+
+    let plan = plan_dependencies(root, "Forms", Some(&api), Some(SUPPORTED_VERSION)).unwrap();
+    assert!(plan.safe(), "{:?}", plan.blockers);
+    assert_eq!(plan.widget_dependencies.len(), 1);
+    assert_eq!(plan.widget_dependencies[0].content_id, "219304");
+    assert!(
+        plan.changes()
+            .iter()
+            .any(|change| change.contains("widget bundle Combo box")),
+        "{:?}",
+        plan.changes()
+    );
+
+    plan.apply().unwrap();
+    assert!(
+        root.join("widgets/com.mendix.widget.web.Combobox.mpk")
+            .is_file()
+    );
+    let lock = mxrs_marketplace::lock::read_lock(root).unwrap();
+    let entry = lock.packages.get("Combobox").expect("widget locked");
+    assert_eq!(entry.kind, "widget");
+    assert_eq!(entry.content_id.as_deref(), Some("219304"));
+
+    // Re-resolving now finds the widget already installed and requires
+    // nothing further.
+    let plan = plan_dependencies(root, "Forms", Some(&api), Some(SUPPORTED_VERSION)).unwrap();
+    assert!(plan.safe(), "{:?}", plan.blockers);
+    assert!(plan.widget_dependencies.is_empty());
 }

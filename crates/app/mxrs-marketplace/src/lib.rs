@@ -29,6 +29,7 @@ pub mod package;
 pub mod resolver;
 mod transport;
 pub mod ureq_transport;
+pub mod widget_package;
 
 pub use credentials::{Credentials, Pat};
 pub use installer::{InstallPlan, InstallReport, plan_install};
@@ -155,6 +156,12 @@ pub enum MarketplaceError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("invalid Mendix widget package {path}: {message}")]
+    InvalidWidgetPackage { path: String, message: String },
+
+    #[error("widget install refused: {0}")]
+    WidgetInstall(String),
 
     #[error("package not found: {0}")]
     PackageNotFound(String),

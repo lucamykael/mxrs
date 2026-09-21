@@ -103,7 +103,7 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn io_error(path: &Path) -> impl Fn(std::io::Error) -> MarketplaceError + '_ {
+pub(crate) fn io_error(path: &Path) -> impl Fn(std::io::Error) -> MarketplaceError + '_ {
     move |source| MarketplaceError::PackageIo {
         path: path.display().to_string(),
         source,
@@ -176,6 +176,7 @@ pub fn install_module(
             units: report.units,
             files: inventory.files.keys().cloned().collect(),
             asset_originals: originals,
+            asset_original: None,
             content_id: provenance.content_id.clone(),
             version_id: provenance.version_id.clone(),
         },
@@ -672,10 +673,10 @@ enum SnapshotKind {
 
 /// Snapshots every path, runs the operation, and restores everything in
 /// reverse order on failure — `Lifecycle#with_rollback`.
-pub(crate) fn with_rollback(
+pub(crate) fn with_rollback<T>(
     paths: &[PathBuf],
-    operation: impl FnOnce() -> Result<()>,
-) -> Result<()> {
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let temporary = tempfile::tempdir().map_err(|source| MarketplaceError::PackageIo {
         path: "temporary directory".into(),
         source,
@@ -699,7 +700,7 @@ pub(crate) fn with_rollback(
         snapshots.push((path.clone(), backup, kind));
     }
     match operation() {
-        Ok(()) => Ok(()),
+        Ok(value) => Ok(value),
         Err(error) => {
             for (path, backup, kind) in snapshots.iter().rev() {
                 if path.is_dir() {

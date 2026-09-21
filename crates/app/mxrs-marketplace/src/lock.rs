@@ -42,8 +42,15 @@ pub struct LockEntry {
     pub units: usize,
     #[serde(default)]
     pub files: Vec<String>,
+    /// Module entries only — mxrb's plural `asset_originals` map, one backup
+    /// per owned file.
     #[serde(default)]
     pub asset_originals: BTreeMap<String, Option<String>>,
+    /// Widget entries only — mxrb's singular `asset_original`: a widget
+    /// entry owns exactly one file (its `widgets/*.mpk`), so one backup
+    /// reference is enough.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_original: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
