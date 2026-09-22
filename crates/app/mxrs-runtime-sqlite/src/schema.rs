@@ -58,9 +58,13 @@ pub struct RuntimeSchema {
 }
 
 impl RuntimeSchema {
-    pub fn entity(&self, name: &str) -> Result<&EntitySchema> {
+    /// Resolves a stored entity name against the current model. `Ok(None)`
+    /// means the model no longer declares it — a migration question the
+    /// caller answers, not an error by itself. An unqualified name matching
+    /// several modules stays an error: never a silent pick.
+    pub fn lookup(&self, name: &str) -> Result<Option<&EntitySchema>> {
         if let Some(exact) = self.entities.iter().find(|entity| entity.name == name) {
-            return Ok(exact);
+            return Ok(Some(exact));
         }
         let matches: Vec<&EntitySchema> = self
             .entities
@@ -68,14 +72,17 @@ impl RuntimeSchema {
             .filter(|entity| entity.name.rsplit('.').next() == Some(name))
             .collect();
         match matches.as_slice() {
-            [only] => Ok(only),
-            [] => Err(SqliteRuntimeError::InvalidSchema(format!(
-                "unknown entity {name}"
-            ))),
+            [only] => Ok(Some(only)),
+            [] => Ok(None),
             _ => Err(SqliteRuntimeError::InvalidSchema(format!(
                 "ambiguous entity {name}"
             ))),
         }
+    }
+
+    pub fn entity(&self, name: &str) -> Result<&EntitySchema> {
+        self.lookup(name)?
+            .ok_or_else(|| SqliteRuntimeError::InvalidSchema(format!("unknown entity {name}")))
     }
 
     pub fn association(&self, name: &str) -> Result<&AssociationSchema> {
@@ -815,6 +822,20 @@ fn copy_expressions(
         .collect()
 }
 
+/// Renders an attribute's modelled default as a SQL literal.
+///
+/// Two deliberate divergences from mxrb, both in mxrs's favour, both visible
+/// in emitted `DEFAULT` clauses:
+///
+/// - **Boolean:** mxrb applies Ruby truthiness to the raw default string, so
+///   the string `"false"` is truthy there and emits `DEFAULT 1`. This
+///   compares against `"true"` instead, so `"false"` emits `DEFAULT 0`. The
+///   table *layout* stays byte-compatible; a boolean default of `"false"`
+///   is the one value whose literal differs.
+/// - **Integer:** Ruby's `String#to_i` truncates at the first non-digit
+///   (`"12abc"` → `12`); `str::parse` refuses the whole string and falls back
+///   to `0`. Well-formed models are unaffected — only malformed defaults
+///   diverge, and both sides pick a number rather than failing.
 fn sql_literal(value: &str, kind: AttributeType) -> String {
     match kind {
         AttributeType::Boolean => {

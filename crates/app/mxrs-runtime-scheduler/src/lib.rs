@@ -7,9 +7,11 @@
 //! takes the clock instant and an executor closure, so applications connect
 //! it to the flow interpreter and tests never wait on wall-clock time.
 //!
-//! Deliberate divergences from the oracle: dispatch is synchronous (the
-//! caller owns concurrency; mxrb's worker threads and lease heartbeats
-//! exist for its multi-process Ruby server), and the `local` time zone is
+//! Deliberate divergences from the oracle: dispatch is synchronous (mxrb's
+//! worker threads and lease heartbeats exist for its multi-process Ruby
+//! server) — so [`Scheduler::tick`] replays the minute boundaries it slept
+//! through rather than letting a long-running flow swallow another event's
+//! exact `hh:mm` slot; and the `local` time zone is
 //! treated as UTC — a server schedule that depends on the host's zone is
 //! not reproducible, and mxrb itself degrades IANA zones to an explicit
 //! error without tzinfo, which this port mirrors for every non-UTC,
@@ -29,6 +31,10 @@ pub enum SchedulerError {
 fn invalid(message: impl Into<String>) -> SchedulerError {
     SchedulerError::Invalid(message.into())
 }
+
+/// One day of missed minute boundaries is replayed after an outage; older
+/// slots are dropped rather than dispatched in a burst.
+const CATCH_UP_MINUTES: i64 = 1_440;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Schedule {
@@ -228,10 +234,12 @@ fn normalize_job(module_name: &str, source: &Document) -> Result<ScheduledJob, S
         qualified_name: qualified,
         microflow,
         schedule,
+        // mxrb: `fetch(source, 'OnOverlap', …) || 'SkipNext'`. Ruby's `||`
+        // only replaces nil/false, so an explicitly empty `OnOverlap` stays
+        // empty there (it matches neither "skip" nor "delay") rather than
+        // becoming SkipNext.
         overlap: source
             .get_str("OnOverlap")
-            .ok()
-            .filter(|value| !value.is_empty())
             .unwrap_or("SkipNext")
             .to_string(),
         enabled,
@@ -248,9 +256,14 @@ fn normalize_schedule(source: &Document) -> Result<Schedule, SchedulerError> {
     let kind = schedule
         .and_then(|schedule| schedule.get_str("$Type").ok())
         .unwrap_or_default();
-    let value = |keys: &[&str]| schedule.and_then(|schedule| schedule_value(schedule, keys));
+    let value = |keys: &[&str]| -> Result<Option<i64>, SchedulerError> {
+        match schedule {
+            Some(schedule) => schedule_value(schedule, keys),
+            None => Ok(None),
+        }
+    };
     let bounded = |keys: &[&str], low: i64, high: i64| -> Result<i64, SchedulerError> {
-        let number = value(keys).unwrap_or(0);
+        let number = value(keys)?.unwrap_or(0);
         if (low..=high).contains(&number) {
             Ok(number)
         } else {
@@ -262,11 +275,11 @@ fn normalize_schedule(source: &Document) -> Result<Schedule, SchedulerError> {
     };
     if kind.ends_with("MinuteSchedule") {
         Ok(Schedule::Minute {
-            every: positive(value(&["Multiplier"]))?,
+            every: positive(value(&["Multiplier"])?)?,
         })
     } else if kind.ends_with("HourSchedule") {
         Ok(Schedule::Hour {
-            every: positive(value(&["Multiplier"]))?,
+            every: positive(value(&["Multiplier"])?)?,
             minute: bounded(&["MinuteOffset"], 0, 59)?,
         })
     } else if kind.ends_with("DaySchedule") {
@@ -312,7 +325,7 @@ fn legacy_schedule(source: &Document) -> Result<Schedule, SchedulerError> {
         .get_str("IntervalType")
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let every = positive(bson_integer(source.get("Interval")))?;
+    let every = positive(bson_integer(source.get("Interval"), "Interval")?)?;
     match kind.as_str() {
         "minute" => Ok(Schedule::Minute { every }),
         "hour" => Ok(Schedule::Hour { every, minute: 0 }),
@@ -328,15 +341,21 @@ fn legacy_schedule(source: &Document) -> Result<Schedule, SchedulerError> {
 }
 
 /// mxrb's `schedule_value`: the key directly, or nested under `Properties`.
-fn schedule_value(schedule: &Document, keys: &[&str]) -> Option<i64> {
+fn schedule_value(schedule: &Document, keys: &[&str]) -> Result<Option<i64>, SchedulerError> {
     for key in keys {
-        if let Some(value) = bson_integer(schedule.get(key)) {
-            return Some(value);
+        if let Some(value) = bson_integer(schedule.get(key), key)? {
+            return Ok(Some(value));
         }
     }
-    let properties = schedule.get_document("Properties").ok()?;
-    keys.iter()
-        .find_map(|key| bson_integer(properties.get(key)))
+    let Ok(properties) = schedule.get_document("Properties") else {
+        return Ok(None);
+    };
+    for key in keys {
+        if let Some(value) = bson_integer(properties.get(key), key)? {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
 }
 
 fn schedule_flag(schedule: &Document, key: &str) -> Option<bool> {
@@ -346,13 +365,37 @@ fn schedule_flag(schedule: &Document, key: &str) -> Option<bool> {
     schedule.get_document("Properties").ok()?.get_bool(key).ok()
 }
 
-fn bson_integer(value: Option<&Bson>) -> Option<i64> {
+/// Ports mxrb's `integer(value, fallback)` — `value.nil? ? fallback :
+/// Integer(value)`. Ruby's `Integer()` *raises* on a number it cannot read,
+/// so a malformed `"Multiplier": "60x"` refuses the boot there. Returning
+/// `None` here instead would silently install the default multiplier and run
+/// the event every minute, which is exactly the failure this crate's own doc
+/// says cannot happen ("a malformed enabled event is a load-time error").
+///
+/// `Integer(Float)` truncates toward zero, so a fractional `Double` does the
+/// same rather than erroring. One divergence stays documented instead of
+/// ported: Ruby reads a leading-zero string as octal (`Integer("015")` is
+/// 13); this parses it as decimal 15.
+fn bson_integer(value: Option<&Bson>, key: &str) -> Result<Option<i64>, SchedulerError> {
+    let not_an_integer =
+        |shown: String| invalid(format!("scheduled-event {key} is not an integer: {shown}"));
     match value {
-        Some(Bson::Int32(value)) => Some(i64::from(*value)),
-        Some(Bson::Int64(value)) => Some(*value),
-        Some(Bson::Double(value)) if value.fract() == 0.0 => Some(*value as i64),
-        Some(Bson::String(value)) => value.trim().parse().ok(),
-        _ => None,
+        None | Some(Bson::Null) => Ok(None),
+        Some(Bson::Int32(value)) => Ok(Some(i64::from(*value))),
+        Some(Bson::Int64(value)) => Ok(Some(*value)),
+        Some(Bson::Double(value)) => {
+            let truncated = value.trunc();
+            if truncated.is_finite() && (i64::MIN as f64..=i64::MAX as f64).contains(&truncated) {
+                Ok(Some(truncated as i64))
+            } else {
+                Err(not_an_integer(value.to_string()))
+            }
+        }
+        Some(Bson::String(value)) => match value.trim().parse() {
+            Ok(number) => Ok(Some(number)),
+            Err(_) => Err(not_an_integer(format!("{value:?}"))),
+        },
+        Some(other) => Err(not_an_integer(format!("{other:?}"))),
     }
 }
 
@@ -383,24 +426,38 @@ fn parse_time(raw: Option<&str>) -> Option<f64> {
     parse_iso8601(text)
 }
 
+/// `Time.iso8601`'s grammar, not a lenient superset of it: only `T` separates
+/// the date from the time (Ruby's space-separated form is `Time.parse`, which
+/// mxrb does not call), and the date must exist on the calendar — `02-30`
+/// raises there, so it is refused here instead of rolling into March.
 fn parse_iso8601(text: &str) -> Option<f64> {
     // yyyy-mm-ddThh:mm:ss(.fff)?(Z|±hh:mm|±hhmm)?
     let bytes = text.as_bytes();
     if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' {
         return None;
     }
-    let date_time_split = bytes[10];
-    if date_time_split != b'T' && date_time_split != b' ' {
+    if bytes[10] != b'T' {
         return None;
     }
-    let number = |range: std::ops::Range<usize>| -> Option<i64> { text.get(range)?.parse().ok() };
+    let number = |range: std::ops::Range<usize>| -> Option<i64> {
+        let field = text.get(range)?;
+        field
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then_some(())?;
+        field.parse().ok()
+    };
     let year = number(0..4)?;
     let month = number(5..7)?;
     let day = number(8..10)?;
     let hour = number(11..13)?;
     let minute = number(14..16)?;
     let second = number(17..19)?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month) || !(1..=days_in_month(year, month)).contains(&day) {
+        return None;
+    }
+    // A leap second is a legal `Time.iso8601` input; 24:00 is not.
+    if hour > 23 || minute > 59 || second > 60 {
         return None;
     }
     let mut rest = &text[19..];
@@ -420,6 +477,20 @@ fn parse_iso8601(text: &str) -> Option<f64> {
     )
 }
 
+fn is_leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
 /// Hinnant's `days_from_civil`.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
@@ -431,19 +502,33 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// `±hh:mm` or `±hhmm` → seconds.
+/// `±hh:mm` or `±hhmm` → seconds, matching mxrb's `/\A[+-]\d{2}:?\d{2}\z/`
+/// exactly. Stripping every `:` before counting digits (the previous shape)
+/// also accepted `+023:0` and `+:0230`, and an unchecked hour field accepted
+/// `+99:00` — a zone Ruby refuses as out of range.
 fn zone_offset(zone: &str) -> Option<i64> {
-    let (sign, digits) = match zone.split_at_checked(1)? {
+    let (sign, rest) = match zone.split_at_checked(1)? {
         ("+", rest) => (1, rest),
         ("-", rest) => (-1, rest),
         _ => return None,
     };
-    let digits = digits.replace(':', "");
-    if digits.len() != 4 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+    let (hours, minutes) = match rest.len() {
+        4 => rest.split_at(2),
+        5 if rest.as_bytes()[2] == b':' => (&rest[..2], &rest[3..]),
+        _ => return None,
+    };
+    if !hours
+        .bytes()
+        .chain(minutes.bytes())
+        .all(|byte| byte.is_ascii_digit())
+    {
         return None;
     }
-    let hours: i64 = digits[..2].parse().ok()?;
-    let minutes: i64 = digits[2..].parse().ok()?;
+    let hours: i64 = hours.parse().ok()?;
+    let minutes: i64 = minutes.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
     Some(sign * (hours * 3600 + minutes * 60))
 }
 
@@ -486,6 +571,9 @@ pub struct Scheduler<C: Coordinator = MemoryCoordinator> {
     owner: String,
     lease_ttl: f64,
     skip_overlap: bool,
+    /// The newest minute boundary already evaluated, so a tick that arrives
+    /// late still sees the boundaries it slept through.
+    last_minute: Option<i64>,
     last_slots: BTreeMap<String, i64>,
     running: BTreeSet<String>,
     /// `(qualified_name, message)` pairs, like mxrb's `errors` accessor.
@@ -506,50 +594,95 @@ impl<C: Coordinator> Scheduler<C> {
             owner: format!("{}-{}", std::process::id(), uuid::Uuid::new_v4()),
             lease_ttl: 300.0,
             skip_overlap: true,
+            last_minute: None,
             last_slots: BTreeMap::new(),
             running: BTreeSet::new(),
             errors: Vec::new(),
         }
     }
 
+    /// mxrb's `skip_overlap:` constructor keyword (default `true`). With it
+    /// off, a job's own `OnOverlap` decides, which is what makes matching
+    /// `"skip"`/`"delay"` observable at all.
+    #[must_use]
+    pub fn with_skip_overlap(mut self, skip_overlap: bool) -> Self {
+        self.skip_overlap = skip_overlap;
+        self
+    }
+
     pub fn jobs(&self) -> &[ScheduledJob] {
         &self.jobs
     }
 
-    /// Evaluates every job once against `now` (epoch seconds) and executes
-    /// the due ones synchronously. Returns the qualified names dispatched.
-    /// An executor failure lands in [`Scheduler::errors`], never aborts the
-    /// tick, and always releases the job's lease — mxrb's `ensure`.
+    /// Evaluates every job against each minute boundary this tick is
+    /// responsible for and executes the due ones synchronously. Returns the
+    /// qualified names dispatched. An executor failure lands in
+    /// [`Scheduler::errors`], never aborts the tick, and always releases the
+    /// job's lease — mxrb's `ensure`.
+    ///
+    /// Hour, day and week schedules match an exact `hh:mm`, so a tick that
+    /// lands even one second into the next minute would miss the slot
+    /// entirely. mxrb never notices because it dispatches on worker threads
+    /// while its ticker keeps time; this port dispatches inline, so the
+    /// boundaries between the previous tick and this one are replayed here
+    /// instead. Each missed slot fires exactly once, which is what mxrb's
+    /// workers would have produced.
     pub fn tick(
         &mut self,
         now: f64,
         executor: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<Vec<String>, SchedulerError> {
         let mut dispatched = Vec::new();
-        for index in 0..self.jobs.len() {
-            let job = self.jobs[index].clone();
-            let Some(slot) = due_slot(&job, now)? else {
-                continue;
-            };
-            if !self.reserve(&job, slot, now) {
-                continue;
+        for instant in self.pending_minutes(now) {
+            for index in 0..self.jobs.len() {
+                let job = self.jobs[index].clone();
+                let Some(slot) = due_slot(&job, instant)? else {
+                    continue;
+                };
+                // Leases are wall-clock bookkeeping, so they use the real
+                // `now` even while replaying an earlier boundary.
+                if !self.reserve(&job, slot, now) {
+                    continue;
+                }
+                let slot_key = format!(
+                    "{}:{slot}",
+                    job.schedule
+                        .as_ref()
+                        .expect("due jobs have a schedule")
+                        .kind()
+                );
+                if let Err(message) = executor(&job.microflow) {
+                    self.errors.push((job.qualified_name.clone(), message));
+                }
+                self.coordinator
+                    .complete(&job.qualified_name, &slot_key, &self.owner, now);
+                self.running.remove(&job.qualified_name);
+                dispatched.push(job.qualified_name.clone());
             }
-            let slot_key = format!(
-                "{}:{slot}",
-                job.schedule
-                    .as_ref()
-                    .expect("due jobs have a schedule")
-                    .kind()
-            );
-            if let Err(message) = executor(&job.microflow) {
-                self.errors.push((job.qualified_name.clone(), message));
-            }
-            self.coordinator
-                .complete(&job.qualified_name, &slot_key, &self.owner, now);
-            self.running.remove(&job.qualified_name);
-            dispatched.push(job.qualified_name.clone());
         }
         Ok(dispatched)
+    }
+
+    /// The minute boundaries `(last_minute, floor(now / 60)]`, as epoch
+    /// seconds, capped at [`CATCH_UP_MINUTES`] so a process that was down for
+    /// a week does not replay the week.
+    ///
+    /// Boundaries are evaluated at `minute * 60`, never at `now`, which makes
+    /// a replayed slot indistinguishable from a punctual one. The one visible
+    /// consequence is sub-minute `StartDateTime` anchoring: a job starting at
+    /// `10:00:30` is not due at the `10:00:00` boundary, so it first fires at
+    /// `10:01`. The clock is also treated as monotonic — a backwards jump
+    /// never re-opens boundaries that were already evaluated.
+    fn pending_minutes(&mut self, now: f64) -> Vec<f64> {
+        let current = (now.floor() as i64).div_euclid(60);
+        let first = match self.last_minute {
+            Some(last) if last < current => (last + 1).max(current - CATCH_UP_MINUTES + 1),
+            _ => current,
+        };
+        self.last_minute = Some(self.last_minute.map_or(current, |last| last.max(current)));
+        (first..=current)
+            .map(|minute| (minute * 60) as f64)
+            .collect()
     }
 
     fn reserve(&mut self, job: &ScheduledJob, slot: i64, now: f64) -> bool {
@@ -852,6 +985,241 @@ mod tests {
             scheduler.tick(minute_one + 120.0, &mut executor).unwrap(),
             ["App.Nightly"]
         );
+    }
+
+    fn module_with(units: Vec<Document>) -> Module {
+        Module {
+            id: String::new(),
+            name: Some("App".to_string()),
+            sort_index: None,
+            from_app_store: false,
+            app_store_guid: None,
+            app_store_version: None,
+            export_level: String::new(),
+            domain_model: None,
+            pages: Vec::new(),
+            microflows: Vec::new(),
+            nanoflows: Vec::new(),
+            rules: Vec::new(),
+            menus: Vec::new(),
+            module_roles: Vec::new(),
+            artifact_units: units,
+        }
+    }
+
+    #[test]
+    fn jobs_load_from_a_module_skipping_every_other_artifact_unit() {
+        let module = module_with(vec![
+            doc! { "$Type": "Microflows$Microflow", "Name": "NotAnEvent" },
+            event(
+                doc! { "Schedule": doc! { "$Type": "ScheduledEvents$MinuteSchedule", "Multiplier": 5 } },
+            ),
+            {
+                let mut other = event(doc! { "IntervalType": "Day", "Interval": 2 });
+                other.insert("Name", "Cleanup");
+                other.insert("Microflow", "App.RunCleanup");
+                other
+            },
+        ]);
+        let jobs = jobs_from_modules(std::slice::from_ref(&module)).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].qualified_name, "App.Nightly");
+        assert_eq!(jobs[0].schedule, Some(Schedule::Minute { every: 5 }));
+        assert_eq!(jobs[1].qualified_name, "App.Cleanup");
+        // An already-qualified microflow name is not qualified twice.
+        assert_eq!(jobs[1].microflow, "App.RunCleanup");
+        assert_eq!(
+            jobs[1].schedule,
+            Some(Schedule::Day {
+                every: 2,
+                hour: 0,
+                minute: 0
+            })
+        );
+
+        // A malformed *enabled* event refuses the whole load, like mxrb's
+        // constructor — it never degrades to a default schedule.
+        let broken = module_with(vec![event(doc! { "IntervalType": "century" })]);
+        assert!(jobs_from_modules(std::slice::from_ref(&broken)).is_err());
+    }
+
+    #[test]
+    fn malformed_schedule_numbers_are_load_errors_not_silent_defaults() {
+        // Ruby's `Integer("60x")` raises; defaulting to 1 would turn a typo
+        // into an event firing every single minute.
+        let error = normalize_job(
+            "App",
+            &event(
+                doc! { "Schedule": doc! { "$Type": "ScheduledEvents$MinuteSchedule", "Multiplier": "60x" } },
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "scheduled-event Multiplier is not an integer: \"60x\""
+        );
+        assert!(
+            normalize_job(
+                "App",
+                &event(doc! { "IntervalType": "Hour", "Interval": "x" })
+            )
+            .is_err()
+        );
+        // A well-formed numeric string still reads, and `Integer(Float)`
+        // truncates toward zero rather than failing.
+        assert_eq!(
+            job(
+                doc! { "Schedule": doc! { "$Type": "ScheduledEvents$MinuteSchedule", "Multiplier": "15" } }
+            )
+            .schedule,
+            Some(Schedule::Minute { every: 15 })
+        );
+        assert_eq!(
+            job(doc! { "Schedule": doc! {
+                "$Type": "ScheduledEvents$HourSchedule", "Multiplier": 1, "MinuteOffset": 30.9,
+            } })
+            .schedule,
+            Some(Schedule::Hour {
+                every: 1,
+                minute: 30
+            })
+        );
+    }
+
+    #[test]
+    fn zone_offsets_and_start_dates_follow_the_oracle_grammar_exactly() {
+        assert_eq!(zone_offset("+02:00"), Some(7200));
+        assert_eq!(zone_offset("-0230"), Some(-9000));
+        // Shapes the old `remove every colon` parse accepted by accident.
+        assert_eq!(zone_offset("+023:0"), None);
+        assert_eq!(zone_offset("+:0230"), None);
+        assert_eq!(zone_offset("+99:00"), None);
+        assert_eq!(zone_offset("0200"), None);
+
+        assert_eq!(parse_time(Some("1970-01-01T00:00:01Z")), Some(1.0));
+        assert_eq!(
+            parse_time(Some("2000-02-29T00:00:00Z")),
+            Some(951_782_400.0)
+        );
+        // `Time.iso8601` rejects all of these; `Time.parse` is not what mxrb
+        // calls, so neither does this.
+        assert_eq!(parse_time(Some("2001-02-29T00:00:00Z")), None);
+        assert_eq!(parse_time(Some("2000-04-31T00:00:00Z")), None);
+        assert_eq!(parse_time(Some("2000-01-01 00:00:00Z")), None);
+        assert_eq!(parse_time(Some("2000-01-01T24:00:00Z")), None);
+        assert_eq!(parse_time(Some("not a date")), None);
+    }
+
+    #[test]
+    fn start_dates_anchor_the_interval_they_do_not_only_defer_it() {
+        // Start 2000-02-29 00:07:00 UTC, every 15 minutes: the slots are
+        // :07, :22, :37 … not :00, :15, :30.
+        let start = 951_782_400.0 + 7.0 * 60.0;
+        let anchored = job(doc! {
+            "StartDateTime": "2000-02-29T00:07:00Z",
+            "Schedule": doc! { "$Type": "ScheduledEvents$MinuteSchedule", "Multiplier": 15 },
+        });
+        assert!(due_slot(&anchored, start).unwrap().is_some());
+        assert_eq!(due_slot(&anchored, start + 60.0).unwrap(), None);
+        assert!(due_slot(&anchored, start + 15.0 * 60.0).unwrap().is_some());
+
+        // Hour schedules anchor on the hour the start date falls in.
+        let hourly = job(doc! {
+            "StartDateTime": "2000-02-29T01:00:00Z",
+            "Schedule": doc! {
+                "$Type": "ScheduledEvents$HourSchedule", "Multiplier": 3, "MinuteOffset": 0,
+            },
+        });
+        let one_am = 951_782_400.0 + 3600.0;
+        assert!(due_slot(&hourly, one_am).unwrap().is_some());
+        assert_eq!(due_slot(&hourly, one_am + 3600.0).unwrap(), None);
+        assert!(due_slot(&hourly, one_am + 3.0 * 3600.0).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_late_tick_replays_the_minute_boundaries_it_slept_through() {
+        // 03:00 daily. A flow that overruns its minute must not swallow it.
+        let daily = job(doc! { "Schedule": doc! {
+            "$Type": "ScheduledEvents$DaySchedule", "HourOfDay": 3, "MinuteOfHour": 0,
+        } });
+        let mut scheduler = Scheduler::new(vec![daily]);
+        let mut nothing = |_: &str| Ok(());
+        let before = 951_782_400.0 + 2.0 * 3600.0 + 59.0 * 60.0; // 02:59:00
+        assert!(scheduler.tick(before, &mut nothing).unwrap().is_empty());
+        // The next tick lands at 03:00:20 — inside the slot — but a tick at
+        // 03:01:30 would have missed 03:00 entirely before the catch-up.
+        let late = 951_782_400.0 + 3.0 * 3600.0 + 90.0;
+        assert_eq!(scheduler.tick(late, &mut nothing).unwrap(), ["App.Nightly"]);
+        // Replayed once, never again.
+        assert!(
+            scheduler
+                .tick(late + 60.0, &mut nothing)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn catch_up_is_capped_and_never_walks_a_clock_backwards() {
+        let every_minute = job(doc! { "Schedule": doc! {
+            "$Type": "ScheduledEvents$MinuteSchedule", "Multiplier": 1,
+        } });
+        let mut scheduler = Scheduler::new(vec![every_minute]);
+        let dispatches = std::cell::RefCell::new(0usize);
+        let mut count = |_: &str| {
+            *dispatches.borrow_mut() += 1;
+            Ok(())
+        };
+        scheduler.tick(60.0, &mut count).unwrap();
+        // Two days later: only one day of boundaries is replayed, and a
+        // job due every minute still dispatches once per tick because each
+        // boundary reuses the same `last_slots` entry.
+        let two_days = 60.0 + 2.0 * 86_400.0;
+        assert_eq!(
+            scheduler.pending_minutes(two_days).len(),
+            CATCH_UP_MINUTES as usize
+        );
+        // A clock that jumps backwards evaluates only that one minute, and
+        // the high-water mark stays put — the next forward tick does not
+        // walk the whole gap a second time.
+        assert_eq!(scheduler.pending_minutes(60.0), vec![60.0]);
+        assert_eq!(
+            scheduler.pending_minutes(two_days + 60.0),
+            vec![two_days + 60.0]
+        );
+        assert_eq!(*dispatches.borrow(), 1);
+    }
+
+    #[test]
+    fn overlap_policy_is_the_events_own_once_the_global_switch_is_off() {
+        let overlap_job = |overlap: Option<&str>| {
+            let mut overrides = doc! { "Schedule": doc! {
+                "$Type": "ScheduledEvents$MinuteSchedule", "Multiplier": 1,
+            } };
+            if let Some(overlap) = overlap {
+                overrides.insert("OnOverlap", overlap);
+            }
+            job(overrides)
+        };
+        // Ruby's `fetch(...) || 'SkipNext'` only replaces nil, so an
+        // explicitly empty OnOverlap stays empty and matches nothing.
+        assert_eq!(overlap_job(Some("")).overlap, "");
+        assert_eq!(overlap_job(None).overlap, "SkipNext");
+
+        let never = overlap_job(Some(""));
+        let delayed = overlap_job(Some("DelayNext"));
+        let default = overlap_job(None);
+        let global = Scheduler::new(Vec::new());
+        // With mxrb's default `skip_overlap: true`, every job skips.
+        for job in [&never, &delayed, &default] {
+            assert!(global.skip_overlap(job));
+        }
+        // With it off, `OnOverlap` decides — which is the only way the
+        // "skip"/"delay" matching is observable at all.
+        let per_job = Scheduler::new(Vec::new()).with_skip_overlap(false);
+        assert!(!per_job.skip_overlap(&never));
+        assert!(per_job.skip_overlap(&delayed));
+        assert!(per_job.skip_overlap(&default));
     }
 
     #[test]

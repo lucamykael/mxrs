@@ -36,6 +36,21 @@ pub enum RuntimeError {
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
+/// Marks a member string as a datetime rather than text.
+///
+/// Store members are JSON, which has no datetime type, so a datetime written
+/// by the flow interpreter has to survive the round trip as a string. Sniffing
+/// the string back — "does it look like a rendered timestamp?" — silently
+/// re-types any text a user happened to write in that shape, turning
+/// `$o/Note = '2026-09-21 12:00:00 UTC'` false and `<` into an error. An
+/// explicit tag cannot collide by accident: `U+0001` is not legal in an XML
+/// or JSON model's text, so no authored value starts with it.
+///
+/// Members are tagged as `{prefix}{epoch seconds}`. Only member *storage* uses
+/// this encoding; every rendering boundary (JSON results, REST bodies,
+/// `formatDateTime`) emits the human form.
+pub const DATETIME_MEMBER_PREFIX: &str = "\u{1}mxrs-datetime:";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ObjectValue {
     pub entity: String,

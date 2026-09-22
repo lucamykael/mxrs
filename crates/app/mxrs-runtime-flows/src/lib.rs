@@ -30,7 +30,7 @@ pub use engine::{
     StoreMembers,
 };
 pub use expression::{Expression, MemberSource, NoObjects};
-pub use value::{FlowValue, ObjectRef, Variables};
+pub use value::{FlowValue, ObjectRef, Variables, member_to_json};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FlowError {

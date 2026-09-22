@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use mxrs_runtime::DATETIME_MEMBER_PREFIX;
 use serde_json::Value;
 
 use crate::FlowError;
@@ -234,9 +235,10 @@ impl FlowValue {
     }
 
     /// Store members hold JSON; this is the inverse direction for reads.
-    /// A string in this adapter's own datetime rendering comes back as a
-    /// [`FlowValue::DateTime`], so `formatDateTime($object/When, …)` works
-    /// on stored values the way mxrb's live `Time` members do.
+    /// A member tagged by [`FlowValue::to_member`] comes back as a
+    /// [`FlowValue::DateTime`], so `formatDateTime($object/When, …)` works on
+    /// stored values the way mxrb's live `Time` members do. Every other
+    /// string stays a string, whatever it looks like.
     pub fn from_member(value: &Value) -> FlowValue {
         match value {
             Value::Null => FlowValue::Empty,
@@ -246,7 +248,7 @@ impl FlowValue {
                 .map(FlowValue::Int)
                 .or_else(|| value.as_f64().map(FlowValue::Float))
                 .unwrap_or(FlowValue::Empty),
-            Value::String(value) => match crate::datetime::parse(value) {
+            Value::String(value) => match untag_datetime(value) {
                 Some(seconds) => FlowValue::DateTime(seconds),
                 None => FlowValue::String(value.clone()),
             },
@@ -259,15 +261,40 @@ impl FlowValue {
 
     /// The member payload written back into the store. Object references are
     /// stored as id strings and lists of objects as id arrays — the store's
-    /// own association representation (`reference_ids`).
+    /// own association representation (`reference_ids`) — and datetimes carry
+    /// [`DATETIME_MEMBER_PREFIX`] so reading them back cannot confuse them
+    /// with text that merely looks like a timestamp.
     pub fn to_member(&self) -> Value {
         match self {
             FlowValue::Object(reference) => Value::String(reference.id.clone()),
             FlowValue::List(values) => {
                 Value::Array(values.iter().map(FlowValue::to_member).collect())
             }
+            FlowValue::DateTime(seconds) => {
+                Value::String(format!("{DATETIME_MEMBER_PREFIX}{seconds}"))
+            }
             other => other.to_json_shallow(),
         }
+    }
+}
+
+/// Reads a tagged datetime member back to epoch seconds.
+fn untag_datetime(text: &str) -> Option<f64> {
+    let seconds: f64 = text.strip_prefix(DATETIME_MEMBER_PREFIX)?.parse().ok()?;
+    seconds.is_finite().then_some(seconds)
+}
+
+/// Renders a stored member as the JSON a caller sees, undoing the datetime
+/// tagging. Used wherever raw member maps cross a runtime boundary, so the
+/// storage encoding never escapes into a response body.
+pub fn member_to_json(value: &Value) -> Value {
+    match value {
+        Value::String(text) => match untag_datetime(text) {
+            Some(seconds) => Value::String(crate::datetime::to_string(seconds)),
+            None => value.clone(),
+        },
+        Value::Array(values) => Value::Array(values.iter().map(member_to_json).collect()),
+        other => other.clone(),
     }
 }
 
@@ -321,5 +348,85 @@ mod tests {
         assert_eq!(FlowValue::Float(2.0).mendix_string(), "2.0");
         assert_eq!(FlowValue::Float(2.5).mendix_string(), "2.5");
         assert_eq!(FlowValue::Bool(true).mendix_string(), "true");
+    }
+
+    /// Every integer edge that would panic in debug and wrap in release is a
+    /// named error instead. `i64::MIN / -1` and `-i64::MIN` are the two whole
+    /// families of that: their true result is not representable.
+    #[test]
+    fn integer_overflow_edges_are_errors_and_never_panics() {
+        let min = FlowValue::Int(i64::MIN);
+        let minus_one = FlowValue::Int(-1);
+        for result in [
+            min.divide(&minus_one),
+            min.negate(),
+            min.subtract(&FlowValue::Int(1)),
+            FlowValue::Int(i64::MAX).add(&FlowValue::Int(1)),
+            min.multiply(&minus_one),
+        ] {
+            assert_eq!(
+                result.unwrap_err(),
+                FlowError::unsupported_expression("integer overflow")
+            );
+        }
+        // Flooring division still works everywhere it is representable.
+        assert_eq!(
+            FlowValue::Int(-7).divide(&FlowValue::Int(2)).unwrap(),
+            FlowValue::Int(-4)
+        );
+        assert_eq!(
+            FlowValue::Int(i64::MIN).divide(&FlowValue::Int(1)).unwrap(),
+            FlowValue::Int(i64::MIN)
+        );
+    }
+
+    #[test]
+    fn json_payloads_survive_a_store_round_trip_intact() {
+        let payload = serde_json::json!({ "id": 7, "tags": ["a", "b"], "nested": { "ok": true } });
+        let value = FlowValue::Json(payload.clone());
+        let member = value.to_member();
+        assert_eq!(member, payload);
+        assert_eq!(FlowValue::from_member(&member), value);
+        assert_eq!(value.to_json_shallow(), payload);
+    }
+
+    /// The whole point of tagging: a datetime round-trips as a datetime, and
+    /// text that merely *looks* like one stays text. Sniffing used to make
+    /// `$o/Note = '2025-09-21 13:54:56 UTC'` false and `<` an error.
+    #[test]
+    fn datetime_members_are_tagged_and_lookalike_text_is_left_alone() {
+        let when = FlowValue::DateTime(1_758_462_896.0);
+        let member = when.to_member();
+        assert_eq!(
+            member,
+            Value::String(format!("{DATETIME_MEMBER_PREFIX}1758462896"))
+        );
+        assert_eq!(FlowValue::from_member(&member), when);
+
+        let lookalike = FlowValue::String("2025-09-21 13:54:56 UTC".into());
+        let stored = lookalike.to_member();
+        assert_eq!(FlowValue::from_member(&stored), lookalike);
+
+        // Rendering boundaries still emit the human form, never the tag.
+        assert_eq!(when.mendix_string(), "2025-09-21 13:54:56 UTC");
+        assert_eq!(
+            when.to_json_shallow(),
+            Value::String("2025-09-21 13:54:56 UTC".into())
+        );
+        assert_eq!(
+            member_to_json(&member),
+            Value::String("2025-09-21 13:54:56 UTC".into())
+        );
+        assert_eq!(member_to_json(&stored), stored);
+        // Lists of datetimes detag element-wise.
+        assert_eq!(
+            member_to_json(&Value::Array(vec![member.clone()])),
+            Value::Array(vec![Value::String("2025-09-21 13:54:56 UTC".into())])
+        );
+        // A truncated or non-numeric tag is text, not a silent zero.
+        assert_eq!(
+            FlowValue::from_member(&Value::String(DATETIME_MEMBER_PREFIX.into())),
+            FlowValue::String(DATETIME_MEMBER_PREFIX.into())
+        );
     }
 }

@@ -7,11 +7,20 @@
 //! layout. The unit-of-work semantics stay in [`mxrs_runtime::Store`]; this
 //! adapter persists committed state and restores it, with the same
 //! generation-based conflict detection as the snapshot adapter. A version-1
-//! snapshot database upgrades in place on open.
+//! snapshot database upgrades in place on open; objects of entities the model
+//! has since dropped make that upgrade destructive, so it is refused by name
+//! unless explicitly allowed.
 //!
 //! AutoNumber sequences are synchronized into `mxrb_schema_sequences` by the
 //! migrator; allocation on create remains with the store layer and is
 //! tracked in the backlog, not silently faked here.
+//!
+//! One value-level divergence from mxrb: a DateTime column holds the store's
+//! tagged member (`mxrs_runtime::DATETIME_MEMBER_PREFIX` plus epoch seconds),
+//! written through verbatim, because the store — not this adapter — owns the
+//! typing of a member. The table *layout* stays byte-compatible with mxrb;
+//! the datetime *values* in it are not mxrb text, and a reader outside the
+//! runtime has to detag them.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -57,15 +66,32 @@ impl RelationalRuntimeStore {
         allow_destructive: bool,
     ) -> Result<Self> {
         let runtime_schema = schema::derive(modules);
-        let (application_id, version) = {
+        let (application_id, version, existing) = {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let identity = identity(&transaction)?;
+            let (application_id, version) = identity(&transaction)?;
+            let existing = crate::schema_objects(&transaction)?;
             transaction.commit()?;
-            identity
+            (application_id, version, existing)
         };
         let legacy_objects = match (application_id, version) {
-            (0, 0) => None,
+            // `application_id = 0` is SQLite's universal default, so it
+            // identifies nothing on its own: a stock `.sqlite3` belonging to
+            // some other program reads as (0, 0) too. Adopt it only when the
+            // file is empty, or when it holds exactly the pre-versioned
+            // snapshot layout this adapter shipped before it stamped an
+            // identity — anything else is someone else's database, and
+            // stamping pragmas plus `mxrb_*` tables into it would corrupt it.
+            (0, 0) if existing.is_empty() => None,
+            (0, 0) if crate::is_legacy_schema(&existing) => {
+                Some(read_legacy_snapshot(&connection)?)
+            }
+            (0, 0) => {
+                return Err(SqliteRuntimeError::UnrelatedDatabase {
+                    application_id,
+                    version,
+                });
+            }
             (APPLICATION_ID, 1) => Some(read_legacy_snapshot(&connection)?),
             (APPLICATION_ID, RELATIONAL_VERSION) => None,
             (APPLICATION_ID, version) => {
@@ -78,6 +104,12 @@ impl RelationalRuntimeStore {
                 });
             }
         };
+        // Resolve the snapshot against the current model *before* migrating:
+        // a refusal must leave the database exactly as it was, and
+        // `schema::migrate` commits its own transaction.
+        let legacy_objects = legacy_objects
+            .map(|objects| retained_legacy_objects(&runtime_schema, objects, allow_destructive))
+            .transpose()?;
         schema::migrate(&mut connection, &runtime_schema, allow_destructive)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(METADATA_SCHEMA)?;
@@ -172,6 +204,47 @@ fn identity(connection: &Connection) -> Result<(i64, i64)> {
     Ok((application_id, version))
 }
 
+/// Splits a version-1 snapshot into the objects the current model can still
+/// store and the entities it has dropped.
+///
+/// The upgrade path used to hand the whole snapshot to `write_objects`, which
+/// failed with `unknown entity X` on the first orphan — and because a
+/// version-1 database has no `mxrb_schema_*` catalogue, `schema::migrate` had
+/// nothing to detect the removal from, so `--allow-destructive-schema` could
+/// not clear it either. Every subsequent boot hit the same error until the
+/// state file was deleted by hand. Now the removal is named up front and
+/// refused like any other destructive migration, or applied when allowed.
+fn retained_legacy_objects(
+    schema: &RuntimeSchema,
+    objects: Vec<ObjectValue>,
+    allow_destructive: bool,
+) -> Result<Vec<ObjectValue>> {
+    let mut retained = Vec::with_capacity(objects.len());
+    let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
+    for object in objects {
+        if schema.lookup(&object.entity)?.is_some() {
+            retained.push(object);
+        } else {
+            *dropped.entry(object.entity).or_default() += 1;
+        }
+    }
+    if !dropped.is_empty() && !allow_destructive {
+        let descriptions: Vec<String> = dropped
+            .iter()
+            .map(|(entity, count)| format!("{entity} ({count})"))
+            .collect();
+        return Err(SqliteRuntimeError::UnsafeMigration {
+            message: format!(
+                "version-1 snapshot contains objects of entities absent from the current model: {}; \
+                 rerun with --allow-destructive-schema after backing up the database",
+                descriptions.join(", ")
+            ),
+            changes: Vec::new(),
+        });
+    }
+    Ok(retained)
+}
+
 fn read_legacy_snapshot(connection: &Connection) -> Result<Vec<ObjectValue>> {
     let mut statement =
         connection.prepare("SELECT entity, object_id, members_json FROM mxrs_runtime_objects")?;
@@ -227,7 +300,12 @@ fn write_objects(
         let mut values: Vec<SqlValue> = vec![SqlValue::Text(object.id.clone())];
         for column in &entity.columns {
             columns.push(column.sql_name.clone());
-            values.push(member_to_sql(object.members.get(&column.name), column.kind));
+            values.push(member_to_sql(
+                object.members.get(&column.name),
+                column.kind,
+                &entity.name,
+                &column.name,
+            )?);
         }
         let placeholders: Vec<String> = (1..=columns.len())
             .map(|index| format!("?{index}"))
@@ -337,26 +415,40 @@ fn read_objects(connection: &Connection, schema: &RuntimeSchema) -> Result<Vec<O
     Ok(objects)
 }
 
-fn member_to_sql(value: Option<&Value>, kind: AttributeType) -> SqlValue {
+/// Projects a member onto its column.
+///
+/// A number that does not fit its integer column (`2.5`, or a magnitude past
+/// `i64`) is refused by name rather than written as NULL: this adapter is the
+/// durability boundary, and a save that silently discards the one value the
+/// caller changed is worse than a save that fails.
+fn member_to_sql(
+    value: Option<&Value>,
+    kind: AttributeType,
+    entity: &str,
+    member: &str,
+) -> Result<SqlValue> {
     let Some(value) = value else {
-        return SqlValue::Null;
+        return Ok(SqlValue::Null);
     };
-    match (kind, value) {
+    let lossy = || SqliteRuntimeError::LossyMember {
+        entity: entity.to_string(),
+        member: member.to_string(),
+        value: value.to_string(),
+        kind,
+    };
+    Ok(match (kind, value) {
         (_, Value::Null) => SqlValue::Null,
         (AttributeType::Boolean, Value::Bool(value)) => SqlValue::Integer(i64::from(*value)),
         (
             AttributeType::Integer | AttributeType::Long | AttributeType::AutoNumber,
-            Value::Number(value),
-        ) => value
-            .as_i64()
-            .map(SqlValue::Integer)
-            .unwrap_or(SqlValue::Null),
-        (AttributeType::Float | AttributeType::Decimal, Value::Number(value)) => {
-            value.as_f64().map(SqlValue::Real).unwrap_or(SqlValue::Null)
+            Value::Number(number),
+        ) => SqlValue::Integer(number.as_i64().ok_or_else(lossy)?),
+        (AttributeType::Float | AttributeType::Decimal, Value::Number(number)) => {
+            SqlValue::Real(number.as_f64().ok_or_else(lossy)?)
         }
         (_, Value::String(value)) => SqlValue::Text(value.clone()),
         (_, other) => SqlValue::Text(other.to_string()),
-    }
+    })
 }
 
 fn sql_to_member(value: SqlValue, kind: AttributeType) -> Option<Value> {

@@ -626,9 +626,15 @@ mod tests {
         assert!(check_baseline(&report, "not json").is_err());
     }
 
+    /// Every command below has a real, named MXRS surface and still reports
+    /// `partial`, because a surface existing is not evidence that it behaves
+    /// like the oracle. Keep this sample on commands whose named gap in
+    /// `classify` is still open — when one is genuinely finished and flips to
+    /// `verified`, swap it out for another partial rather than relaxing the
+    /// assertion.
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["search", "oql", "benchmark", "frontend"])).unwrap();
+        let report = build(&inventory(&["search", "oql", "analyze", "frontend"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

@@ -1744,7 +1744,16 @@ impl FlowEngine {
         Ok(match value {
             FlowValue::Object(reference) => {
                 let object = self.object_value(store, reference)?;
-                Value::Object(object.members.into_iter().collect())
+                // Members are the storage encoding, not the wire encoding:
+                // datetimes are tagged in the store and must be rendered
+                // human-readably here.
+                Value::Object(
+                    object
+                        .members
+                        .iter()
+                        .map(|(name, value)| (name.clone(), crate::member_to_json(value)))
+                        .collect(),
+                )
             }
             FlowValue::List(values) => Value::Array(
                 values

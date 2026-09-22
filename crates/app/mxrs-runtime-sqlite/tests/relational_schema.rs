@@ -271,6 +271,241 @@ fn generation_conflicts_still_guard_relational_saves() {
     );
 }
 
+/// The v1 upgrade reads the snapshot with the *current* model, so objects of
+/// an entity the model no longer declares have nowhere to go. Losing them is
+/// a destructive migration and is refused by name — a version-1 database has
+/// no `mxrb_schema_*` catalogue for `schema::migrate` to detect the removal
+/// from, so this is the only place that can see it.
+#[test]
+fn a_version_one_snapshot_of_a_removed_entity_is_refused_then_dropped_when_allowed() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let mut with_legacy = order_module();
+    if let Some(domain_model) = &mut with_legacy.domain_model {
+        domain_model.entities.push(entity(
+            "Legacy",
+            vec![attribute("Name", AttributeType::String)],
+        ));
+    }
+    {
+        let modules = std::slice::from_ref(&with_legacy);
+        let mut legacy_store = mxrs_runtime_sqlite::SqliteRuntimeStore::open(&path).unwrap();
+        let mut store = Store::new(store_schema(modules));
+        for (entity_name, name) in [("App.Order", "kept"), ("App.Legacy", "orphan")] {
+            let object = store.create(entity_name).unwrap();
+            store
+                .set_member(entity_name, &object.id, "Name", Value::String(name.into()))
+                .unwrap();
+            store.commit(entity_name, &object.id).unwrap();
+        }
+        legacy_store.save(&store).unwrap();
+    }
+
+    let current = order_module();
+    let modules = std::slice::from_ref(&current);
+    let refused = RelationalRuntimeStore::open(&path, modules, false).unwrap_err();
+    let message = refused.to_string();
+    assert!(
+        matches!(refused, SqliteRuntimeError::UnsafeMigration { .. }),
+        "{message}"
+    );
+    assert!(message.contains("App.Legacy (1)"), "{message}");
+    assert!(message.contains("--allow-destructive-schema"), "{message}");
+    // The refusal left the database on version 1, so a second attempt sees
+    // exactly the same thing rather than a half-migrated file.
+    assert!(RelationalRuntimeStore::open(&path, modules, false).is_err());
+
+    let mut upgraded = RelationalRuntimeStore::open(&path, modules, true).unwrap();
+    let mut store = Store::new(store_schema(modules));
+    assert_eq!(upgraded.load(&mut store).unwrap(), 1);
+    assert_eq!(
+        store.retrieve("App.Order").unwrap()[0].members["Name"],
+        Value::String("kept".into())
+    );
+}
+
+/// `application_id = 0` is SQLite's default, so it names no application at
+/// all: the relational adapter has to inspect the schema before adopting a
+/// (0, 0) file, exactly like the version-1 adapter does.
+#[test]
+fn a_foreign_sqlite_database_is_refused_without_changing_any_file_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("someone-elses.sqlite3");
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE invoices (id TEXT PRIMARY KEY); INSERT INTO invoices VALUES ('i-1')",
+            )
+            .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+
+    let module = order_module();
+    let modules = std::slice::from_ref(&module);
+    let refused = RelationalRuntimeStore::open(&path, modules, false).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            SqliteRuntimeError::UnrelatedDatabase {
+                application_id: 0,
+                version: 0
+            }
+        ),
+        "{refused}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    // Not even `--allow-destructive-schema` may adopt it: the flag answers
+    // "may this model's own data be dropped", not "may any file be taken".
+    assert!(RelationalRuntimeStore::open(&path, modules, true).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn boolean_float_and_reference_set_members_round_trip_relationally() {
+    let flag = attribute("Flag", AttributeType::Boolean);
+    let ratio = attribute("Ratio", AttributeType::Float);
+    let order = entity("Order", vec![flag, ratio]);
+    let tag = entity("Tag", vec![attribute("Name", AttributeType::String)]);
+    let tags = association("Order_Tags", &order, &tag, false);
+    let module = module_with(vec![order, tag], vec![tags]);
+    let modules = std::slice::from_ref(&module);
+
+    let mut persistence = RelationalRuntimeStore::in_memory(modules, false).unwrap();
+    let mut store = Store::new(store_schema(modules));
+    let mut tag_ids = Vec::new();
+    for name in ["red", "blue"] {
+        let created = store.create("App.Tag").unwrap();
+        store
+            .set_member("App.Tag", &created.id, "Name", Value::String(name.into()))
+            .unwrap();
+        store.commit("App.Tag", &created.id).unwrap();
+        tag_ids.push(Value::String(created.id));
+    }
+    let order = store.create("App.Order").unwrap();
+    store
+        .set_member("App.Order", &order.id, "Flag", Value::Bool(true))
+        .unwrap();
+    store
+        .set_member("App.Order", &order.id, "Ratio", serde_json::json!(0.25))
+        .unwrap();
+    store
+        .set_member(
+            "App.Order",
+            &order.id,
+            "Order_Tags",
+            Value::Array(tag_ids.clone()),
+        )
+        .unwrap();
+    store.commit("App.Order", &order.id).unwrap();
+    assert_eq!(persistence.save(&store).unwrap(), 3);
+
+    let mut restored = Store::new(store_schema(modules));
+    assert_eq!(persistence.load(&mut restored).unwrap(), 3);
+    let orders = restored.retrieve("App.Order").unwrap();
+    // A boolean survives as a boolean, not as the 0/1 its column stores.
+    assert_eq!(orders[0].members["Flag"], Value::Bool(true));
+    assert_eq!(orders[0].members["Ratio"], serde_json::json!(0.25));
+    let mut stored_tags = orders[0].members["Order_Tags"].as_array().unwrap().clone();
+    stored_tags.sort_by_key(|value| value.as_str().unwrap().to_string());
+    let mut expected = tag_ids.clone();
+    expected.sort_by_key(|value| value.as_str().unwrap().to_string());
+    assert_eq!(stored_tags, expected);
+}
+
+/// Ports `synchronize_sequence`'s `INSERT OR IGNORE`: the sequence row is
+/// seeded once, when the AutoNumber column is first registered, and later
+/// migrations never move it. Allocation itself still belongs to the store
+/// layer, so nothing here hands out numbers.
+#[test]
+fn autonumber_sequences_are_seeded_once_at_the_high_water_mark() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let order = entity(
+        "Order",
+        vec![attribute("Number", AttributeType::AutoNumber)],
+    );
+    let module = module_with(vec![order], Vec::new());
+    let modules = std::slice::from_ref(&module);
+    {
+        let mut persistence = RelationalRuntimeStore::open(&path, modules, false).unwrap();
+        let mut store = Store::new(store_schema(modules));
+        let created = store.create("App.Order").unwrap();
+        store
+            .set_member("App.Order", &created.id, "Number", serde_json::json!(7))
+            .unwrap();
+        store.commit("App.Order", &created.id).unwrap();
+        persistence.save(&store).unwrap();
+    }
+    // Reopening re-runs the migration over rows that now reach 7.
+    RelationalRuntimeStore::open(&path, modules, false).unwrap();
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let next: i64 = connection
+        .query_row("SELECT next_value FROM mxrb_schema_sequences", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(next, 1, "OR IGNORE keeps the first seed, like the oracle");
+}
+
+/// "Zero silent loss" applies to the durability boundary above all: a number
+/// that cannot be stored in its integer column fails the save by name rather
+/// than landing as NULL.
+#[test]
+fn a_member_that_does_not_fit_its_column_fails_the_save_by_name() {
+    let order = entity("Order", vec![attribute("Count", AttributeType::Integer)]);
+    let module = module_with(vec![order], Vec::new());
+    let modules = std::slice::from_ref(&module);
+    let mut persistence = RelationalRuntimeStore::in_memory(modules, false).unwrap();
+    let mut store = Store::new(store_schema(modules));
+    let created = store.create("App.Order").unwrap();
+    store
+        .set_member("App.Order", &created.id, "Count", serde_json::json!(2.5))
+        .unwrap();
+    store.commit("App.Order", &created.id).unwrap();
+
+    let error = persistence.save(&store).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(error, SqliteRuntimeError::LossyMember { .. }),
+        "{message}"
+    );
+    assert!(message.contains("App.Order/Count"), "{message}");
+    assert!(message.contains("2.5"), "{message}");
+}
+
+/// The store tags datetime members; a TEXT column carries that tag through
+/// unchanged, so what comes back out is a datetime again and not text that
+/// merely looks like one.
+#[test]
+fn tagged_datetime_members_survive_a_relational_round_trip_verbatim() {
+    let tagged = format!("{}1758462896", mxrs_runtime::DATETIME_MEMBER_PREFIX);
+    let order = entity("Order", vec![attribute("When", AttributeType::DateTime)]);
+    let module = module_with(vec![order], Vec::new());
+    let modules = std::slice::from_ref(&module);
+    let mut persistence = RelationalRuntimeStore::in_memory(modules, false).unwrap();
+    let mut store = Store::new(store_schema(modules));
+    let created = store.create("App.Order").unwrap();
+    store
+        .set_member(
+            "App.Order",
+            &created.id,
+            "When",
+            Value::String(tagged.clone()),
+        )
+        .unwrap();
+    store.commit("App.Order", &created.id).unwrap();
+    persistence.save(&store).unwrap();
+
+    let mut restored = Store::new(store_schema(modules));
+    persistence.load(&mut restored).unwrap();
+    assert_eq!(
+        restored.retrieve("App.Order").unwrap()[0].members["When"],
+        Value::String(tagged)
+    );
+}
+
 #[test]
 fn a_version_one_snapshot_database_upgrades_in_place() {
     let directory = tempfile::tempdir().unwrap();

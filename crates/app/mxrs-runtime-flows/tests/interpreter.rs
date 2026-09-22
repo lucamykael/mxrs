@@ -640,6 +640,168 @@ fn java_actions_require_an_explicit_registration() {
     assert_eq!(result, FlowValue::String("ABC".into()));
 }
 
+/// mxrb resolves `$ID` parameter references through the Java action's own
+/// Parameters table. That catalogue is not exposed by mxrs-model yet, so a
+/// mapping keyed by identifier is refused — keying the argument map by raw
+/// uuid would hand the adapter a name it can never match, silently.
+#[test]
+fn a_java_action_parameter_mapped_by_identifier_is_refused_not_guessed() {
+    let flows = vec![flow(
+        "ById",
+        vec![
+            start("s"),
+            activity(
+                "j",
+                doc! {
+                    "$Type": "Microflows$JavaActionCallAction",
+                    "JavaAction": "App.Hasher",
+                    "ResultVariableName": "hashed",
+                    "UseReturnVariable": true,
+                    "ParameterMappings": build_array(vec![
+                        Bson::Document(doc! {
+                            "Parameter": "App.Hasher.8b1f5d2e-4c3a-4f7b-9d61-0a2e5c7b3f40",
+                            "Value": doc! {
+                                "$Type": "Microflows$BasicJavaActionParameterValue",
+                                "Argument": "'abc'",
+                            },
+                        }),
+                    ], 2),
+                },
+            ),
+            end("e", "$hashed"),
+        ],
+        vec![edge("f1", "s", "j"), edge("f2", "j", "e")],
+    )];
+
+    struct Anything;
+    impl JavaAction for Anything {
+        fn call(&self, _: &BTreeMap<String, FlowValue>) -> Result<FlowValue, FlowError> {
+            Ok(FlowValue::Empty)
+        }
+    }
+    let engine =
+        FlowEngine::from_modules(&[module_with(flows)]).with_java_action("App.Hasher", Anything);
+    let mut store = store_with_order();
+    let error = engine
+        .call(&mut store, "App.ById", Variables::new(), None)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "maps a parameter by identifier; name resolution from the model is not ported yet"
+        ),
+        "{error}"
+    );
+}
+
+/// The action dispatcher strips a trailing `Action` when it is present, so
+/// both spellings of a type reach the same handler. Real `.mpr` files carry
+/// both, and an unmatched type is a named error, not a skipped activity.
+#[test]
+fn action_types_dispatch_with_or_without_the_action_suffix() {
+    let with_suffix = "Microflows$CreateVariableAction";
+    let without_suffix = "Microflows$CreateVariable";
+    for kind in [with_suffix, without_suffix] {
+        let flows = vec![flow(
+            "Make",
+            vec![
+                start("s"),
+                activity(
+                    "v",
+                    doc! {
+                        "$Type": kind,
+                        "VariableName": "answer",
+                        "InitialValue": "40 + 2",
+                    },
+                ),
+                end("e", "$answer"),
+            ],
+            vec![edge("f1", "s", "v"), edge("f2", "v", "e")],
+        )];
+        let engine = FlowEngine::from_modules(&[module_with(flows)]);
+        let mut store = store_with_order();
+        let (result, _) = call(&engine, &mut store, "App.Make", Variables::new());
+        assert_eq!(result, FlowValue::Int(42), "{kind}");
+    }
+}
+
+/// An unset request mapping means "no body", not `"null"`: mxrb passes nil
+/// to its HTTP layer, which omits the body entirely. Sending the four bytes
+/// `null` changes what a server sees.
+#[test]
+fn a_rest_call_with_an_empty_request_mapping_sends_no_body() {
+    #[derive(Default)]
+    struct Log {
+        bodies: std::sync::Mutex<Vec<Option<String>>>,
+    }
+    struct Recorder(std::sync::Arc<Log>);
+    impl mxrs_runtime_flows::HttpCall for Recorder {
+        fn call(
+            &self,
+            _method: &str,
+            _location: &str,
+            _headers: &[(String, String)],
+            body: Option<&str>,
+            _timeout: Option<f64>,
+        ) -> Result<mxrs_runtime_flows::HttpResponse, FlowError> {
+            self.0
+                .bodies
+                .lock()
+                .unwrap()
+                .push(body.map(ToString::to_string));
+            Ok(mxrs_runtime_flows::HttpResponse {
+                code: 200,
+                body: "pong".to_string(),
+            })
+        }
+    }
+
+    let rest = activity(
+        "r",
+        doc! {
+            "$Type": "Microflows$RestCallAction",
+            "HttpConfiguration": doc! {
+                "HttpMethod": "POST",
+                "CustomLocationTemplate": doc! { "Text": "http://localhost/ping" },
+            },
+            "RequestHandling": doc! { "MappingVariableName": "payload" },
+            "ResultHandlingType": "String",
+            "ResultHandling": doc! {
+                "Bind": true,
+                "ResultVariableName": "answer",
+                "VariableType": doc! { "$Type": "DataTypes$StringType" },
+            },
+        },
+    );
+    let flows = vec![flow(
+        "Ping",
+        vec![
+            start("s"),
+            parameter("p", "payload"),
+            rest,
+            end("e", "$answer"),
+        ],
+        vec![edge("f1", "s", "r"), edge("f2", "r", "e")],
+    )];
+    let log = std::sync::Arc::new(Log::default());
+    let engine = FlowEngine::from_modules(&[module_with(flows)]).with_http(Recorder(log.clone()));
+    let mut store = store_with_order();
+
+    let mut empty = Variables::new();
+    empty.insert("payload".into(), FlowValue::Empty);
+    let (result, _) = call(&engine, &mut store, "App.Ping", empty);
+    assert_eq!(result, FlowValue::String("pong".into()));
+
+    let mut filled = Variables::new();
+    filled.insert(
+        "payload".into(),
+        FlowValue::Json(serde_json::json!({ "ok": true })),
+    );
+    call(&engine, &mut store, "App.Ping", filled);
+
+    let bodies = log.bodies.lock().unwrap().clone();
+    assert_eq!(bodies, [None, Some("{\"ok\":true}".to_string())]);
+}
+
 #[test]
 fn entity_access_enforcement_denies_by_policy_and_stays_off_otherwise() {
     let create = activity(

@@ -21,6 +21,7 @@ pub use schema::{MigrationResult, RemovedItem, RuntimeSchema};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use mxrs_model::AttributeType;
 use mxrs_runtime::{ObjectValue, PersistentObjectValidator, RuntimeError, Store};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
@@ -72,6 +73,15 @@ pub enum SqliteRuntimeError {
     UnsafeMigration {
         message: String,
         changes: Vec<schema::RemovedItem>,
+    },
+    /// A member whose JSON value cannot be stored in its column without
+    /// losing information. Refused rather than written as NULL.
+    #[error("{entity}/{member} holds {value}, which does not fit its {kind:?} column without loss")]
+    LossyMember {
+        entity: String,
+        member: String,
+        value: String,
+        kind: AttributeType,
     },
 }
 
@@ -217,7 +227,7 @@ fn identity(connection: &Connection) -> Result<(i64, i64)> {
     ))
 }
 
-fn schema_objects(connection: &Connection) -> Result<BTreeMap<String, String>> {
+pub(crate) fn schema_objects(connection: &Connection) -> Result<BTreeMap<String, String>> {
     let mut statement = connection.prepare(
         "SELECT name, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name",
     )?;
@@ -272,7 +282,7 @@ fn schema_tokens(sql: &str) -> Vec<String> {
     tokens
 }
 
-fn is_legacy_schema(schema: &BTreeMap<String, String>) -> bool {
+pub(crate) fn is_legacy_schema(schema: &BTreeMap<String, String>) -> bool {
     schema.len() == 1
         && schema
             .get("mxrs_runtime_objects")

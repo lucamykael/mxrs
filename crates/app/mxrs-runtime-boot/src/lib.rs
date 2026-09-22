@@ -110,7 +110,13 @@ pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, 
                     defaults.insert(name.to_string(), value);
                 }
             }
-            schema = schema.entity(qualified.clone(), defaults, !entity.persistable);
+            // The relational schema (`schema::derive`) skips non-persistable
+            // entities *and* OQL views, which have no table of their own.
+            // Treating a view as durable here would hand `persistent_objects()`
+            // rows the writer cannot place, failing the whole shutdown save —
+            // so the two filters have to state the same rule.
+            let transient = !entity.persistable || entity.oql_view();
+            schema = schema.entity(qualified.clone(), defaults, transient);
             entities += 1;
             let mut rules = Vec::new();
             for rule in &entity.access_rules {
@@ -312,6 +318,30 @@ mod tests {
             module_roles: Vec::new(),
             artifact_units: Vec::new(),
         }
+    }
+
+    /// `schema::derive` in mxrs-runtime-sqlite gives an OQL view no table,
+    /// so the store must not call it durable either: a committed view object
+    /// would reach the relational writer with nowhere to go and fail the
+    /// whole shutdown save, losing the session.
+    #[test]
+    fn oql_views_are_transient_like_the_relational_schema_treats_them() {
+        let mut view = entity("Sales", "OrderSummary");
+        view.persistable = true;
+        view.oql_query = Some("SELECT 1 FROM Sales.Order".to_string());
+        assert!(view.oql_view());
+        let mut table = entity("Sales", "Order");
+        table.persistable = true;
+
+        let boot = build(vec![module_with("Sales", vec![view, table])], None).unwrap();
+        let mut store = mxrs_runtime::Store::new(boot.schema.clone());
+        for name in ["Sales.OrderSummary", "Sales.Order"] {
+            let created = store.create(name).unwrap();
+            store.commit(name, &created.id).unwrap();
+        }
+        let persistent = store.persistent_objects();
+        assert_eq!(persistent.len(), 1);
+        assert_eq!(persistent[0].entity, "Sales.Order");
     }
 
     #[test]
