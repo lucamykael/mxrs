@@ -368,8 +368,8 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         "db" => (
             Status::Partial,
-            "mxrs db status/up/down/destroy/credentials/url",
-            "owned, labeled, loopback-only PostgreSQL Docker workspace with private external state; Mendix Runtime boot, schema sync, SQL tooling and workload analysis are not ported",
+            "mxrs db status/up/down/destroy/credentials/url/sql/shell",
+            "owned, labeled, loopback-only PostgreSQL Docker workspace with private external state, plus sql and shell: one statement or an interactive psql, read-only unless --write, enforced through default_transaction_read_only as a session setting (mxrb uses a separate reader role and BEGIN READ ONLY; a session setting no statement in the payload can turn off is the same guarantee for a single-role workspace), with a rejected statement reported as a query failure rather than as a Docker outage; own evidence: psql argv pinned against a mock Docker for both actions and both failure classes, plus a live workspace where a write is refused without --write, accepted with it, and then visible to a read-only query. Still missing: sync (the relational migrator targets SQLite), explain (needs Oql::PlanAnalyzer), workload and indexes (need WorkloadAnalyzer/IndexAdvisor over pg_stat_statements), and Mendix Runtime boot beside PostgreSQL",
         ),
         "find" | "search" => (
             Status::Partial,

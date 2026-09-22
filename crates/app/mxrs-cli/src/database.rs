@@ -2,7 +2,7 @@
 //!
 //! This is deliberately narrower than mxrb's database command: it manages
 //! PostgreSQL only. Mendix Runtime boot, schema synchronization, query-plan
-//! analysis, and interactive SQL remain outside this surface.
+//! analysis and workload statistics remain outside this surface.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +17,9 @@ const USER: &str = "mxrs";
 const DATABASE: &str = "mxrs";
 const MANAGED_LABEL: &str = "io.mxrs.managed";
 const PROJECT_LABEL: &str = "io.mxrs.project";
+/// How PostgreSQL and psql label their own diagnostics on stderr. Used to
+/// tell a rejected statement apart from an unreachable container.
+const PSQL_DIAGNOSTICS: [&str; 3] = ["ERROR:", "FATAL:", "psql:"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {
@@ -193,6 +196,102 @@ impl DatabaseWorkspace {
         params: &Map<String, Value>,
     ) -> Result<Vec<Map<String, Value>>, DatabaseError> {
         self.query_rows_with(&CommandDocker, sql, params)
+    }
+
+    /// Runs one statement and returns psql's own rendering, the way
+    /// `mxrb db sql` does — tables for a `SELECT`, a command tag for
+    /// anything else. [`query_rows`](Self::query_rows) is the machine-facing
+    /// path and stays CSV.
+    ///
+    /// mxrb reaches read-only by connecting as a dedicated reader role and
+    /// wrapping the statement in `BEGIN READ ONLY` / `COMMIT`. This
+    /// workspace has a single owner role (its containers are per-project and
+    /// loopback-only), so the guarantee comes from
+    /// `default_transaction_read_only`, which the server applies to every
+    /// transaction in the session and which no statement in the payload can
+    /// turn off. `--write` is the only way past it, and it is never implied.
+    pub fn execute(&self, sql: &str, write: bool) -> Result<String, DatabaseError> {
+        self.execute_with(&CommandDocker, sql, write)
+    }
+
+    fn execute_with(
+        &self,
+        docker: &impl Docker,
+        sql: &str,
+        write: bool,
+    ) -> Result<String, DatabaseError> {
+        if sql.trim().is_empty() {
+            return Err(DatabaseError::Query("SQL must not be empty".to_string()));
+        }
+        if sql.contains('\0') {
+            return Err(DatabaseError::Query("SQL contains a NUL byte".to_string()));
+        }
+        let mut arguments = vec!["exec".to_string()];
+        if !write {
+            arguments.extend([
+                "--env".to_string(),
+                "PGOPTIONS=-c default_transaction_read_only=on".to_string(),
+            ]);
+        }
+        arguments.extend([
+            self.container.clone(),
+            "psql".to_string(),
+            "--no-psqlrc".to_string(),
+            "--set".to_string(),
+            "ON_ERROR_STOP=1".to_string(),
+            "--username".to_string(),
+            USER.to_string(),
+            "--dbname".to_string(),
+            DATABASE.to_string(),
+            "--command".to_string(),
+            sql.to_string(),
+        ]);
+        let output = docker.output(&arguments)?;
+        if output.success {
+            return Ok(output.stdout);
+        }
+        let stderr = output.stderr.trim().to_string();
+        // `docker exec` passes the container command's exit status through, so
+        // a failure here is usually PostgreSQL rejecting the statement — and
+        // reporting "Docker is unavailable: cannot execute CREATE TABLE in a
+        // read-only transaction" blames the wrong component for something the
+        // caller can actually fix. Recognize psql's own diagnostics and blame
+        // the query; anything else keeps the Docker classification, because a
+        // daemon or container failure really is operational.
+        if PSQL_DIAGNOSTICS
+            .iter()
+            .any(|prefix| stderr.contains(prefix))
+        {
+            return Err(DatabaseError::Query(stderr));
+        }
+        Err(DatabaseError::Docker(stderr))
+    }
+
+    /// The argv for an interactive `psql`, for the caller to exec.
+    ///
+    /// Returned rather than spawned so the command is inspectable: a shell
+    /// that silently connects with write access would be indistinguishable
+    /// from one that does not until something is already changed.
+    pub fn shell_command(&self, write: bool) -> Vec<String> {
+        let mut arguments = vec!["docker".to_string(), "exec".to_string()];
+        if !write {
+            arguments.extend([
+                "--env".to_string(),
+                "PGOPTIONS=-c default_transaction_read_only=on".to_string(),
+            ]);
+        }
+        arguments.extend([
+            "--interactive".to_string(),
+            "--tty".to_string(),
+            self.container.clone(),
+            "psql".to_string(),
+            "--no-psqlrc".to_string(),
+            "--username".to_string(),
+            USER.to_string(),
+            "--dbname".to_string(),
+            DATABASE.to_string(),
+        ]);
+        arguments
     }
 
     fn query_rows_with(
@@ -1085,5 +1184,134 @@ mod tests {
             changed.status_with(&MockDocker::new(vec![])),
             Err(DatabaseError::PortMismatch { .. })
         ));
+    }
+
+    /// `db sql` is the human-facing path: psql's own rendering, one
+    /// statement, read-only unless the caller says otherwise. The pin that
+    /// matters is that read-only is the default and reaches the server as a
+    /// session setting rather than as advice inside the payload.
+    #[test]
+    fn execute_runs_one_statement_read_only_unless_write_is_requested() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+
+        let docker = MockDocker::new(vec![output(true, " count \n-------\n     3\n", "")]);
+        let rendered = workspace
+            .execute_with(&docker, "SELECT count(*) FROM orders", false)
+            .unwrap();
+        assert!(rendered.contains("3"), "{rendered}");
+        assert_eq!(
+            docker.calls.borrow()[0],
+            [
+                "exec",
+                "--env",
+                "PGOPTIONS=-c default_transaction_read_only=on",
+                workspace.container.as_str(),
+                "psql",
+                "--no-psqlrc",
+                "--set",
+                "ON_ERROR_STOP=1",
+                "--username",
+                USER,
+                "--dbname",
+                DATABASE,
+                "--command",
+                "SELECT count(*) FROM orders",
+            ]
+        );
+
+        // `--write` drops the read-only session setting and nothing else.
+        let docker = MockDocker::new(vec![output(true, "UPDATE 1\n", "")]);
+        workspace
+            .execute_with(&docker, "UPDATE orders SET total = 1", true)
+            .unwrap();
+        let call = &docker.calls.borrow()[0];
+        assert_eq!(call[0], "exec");
+        assert_eq!(call[1], workspace.container.as_str());
+        assert!(
+            !call.iter().any(|argument| argument.contains("PGOPTIONS")),
+            "{call:?}"
+        );
+
+        // The statement reaches psql verbatim: no quoting, splitting or
+        // rewriting that could change what the server sees.
+        let docker = MockDocker::new(vec![output(true, "", "")]);
+        let awkward = "SELECT 'a;b', $$c'd$$ -- trailing";
+        workspace.execute_with(&docker, awkward, false).unwrap();
+        assert_eq!(docker.calls.borrow()[0].last().unwrap(), awkward);
+
+        // A statement PostgreSQL rejects is a query failure, not an
+        // operational one: "Docker is unavailable: cannot execute CREATE
+        // TABLE in a read-only transaction" blames the wrong component for
+        // something the caller can fix.
+        let docker = MockDocker::new(vec![output(
+            false,
+            "",
+            "ERROR:  cannot execute CREATE TABLE in a read-only transaction\n",
+        )]);
+        let error = workspace
+            .execute_with(&docker, "CREATE TABLE t(id int)", false)
+            .unwrap_err();
+        assert!(
+            matches!(&error, DatabaseError::Query(message)
+                if message == "ERROR:  cannot execute CREATE TABLE in a read-only transaction"),
+            "{error}"
+        );
+        // An unreachable container still reads as operational.
+        let docker = MockDocker::new(vec![output(
+            false,
+            "",
+            "Error response from daemon: No such container\n",
+        )]);
+        let error = workspace
+            .execute_with(&docker, "SELECT 1", false)
+            .unwrap_err();
+        assert!(matches!(error, DatabaseError::Docker(_)), "{error}");
+
+        // An empty or NUL-bearing statement is refused before Docker runs.
+        for (sql, message) in [
+            ("   ", "SQL must not be empty"),
+            ("SELECT\0 1", "SQL contains a NUL byte"),
+        ] {
+            let docker = MockDocker::new(vec![]);
+            let error = workspace.execute_with(&docker, sql, false).unwrap_err();
+            assert_eq!(error.to_string(), message);
+            assert!(docker.calls.borrow().is_empty(), "{sql:?} reached Docker");
+        }
+    }
+
+    #[test]
+    fn the_shell_command_is_interactive_and_read_only_by_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+        assert_eq!(
+            workspace.shell_command(false),
+            [
+                "docker",
+                "exec",
+                "--env",
+                "PGOPTIONS=-c default_transaction_read_only=on",
+                "--interactive",
+                "--tty",
+                workspace.container.as_str(),
+                "psql",
+                "--no-psqlrc",
+                "--username",
+                USER,
+                "--dbname",
+                DATABASE,
+            ]
+        );
+        let writable = workspace.shell_command(true);
+        assert!(
+            !writable
+                .iter()
+                .any(|argument| argument.contains("PGOPTIONS"))
+        );
+        // Both forms stay interactive; only the read-only setting differs.
+        for form in [workspace.shell_command(false), writable] {
+            assert!(form.contains(&"--interactive".to_string()));
+            assert!(form.contains(&"--tty".to_string()));
+        }
     }
 }

@@ -75,7 +75,7 @@ fn command_options(
         "test" => (&[], &["--json", "--plan"], &[]),
         "functional-instrument" => (&[], &["--json"], &[]),
         "cache" => (&[], &["--json"], &[]),
-        "db" => (&["--port"], &["--json"], &[]),
+        "db" => (&["--port"], &["--json", "--write"], &[]),
         "serve" => (&["--port", "--db-port"], &["--no-up"], &[]),
         "run" => (
             &[
@@ -198,7 +198,7 @@ commands! {
     "demo-user", "new <Name> [--entity Module.Entity] [--role ROLE] [--target DIR] [--dry-run] [--json]", "Create a local Mendix demo user backed by an ignored .env secret", run_demo_user;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "design", "init [--target DIR] [--dry-run] [--json] | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]", "Initialize, inventory, or migrate the project design system", run_design;
-    "db", "<status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]", "Manage an isolated PostgreSQL workspace", run_db;
+    "db", "<status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json] | sql <file.mpr> \"SELECT ...\" [--write]", "Manage and query an isolated PostgreSQL workspace", run_db;
     "diagram-er", "<file.mpr> [--module NAME] [--json] | layout <file.mpr> <layout.json> [--apply] [--json]", "Project the domain ER diagram or apply audited visual layout", run_diagram_er;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
@@ -296,6 +296,40 @@ fn run_changelog(mut args: Vec<String>) -> ExitCode {
     }
 }
 
+/// Hands the terminal to `psql`.
+///
+/// On Unix this replaces the process, as mxrb's `exec` does: psql needs the
+/// real terminal for its pager, readline and `\!`, and an intermediate
+/// parent would also swallow its exit status. Elsewhere it is spawned and
+/// waited on, which costs the process replacement but keeps the status.
+fn run_database_shell(command: &[String]) -> ExitCode {
+    let Some((program, rest)) = command.split_first() else {
+        eprintln!("[mxrs] error: empty database shell command");
+        return ExitCode::FAILURE;
+    };
+    let mut process = std::process::Command::new(program);
+    process.args(rest);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // `exec` only returns when it failed to replace this process.
+        let error = process.exec();
+        eprintln!("[mxrs] error: cannot start {program}: {error}");
+        ExitCode::FAILURE
+    }
+    #[cfg(not(unix))]
+    {
+        match process.status() {
+            Ok(status) if status.success() => ExitCode::SUCCESS,
+            Ok(_) => ExitCode::FAILURE,
+            Err(error) => {
+                eprintln!("[mxrs] error: cannot start {program}: {error}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
 fn run_db(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let port = match take_value(&mut args, "--port")
@@ -309,15 +343,26 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if args.len() != 2
+    let write = take_flag(&mut args, "--write");
+    // `sql` is the one action that takes a statement after the model, so the
+    // arity check is per action rather than a single count.
+    let expected = match args.first().map(String::as_str) {
+        Some("sql") => 3,
+        _ => 2,
+    };
+    if args.len() != expected
         || !matches!(
             args[0].as_str(),
-            "status" | "up" | "down" | "destroy" | "credentials" | "url"
+            "status" | "up" | "down" | "destroy" | "credentials" | "url" | "sql" | "shell"
         )
     {
         eprintln!(
-            "Usage: mxrs db <status|up|down|destroy|credentials|url> <file.mpr> [--port PORT] [--json]"
+            "Usage: mxrs db <status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json]\n       mxrs db sql <file.mpr> \"SELECT ...\" [--write] [--port PORT]"
         );
+        return ExitCode::FAILURE;
+    }
+    if write && !matches!(args[0].as_str(), "sql" | "shell") {
+        eprintln!("[mxrs] error: --write applies only to db sql and db shell");
         return ExitCode::FAILURE;
     }
     let workspace = match mxrs_cli::database::DatabaseWorkspace::open(&args[1], port) {
@@ -328,6 +373,21 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
         }
     };
     let action = args[0].as_str();
+    if action == "sql" {
+        return match workspace.execute(&args[2], write) {
+            Ok(output) => {
+                print!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if action == "shell" {
+        return run_database_shell(&workspace.shell_command(write));
+    }
     if matches!(action, "credentials" | "url") {
         return match workspace.credentials() {
             Ok(credentials) => {
