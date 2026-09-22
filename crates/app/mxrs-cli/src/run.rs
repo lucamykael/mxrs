@@ -340,7 +340,7 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     );
     if !boot.skipped_xpath_rules.is_empty() {
         println!(
-            "[mxrs] warning: {} XPath-guarded access rule(s) enforced as deny until the XPath engine is ported",
+            "[mxrs] warning: {} access rule(s) carry an XPath constraint outside the evaluated subset and are enforced as deny",
             boot.skipped_xpath_rules.len()
         );
     }

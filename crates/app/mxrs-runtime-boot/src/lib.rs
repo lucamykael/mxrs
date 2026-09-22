@@ -10,9 +10,10 @@
 //!
 //! Security mapping is fail-closed in both directions mxrb is: a present
 //! security unit with an unknown `SecurityLevel` counts as enabled, and an
-//! access rule guarded by an XPath constraint grants nothing (mxrb evaluates
-//! supported XPath; evaluating none is the conservative subset — skipped
-//! rules are reported, never silently dropped).
+//! access rule's XPath constraint narrows the rule to the records it names
+//! (`mxrs_runtime::xpath`) rather than widening it to the whole entity. A
+//! constraint outside that evaluated subset denies every record and is
+//! reported here, never silently dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -46,9 +47,10 @@ pub struct Boot {
     pub modules: Vec<Module>,
     pub entities: usize,
     pub documents: usize,
-    /// `Entity.QualifiedName: xpath` pairs whose access rules were skipped
-    /// because their XPath constraint cannot be evaluated yet. Skipping
-    /// denies; it never over-grants.
+    /// `Entity.QualifiedName: xpath` pairs whose constraint is outside the
+    /// subset `mxrs_runtime::xpath` evaluates. Those rules are still carried,
+    /// but their constraint can never hold, so they deny every record. A
+    /// constraint the evaluator *can* read is not listed here.
     pub skipped_xpath_rules: Vec<String>,
 }
 
@@ -120,9 +122,12 @@ pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, 
             entities += 1;
             let mut rules = Vec::new();
             for rule in &entity.access_rules {
-                if !rule.xpath.trim().is_empty() {
-                    skipped_xpath_rules.push(format!("{qualified}: {}", rule.xpath.trim()));
-                    continue;
+                let xpath = rule.xpath.trim();
+                // A constraint the evaluator cannot read must not silently
+                // become an unconstrained grant, so it is reported here at
+                // boot as well as denied per record at authorization time.
+                if !xpath.is_empty() && !mxrs_runtime::xpath::is_supported(xpath) {
+                    skipped_xpath_rules.push(format!("{qualified}: {xpath}"));
                 }
                 rules.push(EntityRule {
                     module_roles: rule.roles.iter().cloned().collect(),
@@ -134,6 +139,7 @@ pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, 
                         .iter()
                         .map(|member| (member.name.clone(), member_right(&member.rights)))
                         .collect(),
+                    xpath: xpath.to_string(),
                 });
             }
             if !rules.is_empty() {
@@ -380,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn access_rules_map_to_entity_rules_and_xpath_rules_deny_instead_of_overgranting() {
+    fn access_rules_map_to_entity_rules_and_xpath_rules_narrow_them_per_record() {
         let mut order = entity("Sales", "Order");
         order.access_rules = vec![
             AccessRule {
@@ -446,19 +452,21 @@ mod tests {
         };
         let boot = build(vec![module_with("Sales", vec![order])], Some(&security)).unwrap();
         assert!(boot.security.enabled);
-        assert_eq!(
-            boot.skipped_xpath_rules,
-            ["Sales.Order: [Owner = $currentUser]"]
-        );
+        // `[Owner = $currentUser]` is inside the evaluated subset, so it is
+        // carried rather than reported — the report names only constraints
+        // mxrs cannot read.
+        assert!(boot.skipped_xpath_rules.is_empty());
         assert!(boot.security.administrator_roles.contains("Administrator"));
         let sales_user = SecurityContext {
             user: Some("alice".to_string()),
             user_roles: ["User".to_string()].into(),
             module_roles: BTreeSet::new(),
+            variables: BTreeMap::new(),
         };
         assert!(boot.security.entity_allowed(
             "Sales.Order",
             EntityAction::Create,
+            None,
             None,
             &sales_user
         ));
@@ -466,12 +474,14 @@ mod tests {
             "Sales.Order",
             EntityAction::Delete,
             None,
+            None,
             &sales_user
         ));
         assert!(boot.security.entity_allowed(
             "Sales.Order",
             EntityAction::Write,
             Some("Total"),
+            None,
             &sales_user
         ));
         // An unknown member right is a denial (mxrb's RIGHTS.fetch(…, :none)),
@@ -480,20 +490,105 @@ mod tests {
             "Sales.Order",
             EntityAction::Read,
             Some("Notes"),
+            None,
             &sales_user
         ));
-        // The XPath-guarded owner rule was skipped: an owner-role context
-        // gains nothing rather than everything.
+        // The owner rule is constrained, so it decides per record. Without a
+        // record the question is about the entity, and the rule applies.
         let owner = SecurityContext {
             user: Some("bob".to_string()),
             user_roles: BTreeSet::new(),
             module_roles: ["Sales.Owner".to_string()].into(),
+            variables: BTreeMap::new(),
         };
-        assert!(
-            !boot
-                .security
-                .entity_allowed("Sales.Order", EntityAction::Delete, None, &owner)
+        assert!(boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Delete,
+            None,
+            None,
+            &owner
+        ));
+        let his = BTreeMap::from([("Owner".to_string(), Value::String("bob".into()))]);
+        let hers = BTreeMap::from([("Owner".to_string(), Value::String("alice".into()))]);
+        assert!(boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Delete,
+            None,
+            Some(&his),
+            &owner
+        ));
+        // Someone else's record: the only rule his roles reach does not
+        // cover it, so the whole action is denied.
+        assert!(!boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Delete,
+            None,
+            Some(&hers),
+            &owner
+        ));
+    }
+
+    /// A constraint the evaluator cannot read must deny every record and be
+    /// reported, rather than quietly widening to the whole entity.
+    #[test]
+    fn an_unreadable_xpath_constraint_is_reported_and_denies_every_record() {
+        let mut rule = AccessRule {
+            id: None,
+            roles: vec!["Sales.Owner".to_string()],
+            create: true,
+            delete: true,
+            documentation: String::new(),
+            default_rights: "ReadWrite".to_string(),
+            members: vec![],
+            xpath: "[contains(Name, 'x')]".to_string(),
+            xpath_caption: None,
+            raw: doc! {},
+        };
+        let build_with = |rule: AccessRule| {
+            let mut entity = entity("Sales", "Order");
+            entity.access_rules = vec![rule];
+            build(
+                vec![module_with("Sales", vec![entity])],
+                Some(&doc! {
+                    "$Type": "Security$ProjectSecurity",
+                    "SecurityLevel": "CheckEverything",
+                }),
+            )
+            .unwrap()
+        };
+
+        let boot = build_with(rule.clone());
+        assert_eq!(
+            boot.skipped_xpath_rules,
+            ["Sales.Order: [contains(Name, 'x')]"]
         );
+        let context = SecurityContext {
+            user: Some("bob".to_string()),
+            user_roles: BTreeSet::new(),
+            module_roles: ["Sales.Owner".to_string()].into(),
+            variables: BTreeMap::new(),
+        };
+        let record = BTreeMap::from([("Name".to_string(), Value::String("xyz".into()))]);
+        assert!(!boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Delete,
+            None,
+            Some(&record),
+            &context
+        ));
+
+        // A readable constraint is not reported at all — the report names
+        // what mxrs will never honour, not every constrained rule.
+        rule.xpath = "[Name = 'xyz']".to_string();
+        let boot = build_with(rule);
+        assert!(boot.skipped_xpath_rules.is_empty());
+        assert!(boot.security.entity_allowed(
+            "Sales.Order",
+            EntityAction::Delete,
+            None,
+            Some(&record),
+            &context
+        ));
     }
 
     #[test]

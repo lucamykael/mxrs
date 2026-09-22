@@ -38,8 +38,8 @@ fn disabled_security_and_explicit_administrators_bypass_rules_but_anonymous_user
         EntityAction::Write,
         EntityAction::Delete,
     ] {
-        assert!(policy.entity_allowed("Missing", action, Some("Missing"), &admin));
-        assert!(!policy.entity_allowed("Missing", action, None, &SecurityContext::default()));
+        assert!(policy.entity_allowed("Missing", action, Some("Missing"), None, &admin));
+        assert!(!policy.entity_allowed("Missing", action, None, None, &SecurityContext::default()));
     }
     assert!(policy.document_allowed("Missing", &admin));
     assert!(!policy.document_allowed("Sales.Allowed", &SecurityContext::default()));
@@ -49,6 +49,7 @@ fn disabled_security_and_explicit_administrators_bypass_rules_but_anonymous_user
     assert!(policy.entity_allowed(
         "Missing",
         EntityAction::Write,
+        None,
         None,
         &SecurityContext::default()
     ));
@@ -114,7 +115,7 @@ fn entity_access_is_the_union_of_matching_rules_with_explicit_member_overrides()
         (EntityAction::Write, Some("Editable"), true),
     ] {
         assert_eq!(
-            policy.entity_allowed("Sales.Order", action, member, &context),
+            policy.entity_allowed("Sales.Order", action, member, None, &context),
             allowed,
             "{action:?} {member:?}"
         );
@@ -129,11 +130,18 @@ fn entity_access_is_the_union_of_matching_rules_with_explicit_member_overrides()
             member_rights: BTreeMap::from([("Hidden".into(), MemberRight::Read)]),
             ..Default::default()
         });
-    assert!(policy.entity_allowed("Sales.Order", EntityAction::Delete, None, &context));
-    assert!(policy.entity_allowed("Sales.Order", EntityAction::Read, Some("Hidden"), &context));
+    assert!(policy.entity_allowed("Sales.Order", EntityAction::Delete, None, None, &context));
+    assert!(policy.entity_allowed(
+        "Sales.Order",
+        EntityAction::Read,
+        Some("Hidden"),
+        None,
+        &context
+    ));
     assert!(!policy.entity_allowed(
         "Sales.Order",
         EntityAction::Read,
+        None,
         None,
         &SecurityContext::default()
     ));
@@ -157,21 +165,23 @@ fn absent_member_rights_never_grant_reads_or_writes_and_default_write_can_be_nar
         (EntityAction::Write, Some("Unspecified")),
         (EntityAction::Write, None),
     ] {
-        assert!(!policy.entity_allowed("Sales.Order", action, member, &context));
+        assert!(!policy.entity_allowed("Sales.Order", action, member, None, &context));
     }
     policy.entities.get_mut("Sales.Order").unwrap()[0].default_member_right =
         Some(MemberRight::Write);
-    assert!(policy.entity_allowed("Sales.Order", EntityAction::Write, None, &context));
+    assert!(policy.entity_allowed("Sales.Order", EntityAction::Write, None, None, &context));
     assert!(policy.entity_allowed(
         "Sales.Order",
         EntityAction::Write,
         Some("Default"),
+        None,
         &context
     ));
     assert!(!policy.entity_allowed(
         "Sales.Order",
         EntityAction::Write,
         Some("ReadOnly"),
+        None,
         &context
     ));
 }

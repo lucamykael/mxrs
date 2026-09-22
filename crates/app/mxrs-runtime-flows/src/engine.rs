@@ -809,7 +809,13 @@ impl FlowEngine {
     ) -> Result<(), FlowError> {
         let name = action.get_str("ChangeVariableName").unwrap_or_default();
         let reference = as_object(fetch(variables, name)?)?;
-        self.authorize_entity(execution, &reference.entity, EntityAction::Write, None)?;
+        self.authorize_object(
+            execution,
+            Some(store),
+            &reference,
+            EntityAction::Write,
+            None,
+        )?;
         self.apply_changes(store, execution, &reference, action.get("Items"), variables)?;
         self.commit_for_action(store, execution, action, &reference)
     }
@@ -825,9 +831,10 @@ impl FlowEngine {
         for item in bson_items(items) {
             let Bson::Document(item) = item else { continue };
             let member = member_name(&item);
-            self.authorize_entity(
+            self.authorize_object(
                 execution,
-                &reference.entity,
+                Some(store),
+                reference,
                 EntityAction::Write,
                 Some(&member),
             )?;
@@ -994,7 +1001,7 @@ impl FlowEngine {
         let xpath = source.get_str("XpathConstraint").unwrap_or_default();
         let mut values = self.filter_by_xpath(store, values, xpath, variables)?;
         if self.enforce_entity_access(execution) {
-            values.retain(|value| self.record_readable(execution, &value.entity));
+            values.retain(|value| self.record_readable(execution, value));
         }
         let sortings = source
             .get_document("NewSortings")
@@ -1059,7 +1066,7 @@ impl FlowEngine {
         let start_value = self.object_value(store, &start)?;
         let mut values = store.retrieve_association(association, &start_value);
         if self.enforce_entity_access(execution) {
-            values.retain(|value| self.record_readable(execution, &value.entity));
+            values.retain(|value| self.record_readable(execution, value));
         }
         let definition = self.associations.get(association_id);
         let collapse = definition.is_some_and(|definition| {
@@ -1902,11 +1909,21 @@ impl FlowEngine {
         execution.apply_entity_access && self.policy.is_some() && execution.security.is_some()
     }
 
-    fn record_readable(&self, execution: &Execution, entity: &str) -> bool {
+    /// mxrb's `filter_readable`: a retrieved row survives only if some rule
+    /// the caller's roles grant also *covers that row*. Passing the members
+    /// is what lets an XPath-constrained rule decide, instead of granting the
+    /// whole entity to anyone the rule names.
+    fn record_readable(&self, execution: &Execution, value: &ObjectValue) -> bool {
         let (Some(policy), Some(context)) = (&self.policy, &execution.security) else {
             return true;
         };
-        policy.entity_allowed(entity, EntityAction::Read, None, context)
+        policy.entity_allowed(
+            &value.entity,
+            EntityAction::Read,
+            None,
+            Some(&value.members),
+            context,
+        )
     }
 
     fn authorize_entity(
@@ -1916,13 +1933,28 @@ impl FlowEngine {
         action: EntityAction,
         member: Option<&str>,
     ) -> Result<(), FlowError> {
+        self.authorize_entity_record(execution, entity, action, member, None)
+    }
+
+    /// The record-aware form. `None` asks about the entity rather than about
+    /// a row, which is the question `create` and a bare permission check ask;
+    /// anything acting on an object in hand passes that object, so a rule
+    /// constrained to other rows cannot authorize it.
+    fn authorize_entity_record(
+        &self,
+        execution: &Execution,
+        entity: &str,
+        action: EntityAction,
+        member: Option<&str>,
+        record: Option<&BTreeMap<String, Value>>,
+    ) -> Result<(), FlowError> {
         if !self.enforce_entity_access(execution) {
             return Ok(());
         }
         let (Some(policy), Some(context)) = (&self.policy, &execution.security) else {
             return Ok(());
         };
-        if policy.entity_allowed(entity, action, member, context) {
+        if policy.entity_allowed(entity, action, member, record, context) {
             Ok(())
         } else {
             Err(FlowError::Runtime(
@@ -1943,7 +1975,31 @@ impl FlowEngine {
         reference: &ObjectRef,
         action: EntityAction,
     ) -> Result<(), FlowError> {
-        self.authorize_entity(execution, &reference.entity, action, None)
+        self.authorize_object(execution, None, reference, action, None)
+    }
+
+    /// Authorizes an action against the object the reference names, reading
+    /// its current members so a constrained rule is judged on the row being
+    /// acted upon. Without the store — or when the object is gone — this
+    /// falls back to the entity-level question rather than inventing a row.
+    fn authorize_object(
+        &self,
+        execution: &Execution,
+        store: Option<&Store>,
+        reference: &ObjectRef,
+        action: EntityAction,
+        member: Option<&str>,
+    ) -> Result<(), FlowError> {
+        let record = store
+            .and_then(|store| store.find(&reference.entity, &reference.id).ok().flatten())
+            .map(|object| object.members);
+        self.authorize_entity_record(
+            execution,
+            &reference.entity,
+            action,
+            member,
+            record.as_ref(),
+        )
     }
 }
 

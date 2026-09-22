@@ -34,6 +34,8 @@ pub enum RuntimeError {
     InvalidPersistence(String),
 }
 
+pub mod xpath;
+
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
 /// Marks a member string as a datetime rather than text.
@@ -452,6 +454,10 @@ pub struct SecurityContext {
     pub user: Option<String>,
     pub user_roles: BTreeSet<String>,
     pub module_roles: BTreeSet<String>,
+    /// Session values an XPath constraint can name as `$variable`. Kept on
+    /// the context rather than passed alongside it so a constraint can never
+    /// be evaluated against variables from a different caller.
+    pub variables: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -468,6 +474,14 @@ pub struct EntityRule {
     pub delete: bool,
     pub default_member_right: Option<MemberRight>,
     pub member_rights: BTreeMap<String, MemberRight>,
+    /// The rule's XPath constraint, empty when it applies to every record.
+    ///
+    /// A constraint narrows *which records* the rule speaks for, so it can
+    /// only be evaluated when there is a record in hand. Asking whether a
+    /// role may create or read the entity at all is a question about no
+    /// particular record, and there the rule applies unconstrained — the
+    /// oracle's `next true unless evaluate_xpath && record`.
+    pub xpath: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -507,11 +521,21 @@ impl SecurityPolicy {
             .is_some_and(|roles| !roles.is_disjoint(&context.module_roles))
     }
 
+    /// Whether `context` may take `action` on `entity`, optionally narrowed to
+    /// one `member` and one `record`.
+    ///
+    /// `record` is what makes XPath constraints decidable. Without it the
+    /// question is about the entity rather than about any row, and a
+    /// constrained rule applies unconstrained — the same split the oracle
+    /// draws. With it, a rule whose constraint does not hold for that record
+    /// does not speak for it, and a constraint this runtime cannot evaluate
+    /// is a denial rather than a guess.
     pub fn entity_allowed(
         &self,
         entity: &str,
         action: EntityAction,
         member: Option<&str>,
+        record: Option<&BTreeMap<String, Value>>,
         context: &SecurityContext,
     ) -> bool {
         if !self.enabled || self.administrator(context) {
@@ -522,6 +546,12 @@ impl SecurityPolicy {
             rules
                 .iter()
                 .filter(|rule| !rule.module_roles.is_disjoint(&context.module_roles))
+                .filter(|rule| match record {
+                    Some(record) if !rule.xpath.trim().is_empty() => {
+                        xpath::evaluate(&rule.xpath, record, &context) == Some(true)
+                    }
+                    _ => true,
+                })
                 .any(|rule| match action {
                     EntityAction::Create => rule.create,
                     EntityAction::Delete => rule.delete,
@@ -777,15 +807,17 @@ mod tests {
             "Sales.Order",
             EntityAction::Write,
             Some("Status"),
+            None,
             &context
         ));
         assert!(!policy.entity_allowed(
             "Sales.Order",
             EntityAction::Write,
             Some("Number"),
+            None,
             &context
         ));
-        assert!(policy.entity_allowed("Sales.Order", EntityAction::Write, None, &context));
+        assert!(policy.entity_allowed("Sales.Order", EntityAction::Write, None, None, &context));
     }
 
     #[test]

@@ -834,6 +834,7 @@ fn entity_access_enforcement_denies_by_policy_and_stays_off_otherwise() {
             delete: false,
             default_member_right: Some(MemberRight::Read),
             member_rights: BTreeMap::new(),
+            xpath: String::new(),
         }],
     );
     let engine =
@@ -843,6 +844,7 @@ fn entity_access_enforcement_denies_by_policy_and_stays_off_otherwise() {
         user: Some("alice".to_string()),
         user_roles: Default::default(),
         module_roles: ["App.Reader".to_string()].into(),
+        variables: BTreeMap::new(),
     };
     // ApplyEntityAccess=false: the flow runs even under a context.
     engine
@@ -868,6 +870,75 @@ fn entity_access_enforcement_denies_by_policy_and_stays_off_otherwise() {
     engine
         .call(&mut store, "App.Locked", Variables::new(), None)
         .unwrap();
+}
+
+/// mxrb's `filter_readable`: a retrieve under entity access returns only the
+/// rows some applicable rule actually covers. Before the constraint was
+/// evaluated, a role named by an owner-scoped rule saw every row — the rule
+/// granted the entity instead of the rows it names.
+#[test]
+fn an_xpath_constrained_rule_filters_retrieved_rows_per_record() {
+    let retrieve = activity(
+        "r",
+        doc! {
+            "$Type": "Microflows$RetrieveAction",
+            "ResultVariableName": "orders",
+            "RetrieveSource": doc! {
+                "$Type": "Microflows$DatabaseRetrieveSource",
+                "Entity": "App.Order",
+            },
+        },
+    );
+    let flows = vec![secured_flow(
+        "Mine",
+        vec![start("s"), retrieve, end("e", "$orders")],
+        vec![edge("f1", "s", "r"), edge("f2", "r", "e")],
+    )];
+    let mut policy = SecurityPolicy {
+        enabled: true,
+        ..SecurityPolicy::default()
+    };
+    policy.entities.insert(
+        "App.Order".to_string(),
+        vec![EntityRule {
+            module_roles: ["App.Owner".to_string()].into(),
+            create: true,
+            delete: true,
+            default_member_right: Some(MemberRight::Read),
+            member_rights: BTreeMap::new(),
+            xpath: "[Owner = '[%CurrentUser%]']".to_string(),
+        }],
+    );
+    let engine = FlowEngine::from_modules(&[module_with(flows)]).with_policy(policy);
+    let mut store = store_with_order();
+    for owner in ["alice", "bob", "alice"] {
+        let order = store.create("App.Order").unwrap();
+        store
+            .set_member("App.Order", &order.id, "Owner", owner.into())
+            .unwrap();
+        store.commit("App.Order", &order.id).unwrap();
+    }
+    let context = |user: &str| SecurityContext {
+        user: Some(user.to_string()),
+        user_roles: Default::default(),
+        module_roles: ["App.Owner".to_string()].into(),
+        variables: BTreeMap::new(),
+    };
+
+    let count = |engine: &FlowEngine, store: &mut Store, user: &str| {
+        let (result, _) = engine
+            .call(store, "App.Mine", Variables::new(), Some(context(user)))
+            .unwrap_or_else(|error| panic!("{user}: {error}"));
+        match result {
+            FlowValue::List(values) => values.len(),
+            other => panic!("expected a list, got {other:?}"),
+        }
+    };
+    assert_eq!(count(&engine, &mut store, "alice"), 2);
+    assert_eq!(count(&engine, &mut store, "bob"), 1);
+    // A caller whose roles match but who owns nothing sees nothing, rather
+    // than the whole table.
+    assert_eq!(count(&engine, &mut store, "carol"), 0);
 }
 
 #[test]
