@@ -173,6 +173,13 @@ fn materialized_deployment(root: &Path, runtime_version: &str) -> PathBuf {
     std::fs::write(deployment.join("web/assets/app.css"), b"body{}").unwrap();
     std::fs::write(deployment.join("web/.dotfile"), b"hidden").unwrap();
     std::fs::write(deployment.join("native/native.json"), b"{}").unwrap();
+    // A real deployment also carries data/, log/ and run/. They are not
+    // deployment roots, so nothing under them may reach the archive — a
+    // local database and build scratch must not ship to production.
+    for directory in ["data/database", "log", "run"] {
+        std::fs::create_dir_all(deployment.join(directory)).unwrap();
+        std::fs::write(deployment.join(directory).join("local.bin"), b"scratch").unwrap();
+    }
     // The compiled model must not look older than the MPR, or `pack` refuses
     // it as stale — which is a behaviour of its own, tested below.
     let fresh = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
@@ -220,6 +227,9 @@ fn pack_archives_a_materialized_deployment_deterministically() {
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect();
+    // `roots` and the file count together prove the exclusion: the scratch
+    // files under data/, log/ and run/ would have added three files and
+    // three roots had any of them been packaged.
     assert_eq!(roots, ["model", "native", "sass", "web"]);
     assert_eq!(report["metadata"]["RuntimeVersion"], "11.12.1");
 

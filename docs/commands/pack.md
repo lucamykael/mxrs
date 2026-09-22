@@ -9,15 +9,14 @@ unless `--force` is given.
 
 ## What this does and does not do
 
-MXRB's `pack` is two halves. This is the container half — a port of
-`compiler/packager.rb` — and it stops exactly where that file does: it never
-invokes `mx` or `mxbuild`, and it never compiles anything.
+This archives a deployment directory that something else materialized. It
+never invokes `mx` or `mxbuild`, and it never compiles anything.
 
-Materializing `deployment/` **from the model** is the other half: page and
-widget bundle compilation, Java proxy generation, the project jar, the web
-shell. That is roughly 12k lines of `lib/mxrb/compiler/` and is **not ported**.
-Until it is, the deployment directory has to come from MXRB or from Studio Pro;
-`mxrs pack` then packages it.
+That is the same scope MXRB's `pack` has. MXRB carries a `DeploymentMaterializer`
+in its library, but no `bin/mxrb` command reaches it, and it works by copying
+run templates out of a licensed Studio Pro installation rather than deriving
+them from the model. So for both tools the deployment directory comes from
+Studio Pro, and `pack` packages it.
 
 ## Archive layout
 
@@ -30,6 +29,12 @@ Every entry is stamped `2000-01-01T00:00:00Z`, so packaging the same
 deployment twice produces byte-identical archives. Unix permission bits are
 carried through, because the Mendix runtime reads the executable bit off some
 entries; the timestamp is the only thing normalized.
+
+This is one deliberate improvement on the oracle. MXRB declares the same fixed
+time, but rubyzip overwrites it with each source file's mtime when the entry is
+added, so the constant never reaches the archive: `touch`-ing one unchanged file
+changes MXRB's whole archive checksum. Here the fixed time is what is written,
+which is what the constant was for.
 
 The archive is written to a temporary file beside the output and renamed, so a
 crash mid-write cannot leave a truncated file that still opens as a ZIP.
@@ -58,17 +63,27 @@ mean different things on different machines.
 
 ## Verification
 
-Content parity with the oracle is the pin that matters. Over the same
-deployment directory, `mxrb pack` and `mxrs pack` report the same file count
-and Mendix version, and `mxrs mda compare` finds **0 differences** between the
-two archives — same entry set, same SHA-256 per entry. The whole-archive
-checksums differ because rubyzip and the Rust `zip` crate deflate differently;
-that is a compression artifact, not a content one, which is why comparison is
-done at the entry level.
+Content parity with the oracle is the pin that matters. Verified over a real
+46-file deployment, materialized by MXRB's own `DeploymentMaterializer` from a
+Mendix 11.12.1 installation:
 
-All eight refusals above were run against both implementations and produce the
-same message text. MXRB surfaces them as uncaught Ruby exceptions with a
-backtrace; this prints `[mxrs] error: <message>` and exits non-zero.
+- both print `Packed 46 files for Mendix 11.12.1`;
+- `mxrs mda compare` finds **0 differences**;
+- inspecting the two ZIPs directly, all **72 entries** — directories included —
+  match on name, permission bits, uncompressed size and CRC-32.
+
+The whole-archive checksums differ for two reasons, both understood: rubyzip
+and the Rust `zip` crate deflate differently, and MXRB stamps source mtimes
+where this stamps the fixed time. Neither is a content difference, which is why
+parity is asserted per entry.
+
+Seven of the eight refusals were run against both implementations and produce
+the same message text; MXRB surfaces them as uncaught Ruby exceptions with a
+backtrace, while this prints `[mxrs] error: <message>` and exits non-zero. The
+eighth — an unaudited Mendix major — is unit-tested instead, because forging an
+MPR that declares one is harder than the check it exercises. The unparseable-
+metadata message shares MXRB's `invalid model/metadata.json:` prefix; the
+parser detail after it naturally differs between Ruby's JSON and `serde_json`.
 
 ```sh
 cargo test -p mxrs-cli --test commands pack

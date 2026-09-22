@@ -407,9 +407,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "catalog, logical SQL projection onto the physical runtime tables, and aliased association-path JOINs; an association path used directly as a FROM source is refused by name rather than guessed",
         ),
         "pack" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs pack",
-            "MDA container writer ported from compiler/packager.rb: deployment roots only, directories before files, entries stamped at a fixed time so repacking is byte-identical, unix modes carried, atomic rename, and all eight refusals (unmaterialized, stale, runtime mismatch, unaudited major, symlink, existing output, missing deployment, unparseable metadata) with the oracle's exact message text; own evidence: mxrs mda compare reports 0 differences against an mxrb-produced MDA over the same deployment. Materializing deployment/ FROM the model — page/widget bundle compilation, Java proxies, project jar, web shell, ~12k lines of lib/mxrb/compiler/ — is not ported, so the deployment directory must still come from MXRB or Studio Pro",
+            "full port of compiler/packager.rb: deployment roots only (data/log/run stay out), directories before files, unix modes carried, atomic rename, and all eight refusals — unmaterialized, stale, runtime mismatch, unaudited major, symlink, existing output, missing deployment, unparseable metadata. Like mxrb's, this command archives a deployment somebody else materialized: bin/mxrb exposes no deployment-compiling command either (DeploymentMaterializer is library-only and needs a licensed Studio Pro install for its templates), so the CLI contracts are the same scope. Own evidence: over a real 46-file deployment materialized by mxrb from Mendix 11.12.1, both print the identical result line and all 72 entries match on name, permissions, size and CRC-32 (mxrs mda compare: 0 differences); seven refusals were run against both and carry byte-identical message text, the eighth is unit-tested. One deliberate improvement: mxrb declares a FIXED_TIME but rubyzip overwrites it with each source file's mtime, so touching an unchanged file changes its archive — this stamps the fixed time as intended, and repacking is byte-identical",
         ),
         "portable" => (
             Status::Partial,

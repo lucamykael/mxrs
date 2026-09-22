@@ -1279,4 +1279,23 @@ mod tests {
         let decoded = decode_tar(&archive).unwrap();
         assert_eq!(decoded.get(&path).unwrap(), b"content");
     }
+
+    /// The only refusal the CLI suite cannot reach, because forging an MPR
+    /// that declares an unaudited Mendix major is harder than the check is.
+    #[test]
+    fn only_audited_mendix_majors_may_be_packaged() {
+        for version in ["6.10.8", "7.17.0", "9.6.1.29396", "10.24.0", "11.12.1"] {
+            assert!(audit_mendix_version(version).is_ok(), "{version}");
+        }
+        for version in ["8.18.0", "12.0.0", "", "eleven", "x.1.2"] {
+            let error = audit_mendix_version(version).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "audited native compilation supports Mendix 6.x, 7.x, 9.x, 10.x, and 11.x; got {version}"
+                ),
+                "{version}"
+            );
+        }
+    }
 }
