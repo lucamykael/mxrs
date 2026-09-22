@@ -43,6 +43,22 @@ pub enum PackageError {
     OutputInsideInput(String),
     #[error("invalid MDA {path}: {reason}")]
     InvalidMda { path: String, reason: String },
+    #[error("{0}: file already exists")]
+    OutputExists(String),
+    #[error("{0}: deployment directory not found")]
+    DeploymentNotFound(String),
+    #[error("audited native compilation supports Mendix 6.x, 7.x, 9.x, 10.x, and 11.x; got {0}")]
+    UnsupportedMendixVersion(String),
+    #[error("deployment is not materialized; missing {0}")]
+    DeploymentNotMaterialized(String),
+    #[error("invalid model/metadata.json: {0}")]
+    InvalidDeploymentMetadata(String),
+    #[error("deployment targets Mendix {actual}, but MPR targets {target}")]
+    DeploymentRuntimeMismatch { actual: String, target: String },
+    #[error("deployment is stale: {compiled} is older than {mpr}")]
+    StaleDeployment { compiled: String, mpr: String },
+    #[error("deployment contains symlink {0}")]
+    DeploymentSymlink(String),
 }
 
 pub type Result<T> = std::result::Result<T, PackageError>;
@@ -224,6 +240,301 @@ pub fn inspect_mda(path: impl AsRef<Path>) -> Result<MdaInspection> {
         entries,
         sha256: sha256(&archive_bytes),
     })
+}
+
+/// The deployment subtrees an MDA carries, in `Adapter::ROOTS` order. A
+/// deployment directory may hold anything else beside them; only these are
+/// packaged, so stray build scratch never reaches the archive.
+const DEPLOYMENT_ROOTS: [&str; 5] = ["model", "web", "native", "sass", "tmp"];
+
+/// Files whose absence means the deployment was never materialized. Checked
+/// by name rather than by walking, so the diagnostic can list exactly what is
+/// missing instead of saying the directory "looks wrong".
+const DEPLOYMENT_REQUIRED_FILES: [&str; 4] = [
+    "model/model.mdp",
+    "model/metadata.json",
+    "model/bundles/project.jar",
+    "web/index.html",
+];
+
+/// Mendix major versions whose deployment layout this writer has been audited
+/// against. Ports `Adapter.for`'s table rather than accepting anything that
+/// parses: packaging an unaudited layout would produce an archive that only
+/// looks right.
+const AUDITED_MAJORS: [u64; 5] = [6, 7, 9, 10, 11];
+
+/// Every MDA entry is stamped 2000-01-01T00:00:00Z so that packaging the same
+/// deployment twice produces the same archive. Ports MXRB's `FIXED_TIME`.
+const MDA_FIXED_TIME: (u16, u8, u8, u8, u8, u8) = (2000, 1, 1, 0, 0, 0);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdaPackReport {
+    pub path: PathBuf,
+    pub mendix_version: String,
+    pub files: usize,
+    pub sha256: String,
+    pub metadata: serde_json::Value,
+}
+
+/// Packages an already-materialized Mendix deployment directory into an MDA.
+///
+/// This is the container half of MXRB's `pack`, ported from
+/// `compiler/packager.rb`, and it deliberately stops where that file does: it
+/// never invokes `mx`/`mxbuild` and never compiles anything. Materializing
+/// `deployment/` from the model — page and widget bundles, Java proxies, the
+/// project jar — is the separate, much larger half that is not ported.
+///
+/// Refusing to package an unmaterialized, stale, or version-mismatched
+/// deployment is the whole point of the validation below: an MDA that is
+/// structurally a valid ZIP but built from yesterday's model is the failure
+/// mode that costs a deployment, and it is invisible in the artifact.
+pub fn pack_mda(
+    mpr: impl AsRef<Path>,
+    deployment: Option<&Path>,
+    output: impl AsRef<Path>,
+    force: bool,
+) -> Result<MdaPackReport> {
+    let mpr = absolute(mpr.as_ref())?;
+    let project_root = mpr.parent().unwrap_or(Path::new("."));
+    let deployment = match deployment {
+        Some(path) => absolute(path)?,
+        None => absolute(&project_root.join("deployment"))?,
+    };
+    let output = absolute(output.as_ref())?;
+
+    if output.exists() && !force {
+        return Err(PackageError::OutputExists(output.display().to_string()));
+    }
+    if !deployment.is_dir() {
+        return Err(PackageError::DeploymentNotFound(
+            deployment.display().to_string(),
+        ));
+    }
+
+    let project = mxrs_model::Project::open(&mpr, true)?;
+    let version = project.mendix_version()?.unwrap_or_default();
+    audit_mendix_version(&version)?;
+    let metadata = validate_deployment(&deployment, &version)?;
+    validate_deployment_freshness(&mpr, &deployment)?;
+
+    let (files, directories) = deployment_inventory(&deployment)?;
+    write_mda_atomically(&output, &deployment, &files, &directories)?;
+
+    let inspection = inspect_mda(&output)?;
+    Ok(MdaPackReport {
+        path: output,
+        mendix_version: version,
+        files: inspection.files().count(),
+        sha256: inspection.sha256,
+        metadata,
+    })
+}
+
+fn audit_mendix_version(version: &str) -> Result<()> {
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u64>().ok());
+    match major {
+        Some(major) if AUDITED_MAJORS.contains(&major) => Ok(()),
+        _ => Err(PackageError::UnsupportedMendixVersion(version.to_string())),
+    }
+}
+
+/// Ports `Adapter#validate_deployment!`: the required files must exist, the
+/// metadata must parse, and its `RuntimeVersion` must agree with the model's
+/// on the first three components.
+fn validate_deployment(deployment: &Path, version: &str) -> Result<serde_json::Value> {
+    let missing: Vec<&str> = DEPLOYMENT_REQUIRED_FILES
+        .iter()
+        .copied()
+        .filter(|relative| !deployment.join(relative).is_file())
+        .collect();
+    if !missing.is_empty() {
+        return Err(PackageError::DeploymentNotMaterialized(missing.join(", ")));
+    }
+    let metadata_path = deployment.join("model/metadata.json");
+    let bytes = std::fs::read(&metadata_path)
+        .map_err(|source| PackageError::InvalidDeploymentMetadata(source.to_string()))?;
+    let metadata: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| PackageError::InvalidDeploymentMetadata(error.to_string()))?;
+    let runtime = metadata.get("RuntimeVersion").ok_or_else(|| {
+        PackageError::InvalidDeploymentMetadata("key not found: \"RuntimeVersion\"".to_string())
+    })?;
+    // MXRB's `.to_s` accepts any scalar here; a non-string is rendered rather
+    // than refused, so the mismatch message stays the one a user can act on.
+    let runtime = match runtime {
+        serde_json::Value::String(value) => value.clone(),
+        other => other.to_string(),
+    };
+    if version_prefix(&runtime) == version_prefix(version) {
+        Ok(metadata)
+    } else {
+        Err(PackageError::DeploymentRuntimeMismatch {
+            actual: runtime,
+            target: version.to_string(),
+        })
+    }
+}
+
+fn version_prefix(version: &str) -> Vec<&str> {
+    version.split('.').take(3).collect()
+}
+
+/// Ports `Adapter#validate_freshness!`. A compiled model older than the `.mpr`
+/// means the deployment does not describe the model being packaged.
+fn validate_deployment_freshness(mpr: &Path, deployment: &Path) -> Result<()> {
+    let compiled = deployment.join("model/model.mdp");
+    let compiled_time = std::fs::metadata(&compiled)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|source| io_error(&compiled, source))?;
+    let mpr_time = std::fs::metadata(mpr)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|source| io_error(mpr, source))?;
+    if compiled_time >= mpr_time {
+        return Ok(());
+    }
+    Err(PackageError::StaleDeployment {
+        compiled: compiled.display().to_string(),
+        mpr: mpr.display().to_string(),
+    })
+}
+
+/// Collects the deployment roots and everything beneath them, hidden entries
+/// included, sorted by archive path so the inventory does not depend on
+/// directory iteration order.
+///
+/// A symlink anywhere is refused rather than followed or stored: following one
+/// silently pulls content from outside the deployment into the archive, and
+/// storing one produces an MDA whose meaning depends on the machine that
+/// unpacks it.
+fn deployment_inventory(deployment: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    for root in DEPLOYMENT_ROOTS {
+        let root = deployment.join(root);
+        if !root.exists() {
+            continue;
+        }
+        collect_deployment_paths(&root, &mut files, &mut directories)?;
+    }
+    let key = |path: &PathBuf| mda_relative_path(deployment, path);
+    files.sort_by_key(key);
+    directories.sort_by_key(key);
+    Ok((files, directories))
+}
+
+fn collect_deployment_paths(
+    path: &Path,
+    files: &mut Vec<PathBuf>,
+    directories: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| io_error(path, source))?;
+    if metadata.file_type().is_symlink() {
+        return Err(PackageError::DeploymentSymlink(path.display().to_string()));
+    }
+    if metadata.is_dir() {
+        directories.push(path.to_path_buf());
+        let mut children: Vec<PathBuf> = std::fs::read_dir(path)
+            .map_err(|source| io_error(path, source))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|source| io_error(path, source))?;
+        children.sort();
+        for child in children {
+            collect_deployment_paths(&child, files, directories)?;
+        }
+    } else {
+        files.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn mda_relative_path(deployment: &Path, path: &Path) -> String {
+    path.strip_prefix(deployment)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Writes through a temporary file beside the output, then renames. A crash
+/// mid-write leaves the previous archive intact rather than a truncated one
+/// that still opens as a ZIP.
+fn write_mda_atomically(
+    output: &Path,
+    deployment: &Path,
+    files: &[PathBuf],
+    directories: &[PathBuf],
+) -> Result<()> {
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+    let temporary = output.with_extension(format!("mda-partial-{}", std::process::id()));
+    let result = write_mda(&temporary, deployment, files, directories);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return result;
+    }
+    std::fs::rename(&temporary, output).map_err(|source| {
+        let _ = std::fs::remove_file(&temporary);
+        io_error(output, source)
+    })
+}
+
+fn write_mda(
+    temporary: &Path,
+    deployment: &Path,
+    files: &[PathBuf],
+    directories: &[PathBuf],
+) -> Result<()> {
+    let (year, month, day, hour, minute, second) = MDA_FIXED_TIME;
+    let fixed = zip::DateTime::from_date_and_time(year, month, day, hour, minute, second)
+        .map_err(|error| PackageError::InvalidArchive(error.to_string()))?;
+    let handle = std::fs::File::create(temporary).map_err(|source| io_error(temporary, source))?;
+    let mut archive = zip::ZipWriter::new(std::io::BufWriter::new(handle));
+    for directory in directories {
+        let options = mda_entry_options(fixed, directory)?;
+        archive
+            .add_directory(mda_relative_path(deployment, directory), options)
+            .map_err(|error| PackageError::InvalidArchive(error.to_string()))?;
+    }
+    for file in files {
+        let options = mda_entry_options(fixed, file)?;
+        archive
+            .start_file(mda_relative_path(deployment, file), options)
+            .map_err(|error| PackageError::InvalidArchive(error.to_string()))?;
+        let mut source = std::fs::File::open(file).map_err(|source| io_error(file, source))?;
+        std::io::copy(&mut source, &mut archive).map_err(|source| io_error(file, source))?;
+    }
+    archive
+        .finish()
+        .map_err(|error| PackageError::InvalidArchive(error.to_string()))?;
+    Ok(())
+}
+
+fn mda_entry_options(fixed: zip::DateTime, source: &Path) -> Result<zip::write::SimpleFileOptions> {
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(fixed);
+    Ok(options.unix_permissions(deployment_permissions(source)?))
+}
+
+/// Mendix's runtime reads executable bits off some deployment entries, so the
+/// mode is carried through rather than normalized — the one thing about an
+/// entry that is not fixed.
+#[cfg(unix)]
+fn deployment_permissions(source: &Path) -> Result<u32> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let metadata = std::fs::metadata(source).map_err(|error| io_error(source, error))?;
+    Ok(metadata.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn deployment_permissions(_source: &Path) -> Result<u32> {
+    // Windows has no POSIX mode to carry; MXRB reads `File.stat(...).mode`,
+    // which Ruby synthesizes there too. 0o644/0o755 would be a guess, so the
+    // archive records the conventional file mode and lets the runtime decide.
+    Ok(0o644)
 }
 
 pub fn compare_mda(left: impl AsRef<Path>, right: impl AsRef<Path>) -> Result<Vec<MdaDifference>> {

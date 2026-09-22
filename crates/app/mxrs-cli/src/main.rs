@@ -110,6 +110,7 @@ fn command_options(
         ),
         "oql" => (&["--dialect"], &["--json"], &[]),
         "analyze" => (&["--dialect", "--sql", "--oql"], &["--json"], &[]),
+        "pack" => (&["--output", "--deployment"], &["--force"], &[]),
         "package" => (&["--web", "--output", "-o"], &[], &[]),
         "search" => (&["--limit"], &["--json"], &[]),
         "translate-oql" => (&["--dialect"], &[], &[]),
@@ -227,6 +228,7 @@ commands! {
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
     "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
     "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
+    "pack", "<file.mpr> [--output FILE.mda] [--deployment DIR] [--force]", "Package a materialized deployment into an MDA", run_pack;
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
     "portability", "<file.mpr> [--json] [--verify-round-trip] [--require-typed]", "Audit typed authoring versus lossless model preservation", run_portability;
     "page", "new <Module.Page> [--template NAME] [--chain CHAIN] [--role Module.Role] [--target DIR] [--dry-run] [--json] | templates [--json]", "Scaffold a page declaration, a page-led vertical slice, or list page templates", run_page;
@@ -2693,6 +2695,48 @@ fn run_translate_oql(mut args: Vec<String>) -> ExitCode {
     } else {
         eprintln!("[mxrs] unsupported: {}", projection.warnings.join("; "));
         ExitCode::FAILURE
+    }
+}
+
+/// `mxrs pack` is the container half of MXRB's `pack`: it archives a
+/// deployment directory that something else already materialized. It does not
+/// compile a model into one, and says so rather than producing an archive
+/// that is structurally valid and semantically empty.
+///
+/// The default output mirrors MXRB's: `<project>/build/<name>.mda`.
+fn run_pack(mut args: Vec<String>) -> ExitCode {
+    let output = take_value(&mut args, "--output");
+    let deployment = take_value(&mut args, "--deployment");
+    let force = take_flag(&mut args, "--force");
+    let [path] = args.as_slice() else {
+        eprintln!(
+            "[mxrs] error: usage: mxrs pack <file.mpr> [--output FILE.mda] [--deployment DIR] [--force]"
+        );
+        return ExitCode::FAILURE;
+    };
+    let model = Path::new(path);
+    let output = output.map(PathBuf::from).unwrap_or_else(|| {
+        let name = model.file_stem().unwrap_or_default();
+        model
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("build")
+            .join(format!("{}.mda", name.to_string_lossy()))
+    });
+    match mxrs_packager::pack_mda(model, deployment.as_deref().map(Path::new), &output, force) {
+        Ok(report) => {
+            println!(
+                "[mxrs] Packed {} files for Mendix {}",
+                report.files, report.mendix_version
+            );
+            println!("[mxrs] SHA-256 {}", report.sha256);
+            println!("[mxrs] {}", report.path.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 

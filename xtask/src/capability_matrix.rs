@@ -406,7 +406,16 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs oql",
             "catalog, logical SQL projection onto the physical runtime tables, and aliased association-path JOINs; an association path used directly as a FROM source is refused by name rather than guessed",
         ),
-        "pack" | "portable" => (Status::Partial, "mxrs package", "reproducible MXRS archive"),
+        "pack" => (
+            Status::Partial,
+            "mxrs pack",
+            "MDA container writer ported from compiler/packager.rb: deployment roots only, directories before files, entries stamped at a fixed time so repacking is byte-identical, unix modes carried, atomic rename, and all eight refusals (unmaterialized, stale, runtime mismatch, unaudited major, symlink, existing output, missing deployment, unparseable metadata) with the oracle's exact message text; own evidence: mxrs mda compare reports 0 differences against an mxrb-produced MDA over the same deployment. Materializing deployment/ FROM the model — page/widget bundle compilation, Java proxies, project jar, web shell, ~12k lines of lib/mxrb/compiler/ — is not ported, so the deployment directory must still come from MXRB or Studio Pro",
+        ),
+        "portable" => (
+            Status::Partial,
+            "mxrs package",
+            "reproducible MXRS archive; mxrb's portable Runtime bundle (portable_packager.rb: a deployment plus a --mendix-home Runtime tree zipped into a self-contained runtime.zip) is not ported",
+        ),
         "query" => (
             Status::Partial,
             "mxrs translate-oql",

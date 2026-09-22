@@ -31,6 +31,10 @@ fn text(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
 
+fn text_err(output: &Output) -> String {
+    String::from_utf8(output.stderr.clone()).unwrap()
+}
+
 fn fixture(cyclic: bool) -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("Commands.mpr");
@@ -148,6 +152,209 @@ fn benchmark_measures_the_three_read_only_model_operations() {
     assert!(text(&output).contains("Open average     :"));
     assert!(text(&output).contains("Index average    :"));
     assert!(text(&output).contains("Validate average :"));
+}
+
+/// Writes the four files `Adapter::REQUIRED_FILES` names plus a little extra
+/// content, so `pack` sees something a real materialized deployment would
+/// have: nested directories, a dotfile, an executable, and an empty root.
+fn materialized_deployment(root: &Path, runtime_version: &str) -> PathBuf {
+    let deployment = root.join("deployment");
+    for directory in ["model/bundles", "web/assets", "native", "sass"] {
+        std::fs::create_dir_all(deployment.join(directory)).unwrap();
+    }
+    std::fs::write(
+        deployment.join("model/metadata.json"),
+        format!(r#"{{"RuntimeVersion":"{runtime_version}","ProjectName":"Commands"}}"#),
+    )
+    .unwrap();
+    std::fs::write(deployment.join("model/model.mdp"), b"compiled-model").unwrap();
+    std::fs::write(deployment.join("model/bundles/project.jar"), b"jar").unwrap();
+    std::fs::write(deployment.join("web/index.html"), b"<html></html>").unwrap();
+    std::fs::write(deployment.join("web/assets/app.css"), b"body{}").unwrap();
+    std::fs::write(deployment.join("web/.dotfile"), b"hidden").unwrap();
+    std::fs::write(deployment.join("native/native.json"), b"{}").unwrap();
+    // The compiled model must not look older than the MPR, or `pack` refuses
+    // it as stale — which is a behaviour of its own, tested below.
+    let fresh = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    let handle = std::fs::File::options()
+        .write(true)
+        .open(deployment.join("model/model.mdp"))
+        .unwrap();
+    handle.set_modified(fresh).unwrap();
+    deployment
+}
+
+/// MXRB's `pack` archives a deployment somebody else materialized; so does
+/// this. The pin that matters is content parity with that oracle — same entry
+/// set, same bytes per entry — plus determinism, which the fixed entry
+/// timestamps exist to provide.
+#[test]
+fn pack_archives_a_materialized_deployment_deterministically() {
+    let (directory, path) = fixture(false);
+    materialized_deployment(directory.path(), "11.12.1");
+    let output = directory.path().join("out.mda");
+
+    let packed = cli(&[
+        "pack",
+        path.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(packed.status.success(), "{}", text_err(&packed));
+    let rendered = text(&packed);
+    assert!(
+        rendered.contains("Packed 7 files for Mendix 11.12.1"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("[mxrs] SHA-256 "), "{rendered}");
+
+    // Every deployment root is carried, including the empty one, and the
+    // dotfile is not quietly skipped.
+    let inspected = cli(&["mda", "inspect", output.to_str().unwrap(), "--json"]);
+    assert!(inspected.status.success(), "{}", text_err(&inspected));
+    let report: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(report["files"], 7);
+    let roots: Vec<&str> = report["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(roots, ["model", "native", "sass", "web"]);
+    assert_eq!(report["metadata"]["RuntimeVersion"], "11.12.1");
+
+    // Same deployment, same bytes: entries are stamped at a fixed time, so
+    // an MDA is comparable across machines and runs.
+    let first = std::fs::read(&output).unwrap();
+    let again = directory.path().join("again.mda");
+    assert!(
+        cli(&[
+            "pack",
+            path.to_str().unwrap(),
+            "--output",
+            again.to_str().unwrap(),
+        ])
+        .status
+        .success()
+    );
+    assert_eq!(first, std::fs::read(&again).unwrap());
+
+    // The default output mirrors MXRB's `<project>/build/<name>.mda`.
+    assert!(cli(&["pack", path.to_str().unwrap()]).status.success());
+    assert!(directory.path().join("build/Commands.mda").is_file());
+
+    // An existing archive is preserved unless the caller says otherwise.
+    let refused = cli(&[
+        "pack",
+        path.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(text_err(&refused).contains("file already exists"));
+    assert!(
+        cli(&[
+            "pack",
+            path.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--force",
+        ])
+        .status
+        .success()
+    );
+}
+
+/// Each refusal carries MXRB's exact message. An MDA that is a structurally
+/// valid ZIP built from a stale or mismatched deployment is the failure this
+/// command exists to prevent, and it cannot be seen in the artifact.
+#[test]
+fn pack_refuses_unmaterialized_stale_mismatched_and_symlinked_deployments() {
+    let (directory, path) = fixture(false);
+    let output = directory.path().join("out.mda");
+    let pack = |deployment: &Path| {
+        cli(&[
+            "pack",
+            path.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--force",
+            "--deployment",
+            deployment.to_str().unwrap(),
+        ])
+    };
+
+    let missing = directory.path().join("absent");
+    let refused = pack(&missing);
+    assert!(!refused.status.success());
+    assert!(
+        text_err(&refused).contains("deployment directory not found"),
+        "{}",
+        text_err(&refused)
+    );
+
+    let bare = directory.path().join("bare");
+    std::fs::create_dir_all(bare.join("model")).unwrap();
+    let refused = pack(&bare);
+    assert!(!refused.status.success());
+    assert!(
+        text_err(&refused).contains(
+            "deployment is not materialized; missing model/model.mdp, model/metadata.json, \
+             model/bundles/project.jar, web/index.html"
+        ),
+        "{}",
+        text_err(&refused)
+    );
+
+    let mismatched = directory.path().join("mismatched");
+    std::fs::create_dir_all(&mismatched).unwrap();
+    let deployment = materialized_deployment(&mismatched, "10.6.0");
+    let refused = pack(&deployment);
+    assert!(!refused.status.success());
+    assert!(
+        text_err(&refused).contains("deployment targets Mendix 10.6.0, but MPR targets 11.12.1"),
+        "{}",
+        text_err(&refused)
+    );
+
+    let stale_root = directory.path().join("stale");
+    std::fs::create_dir_all(&stale_root).unwrap();
+    let stale = materialized_deployment(&stale_root, "11.12.1");
+    std::fs::File::options()
+        .write(true)
+        .open(stale.join("model/model.mdp"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let refused = pack(&stale);
+    assert!(!refused.status.success());
+    assert!(
+        text_err(&refused).contains("deployment is stale:"),
+        "{}",
+        text_err(&refused)
+    );
+
+    // A symlink is refused rather than followed or stored: following one
+    // pulls content from outside the deployment into the archive, and storing
+    // one makes the MDA mean different things on different machines.
+    #[cfg(unix)]
+    {
+        let linked_root = directory.path().join("linked");
+        std::fs::create_dir_all(&linked_root).unwrap();
+        let linked = materialized_deployment(&linked_root, "11.12.1");
+        std::os::unix::fs::symlink(
+            linked.join("model/model.mdp"),
+            linked.join("web/elsewhere.mdp"),
+        )
+        .unwrap();
+        let refused = pack(&linked);
+        assert!(!refused.status.success());
+        assert!(
+            text_err(&refused).contains("deployment contains symlink"),
+            "{}",
+            text_err(&refused)
+        );
+    }
 }
 
 #[test]
