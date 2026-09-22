@@ -573,10 +573,20 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     }
     let navigation = root.join("src/presentation/navigation/order_overview.rs");
     assert!(rendered.contains(&format!("  create  {}", navigation.display())));
+    let entry = std::fs::read_to_string(navigation).unwrap();
+    assert!(entry.contains("Sales.OrderOverview"), "{entry}");
+    // The generated entry goes through the find-or-create accessor. It must
+    // not assume the application still declares the profile it names: MXRB
+    // refuses the scaffold outright when the Responsive aggregator is
+    // missing, and deferring that to a panic inside the user's build — which
+    // an `expect` here would do — is strictly worse than either.
     assert!(
-        std::fs::read_to_string(navigation)
-            .unwrap()
-            .contains("Sales.OrderOverview")
+        entry.contains("project.navigation_item("),
+        "the navigation entry should use the total accessor: {entry}"
+    );
+    assert!(
+        !entry.contains("expect("),
+        "generated navigation must not contain a panic path: {entry}"
     );
     assert!(text(&scaffold(&root, &["scaffold", "list"])).contains("page:Sales.OrderOverview"));
 }

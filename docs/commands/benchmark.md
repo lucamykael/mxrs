@@ -22,8 +22,16 @@ Validate average : 0.000000s
 
 `--json` emits the same five result fields as MXRB:
 `iterations`, `open_seconds`, `index_seconds`, `validate_seconds`, and
-`units`. Durations are wall-clock averages in seconds and are intentionally
-not compared numerically between invocations or implementations.
+`units`. Every average is rounded to six decimals before it is reported, the
+same precision MXRB's `Benchmark#measure` commits to, so the two JSON
+documents carry the same contract field for field. The durations themselves
+are wall-clock measurements and are intentionally not compared numerically
+between invocations or implementations.
+
+One rendering divergence is deliberate. MXRB prints the rounded value through
+Ruby's `Float#to_s`, so it shows `0.0s`, `0.0005s` or `1.0e-06s`; this prints
+six decimals unconditionally, so the same values read `0.000000s`, `0.000500s`
+and `0.000001s`. The labels and the numbers agree; only the spelling differs.
 
 All work for a phase completes before the next phase starts. Opening, semantic
 indexing, or storage failures therefore produce no benchmark report; the error

@@ -557,8 +557,12 @@ fn render_presentation_module(pages: &[page_export::ConvertedPage], api_mode: Ap
     for page in pages {
         let _ = writeln!(
             source,
-            "    if !project.modules.iter().any(|m| m.name == {:?}) {{\n        let module = ::mxrs_ir::ModuleDecl {{ name: {:?}.to_string(), ..Default::default() }};\n        project.modules.push(module);\n    }}\n    project.modules.iter_mut().find(|m| m.name == {:?}).expect(\"page module exists\").pages.push(pages::{}());",
-            page.module_name, page.module_name, page.module_name, page.function_name,
+            // `module_mut` is the find-or-create accessor, so this stays one
+            // total expression: open-coding it as a conditional push followed
+            // by `find(..).expect(..)` puts a panic into generated product
+            // code for an invariant the reader cannot check locally.
+            "    project.module_mut({:?}).pages.push(pages::{}());",
+            page.module_name, page.function_name,
         );
     }
     source.push_str(
@@ -2674,6 +2678,12 @@ fn write_marker_layer_sources(
             + generated[module_start..]
                 .find('{')
                 .expect("the module declaration contains an opening brace");
+        // Counting raw braces is only sound because everything typegen emits
+        // inside a module block is either a validated Rust identifier or a
+        // model name that `valid_ident` already accepted — and `{:?}` on a
+        // `str` does not escape braces, so a name containing one would close
+        // this module early and silently truncate the marker file. If
+        // `valid_ident` ever loosens, this needs a real lexer instead.
         let mut depth = 0usize;
         let mut source_end = None;
         for (offset, byte) in generated.as_bytes()[opening_brace..].iter().enumerate() {
@@ -3274,6 +3284,13 @@ fn render_entity(
     // `oql_view` is non-persistable by definition in the authoring DSL. Some
     // native projects still carry a contradictory legacy flag, which must not
     // make the generated Cargo project fail to compile.
+    //
+    // This is the one place the exporter *normalizes* rather than preserves:
+    // a native view carrying `persistable true` comes back out of a
+    // round trip as `persistable false`, because the pair has no consistent
+    // meaning to preserve. Mendix itself never reads a view as persistable,
+    // so nothing observable is lost — but the model bytes do change, which is
+    // why it is stated here rather than left for a diff to surprise someone.
     let _ = writeln!(
         out,
         "                persistable {};",

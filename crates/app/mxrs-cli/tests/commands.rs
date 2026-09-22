@@ -131,7 +131,15 @@ fn benchmark_measures_the_three_read_only_model_operations() {
     assert_eq!(report["iterations"], 2);
     assert!(report["units"].as_u64().unwrap() > 0);
     for metric in ["open_seconds", "index_seconds", "validate_seconds"] {
-        assert!(report[metric].as_f64().is_some_and(|value| value >= 0.0));
+        let seconds = report[metric].as_f64().expect(metric);
+        assert!(seconds >= 0.0, "{metric} = {seconds}");
+        // MXRB rounds every average to six decimals before reporting it, so
+        // the JSON contract is that precision rather than a raw clock read.
+        assert_eq!(
+            seconds,
+            (seconds * 1e6).round() / 1e6,
+            "{metric} is not rounded to six decimals"
+        );
     }
 
     let output = cli(&["benchmark", path.to_str().unwrap(), "--iterations", "1"]);

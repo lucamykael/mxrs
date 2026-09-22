@@ -33,20 +33,27 @@ pub(crate) fn page_navigation_aggregator() -> String {
         .to_string()
 }
 
+/// The navigation entry a templated/chain page contributes.
+///
+/// `navigation_item` is a find-or-create accessor precisely so this generated
+/// body cannot panic: the profile it names is a default, not an invariant, and
+/// an application that declares only Phone/Tablet profiles — or that renames
+/// this one while editing its own generated Rust — must keep building.
 pub(crate) fn page_navigation_entry(module_name: &str, name: &str) -> String {
     let caption = humanize(name);
     format!(
         "//! Navigation entry for `{module_name}.{name}`.\n\n\
          pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         let navigation = project.navigation.as_mut().expect(\"page navigation requires an application navigation declaration\");\n    \
-         let profile = navigation.profiles.iter_mut().find(|profile| profile.name == \"Responsive\").expect(\"page navigation requires the Responsive navigation profile\");\n    \
-         profile.items.push(::mxrs::NavigationItemDecl {{\n        \
-         caption: ::std::collections::BTreeMap::from([(\"en_US\".to_string(), {caption:?}.to_string())]),\n        \
-         page: Some(\"{module_name}.{name}\".to_string()),\n        \
-         microflow: None,\n        \
-         icon: Some(::mxrs::NavigationIconDecl::Glyph(\"file\".to_string())),\n        \
-         items: vec![],\n    \
-         }});\n\
+         project.navigation_item(\n        \
+         \"Responsive\",\n        \
+         ::mxrs::NavigationItemDecl {{\n            \
+         caption: ::std::collections::BTreeMap::from([(\"en_US\".to_string(), {caption:?}.to_string())]),\n            \
+         page: Some(\"{module_name}.{name}\".to_string()),\n            \
+         microflow: None,\n            \
+         icon: Some(::mxrs::NavigationIconDecl::Glyph(\"file\".to_string())),\n            \
+         items: vec![],\n        \
+         }},\n    \
+         );\n\
          }}\n"
     )
 }

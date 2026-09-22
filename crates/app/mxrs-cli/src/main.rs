@@ -1747,10 +1747,24 @@ struct BenchmarkResult {
     units: usize,
 }
 
+/// MXRB's `Benchmark#measure` rounds every average to six decimals before it
+/// ever reaches stdout, so that precision — not the raw clock reading — is the
+/// contract a `--json` consumer sees. Matching it keeps the two JSON documents
+/// comparable field for field.
+fn rounded_seconds(seconds: f64) -> f64 {
+    (seconds * 1e6).round() / 1e6
+}
+
 /// Measures the same three read-only operations as MXRB's `benchmark`: open
 /// and enumerate units, build a fresh semantic index, then validate storage.
 /// The index deliberately bypasses MXRS's derivative cache: benchmark results
 /// must describe the operation itself rather than the state of a prior command.
+///
+/// One rendering divergence is deliberate: the human lines format every
+/// average with six decimals, while MXRB prints Ruby's `Float#to_s` of the
+/// rounded value (`0.0s`, `0.0005s`, `1.0e-06s`). The labels and the JSON
+/// fields match; the human value spelling does not, and reproducing Ruby's
+/// float notation would buy nothing a reader of a timing report wants.
 fn run_benchmark(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let iterations = match take_value(&mut args, "--iterations") {
@@ -1775,7 +1789,7 @@ fn run_benchmark(mut args: Vec<String>) -> ExitCode {
             value = run().map_err(|error| format!("{operation}: {error}"))?;
         }
         Ok::<_, String>((
-            started.elapsed().as_secs_f64() / f64::from(iterations),
+            rounded_seconds(started.elapsed().as_secs_f64() / f64::from(iterations)),
             value,
         ))
     };
@@ -2424,7 +2438,9 @@ fn run_analyze(mut args: Vec<String>) -> ExitCode {
                     finding.severity.to_ascii_uppercase(),
                     finding.rule
                 );
-                println!("  {}/{}", source, finding.fragment);
+                // The query is named on the line above; repeating its whole
+                // text here made every finding as long as the query itself.
+                println!("  {}", finding.fragment);
                 println!("  {}", finding.message);
                 println!("  {dialect_key} -> {suggestion}");
             }

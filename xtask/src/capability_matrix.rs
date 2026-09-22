@@ -199,7 +199,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "benchmark" => (
             Status::Verified,
             "mxrs benchmark",
-            "repeatable read-only MPR open/unit enumeration, fresh semantic-index construction and storage validation, with MXRB-compatible iterations, human output and JSON result fields; own evidence: CLI contract suite",
+            "repeatable read-only MPR open/unit enumeration, fresh semantic-index construction and storage validation; MXRB's iteration grammar, its four human labels and its five JSON fields rounded to the same six decimals — only the human value spelling differs (MXRB prints Ruby's Float#to_s, so 1.0e-06s where this prints 0.000001s); own evidence: CLI contract suite",
         ),
         "cache" => (
             Status::Verified,
@@ -404,7 +404,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "oql" => (
             Status::Partial,
             "mxrs oql",
-            "catalog and logical SQL projection",
+            "catalog, logical SQL projection onto the physical runtime tables, and aliased association-path JOINs; an association path used directly as a FROM source is refused by name rather than guessed",
         ),
         "pack" | "portable" => (Status::Partial, "mxrs package", "reproducible MXRS archive"),
         "query" => (

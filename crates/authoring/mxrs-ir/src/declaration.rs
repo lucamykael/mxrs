@@ -5,7 +5,9 @@
 
 use crate::flow::MicroflowDecl;
 use crate::page::{LayoutDecl, PageDecl};
-use crate::{ModuleRoleDecl, NavigationDecl, ProjectSecurityDecl};
+use crate::{
+    ModuleRoleDecl, NavigationDecl, NavigationItemDecl, NavigationProfileDecl, ProjectSecurityDecl,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// An author-level attribute kind.
@@ -732,6 +734,56 @@ impl ProjectDecl {
             target.roles = Some(roles);
         }
     }
+
+    /// Returns the module of this name, declaring an empty one when the
+    /// project has none yet.
+    ///
+    /// Generated declaration layers need "the module I am about to extend"
+    /// without restating it. Open-coding that as
+    /// `iter_mut().find(..).expect(..)` after a conditional `push` puts a
+    /// panic into generated product code for a condition the caller cannot
+    /// see — so the find-or-create lives here, where it is total.
+    pub fn module_mut(&mut self, name: &str) -> &mut ModuleDecl {
+        if let Some(position) = self.modules.iter().position(|module| module.name == name) {
+            return &mut self.modules[position];
+        }
+        self.modules.push(ModuleDecl {
+            name: name.to_string(),
+            ..Default::default()
+        });
+        self.modules
+            .last_mut()
+            .expect("a module was just pushed onto the project")
+    }
+
+    /// Appends a navigation item to `profile`, declaring the navigation and
+    /// the profile when the project does not have them.
+    ///
+    /// A scaffolded page entry must not assume the application still declares
+    /// the profile it was generated against. Mendix profiles are
+    /// Responsive/Tablet/Phone and the generated Rust is meant to be edited,
+    /// so "the Responsive profile exists" is a guess, not an invariant —
+    /// and a guess is exactly what must not become a panic in a user's build.
+    pub fn navigation_item(&mut self, profile: &str, item: NavigationItemDecl) -> &mut Self {
+        let navigation = self.navigation.get_or_insert_with(NavigationDecl::default);
+        if !navigation
+            .profiles
+            .iter()
+            .any(|declared| declared.name == profile)
+        {
+            navigation
+                .profiles
+                .push(NavigationProfileDecl::new(profile));
+        }
+        for declared in navigation
+            .profiles
+            .iter_mut()
+            .filter(|declared| declared.name == profile)
+        {
+            declared.items.push(item.clone());
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -744,6 +796,116 @@ mod tests {
             name: name.to_string(),
             ..ModuleDecl::default()
         }
+    }
+
+    /// Both accessors exist so generated declaration layers never open-code
+    /// find-or-create with an `expect`. Totality is the whole contract: the
+    /// panic they replace fired inside a user's build, not inside mxrs.
+    #[test]
+    fn module_mut_finds_or_declares_without_disturbing_the_others() {
+        let mut project = ProjectDecl {
+            mendix_version: "11.12.1".into(),
+            modules: vec![module("Sales"), module("CRM")],
+            security: None,
+            navigation: None,
+        };
+        project
+            .module_mut("Sales")
+            .entities
+            .push(EntityDecl::new("Order"));
+        project
+            .module_mut("Billing")
+            .entities
+            .push(EntityDecl::new("Invoice"));
+
+        let names: Vec<&str> = project
+            .modules
+            .iter()
+            .map(|module| module.name.as_str())
+            .collect();
+        assert_eq!(names, ["Sales", "CRM", "Billing"]);
+        assert_eq!(project.modules[0].entities.len(), 1);
+        assert!(project.modules[1].entities.is_empty());
+        assert_eq!(project.modules[2].entities.len(), 1);
+        // A second call returns the same module rather than a duplicate.
+        project
+            .module_mut("Billing")
+            .entities
+            .push(EntityDecl::new("Credit"));
+        assert_eq!(project.modules.len(), 3);
+        assert_eq!(project.modules[2].entities.len(), 2);
+    }
+
+    #[test]
+    fn navigation_items_land_in_a_declared_profile_or_create_one() {
+        let item = |page: &str| NavigationItemDecl {
+            caption: Default::default(),
+            page: Some(page.to_string()),
+            microflow: None,
+            icon: None,
+            items: vec![],
+        };
+        // A project that declares no navigation at all still accepts an item.
+        let mut bare = ProjectDecl {
+            mendix_version: "11.12.1".into(),
+            modules: vec![],
+            security: None,
+            navigation: None,
+        };
+        bare.navigation_item("Responsive", item("Main.Home"));
+        let navigation = bare.navigation.as_ref().expect("navigation was declared");
+        assert_eq!(navigation.profiles.len(), 1);
+        assert_eq!(navigation.profiles[0].name, "Responsive");
+        assert_eq!(navigation.profiles[0].items.len(), 1);
+
+        // An existing profile keeps its home page and earlier items.
+        let mut existing = NavigationProfileDecl::new("Responsive");
+        existing.home_page = Some("Main.Home".to_string());
+        existing.items.push(item("Main.First"));
+        let mut project = ProjectDecl {
+            mendix_version: "11.12.1".into(),
+            modules: vec![],
+            security: None,
+            navigation: Some(NavigationDecl {
+                profiles: vec![NavigationProfileDecl::new("Phone"), existing],
+            }),
+        };
+        project.navigation_item("Responsive", item("Main.Second"));
+        let navigation = project.navigation.as_ref().unwrap();
+        assert_eq!(navigation.profiles.len(), 2);
+        assert_eq!(navigation.profiles[0].name, "Phone");
+        assert!(navigation.profiles[0].items.is_empty());
+        assert_eq!(
+            navigation.profiles[1].home_page.as_deref(),
+            Some("Main.Home")
+        );
+        let pages: Vec<Option<&str>> = navigation.profiles[1]
+            .items
+            .iter()
+            .map(|item| item.page.as_deref())
+            .collect();
+        assert_eq!(pages, [Some("Main.First"), Some("Main.Second")]);
+
+        // A project that renamed Responsive away gets the profile declared
+        // rather than a panic — the case that used to abort a user's build.
+        let mut renamed = ProjectDecl {
+            mendix_version: "11.12.1".into(),
+            modules: vec![],
+            security: None,
+            navigation: Some(NavigationDecl {
+                profiles: vec![NavigationProfileDecl::new("Phone")],
+            }),
+        };
+        renamed.navigation_item("Responsive", item("Main.Home"));
+        let names: Vec<&str> = renamed
+            .navigation
+            .as_ref()
+            .unwrap()
+            .profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect();
+        assert_eq!(names, ["Phone", "Responsive"]);
     }
 
     #[test]
