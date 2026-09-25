@@ -762,10 +762,12 @@ dependencies = [
  "mxrs-project",
  "mxrs-query-server",
  "mxrs-refactor",
+ "mxrs-relational-schema",
  "mxrs-runtime",
  "mxrs-runtime-boot",
  "mxrs-runtime-flows",
  "mxrs-runtime-http",
+ "mxrs-runtime-postgres",
  "mxrs-runtime-scheduler",
  "mxrs-runtime-sqlite",
  "mxrs-scaffold",
@@ -1134,6 +1136,7 @@ name = "mxrs-relational-schema"
 version = "0.1.0"
 dependencies = [
  "mxrs-model",
+ "serde",
  "sha2",
  "thiserror",
 ]
@@ -1185,6 +1188,17 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "mxrs-runtime-postgres"
+version = "0.1.0"
+dependencies = [
+ "mxrs-model",
+ "mxrs-relational-schema",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

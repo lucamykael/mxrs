@@ -12,6 +12,7 @@ workspace that belongs to one project and nothing else.
 | `credentials` | Prints host, port, database, user and password |
 | `url` | Prints the `postgresql://` connection URL |
 | `sql` | Runs one statement and prints psql's own rendering |
+| `sync` | Applies the model's relational schema to the workspace |
 | `explain` | Diagnoses one statement's query plan against the existing indexes |
 | `workload` | Reports cumulative query, table and index statistics |
 | `indexes` | Proposes index candidates the recorded workload supports |
@@ -91,6 +92,77 @@ with `WITH`, and it is the server setting that refuses to execute it.
 Findings never change the exit status. A plan diagnosis is advice about a
 query that ran, not a failure of the command.
 
+## Schema
+
+`mxrs db sync FILE.mpr [--allow-destructive-schema] [--json]` creates what the
+model declares: one table per persistable, non-view entity, one join table per
+association, and the `mxrb_schema_*` catalog that records which model artifact
+each one belongs to. Running it twice is a no-op — it reports
+`Schema already matches the model` and issues no statements at all.
+
+The whole migration goes out as one `psql --command`, which PostgreSQL runs in
+a single implicit transaction. It lands whole or not at all.
+
+Anything that would *lose* data is refused by default, naming exactly what
+would go:
+
+```console
+$ mxrs db sync app/App.mpr
+[mxrs] error: schema migration would remove attribute Gone
+(mxrb_entity_9ebd….mxrb_attribute_gone); rerun with
+--allow-destructive-schema after backing up the database
+```
+
+### Columns are typed
+
+| Mendix | PostgreSQL |
+| --- | --- |
+| String, HashString, Enum | `text` |
+| Integer | `integer` |
+| Long, AutoNumber | `bigint` |
+| Float | `double precision` |
+| Decimal | `numeric` |
+| Boolean | `boolean` |
+| DateTime | `timestamp with time zone` |
+| Binary | `bytea` |
+
+The SQLite backend stores everything as `TEXT`/`INTEGER`/`REAL`/`BLOB` because
+that layout is a contract with MXRB. PostgreSQL has no MXRB counterpart —
+MXRB's `db sync` boots a Mendix Runtime and lets *it* synchronize the schema,
+so there is no MXRB code that emits PostgreSQL DDL and nothing to match.
+
+Inheriting SQLite's layout would be worse than pointless. Every query
+parameter is bound as a quoted literal, and PostgreSQL resolves an
+unknown-typed literal against the column it is compared with. Against
+`bigint`, `WHERE n > '99'` finds 100. Against `text`, the same predicate
+compares lexicographically, finds nothing, and reports no error — a silently
+wrong answer. Typed columns also turn a parameter that cannot be a number into
+a loud `invalid input syntax for type bigint`.
+
+`Decimal` is the clearest case: SQLite maps it to `REAL` and loses precision
+doing it, and there is no compatibility reason to repeat that here.
+
+An AutoNumber allocates from `mxrb_schema_sequences`, not from a database
+identity column — the allocation semantics belong to the model, and every
+backend has to agree on them.
+
+### What it does not do
+
+Changing an attribute's default rewrites the column default; it does not
+backfill rows that already exist. Adding a *required* attribute to a table
+that already has rows, with no default to give them, fails the whole migration
+— PostgreSQL refuses the column and the transaction rolls back.
+
+**`db sync` does not make `mxrs serve`'s OQL queries resolve.** The two target
+different physical layouts: `sync` writes MXRS's own (`mxrb_entity_<hash>`,
+shared with the SQLite backend and with MXRB's `SchemaMigrator`), while
+`serve` translates OQL to Mendix Runtime naming (`"Sales$Order"`), which is
+what MXRB's OQL server reads because MXRB's `db sync` produces it via the
+Runtime. Raw SQL against the tables `sync` creates works today; OQL against
+them needs `serve` to be given the physical catalog, which `mxrs-oql` can
+already produce (`confidence: "physical"`) but `serve` does not pass. That is
+a named gap, not a surprise.
+
 ## Cumulative statistics
 
 `mxrs db workload FILE.mpr [--limit N] [--save FILE] [--compare FILE] [--json]`
@@ -144,12 +216,10 @@ several seconds earlier: the official image runs a temporary server for
 
 ## Not ported
 
-MXRB's `db` also offers `sync`, and its `up` boots a Mendix Runtime container
-beside PostgreSQL. Neither is here:
-
-- `sync` — schema synchronization against PostgreSQL. The relational migrator
-  exists (`mxrs-runtime-sqlite`'s `schema.rs`) but targets SQLite.
-- Mendix Runtime boot — `db up` here starts PostgreSQL only.
+MXRB's `db up` boots a Mendix Runtime container beside PostgreSQL; `db up`
+here starts PostgreSQL only. That is also what MXRB's `db sync` is —
+`up(force_build: true)`, with the Runtime doing the schema work — so the
+`sync` above is MXRS's own answer to the same need, not a port of it.
 
 MXRB's `db workload` also accepts `--engine sql_server`, and exposes the
 analyzer's thresholds as a keyword hash it has to validate at runtime. Here the
@@ -220,12 +290,14 @@ the first run and on no later one.
 ```sh
 cargo test -p mxrs-cli --lib database
 cargo test -p mxrs-cli --lib db_reports
+cargo test -p mxrs-runtime-postgres
 cargo test -p mxrs-oql --lib plan
 cargo test -p mxrs-oql --lib workload
 cargo test -p mxrs-oql --lib index_advisor
 cargo test -p mxrs-oql --lib baseline
 mxrs db up app/App.mpr && mxrs db sql app/App.mpr "SELECT count(*) FROM mxrb_schema_entities"
 mxrs db explain app/App.mpr "SELECT * FROM mxrb_schema_entities" --analyze
+mxrs db sync app/App.mpr
 mxrs db workload app/App.mpr --limit 5 --save baseline.json
 mxrs db indexes app/App.mpr
 ```

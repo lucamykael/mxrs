@@ -77,7 +77,12 @@ fn command_options(
         "cache" => (&[], &["--json"], &[]),
         "db" => (
             &["--port", "--limit", "--save", "--compare"],
-            &["--json", "--write", "--analyze"],
+            &[
+                "--json",
+                "--write",
+                "--analyze",
+                "--allow-destructive-schema",
+            ],
             &[],
         ),
         "serve" => (&["--port", "--db-port"], &["--no-up"], &[]),
@@ -202,7 +207,7 @@ commands! {
     "demo-user", "new <Name> [--entity Module.Entity] [--role ROLE] [--target DIR] [--dry-run] [--json]", "Create a local Mendix demo user backed by an ignored .env secret", run_demo_user;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "design", "init [--target DIR] [--dry-run] [--json] | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]", "Initialize, inventory, or migrate the project design system", run_design;
-    "db", "<status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json] | sql <file.mpr> \"SELECT ...\" [--write] | explain <file.mpr> \"SELECT ...\" [--analyze] [--json] | workload <file.mpr> [--limit N] [--save FILE] [--compare FILE] [--json] | indexes <file.mpr> [--limit N] [--json]", "Manage, query, explain and profile an isolated PostgreSQL workspace", run_db;
+    "db", "<status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json] | sql <file.mpr> \"SELECT ...\" [--write] | explain <file.mpr> \"SELECT ...\" [--analyze] [--json] | workload <file.mpr> [--limit N] [--save FILE] [--compare FILE] [--json] | indexes <file.mpr> [--limit N] [--json] | sync <file.mpr> [--allow-destructive-schema] [--json]", "Manage, migrate, query and profile an isolated PostgreSQL workspace", run_db;
     "diagram-er", "<file.mpr> [--module NAME] [--json] | layout <file.mpr> <layout.json> [--apply] [--json]", "Project the domain ER diagram or apply audited visual layout", run_diagram_er;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
@@ -403,6 +408,7 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
     };
     let write = take_flag(&mut args, "--write");
     let analyze = take_flag(&mut args, "--analyze");
+    let allow_destructive = take_flag(&mut args, "--allow-destructive-schema");
     let limit = take_value(&mut args, "--limit");
     let save = take_value(&mut args, "--save");
     let compare = take_value(&mut args, "--compare");
@@ -425,11 +431,12 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
                 | "explain"
                 | "workload"
                 | "indexes"
+                | "sync"
                 | "shell"
         )
     {
         eprintln!(
-            "Usage: mxrs db <status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json]\n       mxrs db sql <file.mpr> \"SELECT ...\" [--write] [--port PORT]\n       mxrs db explain <file.mpr> \"SELECT ...\" [--analyze] [--json] [--port PORT]\n       mxrs db workload <file.mpr> [--limit N] [--save FILE] [--compare FILE] [--json]\n       mxrs db indexes <file.mpr> [--limit N] [--json]"
+            "Usage: mxrs db <status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json]\n       mxrs db sql <file.mpr> \"SELECT ...\" [--write] [--port PORT]\n       mxrs db explain <file.mpr> \"SELECT ...\" [--analyze] [--json] [--port PORT]\n       mxrs db workload <file.mpr> [--limit N] [--save FILE] [--compare FILE] [--json]\n       mxrs db indexes <file.mpr> [--limit N] [--json]\n       mxrs db sync <file.mpr> [--allow-destructive-schema] [--json]"
         );
         return ExitCode::FAILURE;
     }
@@ -439,6 +446,10 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
     }
     if analyze && args[0].as_str() != "explain" {
         eprintln!("[mxrs] error: --analyze applies only to db explain");
+        return ExitCode::FAILURE;
+    }
+    if allow_destructive && args[0].as_str() != "sync" {
+        eprintln!("[mxrs] error: --allow-destructive-schema applies only to db sync");
         return ExitCode::FAILURE;
     }
     if limit.is_some() && !matches!(args[0].as_str(), "workload" | "indexes") {
@@ -516,6 +527,26 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
                     );
                 } else {
                     print!("{}", mxrs_cli::db_reports::render_index_advice(&advice));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if action == "sync" {
+        return match workspace.sync(allow_destructive) {
+            Ok(report) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report)
+                            .expect("a sync report is serializable")
+                    );
+                } else {
+                    print!("{}", mxrs_cli::db_reports::render_sync_report(&report));
                 }
                 ExitCode::SUCCESS
             }

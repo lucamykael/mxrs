@@ -10,6 +10,8 @@ use std::process::Command;
 use mxrs_oql::index_advisor::{IndexAdvice, IndexAdvisor};
 use mxrs_oql::plan::{IndexCatalogEntry, PlanAnalyzer, PlanReport};
 use mxrs_oql::workload::{WorkloadAnalyzer, WorkloadReport};
+use mxrs_relational_schema::RuntimeSchema;
+use mxrs_runtime_postgres::SyncReport;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -62,6 +64,8 @@ pub enum DatabaseError {
     InvalidIndexCatalog(String),
     #[error(transparent)]
     Plan(#[from] mxrs_oql::plan::PlanError),
+    #[error(transparent)]
+    Schema(#[from] mxrs_runtime_postgres::PostgresError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -241,6 +245,41 @@ impl DatabaseWorkspace {
         let mut arguments = self.psql_arguments(write);
         arguments.extend(["--command".to_string(), sql.to_string()]);
         classify(docker.output(&arguments)?)
+    }
+
+    /// Brings the workspace's schema in line with the model.
+    ///
+    /// mxrb's `db sync` rebuilds a Mendix Runtime image and lets the Runtime
+    /// synchronize the schema; there is no mxrb code that emits PostgreSQL
+    /// DDL, so this is MXRS's own. It closes a real hole: `mxrs serve` reads
+    /// this workspace, and until now nothing ever created the tables it reads.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a migration that would drop anything unless `allow_destructive`
+    /// says otherwise, and applies nothing in that case.
+    pub fn sync(&self, allow_destructive: bool) -> Result<SyncReport, DatabaseError> {
+        let schema = self.runtime_schema()?;
+        let session = WorkspaceSession {
+            workspace: self,
+            docker: CommandDocker,
+        };
+        Ok(mxrs_runtime_postgres::migrate(
+            &session,
+            &schema,
+            allow_destructive,
+        )?)
+    }
+
+    /// The relational schema the model declares, derived the same way every
+    /// backend and the OQL projection derive it.
+    fn runtime_schema(&self) -> Result<RuntimeSchema, DatabaseError> {
+        let project = mxrs_model::Project::open(&self.source, true)
+            .map_err(|error| DatabaseError::InvalidMpr(error.to_string()))?;
+        let modules = project
+            .modules()
+            .map_err(|error| DatabaseError::InvalidMpr(error.to_string()))?;
+        Ok(mxrs_relational_schema::derive(&modules))
     }
 
     /// Analyzes one read-only statement's PostgreSQL plan, matched against the
@@ -498,7 +537,11 @@ impl DatabaseWorkspace {
             "--command".to_string(),
             format!("COPY ({statement}) TO STDOUT WITH CSV HEADER"),
         ]);
-        let output = docker.run(&arguments)?;
+        // Classified like every other statement: a query the server rejects is
+        // the caller's to fix, and `mxrs serve` turns that distinction into
+        // HTTP 400 rather than 422. Without it a missing relation reaches the
+        // client as "Docker is unavailable".
+        let output = classify(docker.output(&arguments)?)?;
         parse_csv_rows(&output)
     }
 
@@ -684,6 +727,37 @@ impl DatabaseWorkspace {
         // could leave an initialized workspace with no usable credential.
         write_private(&self.state_path, &bytes)?;
         Ok(state)
+    }
+}
+
+/// The workspace as a place to run SQL, for the schema migrator.
+///
+/// Reads go through the read-only path every other query uses; the migration
+/// script is the one thing here that writes, and it goes out as a single
+/// `--command` so psql runs it in one implicit transaction.
+struct WorkspaceSession<'a, D: Docker> {
+    workspace: &'a DatabaseWorkspace,
+    docker: D,
+}
+
+impl<D: Docker> mxrs_runtime_postgres::SqlSession for WorkspaceSession<'_, D> {
+    fn query(
+        &self,
+        sql: &str,
+    ) -> std::result::Result<Vec<Map<String, Value>>, mxrs_runtime_postgres::PostgresError> {
+        self.workspace
+            .query_rows_with(&self.docker, sql, &Map::new())
+            .map_err(|error| mxrs_runtime_postgres::PostgresError::Session(error.to_string()))
+    }
+
+    fn execute(
+        &self,
+        script: &str,
+    ) -> std::result::Result<(), mxrs_runtime_postgres::PostgresError> {
+        self.workspace
+            .execute_with(&self.docker, script, true)
+            .map(|_| ())
+            .map_err(|error| mxrs_runtime_postgres::PostgresError::Session(error.to_string()))
     }
 }
 

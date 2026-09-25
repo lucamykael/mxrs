@@ -1,0 +1,18 @@
+[package]
+name = "mxrs-runtime-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Applies the relational schema of a Mendix model to PostgreSQL: typed columns, an idempotent migration, and a destructive change refused unless it is asked for."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-relational-schema = { path = "../../model/mxrs-relational-schema" }
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true

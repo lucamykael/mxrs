@@ -12,5 +12,6 @@ workspace = true
 
 [dependencies]
 mxrs-model = { path = "../mxrs-model" }
+serde = { workspace = true }
 sha2 = "0.10"
 thiserror.workspace = true

@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 
 use mxrs_model::{AttributeType, Module};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -143,7 +144,7 @@ impl RuntimeSchema {
 
 /// What a migration created or changed. Every backend reports the same
 /// vocabulary, so a caller can render one result without knowing the dialect.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MigrationResult {
     pub created_tables: Vec<String>,
     pub added_columns: Vec<String>,
@@ -152,7 +153,7 @@ pub struct MigrationResult {
 
 /// One removal a migration would perform; carried by the destructive-refusal
 /// error so callers can present exactly what would be lost.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RemovedItem {
     pub kind: &'static str,
     pub name: String,

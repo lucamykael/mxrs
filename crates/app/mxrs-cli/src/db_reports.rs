@@ -9,6 +9,7 @@ use mxrs_oql::baseline::WorkloadComparison;
 use mxrs_oql::index_advisor::IndexAdvice;
 use mxrs_oql::plan::PlanReport;
 use mxrs_oql::workload::WorkloadReport;
+use mxrs_runtime_postgres::SyncReport;
 
 /// Renders a query plan the way mxrb's `render_plan_report` does.
 ///
@@ -125,6 +126,39 @@ pub fn render_index_advice(advice: &IndexAdvice) -> String {
     }
     if advice.candidates.is_empty() {
         text.push_str("[mxrs] No evidence-backed index candidates\n");
+    }
+    text
+}
+
+/// Renders what a schema migration did. Lists every object it touched rather
+/// than a count: after a migration the useful question is which table
+/// changed, and a number cannot answer it.
+#[must_use]
+pub fn render_sync_report(report: &SyncReport) -> String {
+    if report.unchanged {
+        return "[mxrs] Schema already matches the model\n".to_string();
+    }
+    let mut text = String::new();
+    for (label, items) in [
+        ("Created table", &report.created_tables),
+        ("Added column", &report.added_columns),
+        ("Changed type", &report.retyped_columns),
+        ("Changed nullability", &report.renullified_columns),
+        ("Created index", &report.created_indexes),
+    ] {
+        for item in items {
+            text.push_str(&format!("{label:<20}: {item}\n"));
+        }
+    }
+    for removed in &report.removed {
+        let target = removed.column.as_ref().map_or_else(
+            || removed.table.clone(),
+            |column| format!("{}.{column}", removed.table),
+        );
+        text.push_str(&format!(
+            "[REMOVED] {} {}: {target}\n",
+            removed.kind, removed.name
+        ));
     }
     text
 }
