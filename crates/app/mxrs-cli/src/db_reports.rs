@@ -5,7 +5,10 @@
 //! instead of printing: the shape is the contract, and a function that writes
 //! to stdout cannot be asserted on.
 
+use mxrs_oql::baseline::WorkloadComparison;
+use mxrs_oql::index_advisor::IndexAdvice;
 use mxrs_oql::plan::PlanReport;
+use mxrs_oql::workload::WorkloadReport;
 
 /// Renders a query plan the way mxrb's `render_plan_report` does.
 ///
@@ -46,6 +49,114 @@ pub fn render_plan_report(report: &PlanReport) -> String {
         text.push_str("[mxrs] No plan findings\n");
     }
     text
+}
+
+/// Renders cumulative workload statistics the way mxrb's
+/// `render_workload_report` does: one line per fingerprint, ranked by total
+/// time, then one block per finding.
+#[must_use]
+pub fn render_workload_report(report: &WorkloadReport) -> String {
+    let mut text = String::new();
+    for query in &report.queries {
+        text.push_str(&format!(
+            "{}\t{} calls\t{} ms total\t{} ms mean\n",
+            query.query_id,
+            query.calls,
+            decimal(query.total_time_ms, 3),
+            decimal(query.mean_time_ms, 3)
+        ));
+    }
+    for finding in &report.findings {
+        text.push_str(&format!(
+            "[{}] {}: {}\n  {}\n  {}\n",
+            finding.severity.as_str().to_uppercase(),
+            finding.rule,
+            finding.subject,
+            finding.message,
+            finding.suggestion
+        ));
+    }
+    if report.findings.is_empty() {
+        text.push_str("[mxrs] No workload findings\n");
+    }
+    text
+}
+
+/// The deltas against a saved baseline, appended after the report they belong
+/// to. A delta is not a finding: it says a number moved, not that the number
+/// is wrong.
+#[must_use]
+pub fn render_comparison(comparison: &WorkloadComparison) -> String {
+    comparison
+        .deltas
+        .iter()
+        .map(|delta| {
+            format!(
+                "[DELTA] {} {}: {}%\n",
+                delta.query_id,
+                delta.metric,
+                decimal(delta.change_percent, 2)
+            )
+        })
+        .collect()
+}
+
+/// Renders index advice the way mxrb's `render_index_advice` does. A candidate
+/// is a hypothesis to test, which is why its supporting fingerprints are
+/// printed beside it rather than summarized away.
+#[must_use]
+pub fn render_index_advice(advice: &IndexAdvice) -> String {
+    let mut text = String::new();
+    for candidate in &advice.candidates {
+        text.push_str(&format!(
+            "[{}] {}({})\n  {} Queries: {}\n",
+            candidate.confidence.as_str().to_uppercase(),
+            candidate.relation,
+            candidate.columns.join(", "),
+            candidate.reason,
+            candidate.query_ids.join(", ")
+        ));
+    }
+    for pair in &advice.redundant_indexes {
+        text.push_str(&format!(
+            "[WARNING] overlapping indexes: {} and {}\n",
+            pair.0, pair.1
+        ));
+    }
+    if advice.candidates.is_empty() {
+        text.push_str("[mxrs] No evidence-backed index candidates\n");
+    }
+    text
+}
+
+/// A rounded float printed the way Ruby prints one: a whole value keeps its
+/// `.0`, so `20` and `20.0` cannot be confused for different measurements
+/// across the two tools.
+fn decimal(value: f64, digits: i32) -> String {
+    let scale = 10_f64.powi(digits);
+    let rounded = (value * scale).round() / scale;
+    if rounded.fract() == 0.0 && rounded.is_finite() {
+        format!("{rounded:.1}")
+    } else {
+        format!("{rounded}")
+    }
+}
+
+/// The capture time of a workload baseline, at second precision like Ruby's
+/// `Time#iso8601`.
+///
+/// # Panics
+///
+/// Never: the clock is always representable as RFC 3339.
+#[must_use]
+pub fn captured_at() -> String {
+    let stamp = mxrs_bson::DateTime::now()
+        .try_to_rfc3339_string()
+        .expect("the current time is representable");
+    match stamp.split_once('.') {
+        Some((seconds, _)) => format!("{seconds}Z"),
+        None => stamp,
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +218,90 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("No change is implied"), "{rendered}");
+    }
+
+    fn workload(rows: Value) -> WorkloadReport {
+        let rows = rows
+            .as_array()
+            .expect("an array of rows")
+            .iter()
+            .map(|row| row.as_object().expect("a row object").clone())
+            .collect::<Vec<_>>();
+        mxrs_oql::workload::WorkloadAnalyzer::new().analyze(&rows, &[], &[])
+    }
+
+    /// One line per fingerprint, and mxrb's number formatting: a whole value
+    /// keeps its `.0` so the two tools cannot disagree about what was measured.
+    #[test]
+    fn a_workload_lists_each_fingerprint_then_its_findings() {
+        let rendered = render_workload_report(&workload(json!([{
+            "queryid": "42", "query": "SELECT * FROM orders", "calls": "2",
+            "total_exec_time": "2400.5", "mean_exec_time": "1200", "rows": "10",
+            "shared_blks_hit": "100", "shared_blks_read": "900",
+            "temp_blks_written": "0", "blk_read_time": "0", "blk_write_time": "0"
+        }])));
+        assert_eq!(
+            rendered,
+            "42\t2 calls\t2400.5 ms total\t1200.0 ms mean\n\
+             [WARNING] high_cumulative_time: 42\n  \
+             This query fingerprint consumes substantial cumulative execution time.\n  \
+             Prioritize it by total time, then inspect its real plan with db explain --analyze.\n\
+             [WARNING] high_mean_time: 42\n  \
+             Mean execution time exceeds 100 ms.\n  \
+             Inspect plan stability, cardinality estimates, locks, I/O, and returned row volume.\n\
+             [WARNING] low_cache_hit: 42\n  \
+             A significant share of shared blocks came from storage.\n  \
+             Check working-set size, access locality, indexes, and whether the query reads excess rows.\n"
+        );
+    }
+
+    #[test]
+    fn a_quiet_workload_and_an_unsupported_index_guess_both_say_so() {
+        assert_eq!(
+            render_workload_report(&workload(json!([]))),
+            "[mxrs] No workload findings\n"
+        );
+        assert_eq!(
+            render_index_advice(&IndexAdvice {
+                candidates: Vec::new(),
+                redundant_indexes: Vec::new(),
+            }),
+            "[mxrs] No evidence-backed index candidates\n"
+        );
+    }
+
+    #[test]
+    fn index_advice_prints_its_supporting_fingerprints_and_overlapping_pairs() {
+        let advice = IndexAdvice {
+            candidates: vec![mxrs_oql::index_advisor::IndexCandidate {
+                relation: "orders".to_string(),
+                columns: vec!["status".to_string(), "id".to_string()],
+                confidence: mxrs_oql::index_advisor::Confidence::High,
+                query_ids: vec!["q1".to_string(), "q2".to_string()],
+                reason: "Because.",
+            }],
+            redundant_indexes: vec![mxrs_oql::index_advisor::RedundantPair(
+                "a".to_string(),
+                "b".to_string(),
+            )],
+        };
+        assert_eq!(
+            render_index_advice(&advice),
+            "[HIGH] orders(status, id)\n  \
+             Because. Queries: q1, q2\n\
+             [WARNING] overlapping indexes: a and b\n"
+        );
+    }
+
+    /// A capture stamp is second-precision RFC 3339, the shape Ruby's
+    /// `Time#iso8601` writes into a baseline.
+    #[test]
+    fn a_capture_stamp_is_second_precision_and_zulu() {
+        let stamp = captured_at();
+        assert_eq!(stamp.len(), 20, "{stamp}");
+        assert_eq!(&stamp[10..11], "T", "{stamp}");
+        assert!(stamp.ends_with('Z'), "{stamp}");
+        assert!(!stamp.contains('.'), "{stamp}");
     }
 
     /// A node with neither a relation nor a node type is the one case where

@@ -1046,6 +1046,7 @@ dependencies = [
  "mxrs-ir",
  "mxrs-model",
  "mxrs-writer",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

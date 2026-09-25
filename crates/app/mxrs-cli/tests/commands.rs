@@ -501,6 +501,42 @@ fn db_cli_grammar_names_the_action_each_flag_belongs_to() {
         );
     }
 
+    // `--limit` belongs to the two statistics actions, `--save`/`--compare`
+    // only to the one that has something to snapshot.
+    for arguments in [
+        vec!["db", "explain", "/missing.mpr", "SELECT 1", "--limit", "5"],
+        vec!["db", "status", "/missing.mpr", "--limit", "5"],
+    ] {
+        let message = stderr(&arguments);
+        assert!(
+            message.contains("--limit applies only to db workload and db indexes"),
+            "{arguments:?}: {message}"
+        );
+    }
+    for arguments in [
+        vec!["db", "indexes", "/missing.mpr", "--save", "/tmp/b.json"],
+        vec!["db", "status", "/missing.mpr", "--compare", "/tmp/b.json"],
+    ] {
+        let message = stderr(&arguments);
+        assert!(
+            message.contains("--save and --compare apply only to db workload"),
+            "{arguments:?}: {message}"
+        );
+    }
+    for value in ["0", "1001", "twenty", "1.5"] {
+        let message = stderr(&["db", "workload", "/missing.mpr", "--limit", value]);
+        assert!(
+            message.contains("--limit requires an integer from 1 to 1000"),
+            "{value}: {message}"
+        );
+    }
+    // A negative value reads as the next flag, so it is refused one step
+    // earlier — as a missing value rather than as an out-of-range one.
+    assert!(
+        stderr(&["db", "workload", "/missing.mpr", "--limit", "-1"])
+            .contains("--limit requires a value")
+    );
+
     // With the grammar satisfied, the next failure is about the model — which
     // is how we know arity 3 and `--analyze` were accepted.
     for arguments in [
@@ -513,6 +549,15 @@ fn db_cli_grammar_names_the_action_each_flag_belongs_to() {
             "--analyze",
             "--json",
         ],
+        vec![
+            "db",
+            "workload",
+            "/missing.mpr",
+            "--limit",
+            "1000",
+            "--json",
+        ],
+        vec!["db", "indexes", "/missing.mpr"],
     ] {
         let message = stderr(&arguments);
         assert!(message.starts_with("[mxrs] error:"), "{message}");
@@ -573,6 +618,16 @@ case "$1 ${2-}" in
   "rm --force")
     rm "$MXRS_FAKE_DOCKER_ROOT/container"
     printf 'removed\n' ;;
+  "exec "*)
+    # `db up` waits for the server and enables the statistics it reads. This
+    # workspace answers as one that is already configured, so no restart.
+    case "$*" in
+      *pg_isready*) printf 'accepting connections\n' ;;
+      *"SHOW shared_preload_libraries"*) printf 'pg_stat_statements\n' ;;
+      *"SHOW track_io_timing"*) printf 'on\n' ;;
+      *"CREATE EXTENSION"*) printf 'CREATE EXTENSION\n' ;;
+      *) printf 'unexpected fake psql call: %s\n' "$*" >&2; exit 2 ;;
+    esac ;;
   *) printf 'unexpected fake Docker call: %s\n' "$*" >&2; exit 2 ;;
 esac
 "#,

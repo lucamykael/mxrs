@@ -13,6 +13,8 @@ workspace that belongs to one project and nothing else.
 | `url` | Prints the `postgresql://` connection URL |
 | `sql` | Runs one statement and prints psql's own rendering |
 | `explain` | Diagnoses one statement's query plan against the existing indexes |
+| `workload` | Reports cumulative query, table and index statistics |
+| `indexes` | Proposes index candidates the recorded workload supports |
 | `shell` | Hands the terminal to an interactive `psql` |
 
 ## Isolation
@@ -89,16 +91,70 @@ with `WITH`, and it is the server setting that refuses to execute it.
 Findings never change the exit status. A plan diagnosis is advice about a
 query that ran, not a failure of the command.
 
+## Cumulative statistics
+
+`mxrs db workload FILE.mpr [--limit N] [--save FILE] [--compare FILE] [--json]`
+reads what `pg_stat_statements`, `pg_stat_user_tables` and
+`pg_stat_user_indexes` have accumulated since the last statistics reset, and
+`mxrs db indexes FILE.mpr [--limit N] [--json]` turns the same reading into
+index hypotheses. `--limit` defaults to 20 for `workload` and 50 for
+`indexes`, and must be between 1 and 1000.
+
+| Rule | Fires when |
+| --- | --- |
+| `high_cumulative_time` | A fingerprint spent ≥ 1000 ms in total |
+| `high_mean_time` | Its mean execution time is ≥ 100 ms |
+| `low_cache_hit` | ≥ 100 shared blocks touched, < 90% of them from cache |
+| `temporary_block_writes` | It wrote temporary blocks at all |
+| `high_rows_per_call` | It moves ≥ 10 000 rows per call |
+| `table_sequential_pressure` | ≥ 100 000 rows read sequentially, and more sequential scans than index scans |
+| `unused_large_index` | A non-unique, non-primary index of ≥ 1 MiB with no scans |
+
+Every finding carries the numbers behind it. The statistics are cumulative
+over a window this command cannot see the start of, so a threshold is a place
+to start looking, not a verdict — which is also why a finding never changes
+the exit status.
+
+An index candidate needs two independent signals: a relation under cumulative
+sequential-scan pressure, and a column the recorded workload repeatedly
+filters on, with either two distinct fingerprints or one that cost ≥ 1000 ms.
+Nothing reads a query plan, so a candidate is a hypothesis to test with
+`db explain`. The command also names pairs of indexes on one relation whose
+column lists are identical after normalization, without picking which to drop.
+
+`--save` writes a versioned snapshot, and `--compare` reports the per-metric
+change against one. A positive `change_percent` is a regression; a metric that
+was zero and is not any more reports 100%, because a percentage of zero has no
+meaning and dropping it would hide a new cost.
+
+### What `db up` has to do for this
+
+`pg_stat_statements` is a preloaded library, so the first `db up` on a
+workspace sets `shared_preload_libraries`, restarts the container and waits for
+the server again. That happens once per workspace — the setting lives in the
+data volume. `track_io_timing` is enabled the same way but only needs a reload,
+and the extension itself is created if missing. Every later `db up` pays two
+settings queries and one `CREATE EXTENSION IF NOT EXISTS`.
+
+`db up` also waits for the server to accept connections before returning. It
+used to return as soon as Docker reported the container started, which is
+several seconds earlier: the official image runs a temporary server for
+`initdb` and shuts it down again, so readiness needs two consecutive
+`pg_isready` probes, not one.
+
 ## Not ported
 
-MXRB's `db` also offers `sync`, `workload` and `indexes`, and its `up` boots a
-Mendix Runtime container beside PostgreSQL. None of that is here:
+MXRB's `db` also offers `sync`, and its `up` boots a Mendix Runtime container
+beside PostgreSQL. Neither is here:
 
 - `sync` — schema synchronization against PostgreSQL. The relational migrator
   exists (`mxrs-runtime-sqlite`'s `schema.rs`) but targets SQLite.
-- `workload` / `indexes` — need `Oql::WorkloadAnalyzer` and `Oql::IndexAdvisor`
-  over `pg_stat_statements`.
 - Mendix Runtime boot — `db up` here starts PostgreSQL only.
+
+MXRB's `db workload` also accepts `--engine sql_server`, and exposes the
+analyzer's thresholds as a keyword hash it has to validate at runtime. Here the
+thresholds are a struct, so an unknown one cannot be written; the CLI does not
+expose them, and neither does MXRB's.
 
 MXRB's `db explain` also accepts `--engine sql_server`. This one is PostgreSQL
 only, and the report names its engine rather than leaving it implied.
@@ -140,10 +196,24 @@ read-only session with every row still present afterwards. The same captured
 `EXPLAIN` JSON and `pg_indexes` rows fed to MXRB's own `PlanAnalyzer` produce
 an identical `--json` payload, key order included.
 
+`Oql::WorkloadAnalyzer`'s and `Oql::IndexAdvisor`'s specs are ported the same
+way, and the live check goes further: on a 300 000-row table with a duplicated
+index and a handful of repeated queries, the three captured statistics
+catalogs were fed to MXRB's own analyzers, and both the `workload` and the
+`indexes` payloads came out identical to this one — key order included, down
+to the nested finding metrics. `db up`'s readiness wait and its monitoring
+setup are pinned against a mock Docker, including that the restart happens on
+the first run and on no later one.
+
 ```sh
 cargo test -p mxrs-cli --lib database
 cargo test -p mxrs-cli --lib db_reports
 cargo test -p mxrs-oql --lib plan
+cargo test -p mxrs-oql --lib workload
+cargo test -p mxrs-oql --lib index_advisor
+cargo test -p mxrs-oql --lib baseline
 mxrs db up app/App.mpr && mxrs db sql app/App.mpr "SELECT count(*) FROM mxrb_schema_entities"
 mxrs db explain app/App.mpr "SELECT * FROM mxrb_schema_entities" --analyze
+mxrs db workload app/App.mpr --limit 5 --save baseline.json
+mxrs db indexes app/App.mpr
 ```

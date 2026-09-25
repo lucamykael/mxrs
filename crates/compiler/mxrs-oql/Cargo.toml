@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 mxrs-model = { path = "../../model/mxrs-model" }
+regex = "1"
 sha2 = "0.10"
 serde.workspace = true
 serde_json.workspace = true

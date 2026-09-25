@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use mxrs_oql::index_advisor::{IndexAdvice, IndexAdvisor};
 use mxrs_oql::plan::{IndexCatalogEntry, PlanAnalyzer, PlanReport};
+use mxrs_oql::workload::{WorkloadAnalyzer, WorkloadReport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -16,6 +18,9 @@ const FORMAT: u32 = 1;
 const IMAGE: &str = "postgres:13-alpine";
 const USER: &str = "mxrs";
 const DATABASE: &str = "mxrs";
+/// The statistics extension `db workload` and `db indexes` read. It has to be
+/// preloaded by the server, which is why enabling it costs one restart.
+const EXTENSION: &str = "pg_stat_statements";
 const MANAGED_LABEL: &str = "io.mxrs.managed";
 const PROJECT_LABEL: &str = "io.mxrs.project";
 /// How PostgreSQL and psql label their own diagnostics on stderr. Used to
@@ -276,6 +281,130 @@ impl DatabaseWorkspace {
         Ok(PlanAnalyzer::new(indexes).analyze(&payload, analyze)?)
     }
 
+    /// Reads the cumulative statistics `pg_stat_statements` and the table and
+    /// index catalogs have accumulated, and turns them into findings. Ports
+    /// mxrb's `DatabaseWorkspace#workload`.
+    ///
+    /// The numbers are cumulative since the last statistics reset, so they
+    /// describe a window this command cannot see the start of — which is why
+    /// every finding carries its measurements rather than only a verdict.
+    pub fn workload(&self, limit: u32) -> Result<WorkloadReport, DatabaseError> {
+        self.workload_with(&CommandDocker, limit)
+    }
+
+    /// Index hypotheses from the same statistics. Ports mxrb's
+    /// `DatabaseWorkspace#index_advice`.
+    pub fn index_advice(&self, limit: u32) -> Result<IndexAdvice, DatabaseError> {
+        Ok(IndexAdvisor::new().analyze(&self.workload(limit)?))
+    }
+
+    fn workload_with(
+        &self,
+        docker: &impl Docker,
+        limit: u32,
+    ) -> Result<WorkloadReport, DatabaseError> {
+        if !(1..=1_000).contains(&limit) {
+            return Err(DatabaseError::Query(
+                "workload limit must be between 1 and 1000".to_string(),
+            ));
+        }
+        let empty = Map::new();
+        // `limit` is interpolated rather than bound: psql variables cannot
+        // appear where `LIMIT` needs a literal, and it has just been checked
+        // to be an integer in range.
+        let queries = self.query_rows_with(
+            docker,
+            &WORKLOAD_QUERIES_SQL.replace("$LIMIT", &limit.to_string()),
+            &empty,
+        )?;
+        let tables = self.query_rows_with(docker, WORKLOAD_TABLES_SQL, &empty)?;
+        let indexes = self.query_rows_with(docker, WORKLOAD_INDEXES_SQL, &empty)?;
+        Ok(WorkloadAnalyzer::new().analyze(&queries, &tables, &indexes))
+    }
+
+    /// Waits until PostgreSQL accepts connections. Ports mxrb's
+    /// `wait_for_database!`, including the two-consecutive-successes rule:
+    /// the official image runs a temporary server for `initdb` and shuts it
+    /// down again, so one `pg_isready` can succeed against a server that is
+    /// about to disappear.
+    fn wait_for_database(&self, docker: &impl Docker) -> Result<(), DatabaseError> {
+        let mut consecutive = 0;
+        for _ in 0..30 {
+            let ready = docker
+                .output(&[
+                    "exec".to_string(),
+                    self.container.clone(),
+                    "pg_isready".to_string(),
+                    "--username".to_string(),
+                    USER.to_string(),
+                    "--dbname".to_string(),
+                    DATABASE.to_string(),
+                ])
+                .is_ok_and(|output| output.success);
+            consecutive = if ready { consecutive + 1 } else { 0 };
+            if consecutive >= 2 {
+                return Ok(());
+            }
+            docker.sleep();
+        }
+        Err(DatabaseError::Docker(
+            "PostgreSQL did not become ready".to_string(),
+        ))
+    }
+
+    /// Enables the statistics `db workload` and `db indexes` read. Ports
+    /// mxrb's `configure_monitoring!`.
+    ///
+    /// `pg_stat_statements` is a preloaded library, so turning it on costs one
+    /// restart — once per workspace, because the setting lives in the data
+    /// volume. `track_io_timing` is what makes the I/O columns anything other
+    /// than zero, and it only needs a reload.
+    fn configure_monitoring(&self, docker: &impl Docker) -> Result<(), DatabaseError> {
+        let libraries = self.scalar(docker, "SHOW shared_preload_libraries")?;
+        let mut preloaded: Vec<&str> = libraries
+            .split(',')
+            .map(str::trim)
+            .filter(|library| !library.is_empty())
+            .collect();
+        if !preloaded.contains(&EXTENSION) {
+            preloaded.push(EXTENSION);
+            // Interpolated, but not from user input: this is the server's own
+            // `SHOW` output going back to the server it came from.
+            self.execute_with(
+                docker,
+                &format!(
+                    "ALTER SYSTEM SET shared_preload_libraries = '{}'",
+                    preloaded.join(",")
+                ),
+                true,
+            )?;
+            docker.run(&["restart".to_string(), self.container.clone()])?;
+            self.wait_for_database(docker)?;
+        }
+        if self.scalar(docker, "SHOW track_io_timing")? != "on" {
+            self.execute_with(docker, "ALTER SYSTEM SET track_io_timing = on", true)?;
+            self.execute_with(docker, "SELECT pg_reload_conf()", true)?;
+        }
+        self.execute_with(
+            docker,
+            &format!("CREATE EXTENSION IF NOT EXISTS {EXTENSION}"),
+            true,
+        )?;
+        Ok(())
+    }
+
+    /// One value from a settings query, trimmed.
+    fn scalar(&self, docker: &impl Docker, sql: &str) -> Result<String, DatabaseError> {
+        let mut arguments = self.psql_arguments(true);
+        arguments.extend([
+            "--tuples-only".to_string(),
+            "--no-align".to_string(),
+            "--command".to_string(),
+            sql.to_string(),
+        ]);
+        Ok(classify(docker.output(&arguments)?)?.trim().to_string())
+    }
+
     fn index_catalog_with(
         &self,
         docker: &impl Docker,
@@ -411,7 +540,7 @@ impl DatabaseWorkspace {
             if inspection.state != "running" {
                 docker.run(&["start".into(), self.container.clone()])?;
             }
-            return self.status_with(docker);
+            return self.ready(docker);
         }
         if let Some(inspection) = docker.inspect("volume", &self.volume)? {
             self.ensure_owned("volume", &self.volume, &inspection)?;
@@ -455,6 +584,16 @@ impl DatabaseWorkspace {
             ),
             IMAGE.into(),
         ])?;
+        self.ready(docker)
+    }
+
+    /// The workspace, once PostgreSQL is actually answering and the statistics
+    /// `db workload` needs are enabled. `up` used to return as soon as Docker
+    /// reported the container started, which is several seconds before the
+    /// server accepts a connection.
+    fn ready(&self, docker: &impl Docker) -> Result<DatabaseStatus, DatabaseError> {
+        self.wait_for_database(docker)?;
+        self.configure_monitoring(docker)?;
         self.status_with(docker)
     }
 
@@ -557,6 +696,13 @@ struct Inspection {
 
 trait Docker {
     fn output(&self, arguments: &[String]) -> Result<DockerOutput, DatabaseError>;
+
+    /// One tick of the readiness poll. A trait method so a test can wait for a
+    /// server that is never actually starting without waiting for it in real
+    /// time.
+    fn sleep(&self) {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 
     fn run(&self, arguments: &[String]) -> Result<String, DatabaseError> {
         let output = self.output(arguments)?;
@@ -709,6 +855,36 @@ const INDEX_CATALOG_SQL: &str = "SELECT schemaname, tablename, indexname, indexd
      FROM pg_indexes \
      WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
      ORDER BY schemaname, tablename, indexname";
+
+/// mxrb's `workload_queries`. `$LIMIT` is substituted by a checked integer.
+///
+/// Only read-only fingerprints from this database are considered, and
+/// `pg_stat_statements` excludes its own view so the report never ranks the
+/// query that produced it.
+const WORKLOAD_QUERIES_SQL: &str = "SELECT queryid::text, calls, total_exec_time, mean_exec_time, rows, \
+     shared_blks_hit, shared_blks_read, temp_blks_written, \
+     blk_read_time, blk_write_time, query \
+     FROM pg_stat_statements \
+     WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+     AND query NOT ILIKE '%pg_stat_statements%' \
+     AND query ~* '^[[:space:]]*(SELECT|WITH)([[:space:]]|$)' \
+     ORDER BY total_exec_time DESC \
+     LIMIT $LIMIT";
+
+/// mxrb's `workload_tables`.
+const WORKLOAD_TABLES_SQL: &str = "SELECT schemaname, relname, seq_scan, seq_tup_read, idx_scan, n_live_tup, \
+     last_analyze, last_autoanalyze \
+     FROM pg_stat_user_tables \
+     ORDER BY seq_tup_read DESC";
+
+/// mxrb's `workload_indexes`. The definition travels with the statistics so
+/// the index advisor can compare column lists without a second query.
+const WORKLOAD_INDEXES_SQL: &str = "SELECT s.schemaname, s.relname, s.indexrelname, s.idx_scan, \
+     s.idx_tup_read, s.idx_tup_fetch, pg_relation_size(s.indexrelid) AS index_bytes, \
+     i.indisunique, i.indisprimary, pg_get_indexdef(s.indexrelid) AS indexdef \
+     FROM pg_stat_user_indexes s \
+     JOIN pg_index i ON i.indexrelid = s.indexrelid \
+     ORDER BY index_bytes DESC";
 
 /// Ports mxrb's `read_only_statement`: one statement, no NUL bytes, no `;`,
 /// and it must start with `SELECT` or `WITH`. Error messages match mxrb's so
@@ -1004,6 +1180,22 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| DatabaseError::Docker("unexpected call".to_string()))
         }
+
+        /// The readiness poll waits on a real clock in production; a test that
+        /// exercises the give-up path must not.
+        fn sleep(&self) {}
+    }
+
+    /// PostgreSQL answering, already carrying the monitoring configuration:
+    /// two `pg_isready` probes, the two settings, and the extension.
+    fn ready_responses() -> Vec<DockerOutput> {
+        vec![
+            output(true, "accepting connections\n", ""),
+            output(true, "accepting connections\n", ""),
+            output(true, "pg_stat_statements\n", ""),
+            output(true, "on\n", ""),
+            output(true, "CREATE EXTENSION\n", ""),
+        ]
     }
 
     fn output(success: bool, stdout: &str, stderr: &str) -> DockerOutput {
@@ -1048,13 +1240,19 @@ mod tests {
     fn up_labels_resources_and_keeps_the_password_out_of_docker_arguments() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = workspace(&directory);
-        let docker = MockDocker::new(vec![
+        let mut responses = vec![
             output(false, "", "No such container"),
             output(false, "", "no such volume"),
             output(true, "volume\n", ""),
             output(true, "container\n", ""),
-            output(true, &format!("true|{}|running\n", workspace.key), ""),
-        ]);
+        ];
+        responses.extend(ready_responses());
+        responses.push(output(
+            true,
+            &format!("true|{}|running\n", workspace.key),
+            "",
+        ));
+        let docker = MockDocker::new(responses);
         let report = workspace.up_with(&docker).unwrap();
         assert_eq!(report.container_state, "running");
         let password = workspace.credentials().unwrap().password;
@@ -1552,6 +1750,187 @@ mod tests {
             matches!(&error, DatabaseError::InvalidIndexCatalog(_)),
             "{error}"
         );
+    }
+
+    /// `db workload` reads three statistics catalogs and nothing else, and the
+    /// limit reaches `LIMIT` as a checked integer rather than as text from the
+    /// caller.
+    #[test]
+    fn workload_reads_the_three_statistics_catalogs_under_a_checked_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+
+        for limit in [0, 1_001, u32::MAX] {
+            let docker = MockDocker::new(vec![]);
+            let error = workspace.workload_with(&docker, limit).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "workload limit must be between 1 and 1000"
+            );
+            assert!(docker.calls.borrow().is_empty(), "{limit} reached Docker");
+        }
+
+        let docker = MockDocker::new(vec![
+            output(
+                true,
+                "queryid,calls,total_exec_time,mean_exec_time,rows,shared_blks_hit,\
+                 shared_blks_read,temp_blks_written,blk_read_time,blk_write_time,query\n\
+                 42,2,2400.5,1200.25,40000,100,900,12,30,2.5,SELECT * FROM orders\n",
+                "",
+            ),
+            output(
+                true,
+                "schemaname,relname,seq_scan,seq_tup_read,idx_scan,n_live_tup\n\
+                 public,orders,50,200000,10,50000\n",
+                "",
+            ),
+            output(
+                true,
+                "schemaname,relname,indexrelname,idx_scan,idx_tup_read,index_bytes,\
+                 indisunique,indisprimary,indexdef\n\
+                 public,orders,orders_old_idx,0,0,2097152,f,f,CREATE INDEX orders_old_idx ON public.orders USING btree (status)\n",
+                "",
+            ),
+        ]);
+        let report = workspace.workload_with(&docker, 20).unwrap();
+
+        let calls = docker.calls.borrow();
+        assert_eq!(calls.len(), 3, "exactly three catalogs are read");
+        for (call, sql) in calls.iter().zip([
+            WORKLOAD_QUERIES_SQL.replace("$LIMIT", "20"),
+            WORKLOAD_TABLES_SQL.to_string(),
+            WORKLOAD_INDEXES_SQL.to_string(),
+        ]) {
+            assert_eq!(
+                call.last().unwrap(),
+                &format!("COPY ({sql}) TO STDOUT WITH CSV HEADER")
+            );
+            // Reading statistics is a read-only operation like any other.
+            assert_eq!(
+                call[1..3],
+                ["--env", "PGOPTIONS=-c default_transaction_read_only=on"]
+            );
+        }
+        assert!(
+            calls[0].last().unwrap().contains("LIMIT 20")
+                && !calls[0].last().unwrap().contains("$LIMIT"),
+            "{:?}",
+            calls[0].last()
+        );
+        drop(calls);
+
+        assert_eq!(report.queries.len(), 1);
+        assert_eq!(report.queries[0].query_id, "42");
+        assert_eq!(report.queries[0].cache_hit_ratio, 0.1);
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .map(|finding| finding.rule.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "high_cumulative_time",
+                "high_mean_time",
+                "low_cache_hit",
+                "temporary_block_writes",
+                "high_rows_per_call",
+                "table_sequential_pressure",
+                "unused_large_index",
+            ]
+        );
+    }
+
+    /// `pg_stat_statements` is a preloaded library, so the first `up` on a
+    /// workspace restarts the server — and no later one does.
+    #[test]
+    fn enabling_the_statistics_extension_costs_one_restart_and_only_the_first_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+
+        let docker = MockDocker::new(vec![
+            output(true, "\n", ""), // no preloaded libraries yet
+            output(true, "ALTER SYSTEM\n", ""),
+            output(true, "restarted\n", ""),
+            output(true, "accepting connections\n", ""),
+            output(true, "accepting connections\n", ""),
+            output(true, "off\n", ""), // track_io_timing
+            output(true, "ALTER SYSTEM\n", ""),
+            output(true, "pg_reload_conf\n", ""),
+            output(true, "CREATE EXTENSION\n", ""),
+        ]);
+        workspace.configure_monitoring(&docker).unwrap();
+
+        let calls = docker.calls.borrow();
+        let commands: Vec<&str> = calls
+            .iter()
+            .filter_map(|call| call.last().map(String::as_str))
+            .collect();
+        assert!(
+            commands.contains(&"ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements'"),
+            "{commands:?}"
+        );
+        assert!(
+            commands.contains(&"ALTER SYSTEM SET track_io_timing = on"),
+            "{commands:?}"
+        );
+        assert!(
+            commands.contains(&"CREATE EXTENSION IF NOT EXISTS pg_stat_statements"),
+            "{commands:?}"
+        );
+        assert!(
+            calls.iter().any(|call| call[0] == "restart"),
+            "the server has to restart to preload the library"
+        );
+        // Settings are written as the owner, so they must not carry the
+        // read-only session setting that would refuse them.
+        for call in calls.iter().filter(|call| {
+            call.last()
+                .is_some_and(|command| command.starts_with("ALTER SYSTEM"))
+        }) {
+            assert!(!call.iter().any(|argument| argument.contains("PGOPTIONS")));
+        }
+        drop(calls);
+
+        // Already configured: no ALTER SYSTEM, no restart. `db up` pays three
+        // cheap queries and nothing else on every run after the first.
+        let docker = MockDocker::new(vec![
+            output(true, "pg_stat_statements\n", ""),
+            output(true, "on\n", ""),
+            output(true, "CREATE EXTENSION\n", ""),
+        ]);
+        workspace.configure_monitoring(&docker).unwrap();
+        let calls = docker.calls.borrow();
+        assert!(
+            !calls.iter().any(|call| call[0] == "restart"
+                || call.last().is_some_and(|c| c.starts_with("ALTER SYSTEM"))),
+            "{calls:?}"
+        );
+    }
+
+    /// The readiness poll needs two consecutive successes, because the image
+    /// runs a temporary server for `initdb` and then shuts it down.
+    #[test]
+    fn readiness_needs_two_consecutive_probes_and_eventually_gives_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+
+        let docker = MockDocker::new(vec![
+            output(true, "accepting connections\n", ""),
+            output(false, "", "no response"),
+            output(true, "accepting connections\n", ""),
+            output(true, "accepting connections\n", ""),
+        ]);
+        workspace.wait_for_database(&docker).unwrap();
+        assert_eq!(docker.calls.borrow().len(), 4);
+        assert_eq!(docker.calls.borrow()[0][2], "pg_isready");
+
+        let never = MockDocker::new(Vec::new());
+        let error = workspace.wait_for_database(&never).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Docker is unavailable: PostgreSQL did not become ready"
+        );
+        assert_eq!(never.calls.borrow().len(), 30, "the poll is bounded");
     }
 
     #[test]

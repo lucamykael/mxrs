@@ -1,7 +1,10 @@
 //! Conservative OQL tooling. Unsupported syntax returns an explicit reason;
 //! no translation result is ever presented as executable physical SQL.
 
+pub mod baseline;
+pub mod index_advisor;
 pub mod plan;
+pub mod workload;
 
 use std::collections::{BTreeMap, BTreeSet};
 

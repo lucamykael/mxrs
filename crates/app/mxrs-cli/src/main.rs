@@ -75,7 +75,11 @@ fn command_options(
         "test" => (&[], &["--json", "--plan"], &[]),
         "functional-instrument" => (&[], &["--json"], &[]),
         "cache" => (&[], &["--json"], &[]),
-        "db" => (&["--port"], &["--json", "--write", "--analyze"], &[]),
+        "db" => (
+            &["--port", "--limit", "--save", "--compare"],
+            &["--json", "--write", "--analyze"],
+            &[],
+        ),
         "serve" => (&["--port", "--db-port"], &["--no-up"], &[]),
         "run" => (
             &[
@@ -198,7 +202,7 @@ commands! {
     "demo-user", "new <Name> [--entity Module.Entity] [--role ROLE] [--target DIR] [--dry-run] [--json]", "Create a local Mendix demo user backed by an ignored .env secret", run_demo_user;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "design", "init [--target DIR] [--dry-run] [--json] | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]", "Initialize, inventory, or migrate the project design system", run_design;
-    "db", "<status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json] | sql <file.mpr> \"SELECT ...\" [--write] | explain <file.mpr> \"SELECT ...\" [--analyze] [--json]", "Manage, query and explain an isolated PostgreSQL workspace", run_db;
+    "db", "<status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json] | sql <file.mpr> \"SELECT ...\" [--write] | explain <file.mpr> \"SELECT ...\" [--analyze] [--json] | workload <file.mpr> [--limit N] [--save FILE] [--compare FILE] [--json] | indexes <file.mpr> [--limit N] [--json]", "Manage, query, explain and profile an isolated PostgreSQL workspace", run_db;
     "diagram-er", "<file.mpr> [--module NAME] [--json] | layout <file.mpr> <layout.json> [--apply] [--json]", "Project the domain ER diagram or apply audited visual layout", run_diagram_er;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
@@ -330,6 +334,60 @@ fn run_database_shell(command: &[String]) -> ExitCode {
     }
 }
 
+/// `db workload`, including the baseline it can save and the one it can
+/// compare against.
+///
+/// The snapshot is written before the report is printed: if saving fails, the
+/// caller learns that instead of reading a report they believe was recorded.
+fn run_db_workload(
+    workspace: &mxrs_cli::database::DatabaseWorkspace,
+    limit: u32,
+    save: Option<&str>,
+    compare: Option<&str>,
+    json: bool,
+) -> ExitCode {
+    let report = match workspace.workload(limit) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(path) = save {
+        let snapshot = mxrs_oql::baseline::dump(&report, &mxrs_cli::db_reports::captured_at());
+        if let Err(error) = std::fs::write(path, snapshot) {
+            eprintln!("[mxrs] error: cannot write {path}: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let comparison = match compare {
+        Some(path) => match std::fs::read_to_string(path)
+            .map_err(|error| format!("cannot read workload baseline: {error}"))
+            .and_then(|text| {
+                mxrs_oql::baseline::compare(&report, &text).map_err(|error| error.to_string())
+            }) {
+            Ok(comparison) => Some(comparison),
+            Err(message) => {
+                eprintln!("[mxrs] error: {message}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("a workload report is serializable")
+        );
+        return ExitCode::SUCCESS;
+    }
+    print!("{}", mxrs_cli::db_reports::render_workload_report(&report));
+    if let Some(comparison) = &comparison {
+        print!("{}", mxrs_cli::db_reports::render_comparison(comparison));
+    }
+    ExitCode::SUCCESS
+}
+
 fn run_db(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let port = match take_value(&mut args, "--port")
@@ -345,6 +403,9 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
     };
     let write = take_flag(&mut args, "--write");
     let analyze = take_flag(&mut args, "--analyze");
+    let limit = take_value(&mut args, "--limit");
+    let save = take_value(&mut args, "--save");
+    let compare = take_value(&mut args, "--compare");
     // `sql` and `explain` are the actions that take a statement after the
     // model, so the arity check is per action rather than a single count.
     let expected = match args.first().map(String::as_str) {
@@ -362,11 +423,13 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
                 | "url"
                 | "sql"
                 | "explain"
+                | "workload"
+                | "indexes"
                 | "shell"
         )
     {
         eprintln!(
-            "Usage: mxrs db <status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json]\n       mxrs db sql <file.mpr> \"SELECT ...\" [--write] [--port PORT]\n       mxrs db explain <file.mpr> \"SELECT ...\" [--analyze] [--json] [--port PORT]"
+            "Usage: mxrs db <status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json]\n       mxrs db sql <file.mpr> \"SELECT ...\" [--write] [--port PORT]\n       mxrs db explain <file.mpr> \"SELECT ...\" [--analyze] [--json] [--port PORT]\n       mxrs db workload <file.mpr> [--limit N] [--save FILE] [--compare FILE] [--json]\n       mxrs db indexes <file.mpr> [--limit N] [--json]"
         );
         return ExitCode::FAILURE;
     }
@@ -378,6 +441,27 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
         eprintln!("[mxrs] error: --analyze applies only to db explain");
         return ExitCode::FAILURE;
     }
+    if limit.is_some() && !matches!(args[0].as_str(), "workload" | "indexes") {
+        eprintln!("[mxrs] error: --limit applies only to db workload and db indexes");
+        return ExitCode::FAILURE;
+    }
+    if (save.is_some() || compare.is_some()) && args[0].as_str() != "workload" {
+        eprintln!("[mxrs] error: --save and --compare apply only to db workload");
+        return ExitCode::FAILURE;
+    }
+    // mxrb's defaults: a workload listing is meant to be read, an index sweep
+    // is meant to be exhaustive.
+    let default_limit = if args[0] == "indexes" { 50 } else { 20 };
+    let limit = match limit {
+        Some(value) => match value.parse::<u32>() {
+            Ok(limit) if (1..=1_000).contains(&limit) => limit,
+            _ => {
+                eprintln!("[mxrs] error: --limit requires an integer from 1 to 1000");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => default_limit,
+    };
     let workspace = match mxrs_cli::database::DatabaseWorkspace::open(&args[1], port) {
         Ok(workspace) => workspace,
         Err(error) => {
@@ -409,6 +493,29 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
                     );
                 } else {
                     print!("{}", mxrs_cli::db_reports::render_plan_report(&report));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if action == "workload" {
+        return run_db_workload(&workspace, limit, save.as_deref(), compare.as_deref(), json);
+    }
+    if action == "indexes" {
+        return match workspace.index_advice(limit) {
+            Ok(advice) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&advice)
+                            .expect("index advice is serializable")
+                    );
+                } else {
+                    print!("{}", mxrs_cli::db_reports::render_index_advice(&advice));
                 }
                 ExitCode::SUCCESS
             }
