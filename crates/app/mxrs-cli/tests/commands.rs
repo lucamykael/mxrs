@@ -461,6 +461,65 @@ fn db_rejects_invalid_ports_and_invalid_projects_before_contacting_docker() {
     assert!(!cli(&["db", "sql", "/missing.mpr"]).status.success());
 }
 
+/// Every grammar check runs before the model is opened, so these need neither
+/// a project nor Docker. A flag that applies to one action must be an error on
+/// the others rather than silently ignored.
+#[test]
+fn db_cli_grammar_names_the_action_each_flag_belongs_to() {
+    let stderr = |arguments: &[&str]| {
+        let output = cli(arguments);
+        assert!(!output.status.success(), "{arguments:?} should have failed");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    // `explain` takes a statement after the model, like `sql`.
+    assert!(stderr(&["db", "explain", "/missing.mpr"]).contains("mxrs db explain <file.mpr>"));
+    assert!(stderr(&["db", "bogus", "/missing.mpr", "SELECT 1"]).contains("Usage: mxrs db"));
+
+    // `--write` is for the two actions that can write; `--analyze` is for the
+    // one action that executes a statement to measure it.
+    for arguments in [
+        vec!["db", "explain", "/missing.mpr", "SELECT 1", "--write"],
+        vec!["db", "status", "/missing.mpr", "--write"],
+        vec!["db", "up", "/missing.mpr", "--write"],
+    ] {
+        let message = stderr(&arguments);
+        assert!(
+            message.contains("--write applies only to db sql and db shell"),
+            "{arguments:?}: {message}"
+        );
+    }
+    for arguments in [
+        vec!["db", "sql", "/missing.mpr", "SELECT 1", "--analyze"],
+        vec!["db", "status", "/missing.mpr", "--analyze"],
+        vec!["db", "shell", "/missing.mpr", "--analyze"],
+    ] {
+        let message = stderr(&arguments);
+        assert!(
+            message.contains("--analyze applies only to db explain"),
+            "{arguments:?}: {message}"
+        );
+    }
+
+    // With the grammar satisfied, the next failure is about the model — which
+    // is how we know arity 3 and `--analyze` were accepted.
+    for arguments in [
+        vec!["db", "explain", "/missing.mpr", "SELECT 1"],
+        vec![
+            "db",
+            "explain",
+            "/missing.mpr",
+            "SELECT 1",
+            "--analyze",
+            "--json",
+        ],
+    ] {
+        let message = stderr(&arguments);
+        assert!(message.starts_with("[mxrs] error:"), "{message}");
+        assert!(!message.contains("Usage:"), "{message}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn db_cli_runs_the_owned_lifecycle_without_putting_its_password_on_the_command_line() {

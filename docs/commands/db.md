@@ -103,6 +103,12 @@ Mendix Runtime container beside PostgreSQL. None of that is here:
 MXRB's `db explain` also accepts `--engine sql_server`. This one is PostgreSQL
 only, and the report names its engine rather than leaving it implied.
 
+One deliberate near-miss: the filter quoted inside a scan suggestion uses
+Rust's `Debug` escaping where MXRB uses `String#inspect`. They agree on the
+ASCII predicates PostgreSQL renders in practice, but not in general — Ruby
+escapes `#{`, and Rust escapes combining marks. Only that one sentence of one
+suggestion is affected.
+
 ## Verification
 
 The psql argv for `sql`, `explain` and `shell` is pinned against a mock Docker,
@@ -116,14 +122,27 @@ together on one plan, a small scan staying a hint, a large unindexed scan
 suggesting nothing it cannot support, external sorts against low-volume noise,
 and both malformed-payload rejections. The `--json` payload is pinned too,
 including that `clean` is derived from the findings and that a metric the plan
-does not carry is omitted rather than serialized as a zero.
+does not carry is omitted rather than serialized as a zero. Every threshold is
+pinned on both sides of its boundary, and the two conditions guarding a single
+rule are separated so that neither can carry the other.
+
+The text `db explain` prints is rendered by a library function and asserted
+whole, including the empty subject MXRB prints for a plan node that has
+neither a relation nor a node type. The command grammar is asserted too: which
+actions take a statement, and which action each flag belongs to.
 
 Live-checked against a real workspace: a `SELECT` renders as psql renders it,
 `CREATE TABLE` is refused without `--write` and accepted with it, and the
-resulting table is then visible to a read-only query.
+resulting table is then visible to a read-only query. For `explain`, on a
+20 000-row table with one index: a filtered scan reports the warning and lists
+that index, and under `--analyze` a data-modifying CTE is refused by the
+read-only session with every row still present afterwards. The same captured
+`EXPLAIN` JSON and `pg_indexes` rows fed to MXRB's own `PlanAnalyzer` produce
+an identical `--json` payload, key order included.
 
 ```sh
 cargo test -p mxrs-cli --lib database
+cargo test -p mxrs-cli --lib db_reports
 cargo test -p mxrs-oql --lib plan
 mxrs db up app/App.mpr && mxrs db sql app/App.mpr "SELECT count(*) FROM mxrb_schema_entities"
 mxrs db explain app/App.mpr "SELECT * FROM mxrb_schema_entities" --analyze

@@ -110,10 +110,12 @@ impl std::fmt::Display for Severity {
     }
 }
 
-/// One row of `pg_indexes`, the catalog a finding is matched against.
+/// One row of `pg_indexes`, the catalog a finding is matched against. Every
+/// column is required: `pg_indexes` declares them all, so a row missing one is
+/// a malformed catalog to report, not a `None` to absorb.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct IndexCatalogEntry {
-    pub schemaname: Option<String>,
+    pub schemaname: String,
     pub tablename: String,
     pub indexname: String,
     pub indexdef: String,
@@ -385,7 +387,7 @@ impl PlanAnalyzer {
             .filter(|index| {
                 schema
                     .as_deref()
-                    .is_none_or(|schema| index.schemaname.as_deref() == Some(schema))
+                    .is_none_or(|schema| index.schemaname == schema)
             })
             .map(|index| IndexReference {
                 name: index.indexname.clone(),
@@ -399,8 +401,10 @@ fn scan_suggestion(node: &Value, indexes: &[IndexReference], large: bool) -> Str
     if !large {
         return "No change is implied; compare with an index plan as data grows.".to_string();
     }
-    // The filter is quoted the way mxrb's `String#inspect` quotes it, so the
-    // two tools print the same predicate for the same plan.
+    // Quoted with Rust's `Debug`, which agrees with mxrb's `String#inspect`
+    // for the ASCII predicates PostgreSQL renders in practice but is not the
+    // same escaping function: Ruby escapes `#{`, and Rust escapes combining
+    // marks. Only this suggestion string is affected.
     let prefix = text(node, "Filter").map_or_else(
         || "Review selective predicates. ".to_string(),
         |filter| format!("Review the filter {filter:?}. "),
@@ -489,20 +493,20 @@ mod tests {
     fn catalog() -> Vec<IndexCatalogEntry> {
         vec![
             IndexCatalogEntry {
-                schemaname: Some("public".to_string()),
+                schemaname: "public".to_string(),
                 tablename: "sales$order".to_string(),
                 indexname: "sales_order_status_idx".to_string(),
                 indexdef: "CREATE INDEX sales_order_status_idx ON public.sales$order(status)"
                     .to_string(),
             },
             IndexCatalogEntry {
-                schemaname: Some("archive".to_string()),
+                schemaname: "archive".to_string(),
                 tablename: "sales$order".to_string(),
                 indexname: "archive_idx".to_string(),
                 indexdef: "CREATE INDEX archive_idx ...".to_string(),
             },
             IndexCatalogEntry {
-                schemaname: Some("public".to_string()),
+                schemaname: "public".to_string(),
                 tablename: "sales$customer".to_string(),
                 indexname: "customer_idx".to_string(),
                 indexdef: "CREATE INDEX customer_idx ...".to_string(),
@@ -658,6 +662,92 @@ mod tests {
                 .collect::<Vec<_>>(),
             [PlanRule::DiskSort]
         );
+    }
+
+    /// Every threshold is a boundary a real plan will sit exactly on, and `>=`
+    /// is not interchangeable with `>`. Each edge is pinned on both sides, and
+    /// the two conditions that guard one rule are separated so neither can
+    /// carry the other.
+    #[test]
+    fn every_threshold_is_pinned_on_both_sides_of_its_boundary() {
+        let analyze = |plan: Value| {
+            PlanAnalyzer::default()
+                .analyze(&envelope(plan, json!({})), false)
+                .unwrap()
+                .findings
+                .iter()
+                .map(|finding| (finding.rule, finding.severity))
+                .collect::<Vec<_>>()
+        };
+        for (label, plan, expected) in [
+            (
+                "a scan at exactly 1000 rows is large",
+                json!({"Node Type": "Seq Scan", "Relation Name": "t", "Plan Rows": 1_000}),
+                vec![(PlanRule::SequentialScan, Severity::Warning)],
+            ),
+            (
+                "one row below it is only a hint",
+                json!({"Node Type": "Seq Scan", "Relation Name": "t", "Plan Rows": 999}),
+                vec![(PlanRule::SequentialScan, Severity::Hint)],
+            ),
+            (
+                "cost alone makes a small scan large at exactly 1000",
+                json!({"Node Type": "Seq Scan", "Relation Name": "t", "Plan Rows": 1, "Total Cost": 1_000.0}),
+                vec![(PlanRule::SequentialScan, Severity::Warning)],
+            ),
+            (
+                "and does not just below 1000",
+                json!({"Node Type": "Seq Scan", "Relation Name": "t", "Plan Rows": 1, "Total Cost": 999.9}),
+                vec![(PlanRule::SequentialScan, Severity::Hint)],
+            ),
+            (
+                "a filter discarding exactly 1000, more than it returned",
+                json!({"Node Type": "Index Scan", "Plan Rows": 999, "Actual Rows": 999, "Rows Removed by Filter": 1_000}),
+                vec![(PlanRule::FilterDiscard, Severity::Warning)],
+            ),
+            (
+                "one discarded row below the threshold",
+                json!({"Node Type": "Index Scan", "Plan Rows": 998, "Actual Rows": 998, "Rows Removed by Filter": 999}),
+                vec![],
+            ),
+            (
+                "discarding exactly as many as it returned is not more",
+                json!({"Node Type": "Index Scan", "Plan Rows": 1_000, "Actual Rows": 1_000, "Rows Removed by Filter": 1_000}),
+                vec![],
+            ),
+            (
+                "off by exactly 10x at exactly 100 rows",
+                json!({"Node Type": "Index Scan", "Plan Rows": 10, "Actual Rows": 100}),
+                vec![(PlanRule::CardinalityMisestimation, Severity::Warning)],
+            ),
+            (
+                "an 11x miss just under the 100-row floor stays quiet",
+                json!({"Node Type": "Index Scan", "Plan Rows": 9, "Actual Rows": 99}),
+                vec![],
+            ),
+            (
+                "enough rows but just under 10x stays quiet too",
+                json!({"Node Type": "Index Scan", "Plan Rows": 11, "Actual Rows": 100}),
+                vec![],
+            ),
+            (
+                "a nested loop at exactly 10 000 rows across its loops",
+                json!({"Node Type": "Nested Loop", "Plan Rows": 1_000, "Actual Loops": 10}),
+                vec![(PlanRule::HighVolumeNestedLoop, Severity::Warning)],
+            ),
+            (
+                "one row per loop below it",
+                json!({"Node Type": "Nested Loop", "Plan Rows": 999, "Actual Loops": 10}),
+                vec![],
+            ),
+            (
+                "a plan-only nested loop counts as one loop, not zero",
+                json!({"Node Type": "Nested Loop", "Plan Rows": 10_000}),
+                vec![(PlanRule::HighVolumeNestedLoop, Severity::Warning)],
+            ),
+        ] {
+            assert_eq!(analyze(plan), expected, "{label}");
+        }
     }
 
     #[test]

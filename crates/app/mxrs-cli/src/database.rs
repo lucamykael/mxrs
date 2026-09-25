@@ -721,13 +721,19 @@ fn read_only_statement(sql: &str) -> Result<String, DatabaseError> {
     if statement.is_empty() {
         return Err(DatabaseError::Query("SQL must not be empty".to_string()));
     }
+    // Compared as bytes, not as a `&str` slice: slicing by a keyword length
+    // panics when the boundary lands inside a multi-byte character, and
+    // `sel 日本語` is an ordinary rejection rather than a crash. A non-ASCII
+    // byte is neither alphanumeric nor `_`, so it ends the keyword exactly the
+    // way mxrb's `\b` does.
+    let bytes = statement.as_bytes();
     let read_only_keyword = ["SELECT", "WITH"].iter().any(|keyword| {
-        statement.len() >= keyword.len()
-            && statement[..keyword.len()].eq_ignore_ascii_case(keyword)
-            && statement[keyword.len()..]
-                .chars()
-                .next()
-                .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '_')
+        bytes
+            .get(..keyword.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(keyword.as_bytes()))
+            && bytes
+                .get(keyword.len())
+                .is_none_or(|next| !next.is_ascii_alphanumeric() && *next != b'_')
     });
     if !read_only_keyword || statement.contains(';') {
         return Err(DatabaseError::Query(
@@ -1413,12 +1419,19 @@ mod tests {
             ]
         );
         assert!(
-            docker.calls.borrow()[1]
-                .last()
-                .unwrap()
-                .contains("pg_indexes"),
-            "the index catalog is read after the plan"
+            docker.calls.borrow()[1].last().unwrap()
+                == &format!("COPY ({INDEX_CATALOG_SQL}) TO STDOUT WITH CSV HEADER"),
+            "the index catalog is read after the plan, as the whole query"
         );
+        // The schema filter and the ordering are part of the contract the docs
+        // and the listed-index order rely on, not decoration.
+        for clause in [
+            "FROM pg_indexes",
+            "WHERE schemaname NOT IN ('pg_catalog', 'information_schema')",
+            "ORDER BY schemaname, tablename, indexname",
+        ] {
+            assert!(INDEX_CATALOG_SQL.contains(clause), "{clause}");
+        }
         assert!(!report.clean());
         let finding = &report.findings[0];
         assert_eq!(finding.relation.as_deref(), Some("public.orders"));
@@ -1470,6 +1483,29 @@ mod tests {
             "online queries must be one read-only SELECT or WITH statement"
         );
         assert!(docker.calls.borrow().is_empty());
+
+        // A statement whose keyword boundary lands inside a multi-byte
+        // character is an ordinary rejection. Slicing `&str` by the keyword
+        // length used to panic here, and `db explain` is the first CLI path
+        // that reaches this check with arbitrary user text.
+        for sql in ["sel 日本語", "abc😀", "日本語", "SEL日"] {
+            let docker = MockDocker::new(vec![]);
+            let error = workspace.explain_with(&docker, sql, false).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "online queries must be one read-only SELECT or WITH statement",
+                "{sql:?}"
+            );
+            assert!(docker.calls.borrow().is_empty(), "{sql:?} reached Docker");
+        }
+        // A multi-byte character immediately after the keyword still ends it,
+        // the way mxrb's `\b` does with its ASCII `\w`.
+        let docker = MockDocker::new(vec![output(true, PLAN, ""), output(true, CATALOG, "")]);
+        assert!(
+            workspace
+                .explain_with(&docker, "WITH日 AS (SELECT 1) SELECT 1 FROM WITH日", false)
+                .is_ok()
+        );
 
         // Output that is not EXPLAIN JSON is reported as such rather than
         // surfacing as a parser panic or an empty report.

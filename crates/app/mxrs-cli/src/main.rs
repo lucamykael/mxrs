@@ -330,52 +330,6 @@ fn run_database_shell(command: &[String]) -> ExitCode {
     }
 }
 
-/// Renders a query plan the way mxrb's `render_plan_report` does: the header,
-/// then one block per finding. Findings never change the exit status — a plan
-/// diagnosis is advice about a query that ran, not a failure of the command.
-fn render_plan_report(report: &mxrs_oql::plan::PlanReport, json: bool) {
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(report).expect("a plan report is serializable")
-        );
-        return;
-    }
-    println!("Engine         : {}", report.engine);
-    println!(
-        "Mode           : {}",
-        if report.analyzed {
-            "actual"
-        } else {
-            "estimated"
-        }
-    );
-    println!(
-        "Total cost     : {}",
-        report
-            .total_cost
-            .as_ref()
-            .map_or_else(String::new, ToString::to_string)
-    );
-    for finding in &report.findings {
-        let subject = finding
-            .relation
-            .as_deref()
-            .or(finding.node_type.as_deref())
-            .unwrap_or("(unnamed node)");
-        println!(
-            "[{}] {}: {subject}",
-            finding.severity.as_str().to_uppercase(),
-            finding.rule
-        );
-        println!("  {}", finding.message);
-        println!("  {}", finding.suggestion);
-    }
-    if report.findings.is_empty() {
-        println!("[mxrs] No plan findings");
-    }
-}
-
 fn run_db(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let port = match take_value(&mut args, "--port")
@@ -447,7 +401,15 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
     if action == "explain" {
         return match workspace.explain(&args[2], analyze) {
             Ok(report) => {
-                render_plan_report(&report, json);
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report)
+                            .expect("a plan report is serializable")
+                    );
+                } else {
+                    print!("{}", mxrs_cli::db_reports::render_plan_report(&report));
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => {
