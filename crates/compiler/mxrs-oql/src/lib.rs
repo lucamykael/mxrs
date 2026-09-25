@@ -1,6 +1,8 @@
 //! Conservative OQL tooling. Unsupported syntax returns an explicit reason;
 //! no translation result is ever presented as executable physical SQL.
 
+pub mod plan;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};

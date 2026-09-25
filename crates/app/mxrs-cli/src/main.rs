@@ -75,7 +75,7 @@ fn command_options(
         "test" => (&[], &["--json", "--plan"], &[]),
         "functional-instrument" => (&[], &["--json"], &[]),
         "cache" => (&[], &["--json"], &[]),
-        "db" => (&["--port"], &["--json", "--write"], &[]),
+        "db" => (&["--port"], &["--json", "--write", "--analyze"], &[]),
         "serve" => (&["--port", "--db-port"], &["--no-up"], &[]),
         "run" => (
             &[
@@ -198,7 +198,7 @@ commands! {
     "demo-user", "new <Name> [--entity Module.Entity] [--role ROLE] [--target DIR] [--dry-run] [--json]", "Create a local Mendix demo user backed by an ignored .env secret", run_demo_user;
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "design", "init [--target DIR] [--dry-run] [--json] | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]", "Initialize, inventory, or migrate the project design system", run_design;
-    "db", "<status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json] | sql <file.mpr> \"SELECT ...\" [--write]", "Manage and query an isolated PostgreSQL workspace", run_db;
+    "db", "<status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json] | sql <file.mpr> \"SELECT ...\" [--write] | explain <file.mpr> \"SELECT ...\" [--analyze] [--json]", "Manage, query and explain an isolated PostgreSQL workspace", run_db;
     "diagram-er", "<file.mpr> [--module NAME] [--json] | layout <file.mpr> <layout.json> [--apply] [--json]", "Project the domain ER diagram or apply audited visual layout", run_diagram_er;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
@@ -330,6 +330,52 @@ fn run_database_shell(command: &[String]) -> ExitCode {
     }
 }
 
+/// Renders a query plan the way mxrb's `render_plan_report` does: the header,
+/// then one block per finding. Findings never change the exit status — a plan
+/// diagnosis is advice about a query that ran, not a failure of the command.
+fn render_plan_report(report: &mxrs_oql::plan::PlanReport, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(report).expect("a plan report is serializable")
+        );
+        return;
+    }
+    println!("Engine         : {}", report.engine);
+    println!(
+        "Mode           : {}",
+        if report.analyzed {
+            "actual"
+        } else {
+            "estimated"
+        }
+    );
+    println!(
+        "Total cost     : {}",
+        report
+            .total_cost
+            .as_ref()
+            .map_or_else(String::new, ToString::to_string)
+    );
+    for finding in &report.findings {
+        let subject = finding
+            .relation
+            .as_deref()
+            .or(finding.node_type.as_deref())
+            .unwrap_or("(unnamed node)");
+        println!(
+            "[{}] {}: {subject}",
+            finding.severity.as_str().to_uppercase(),
+            finding.rule
+        );
+        println!("  {}", finding.message);
+        println!("  {}", finding.suggestion);
+    }
+    if report.findings.is_empty() {
+        println!("[mxrs] No plan findings");
+    }
+}
+
 fn run_db(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let port = match take_value(&mut args, "--port")
@@ -344,25 +390,38 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
         }
     };
     let write = take_flag(&mut args, "--write");
-    // `sql` is the one action that takes a statement after the model, so the
-    // arity check is per action rather than a single count.
+    let analyze = take_flag(&mut args, "--analyze");
+    // `sql` and `explain` are the actions that take a statement after the
+    // model, so the arity check is per action rather than a single count.
     let expected = match args.first().map(String::as_str) {
-        Some("sql") => 3,
+        Some("sql" | "explain") => 3,
         _ => 2,
     };
     if args.len() != expected
         || !matches!(
             args[0].as_str(),
-            "status" | "up" | "down" | "destroy" | "credentials" | "url" | "sql" | "shell"
+            "status"
+                | "up"
+                | "down"
+                | "destroy"
+                | "credentials"
+                | "url"
+                | "sql"
+                | "explain"
+                | "shell"
         )
     {
         eprintln!(
-            "Usage: mxrs db <status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json]\n       mxrs db sql <file.mpr> \"SELECT ...\" [--write] [--port PORT]"
+            "Usage: mxrs db <status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json]\n       mxrs db sql <file.mpr> \"SELECT ...\" [--write] [--port PORT]\n       mxrs db explain <file.mpr> \"SELECT ...\" [--analyze] [--json] [--port PORT]"
         );
         return ExitCode::FAILURE;
     }
     if write && !matches!(args[0].as_str(), "sql" | "shell") {
         eprintln!("[mxrs] error: --write applies only to db sql and db shell");
+        return ExitCode::FAILURE;
+    }
+    if analyze && args[0].as_str() != "explain" {
+        eprintln!("[mxrs] error: --analyze applies only to db explain");
         return ExitCode::FAILURE;
     }
     let workspace = match mxrs_cli::database::DatabaseWorkspace::open(&args[1], port) {
@@ -377,6 +436,18 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
         return match workspace.execute(&args[2], write) {
             Ok(output) => {
                 print!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if action == "explain" {
+        return match workspace.explain(&args[2], analyze) {
+            Ok(report) => {
+                render_plan_report(&report, json);
                 ExitCode::SUCCESS
             }
             Err(error) => {

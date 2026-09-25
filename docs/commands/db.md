@@ -12,6 +12,7 @@ workspace that belongs to one project and nothing else.
 | `credentials` | Prints host, port, database, user and password |
 | `url` | Prints the `postgresql://` connection URL |
 | `sql` | Runs one statement and prints psql's own rendering |
+| `explain` | Diagnoses one statement's query plan against the existing indexes |
 | `shell` | Hands the terminal to an interactive `psql` |
 
 ## Isolation
@@ -57,25 +58,65 @@ caller can fix.
 An empty statement, or one containing a NUL byte, is refused before Docker is
 invoked at all.
 
+## Query plans
+
+`mxrs db explain FILE.mpr "SELECT ..." [--analyze] [--json]` asks PostgreSQL
+for `EXPLAIN (FORMAT JSON, COSTS, VERBOSE, SETTINGS)` and turns the plan into
+conservative findings. The statement must be one read-only `SELECT` or `WITH`,
+the same rule online queries follow.
+
+| Rule | Fires when | Severity |
+| --- | --- | --- |
+| `sequential_scan` | A `Seq Scan` appears | Warning at ≥ 1000 rows or ≥ 1000 cost, otherwise a hint |
+| `filter_discard` | A filter removed ≥ 1000 rows and more than it returned | Warning |
+| `cardinality_misestimation` | Estimated and actual rows differ by ≥ 10x, with ≥ 100 rows on one side | Warning |
+| `high_volume_nested_loop` | A `Nested Loop` processes ≥ 10 000 rows across its loops | Warning |
+| `disk_sort` | A `Sort` spilled to disk or used an external method | Warning |
+
+A sequential scan is not automatically a problem: scanning a small relation is
+often cheaper than an index lookup, so a small scan is reported as a hint and
+leaves the report `clean`. No finding invents a column recommendation — it
+names the relation, the filter, and the indexes `pg_indexes` already has for
+that relation, in that relation's schema when the planner named one.
+
+`--analyze` adds `ANALYZE`, `BUFFERS` and `TIMING`, which means the statement
+actually runs. MXRB keeps that safe by connecting as a reader role; here the
+session carries `default_transaction_read_only`, which covers the case the
+statement check cannot: a data-modifying CTE
+(`WITH gone AS (DELETE FROM orders RETURNING *) SELECT * FROM gone`) starts
+with `WITH`, and it is the server setting that refuses to execute it.
+
+Findings never change the exit status. A plan diagnosis is advice about a
+query that ran, not a failure of the command.
+
 ## Not ported
 
-MXRB's `db` also offers `sync`, `explain`, `workload` and `indexes`, and its
-`up` boots a Mendix Runtime container beside PostgreSQL. None of that is here:
+MXRB's `db` also offers `sync`, `workload` and `indexes`, and its `up` boots a
+Mendix Runtime container beside PostgreSQL. None of that is here:
 
 - `sync` — schema synchronization against PostgreSQL. The relational migrator
   exists (`mxrs-runtime-sqlite`'s `schema.rs`) but targets SQLite.
-- `explain` — needs a port of `Oql::PlanAnalyzer` (185 lines) plus its plan
-  rendering.
 - `workload` / `indexes` — need `Oql::WorkloadAnalyzer` and `Oql::IndexAdvisor`
   over `pg_stat_statements`.
 - Mendix Runtime boot — `db up` here starts PostgreSQL only.
 
+MXRB's `db explain` also accepts `--engine sql_server`. This one is PostgreSQL
+only, and the report names its engine rather than leaving it implied.
+
 ## Verification
 
-The psql argv for `sql` and `shell` is pinned against a mock Docker, including
-that read-only is the default, that `--write` removes exactly the read-only
-setting and nothing else, that the statement reaches psql verbatim, and that
-the two failure classes stay distinct.
+The psql argv for `sql`, `explain` and `shell` is pinned against a mock Docker,
+including that read-only is the default, that `--write` removes exactly the
+read-only setting and nothing else, that `--analyze` does not remove it, that
+the statement reaches psql verbatim, and that the two failure classes stay
+distinct.
+
+`Oql::PlanAnalyzer`'s own spec is ported case for case: the five rules firing
+together on one plan, a small scan staying a hint, a large unindexed scan
+suggesting nothing it cannot support, external sorts against low-volume noise,
+and both malformed-payload rejections. The `--json` payload is pinned too,
+including that `clean` is derived from the findings and that a metric the plan
+does not carry is omitted rather than serialized as a zero.
 
 Live-checked against a real workspace: a `SELECT` renders as psql renders it,
 `CREATE TABLE` is refused without `--write` and accepted with it, and the
@@ -83,5 +124,7 @@ resulting table is then visible to a read-only query.
 
 ```sh
 cargo test -p mxrs-cli --lib database
+cargo test -p mxrs-oql --lib plan
 mxrs db up app/App.mpr && mxrs db sql app/App.mpr "SELECT count(*) FROM mxrb_schema_entities"
+mxrs db explain app/App.mpr "SELECT * FROM mxrb_schema_entities" --analyze
 ```

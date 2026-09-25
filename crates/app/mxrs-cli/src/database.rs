@@ -1,12 +1,13 @@
 //! Docker-backed, project-isolated PostgreSQL workspaces.
 //!
 //! This is deliberately narrower than mxrb's database command: it manages
-//! PostgreSQL only. Mendix Runtime boot, schema synchronization, query-plan
-//! analysis and workload statistics remain outside this surface.
+//! PostgreSQL only. Mendix Runtime boot, schema synchronization and workload
+//! statistics remain outside this surface.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use mxrs_oql::plan::{IndexCatalogEntry, PlanAnalyzer, PlanReport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -50,6 +51,12 @@ pub enum DatabaseError {
     Query(String),
     #[error("PostgreSQL returned invalid CSV: {0}")]
     InvalidCsv(String),
+    #[error("PostgreSQL returned invalid EXPLAIN JSON: {0}")]
+    InvalidExplain(String),
+    #[error("PostgreSQL returned an unreadable index catalog: {0}")]
+    InvalidIndexCatalog(String),
+    #[error(transparent)]
+    Plan(#[from] mxrs_oql::plan::PlanError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -226,6 +233,65 @@ impl DatabaseWorkspace {
         if sql.contains('\0') {
             return Err(DatabaseError::Query("SQL contains a NUL byte".to_string()));
         }
+        let mut arguments = self.psql_arguments(write);
+        arguments.extend(["--command".to_string(), sql.to_string()]);
+        classify(docker.output(&arguments)?)
+    }
+
+    /// Analyzes one read-only statement's PostgreSQL plan, matched against the
+    /// indexes that already exist. Ports mxrb's `DatabaseWorkspace#explain`.
+    ///
+    /// `analyze` is opt-in because `EXPLAIN ANALYZE` executes the statement.
+    /// mxrb keeps that safe with a dedicated reader role; here the session is
+    /// created with `default_transaction_read_only`, which the server applies
+    /// to every transaction in it. That matters for more than tidiness: a
+    /// data-modifying CTE (`WITH written AS (DELETE ... RETURNING *) SELECT
+    /// ...`) passes the read-only *statement* check, and it is the server
+    /// setting — not the shape of the SQL — that refuses to run it.
+    pub fn explain(&self, sql: &str, analyze: bool) -> Result<PlanReport, DatabaseError> {
+        self.explain_with(&CommandDocker, sql, analyze)
+    }
+
+    fn explain_with(
+        &self,
+        docker: &impl Docker,
+        sql: &str,
+        analyze: bool,
+    ) -> Result<PlanReport, DatabaseError> {
+        let statement = read_only_statement(sql)?;
+        let mut arguments = self.psql_arguments(false);
+        arguments.extend([
+            "--tuples-only".to_string(),
+            "--no-align".to_string(),
+            "--quiet".to_string(),
+            "--command".to_string(),
+            explain_sql(&statement, analyze),
+        ]);
+        let rendered = classify(docker.output(&arguments)?)?;
+        let payload: Value = serde_json::from_str(rendered.trim())
+            .map_err(|error| DatabaseError::InvalidExplain(error.to_string()))?;
+        // The catalog is read only once the plan is in hand, so a rejected
+        // statement costs one query rather than two.
+        let indexes = self.index_catalog_with(docker)?;
+        Ok(PlanAnalyzer::new(indexes).analyze(&payload, analyze)?)
+    }
+
+    fn index_catalog_with(
+        &self,
+        docker: &impl Docker,
+    ) -> Result<Vec<IndexCatalogEntry>, DatabaseError> {
+        self.query_rows_with(docker, INDEX_CATALOG_SQL, &Map::new())?
+            .into_iter()
+            .map(|row| {
+                serde_json::from_value(Value::Object(row))
+                    .map_err(|error| DatabaseError::InvalidIndexCatalog(error.to_string()))
+            })
+            .collect()
+    }
+
+    /// The `docker exec ... psql` prefix both statement paths share, up to but
+    /// not including the command. Read-only unless `write`.
+    fn psql_arguments(&self, write: bool) -> Vec<String> {
         let mut arguments = vec!["exec".to_string()];
         if !write {
             arguments.extend([
@@ -243,28 +309,8 @@ impl DatabaseWorkspace {
             USER.to_string(),
             "--dbname".to_string(),
             DATABASE.to_string(),
-            "--command".to_string(),
-            sql.to_string(),
         ]);
-        let output = docker.output(&arguments)?;
-        if output.success {
-            return Ok(output.stdout);
-        }
-        let stderr = output.stderr.trim().to_string();
-        // `docker exec` passes the container command's exit status through, so
-        // a failure here is usually PostgreSQL rejecting the statement — and
-        // reporting "Docker is unavailable: cannot execute CREATE TABLE in a
-        // read-only transaction" blames the wrong component for something the
-        // caller can actually fix. Recognize psql's own diagnostics and blame
-        // the query; anything else keeps the Docker classification, because a
-        // daemon or container failure really is operational.
-        if PSQL_DIAGNOSTICS
-            .iter()
-            .any(|prefix| stderr.contains(prefix))
-        {
-            return Err(DatabaseError::Query(stderr));
-        }
-        Err(DatabaseError::Docker(stderr))
+        arguments
     }
 
     /// The argv for an interactive `psql`, for the caller to exec.
@@ -621,6 +667,48 @@ fn io(path: &Path, source: std::io::Error) -> DatabaseError {
         source,
     }
 }
+
+/// Blames the right component for a failed `docker exec ... psql`.
+///
+/// `docker exec` passes the container command's exit status through, so a
+/// failure is usually PostgreSQL rejecting the statement — and reporting
+/// "Docker is unavailable: cannot execute CREATE TABLE in a read-only
+/// transaction" blames the wrong component for something the caller can
+/// actually fix. psql's own diagnostics mean the query failed; anything else
+/// keeps the Docker classification, because a daemon or container failure
+/// really is operational.
+fn classify(output: DockerOutput) -> Result<String, DatabaseError> {
+    if output.success {
+        return Ok(output.stdout);
+    }
+    let stderr = output.stderr.trim().to_string();
+    if PSQL_DIAGNOSTICS
+        .iter()
+        .any(|prefix| stderr.contains(prefix))
+    {
+        return Err(DatabaseError::Query(stderr));
+    }
+    Err(DatabaseError::Docker(stderr))
+}
+
+/// Ports mxrb's `explain_sql`. `COSTS`/`VERBOSE`/`SETTINGS` are always on so
+/// an estimated plan still names its relations and non-default planner
+/// settings; `ANALYZE` additionally executes the statement, which is why
+/// `BUFFERS` and `TIMING` only make sense alongside it.
+fn explain_sql(statement: &str, analyze: bool) -> String {
+    let mut options = vec!["FORMAT JSON", "COSTS TRUE", "VERBOSE TRUE", "SETTINGS TRUE"];
+    if analyze {
+        options.extend(["ANALYZE TRUE", "BUFFERS TRUE", "TIMING TRUE"]);
+    }
+    format!("EXPLAIN ({}) {statement}", options.join(", "))
+}
+
+/// mxrb's `index_catalog` query, verbatim: the user schemas only, ordered so
+/// a finding lists the indexes of a relation in a stable order.
+const INDEX_CATALOG_SQL: &str = "SELECT schemaname, tablename, indexname, indexdef \
+     FROM pg_indexes \
+     WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+     ORDER BY schemaname, tablename, indexname";
 
 /// Ports mxrb's `read_only_statement`: one statement, no NUL bytes, no `;`,
 /// and it must start with `SELECT` or `WITH`. Error messages match mxrb's so
@@ -1278,6 +1366,156 @@ mod tests {
             assert_eq!(error.to_string(), message);
             assert!(docker.calls.borrow().is_empty(), "{sql:?} reached Docker");
         }
+    }
+
+    const PLAN: &str = r#"[{"Plan": {"Node Type": "Seq Scan", "Schema": "public",
+        "Relation Name": "orders", "Plan Rows": 5000, "Total Cost": 1200,
+        "Filter": "(status = 'Open')"}, "Planning Time": 0.5}]"#;
+    const CATALOG: &str = "schemaname,tablename,indexname,indexdef\n\
+        public,orders,orders_status_idx,CREATE INDEX orders_status_idx ON public.orders(status)\n\
+        public,invoices,invoices_pkey,CREATE UNIQUE INDEX invoices_pkey ON public.invoices(id)\n";
+
+    /// `db explain` asks PostgreSQL for machine-readable plan JSON and matches
+    /// it against `pg_indexes`. The pins that matter: the plan query is
+    /// read-only even under `--analyze` (which executes the statement), and
+    /// only the scanned relation's indexes reach the finding.
+    #[test]
+    fn explain_analyzes_the_plan_against_the_index_catalog_and_stays_read_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+        let docker = MockDocker::new(vec![output(true, PLAN, ""), output(true, CATALOG, "")]);
+
+        let report = workspace
+            .explain_with(&docker, "  SELECT * FROM orders  ", false)
+            .unwrap();
+
+        let call = &docker.calls.borrow()[0];
+        assert_eq!(
+            call.as_slice(),
+            [
+                "exec",
+                "--env",
+                "PGOPTIONS=-c default_transaction_read_only=on",
+                workspace.container.as_str(),
+                "psql",
+                "--no-psqlrc",
+                "--set",
+                "ON_ERROR_STOP=1",
+                "--username",
+                USER,
+                "--dbname",
+                DATABASE,
+                "--tuples-only",
+                "--no-align",
+                "--quiet",
+                "--command",
+                "EXPLAIN (FORMAT JSON, COSTS TRUE, VERBOSE TRUE, SETTINGS TRUE) SELECT * FROM orders",
+            ]
+        );
+        assert!(
+            docker.calls.borrow()[1]
+                .last()
+                .unwrap()
+                .contains("pg_indexes"),
+            "the index catalog is read after the plan"
+        );
+        assert!(!report.clean());
+        let finding = &report.findings[0];
+        assert_eq!(finding.relation.as_deref(), Some("public.orders"));
+        assert_eq!(
+            finding
+                .indexes
+                .iter()
+                .map(|index| index.name.as_str())
+                .collect::<Vec<_>>(),
+            ["orders_status_idx"]
+        );
+        assert_eq!(
+            report.planning_time_ms.as_ref().unwrap().as_f64(),
+            Some(0.5)
+        );
+
+        // `--analyze` executes the statement, so the read-only session setting
+        // is what keeps a data-modifying CTE from running. It must survive.
+        let docker = MockDocker::new(vec![output(true, PLAN, ""), output(true, CATALOG, "")]);
+        let report = workspace
+            .explain_with(&docker, "SELECT * FROM orders", true)
+            .unwrap();
+        assert!(report.analyzed);
+        let call = &docker.calls.borrow()[0];
+        assert_eq!(
+            call[1..3],
+            ["--env", "PGOPTIONS=-c default_transaction_read_only=on"]
+        );
+        assert_eq!(
+            call.last().unwrap(),
+            "EXPLAIN (FORMAT JSON, COSTS TRUE, VERBOSE TRUE, SETTINGS TRUE, ANALYZE TRUE, \
+             BUFFERS TRUE, TIMING TRUE) SELECT * FROM orders"
+        );
+    }
+
+    #[test]
+    fn explain_refuses_writable_statements_and_names_unusable_planner_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+
+        // The statement check runs before Docker, exactly as for an online
+        // query: `db explain` is not a way to run an UPDATE.
+        let docker = MockDocker::new(vec![]);
+        let error = workspace
+            .explain_with(&docker, "UPDATE orders SET total = 1", false)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "online queries must be one read-only SELECT or WITH statement"
+        );
+        assert!(docker.calls.borrow().is_empty());
+
+        // Output that is not EXPLAIN JSON is reported as such rather than
+        // surfacing as a parser panic or an empty report.
+        let docker = MockDocker::new(vec![output(true, "QUERY PLAN\nSeq Scan on orders\n", "")]);
+        let error = workspace
+            .explain_with(&docker, "SELECT 1", false)
+            .unwrap_err();
+        assert!(
+            matches!(&error, DatabaseError::InvalidExplain(message) if message.contains("expected")),
+            "{error}"
+        );
+
+        // Valid JSON that is not a plan envelope keeps mxrb's wording.
+        let docker = MockDocker::new(vec![
+            output(true, r#"[{"Planning Time": 1}]"#, ""),
+            output(true, CATALOG, ""),
+        ]);
+        let error = workspace
+            .explain_with(&docker, "SELECT 1", false)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "PostgreSQL EXPLAIN JSON has no Plan");
+
+        // A statement PostgreSQL rejects is a query failure, not a Docker one.
+        let docker = MockDocker::new(vec![output(
+            false,
+            "",
+            "ERROR:  relation \"missing\" does not exist\n",
+        )]);
+        let error = workspace
+            .explain_with(&docker, "SELECT * FROM missing", false)
+            .unwrap_err();
+        assert!(matches!(&error, DatabaseError::Query(_)), "{error}");
+
+        // An index catalog row that is not what pg_indexes promises is named,
+        // not silently dropped from the findings.
+        let docker = MockDocker::new(vec![
+            output(true, PLAN, ""),
+            output(true, "tablename,indexname\norders,orders_status_idx\n", ""),
+        ]);
+        let error = workspace
+            .explain_with(&docker, "SELECT * FROM orders", false)
+            .unwrap_err();
+        assert!(
+            matches!(&error, DatabaseError::InvalidIndexCatalog(_)),
+            "{error}"
+        );
     }
 
     #[test]
