@@ -1796,10 +1796,34 @@ mod tests {
 
         let calls = docker.calls.borrow();
         assert_eq!(calls.len(), 3, "exactly three catalogs are read");
+        // Pinned against literals, not against the constants themselves: a
+        // dropped clause here is not cosmetic. Without the
+        // `pg_stat_statements` exclusion the report ranks the query that
+        // produced it, and without `i.indisprimary` every primary-key index
+        // over 1 MiB becomes a false `unused_large_index`.
         for (call, sql) in calls.iter().zip([
-            WORKLOAD_QUERIES_SQL.replace("$LIMIT", "20"),
-            WORKLOAD_TABLES_SQL.to_string(),
-            WORKLOAD_INDEXES_SQL.to_string(),
+            "SELECT queryid::text, calls, total_exec_time, mean_exec_time, rows, \
+             shared_blks_hit, shared_blks_read, temp_blks_written, \
+             blk_read_time, blk_write_time, query \
+             FROM pg_stat_statements \
+             WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+             AND query NOT ILIKE '%pg_stat_statements%' \
+             AND query ~* '^[[:space:]]*(SELECT|WITH)([[:space:]]|$)' \
+             ORDER BY total_exec_time DESC \
+             LIMIT 20"
+                .to_string(),
+            "SELECT schemaname, relname, seq_scan, seq_tup_read, idx_scan, n_live_tup, \
+             last_analyze, last_autoanalyze \
+             FROM pg_stat_user_tables \
+             ORDER BY seq_tup_read DESC"
+                .to_string(),
+            "SELECT s.schemaname, s.relname, s.indexrelname, s.idx_scan, \
+             s.idx_tup_read, s.idx_tup_fetch, pg_relation_size(s.indexrelid) AS index_bytes, \
+             i.indisunique, i.indisprimary, pg_get_indexdef(s.indexrelid) AS indexdef \
+             FROM pg_stat_user_indexes s \
+             JOIN pg_index i ON i.indexrelid = s.indexrelid \
+             ORDER BY index_bytes DESC"
+                .to_string(),
         ]) {
             assert_eq!(
                 call.last().unwrap(),
@@ -1837,6 +1861,61 @@ mod tests {
                 "table_sequential_pressure",
                 "unused_large_index",
             ]
+        );
+    }
+
+    /// The path every repeat `db up` and every `mxrs serve` takes: the
+    /// container already exists, so nothing is created — but the server still
+    /// has to be answering, and the statistics still have to be enabled.
+    #[test]
+    fn an_already_running_container_is_still_waited_for_and_configured() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+        workspace.create_state().unwrap();
+        let mut responses = vec![output(
+            true,
+            &format!("true|{}|running\n", workspace.key),
+            "",
+        )];
+        responses.extend(ready_responses());
+        responses.push(output(
+            true,
+            &format!("true|{}|running\n", workspace.key),
+            "",
+        ));
+        let docker = MockDocker::new(responses);
+
+        let report = workspace.up_with(&docker).unwrap();
+
+        assert_eq!(report.container_state, "running");
+        let calls = docker.calls.borrow();
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call[0] == "run" || call[0] == "start"),
+            "a running container is neither created nor started again: {calls:?}"
+        );
+        let commands: Vec<&str> = calls
+            .iter()
+            .skip(1)
+            .filter_map(|call| call.get(2).map(String::as_str))
+            .collect();
+        assert_eq!(
+            commands[..2],
+            ["pg_isready", "pg_isready"],
+            "readiness is not skipped for an existing container: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| call
+                .last()
+                .is_some_and(|command| command == "SHOW shared_preload_libraries")),
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| call.last().is_some_and(
+                |command| command == "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
+            )),
+            "{calls:?}"
         );
     }
 

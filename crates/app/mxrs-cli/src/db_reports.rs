@@ -293,6 +293,40 @@ mod tests {
         );
     }
 
+    /// `--compare`'s entire output is these lines, so their shape is the
+    /// contract. A delta is reported even at 0%: the metric was measured.
+    #[test]
+    fn a_comparison_prints_one_delta_line_per_metric_that_moved() {
+        let previous = workload(json!([{
+            "queryid": "q1", "query": "SELECT 1", "calls": "2",
+            "total_exec_time": "1000", "mean_exec_time": "100", "rows": "100",
+            "shared_blks_hit": "10", "shared_blks_read": "2",
+            "temp_blks_written": "0", "blk_read_time": "1", "blk_write_time": "0"
+        }]));
+        let current = workload(json!([{
+            "queryid": "q1", "query": "SELECT 1", "calls": "2",
+            "total_exec_time": "1500", "mean_exec_time": "80", "rows": "100",
+            "shared_blks_hit": "10", "shared_blks_read": "2",
+            "temp_blks_written": "0", "blk_read_time": "1", "blk_write_time": "0"
+        }]));
+        let comparison = mxrs_oql::baseline::compare(
+            &current,
+            &mxrs_oql::baseline::dump(&previous, "2026-09-25T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            render_comparison(&comparison),
+            "[DELTA] q1 total_time_ms: 50.0%\n\
+             [DELTA] q1 mean_time_ms: -20.0%\n\
+             [DELTA] q1 io_time_ms: 0.0%\n\
+             [DELTA] q1 rows: 0.0%\n"
+        );
+        assert!(
+            render_comparison(&mxrs_oql::baseline::WorkloadComparison { deltas: Vec::new() })
+                .is_empty()
+        );
+    }
+
     /// A capture stamp is second-precision RFC 3339, the shape Ruby's
     /// `Time#iso8601` writes into a baseline.
     #[test]

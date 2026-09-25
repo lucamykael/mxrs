@@ -181,7 +181,7 @@ pub fn compare(report: &WorkloadReport, text: &str) -> Result<WorkloadComparison
         for metric in METRICS {
             let recorded = before
                 .get(metric.as_str())
-                .and_then(Value::as_f64)
+                .and_then(numeric)
                 .ok_or_else(|| BaselineError::MissingMetric {
                     query_id: query.query_id.clone(),
                     metric,
@@ -192,6 +192,18 @@ pub fn compare(report: &WorkloadReport, text: &str) -> Result<WorkloadComparison
         }
     }
     Ok(WorkloadComparison { deltas })
+}
+
+/// mxrb coerces both sides of a delta with `Float(...)`, which accepts a
+/// numeric string as readily as a number — so a baseline whose metrics were
+/// written as text still compares, and one whose metric is not a number at
+/// all is still refused.
+fn numeric(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 fn delta(query_id: &str, metric: BaselineMetric, before: f64, after: f64) -> Option<WorkloadDelta> {
@@ -345,6 +357,82 @@ mod tests {
             .unwrap();
         assert_eq!(total.before, 0.0);
         assert_eq!(total.change_percent, 100.0);
+    }
+
+    /// The snapshot's bytes are its contract: a later run reads it back, and
+    /// `preserve_order` (declared on this crate's `serde_json`) is what keeps
+    /// the fingerprint keys in workload order rather than sorted.
+    #[test]
+    fn a_snapshot_is_byte_stable_and_keeps_its_fingerprints_in_workload_order() {
+        let rows = json!([
+            {
+                "queryid": "zzz", "query": "SELECT 2", "calls": "1",
+                "total_exec_time": "2", "mean_exec_time": "2", "rows": "0",
+                "shared_blks_hit": "0", "shared_blks_read": "0",
+                "temp_blks_written": "0", "blk_read_time": "0", "blk_write_time": "0"
+            },
+            {
+                "queryid": "aaa", "query": "SELECT 1", "calls": "1",
+                "total_exec_time": "1", "mean_exec_time": "1", "rows": "0",
+                "shared_blks_hit": "0", "shared_blks_read": "0",
+                "temp_blks_written": "0", "blk_read_time": "0", "blk_write_time": "0"
+            }
+        ]);
+        let rows = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row.as_object().unwrap().clone())
+            .collect::<Vec<_>>();
+        let report = WorkloadAnalyzer::new().analyze(&rows, &[], &[]);
+        let snapshot = dump(&report, "2026-09-25T00:00:00Z");
+
+        assert_eq!(
+            snapshot,
+            "{\n  \"version\": 1,\n  \"engine\": \"postgresql\",\n  \
+             \"captured_at\": \"2026-09-25T00:00:00Z\",\n  \"queries\": {\n    \
+             \"zzz\": {\n      \"query_id\": \"zzz\",\n      \"query\": \"SELECT 2\",\n      \
+             \"calls\": 1,\n      \"total_time_ms\": 2.0,\n      \"mean_time_ms\": 2.0,\n      \
+             \"rows\": 0,\n      \"shared_hits\": 0,\n      \"shared_reads\": 0,\n      \
+             \"temp_writes\": 0,\n      \"io_time_ms\": 0.0,\n      \
+             \"cache_hit_ratio\": 1.0\n    },\n    \
+             \"aaa\": {\n      \"query_id\": \"aaa\",\n      \"query\": \"SELECT 1\",\n      \
+             \"calls\": 1,\n      \"total_time_ms\": 1.0,\n      \"mean_time_ms\": 1.0,\n      \
+             \"rows\": 0,\n      \"shared_hits\": 0,\n      \"shared_reads\": 0,\n      \
+             \"temp_writes\": 0,\n      \"io_time_ms\": 0.0,\n      \
+             \"cache_hit_ratio\": 1.0\n    }\n  }\n}\n"
+        );
+    }
+
+    /// mxrb coerces a baseline metric with `Float(...)`, which reads a numeric
+    /// string as readily as a number — and still refuses one that is neither.
+    #[test]
+    fn a_metric_written_as_text_still_compares() {
+        let current = report("q", 150.0, 10.0, 5);
+        let comparison = compare(
+            &current,
+            r#"{"version": 1, "queries": {"q": {"total_time_ms": "100", "mean_time_ms": 10,
+               "io_time_ms": 1, "temp_writes": 0, "rows": 5}}}"#,
+        )
+        .unwrap();
+        let total = comparison
+            .deltas
+            .iter()
+            .find(|delta| delta.metric == BaselineMetric::TotalTimeMs)
+            .unwrap();
+        assert_eq!(total.before, 100.0);
+        assert_eq!(total.change_percent, 50.0);
+
+        assert_eq!(
+            compare(
+                &current,
+                r#"{"version": 1, "queries": {"q": {"total_time_ms": "fast"}}}"#
+            ),
+            Err(BaselineError::MissingMetric {
+                query_id: "q".to_string(),
+                metric: BaselineMetric::TotalTimeMs
+            })
+        );
     }
 
     #[test]

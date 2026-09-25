@@ -417,7 +417,9 @@ fn text(row: &Map<String, Value>, key: &str) -> String {
 /// PostgreSQL rendered in an unexpected form.
 fn integer(row: &Map<String, Value>, key: &str) -> i64 {
     match row.get(key) {
-        Some(Value::String(text)) => leading_number(text).map_or(0, |value| value.trunc() as i64),
+        Some(Value::String(text)) => {
+            leading_number(text, false).map_or(0, |value| value.trunc() as i64)
+        }
         Some(Value::Number(number)) => number.as_f64().map_or(0, |value| value.trunc() as i64),
         _ => 0,
     }
@@ -425,14 +427,20 @@ fn integer(row: &Map<String, Value>, key: &str) -> i64 {
 
 fn float(row: &Map<String, Value>, key: &str) -> f64 {
     match row.get(key) {
-        Some(Value::String(text)) => leading_number(text).unwrap_or(0.0),
+        Some(Value::String(text)) => leading_number(text, true).unwrap_or(0.0),
         Some(Value::Number(number)) => number.as_f64().unwrap_or(0.0),
         _ => 0.0,
     }
 }
 
 /// The longest numeric prefix of `text`, or `None` when there is none.
-fn leading_number(text: &str) -> Option<f64> {
+///
+/// `exponent` is what separates the two Ruby coercions, and the difference is
+/// not academic: with `track_io_timing` on, PostgreSQL renders a small
+/// `blk_read_time` as `8e-05`. `String#to_f` reads that as 0.00008, while
+/// `String#to_i` stops at the `e` and reads 8. A trailing `e` with no digits
+/// after it is not an exponent in either.
+fn leading_number(text: &str, exponent: bool) -> Option<f64> {
     let trimmed = text.trim_start();
     let bytes = trimmed.as_bytes();
     let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
@@ -450,6 +458,19 @@ fn leading_number(text: &str) -> Option<f64> {
             scan += 1;
         }
         if scan > fraction {
+            end = scan;
+        }
+    }
+    if exponent && matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let mut scan = end + 1;
+        if matches!(bytes.get(scan), Some(b'+' | b'-')) {
+            scan += 1;
+        }
+        let digits = scan;
+        while bytes.get(scan).is_some_and(u8::is_ascii_digit) {
+            scan += 1;
+        }
+        if scan > digits {
             end = scan;
         }
     }
@@ -662,6 +683,176 @@ mod tests {
             rendered["findings"][1]["subject"],
             json!("public.orders_old_idx")
         );
+    }
+
+    /// Every threshold is a boundary a real workload will sit exactly on, and
+    /// `>=` is not interchangeable with `>`. Each is pinned on both sides.
+    #[test]
+    fn every_threshold_is_pinned_on_both_sides_of_its_boundary() {
+        // A fingerprint whose only interesting property is the one under test.
+        let query = |overrides: Value| {
+            let mut row = json!({
+                "queryid": "q", "query": "SELECT 1", "calls": "1",
+                "total_exec_time": "1", "mean_exec_time": "1", "rows": "1",
+                "shared_blks_hit": "1", "shared_blks_read": "0",
+                "temp_blks_written": "0", "blk_read_time": "0", "blk_write_time": "0"
+            });
+            for (key, value) in overrides.as_object().unwrap() {
+                row[key] = value.clone();
+            }
+            rows(json!([row]))
+        };
+        let rules = |report: &WorkloadReport| {
+            report
+                .findings
+                .iter()
+                .map(|finding| finding.rule)
+                .collect::<Vec<_>>()
+        };
+
+        for (label, overrides, expected) in [
+            (
+                "exactly 1000 ms cumulative",
+                json!({"total_exec_time": "1000"}),
+                vec![WorkloadRule::HighCumulativeTime],
+            ),
+            (
+                "just under 1000 ms",
+                json!({"total_exec_time": "999.999"}),
+                vec![],
+            ),
+            (
+                "a mean of exactly 100 ms",
+                json!({"mean_exec_time": "100"}),
+                vec![WorkloadRule::HighMeanTime],
+            ),
+            (
+                "a mean just under 100 ms",
+                json!({"mean_exec_time": "99.999"}),
+                vec![],
+            ),
+            (
+                "exactly 100 blocks, exactly under a 0.9 hit ratio",
+                json!({"shared_blks_hit": "89", "shared_blks_read": "11"}),
+                vec![WorkloadRule::LowCacheHit],
+            ),
+            (
+                "99 blocks is too few to judge, however cold",
+                json!({"shared_blks_hit": "0", "shared_blks_read": "99"}),
+                vec![],
+            ),
+            (
+                "exactly a 0.9 hit ratio is not below it",
+                json!({"shared_blks_hit": "90", "shared_blks_read": "10"}),
+                vec![],
+            ),
+            (
+                "one temporary block is enough",
+                json!({"temp_blks_written": "1"}),
+                vec![WorkloadRule::TemporaryBlockWrites],
+            ),
+            (
+                "exactly 10 000 rows per call",
+                json!({"calls": "2", "rows": "20000"}),
+                vec![WorkloadRule::HighRowsPerCall],
+            ),
+            (
+                "one row per call below it",
+                json!({"calls": "2", "rows": "19998"}),
+                vec![],
+            ),
+        ] {
+            assert_eq!(
+                rules(&WorkloadAnalyzer::new().analyze(&query(overrides), &[], &[])),
+                expected,
+                "{label}"
+            );
+        }
+
+        // The table and index rules live on their own rows.
+        let table = |seq_tup_read: &str, seq_scan: &str, idx_scan: &str| {
+            rows(json!([{
+                "schemaname": "public", "relname": "t", "seq_tup_read": seq_tup_read,
+                "seq_scan": seq_scan, "idx_scan": idx_scan, "n_live_tup": "1"
+            }]))
+        };
+        for (label, seq_tup_read, seq_scan, idx_scan, expected) in [
+            (
+                "exactly 100 000 rows read sequentially",
+                "100000",
+                "2",
+                "1",
+                true,
+            ),
+            ("one row below it", "99999", "2", "1", false),
+            (
+                "equal scan counts are not more sequential",
+                "100000",
+                "2",
+                "2",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                !WorkloadAnalyzer::new()
+                    .analyze(&[], &table(seq_tup_read, seq_scan, idx_scan), &[])
+                    .findings
+                    .is_empty(),
+                expected,
+                "{label}"
+            );
+        }
+        let index = |index_bytes: &str, idx_scan: &str| {
+            rows(json!([{
+                "schemaname": "public", "indexrelname": "i",
+                "index_bytes": index_bytes, "idx_scan": idx_scan,
+                "idx_tup_read": "0", "indisunique": "f", "indisprimary": "f"
+            }]))
+        };
+        for (label, index_bytes, idx_scan, expected) in [
+            ("exactly 1 MiB unused", "1048576", "0", true),
+            ("one byte below it", "1048575", "0", false),
+            ("one scan is use", "1048576", "1", false),
+        ] {
+            assert_eq!(
+                !WorkloadAnalyzer::new()
+                    .analyze(&[], &[], &index(index_bytes, idx_scan))
+                    .findings
+                    .is_empty(),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// psql renders a small `float8` in exponent form, which `track_io_timing`
+    /// makes routine for the I/O columns. Ruby's two coercions disagree about
+    /// it on purpose, and so must these.
+    #[test]
+    fn an_exponent_is_read_by_the_float_coercion_and_not_by_the_integer_one() {
+        let report = WorkloadAnalyzer::new().analyze(
+            &rows(json!([{
+                "queryid": "q", "query": "SELECT 1", "calls": "1",
+                "total_exec_time": "1.5E2", "mean_exec_time": "3e+2", "rows": "8e-05",
+                "shared_blks_hit": "1", "shared_blks_read": "0",
+                "temp_blks_written": "2e", "blk_read_time": "8e-05",
+                "blk_write_time": "1e-05"
+            }])),
+            &[],
+            &[],
+        );
+        let query = &report.queries[0];
+        // `String#to_f`
+        assert_eq!(query.total_time_ms, 150.0);
+        assert_eq!(query.mean_time_ms, 300.0);
+        assert!(
+            (query.io_time_ms - 9.0e-05).abs() < f64::EPSILON,
+            "{}",
+            query.io_time_ms
+        );
+        // `String#to_i` stops at the `e`
+        assert_eq!(query.rows, 8);
+        assert_eq!(query.temp_writes, 2);
     }
 
     #[test]

@@ -179,8 +179,23 @@ fn distinct_ids(queries: &[&WorkloadQuery]) -> Vec<String> {
     ids
 }
 
+/// Ruby's `Array#sum` compensates for floating-point error
+/// (Kahan-Babuška-Neumaier) rather than folding naively, and this sum is
+/// compared against a threshold: on a long workload the two can land on
+/// opposite sides of 1000 ms for the same inputs.
 fn total_time(queries: &[&WorkloadQuery]) -> f64 {
-    queries.iter().map(|query| query.total_time_ms).sum()
+    let (mut sum, mut compensation) = (0.0_f64, 0.0_f64);
+    for query in queries {
+        let value = query.total_time_ms;
+        let next = sum + value;
+        compensation += if sum.abs() >= value.abs() {
+            (sum - next) + value
+        } else {
+            (value - next) + sum
+        };
+        sum = next;
+    }
+    sum + compensation
 }
 
 /// A `(schema, relation)` pair, as the catalog spells it.
@@ -425,5 +440,29 @@ mod tests {
             })
         );
         assert_eq!(rendered["redundant_indexes"], json!([]));
+    }
+
+    /// A redundant pair serializes as a two-element array, the way mxrb's
+    /// `[left_name, right_name]` does — not as an object with field names
+    /// nobody on the other side would recognize.
+    #[test]
+    fn a_redundant_pair_serializes_as_the_two_names_in_order() {
+        let advice = IndexAdvisor::new().analyze(&report(
+            vec![],
+            vec![],
+            json!([
+                {"schemaname": "public", "relname": "orders", "indexrelname": "a",
+                 "indexdef": "CREATE INDEX a ON orders USING btree (status)"},
+                {"schemaname": "public", "relname": "orders", "indexrelname": "b",
+                 "indexdef": "CREATE INDEX b ON orders USING btree (\"status\")"},
+                {"schemaname": "public", "relname": "orders", "indexrelname": "c",
+                 "indexdef": "CREATE INDEX c ON orders USING btree (status)"}
+            ]),
+        ));
+        assert_eq!(
+            serde_json::to_value(&advice).unwrap()["redundant_indexes"],
+            json!([["a", "b"], ["a", "c"], ["b", "c"]]),
+            "every overlapping pair is named, in catalog order"
+        );
     }
 }

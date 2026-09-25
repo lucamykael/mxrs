@@ -197,7 +197,19 @@ read-only session with every row still present afterwards. The same captured
 an identical `--json` payload, key order included.
 
 `Oql::WorkloadAnalyzer`'s and `Oql::IndexAdvisor`'s specs are ported the same
-way, and the live check goes further: on a 300 000-row table with a duplicated
+way, every workload threshold is pinned on both sides of its boundary, and the
+three catalog queries are asserted against literal SQL rather than against the
+constants that produce them — dropping the `pg_stat_statements` exclusion would
+let the report rank the query that produced it, and dropping `i.indisprimary`
+would turn every primary-key index over 1 MiB into a false `unused_large_index`.
+
+One coercion is worth knowing about: psql renders a small `float8` in exponent
+form, which `track_io_timing` makes routine for the I/O columns. MXRB reads
+those with `String#to_f` and the row counts with `String#to_i`, and the two
+disagree about `8e-05` on purpose — 0.00008 against 8. This reads them the
+same way.
+
+The live check goes further: on a 300 000-row table with a duplicated
 index and a handful of repeated queries, the three captured statistics
 catalogs were fed to MXRB's own analyzers, and both the `workload` and the
 `indexes` payloads came out identical to this one — key order included, down
