@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 mxrs-runtime = { path = "../mxrs-runtime" }
 mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-relational-schema = { path = "../../model/mxrs-relational-schema" }
 rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
 sha2 = "0.10"
 serde_json.workspace = true

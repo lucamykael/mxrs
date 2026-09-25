@@ -12,8 +12,8 @@ workspace = true
 
 [dependencies]
 mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-relational-schema = { path = "../../model/mxrs-relational-schema" }
 regex = "1"
-sha2 = "0.10"
 serde.workspace = true
 # `preserve_order` is load-bearing here, not incidental: a workload baseline
 # is a JSON object keyed by query id, and its key order is part of the

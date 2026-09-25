@@ -8,8 +8,8 @@ pub mod workload;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use mxrs_relational_schema::physical_name;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OqlError {
@@ -185,12 +185,6 @@ fn runtime_catalog(project: &mxrs_model::Project) -> Result<RuntimeCatalog> {
         entities,
         associations: relations,
     })
-}
-
-fn physical_name(kind: &str, key: &str) -> String {
-    let digest = Sha256::digest(key.as_bytes());
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("mxrb_{kind}_{}", &hex[..20])
 }
 
 pub fn catalog(project: &mxrs_model::Project) -> Result<Vec<Query>> {

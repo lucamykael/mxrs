@@ -42,6 +42,10 @@ const METADATA_SCHEMA: &str = "CREATE TABLE mxrs_runtime_metadata (
 pub enum SqliteRuntimeError {
     #[error("SQLite runtime storage failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A question the schema itself answers — an unknown or ambiguous name —
+    /// which is invalid regardless of the storage behind it.
+    #[error("{0}")]
+    Schema(#[from] mxrs_relational_schema::SchemaError),
     #[error("persistent members for {entity}/{id} are invalid JSON: {source}")]
     Json {
         entity: String,

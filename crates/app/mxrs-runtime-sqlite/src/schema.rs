@@ -1,139 +1,30 @@
-//! Relational schema derivation and migration for the runtime database.
+//! SQLite migration for the runtime database.
 //!
-//! Ports `lib/mxrb/runtime/schema_migrator.rb`: a deterministic SQLite
-//! schema derived from the parsed Mendix project — one table per
-//! persistable, non-view entity, one join table per association, physical
-//! names keyed by storage GUIDs so renames never lose data — plus an
-//! in-place migration that adds what is missing, rebuilds what changed,
-//! and refuses destructive evolutions unless explicitly allowed. Table
-//! names and the `mxrb_schema_*` metadata catalog are byte-compatible with
-//! mxrb's, so a database created by either tool migrates under the other.
+//! Ports the applying half of `lib/mxrb/runtime/schema_migrator.rb`: an
+//! in-place migration that adds what is missing, rebuilds what changed, and
+//! refuses destructive evolutions unless explicitly allowed. The schema being
+//! applied is derived by `mxrs-relational-schema` and is the same one every
+//! other backend sees; what lives here is SQLite's column types, its DDL, and
+//! its table-rebuild dance.
+//!
+//! Table names and the `mxrb_schema_*` metadata catalog are byte-compatible
+//! with mxrb's, so a database created by either tool migrates under the other.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mxrs_model::{AttributeType, Module};
+use mxrs_model::AttributeType;
+pub use mxrs_relational_schema::{
+    AssociationSchema, EntitySchema, MigrationResult, RemovedItem, RuntimeSchema, SchemaColumn,
+    derive, logical_type, physical_name,
+};
 use rusqlite::{Connection, OptionalExtension as _, params};
-use sha2::{Digest, Sha256};
 
 use crate::{Result, SqliteRuntimeError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchemaColumn {
-    pub name: String,
-    pub storage_key: String,
-    pub sql_name: String,
-    pub sql_type: &'static str,
-    pub kind: AttributeType,
-    pub default: Option<String>,
-    pub required: bool,
-    pub unique: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntitySchema {
-    pub name: String,
-    pub storage_key: String,
-    pub table: String,
-    pub columns: Vec<SchemaColumn>,
-    /// `(sql_name, sql_type)` pairs for the enabled system members.
-    pub system_members: Vec<(&'static str, &'static str)>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssociationSchema {
-    pub name: String,
-    pub qualified_name: String,
-    pub storage_key: String,
-    pub table: String,
-    pub from_entity: String,
-    pub to_entity: String,
-    /// `true` for `Reference` (each source at most one target).
-    pub reference: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RuntimeSchema {
-    pub entities: Vec<EntitySchema>,
-    pub associations: Vec<AssociationSchema>,
-}
-
-impl RuntimeSchema {
-    /// Resolves a stored entity name against the current model. `Ok(None)`
-    /// means the model no longer declares it — a migration question the
-    /// caller answers, not an error by itself. An unqualified name matching
-    /// several modules stays an error: never a silent pick.
-    pub fn lookup(&self, name: &str) -> Result<Option<&EntitySchema>> {
-        if let Some(exact) = self.entities.iter().find(|entity| entity.name == name) {
-            return Ok(Some(exact));
-        }
-        let matches: Vec<&EntitySchema> = self
-            .entities
-            .iter()
-            .filter(|entity| entity.name.rsplit('.').next() == Some(name))
-            .collect();
-        match matches.as_slice() {
-            [only] => Ok(Some(only)),
-            [] => Ok(None),
-            _ => Err(SqliteRuntimeError::InvalidSchema(format!(
-                "ambiguous entity {name}"
-            ))),
-        }
-    }
-
-    pub fn entity(&self, name: &str) -> Result<&EntitySchema> {
-        self.lookup(name)?
-            .ok_or_else(|| SqliteRuntimeError::InvalidSchema(format!("unknown entity {name}")))
-    }
-
-    pub fn association(&self, name: &str) -> Result<&AssociationSchema> {
-        let matches: Vec<&AssociationSchema> = self
-            .associations
-            .iter()
-            .filter(|candidate| {
-                candidate.qualified_name == name
-                    || candidate.name == name
-                    || candidate.qualified_name.rsplit('.').next() == Some(name)
-            })
-            .collect();
-        match matches.as_slice() {
-            [only] => Ok(only),
-            [] => Err(SqliteRuntimeError::InvalidSchema(format!(
-                "unknown association {name}"
-            ))),
-            _ => Err(SqliteRuntimeError::InvalidSchema(format!(
-                "ambiguous association {name}"
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MigrationResult {
-    pub created_tables: Vec<String>,
-    pub added_columns: Vec<String>,
-    pub rebuilt_tables: Vec<String>,
-}
-
-/// One removal a migration would perform; carried by the destructive-refusal
-/// error so callers can present exactly what would be lost.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemovedItem {
-    pub kind: &'static str,
-    pub name: String,
-    pub table: String,
-    pub storage_key: String,
-    pub entity_key: Option<String>,
-    pub column: Option<String>,
-}
-
-const SYSTEM_COLUMNS: [(&str, &str, &str); 4] = [
-    ("owner", "__owner_id", "TEXT"),
-    ("created_date", "__created_at", "TEXT"),
-    ("changed_date", "__changed_at", "TEXT"),
-    ("changed_by", "__changed_by_id", "TEXT"),
-];
-
-fn sql_type(kind: AttributeType) -> &'static str {
+/// SQLite column types. The schema itself is dialect-independent and lives
+/// in `mxrs-relational-schema`; only the mapping from a Mendix attribute to a
+/// column type belongs to a backend.
+const fn sql_type(kind: AttributeType) -> &'static str {
     match kind {
         AttributeType::Integer
         | AttributeType::Long
@@ -148,158 +39,9 @@ fn sql_type(kind: AttributeType) -> &'static str {
     }
 }
 
-/// `mxrb_<kind>_<sha256(key)[0,20]>` — mxrb's physical naming, kept verbatim
-/// for database compatibility.
-fn physical_name(kind: &str, key: &str) -> String {
-    let digest = Sha256::digest(key.as_bytes());
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("mxrb_{kind}_{}", &hex[..20])
-}
-
-/// Ports `SchemaMigrator.derive`.
-pub fn derive(modules: &[Module]) -> RuntimeSchema {
-    let mut entities = Vec::new();
-    let mut associations = Vec::new();
-    for module in modules {
-        let Some(module_name) = module.name.as_deref() else {
-            continue;
-        };
-        let mut by_id: BTreeMap<String, String> = BTreeMap::new();
-        for entity in module.entities() {
-            let qualified = qualified_entity_name(module_name, entity);
-            if let Some(id) = &entity.id {
-                by_id.insert(id.clone(), qualified.clone());
-            }
-            by_id.insert(qualified.clone(), qualified);
-        }
-        for entity in module.entities() {
-            if !entity.persistable || entity.oql_view() {
-                continue;
-            }
-            entities.push(entity_schema(module_name, entity));
-        }
-        for association in module.associations() {
-            let Some(name) = association.name.as_deref() else {
-                continue;
-            };
-            let from_id = association.from_entity_id.clone().unwrap_or_default();
-            let from = by_id.get(&from_id).cloned().unwrap_or(from_id);
-            let to = resolve_target(
-                modules,
-                association.to_entity_id.as_deref().unwrap_or_default(),
-                &by_id,
-            );
-            if from.is_empty() || to.is_empty() {
-                continue;
-            }
-            let qualified = format!("{module_name}.{name}");
-            let key = association
-                .id
-                .clone()
-                .filter(|id| !id.is_empty())
-                .unwrap_or_else(|| qualified.clone());
-            associations.push(AssociationSchema {
-                name: name.to_string(),
-                qualified_name: qualified,
-                storage_key: key.clone(),
-                table: physical_name("association", &key),
-                from_entity: from,
-                to_entity: to,
-                reference: association.association_type
-                    == mxrs_model::association::AssociationType::Reference,
-            });
-        }
-    }
-    RuntimeSchema {
-        entities,
-        associations,
-    }
-}
-
-fn entity_schema(module_name: &str, entity: &mxrs_model::Entity) -> EntitySchema {
-    let qualified = qualified_entity_name(module_name, entity);
-    let mut key = entity.data_storage_guid.clone().unwrap_or_default();
-    if key.is_empty() {
-        key = entity.id.clone().unwrap_or_default();
-    }
-    if key.is_empty() {
-        key = qualified.clone();
-    }
-    let columns = entity
-        .attributes
-        .iter()
-        .map(|attribute| {
-            let mut attribute_key = attribute.data_storage_guid.clone().unwrap_or_default();
-            if attribute_key.is_empty() {
-                attribute_key = attribute.id.clone().unwrap_or_default();
-            }
-            if attribute_key.is_empty() {
-                attribute_key = format!("{key}:{}", attribute.name.as_deref().unwrap_or_default());
-            }
-            let kind = attribute.attribute_type;
-            SchemaColumn {
-                name: attribute.name.clone().unwrap_or_default(),
-                sql_name: physical_name("attribute", &attribute_key),
-                storage_key: attribute_key,
-                sql_type: sql_type(kind),
-                kind,
-                default: attribute.default_value.clone(),
-                required: attribute.required,
-                unique: attribute.unique || kind == AttributeType::AutoNumber,
-            }
-        })
-        .collect();
-    let system = &entity.system_members;
-    let system_members = SYSTEM_COLUMNS
-        .iter()
-        .filter(|(flag, _, _)| match *flag {
-            "owner" => system.owner,
-            "created_date" => system.created_date,
-            "changed_date" => system.changed_date,
-            "changed_by" => system.changed_by,
-            _ => false,
-        })
-        .map(|(_, name, kind)| (*name, *kind))
-        .collect();
-    EntitySchema {
-        name: qualified,
-        table: physical_name("entity", &key),
-        storage_key: key,
-        columns,
-        system_members,
-    }
-}
-
-fn qualified_entity_name(module_name: &str, entity: &mxrs_model::Entity) -> String {
-    entity.qualified_name.clone().unwrap_or_else(|| {
-        format!(
-            "{module_name}.{}",
-            entity.name.as_deref().unwrap_or_default()
-        )
-    })
-}
-
-fn resolve_target(modules: &[Module], pointer: &str, local: &BTreeMap<String, String>) -> String {
-    if let Some(target) = local.get(pointer) {
-        return target.clone();
-    }
-    if pointer.contains('.') {
-        return pointer.to_string();
-    }
-    for module in modules {
-        let Some(module_name) = module.name.as_deref() else {
-            continue;
-        };
-        if let Some(entity) = module
-            .entities()
-            .iter()
-            .find(|entity| entity.id.as_deref() == Some(pointer))
-        {
-            return qualified_entity_name(module_name, entity);
-        }
-    }
-    String::new()
-}
+/// Every system member is an identifier or an ISO-8601 timestamp, and mxrb
+/// stores both as `TEXT`.
+const SYSTEM_MEMBER_TYPE: &str = "TEXT";
 
 /// Ports `SchemaMigrator#migrate!` against an open connection. The whole
 /// migration is one immediate transaction: it either completes or leaves
@@ -698,8 +440,8 @@ fn entity_columns(entity: &EntitySchema) -> Vec<(String, String)> {
     for column in &entity.columns {
         result.push((column.sql_name.clone(), column_definition(column)));
     }
-    for (name, kind) in &entity.system_members {
-        result.push(((*name).to_string(), (*kind).to_string()));
+    for name in &entity.system_members {
+        result.push(((*name).to_string(), SYSTEM_MEMBER_TYPE.to_string()));
     }
     result
 }
@@ -712,7 +454,7 @@ fn definition_of<'a>(columns: &'a [(String, String)], name: &str) -> Option<&'a 
 }
 
 fn column_definition(column: &SchemaColumn) -> String {
-    let mut definition = column.sql_type.to_string();
+    let mut definition = sql_type(column.kind).to_string();
     if column.required {
         definition.push_str(" NOT NULL");
     }
@@ -966,23 +708,6 @@ fn synchronize_metadata(connection: &Connection, schema: &RuntimeSchema) -> Resu
         )?;
     }
     Ok(())
-}
-
-/// mxrb writes Ruby symbol names (`integer`, `hashstring`, …).
-fn logical_type(kind: AttributeType) -> &'static str {
-    match kind {
-        AttributeType::String => "string",
-        AttributeType::Integer => "integer",
-        AttributeType::Long => "long",
-        AttributeType::Float => "float",
-        AttributeType::Decimal => "decimal",
-        AttributeType::Boolean => "boolean",
-        AttributeType::DateTime => "datetime",
-        AttributeType::AutoNumber => "autonumber",
-        AttributeType::HashString => "hashstring",
-        AttributeType::Binary => "binary",
-        AttributeType::Enum => "enum",
-    }
 }
 
 fn prune_obsolete_metadata(connection: &Connection, schema: &RuntimeSchema) -> Result<()> {

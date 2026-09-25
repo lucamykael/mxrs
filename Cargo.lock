@@ -1045,11 +1045,11 @@ dependencies = [
  "mxrs-dsl",
  "mxrs-ir",
  "mxrs-model",
+ "mxrs-relational-schema",
  "mxrs-writer",
  "regex",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror",
 ]
@@ -1130,6 +1130,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxrs-relational-schema"
+version = "0.1.0"
+dependencies = [
+ "mxrs-model",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "mxrs-runtime"
 version = "0.1.0"
 dependencies = [
@@ -1194,6 +1203,7 @@ version = "0.1.0"
 dependencies = [
  "mxrs-bson",
  "mxrs-model",
+ "mxrs-relational-schema",
  "mxrs-runtime",
  "rusqlite",
  "serde_json",

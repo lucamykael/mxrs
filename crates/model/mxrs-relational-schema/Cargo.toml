@@ -1,0 +1,16 @@
+[package]
+name = "mxrs-relational-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The dialect-independent relational schema a Mendix model deploys to: physical table and column naming, derivation, and the migration vocabulary shared by every storage backend."
+
+[lints]
+workspace = true
+
+[dependencies]
+mxrs-model = { path = "../mxrs-model" }
+sha2 = "0.10"
+thiserror.workspace = true
