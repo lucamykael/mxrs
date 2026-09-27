@@ -2613,7 +2613,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a flat, Clean Architecture layout: persisted entities are individual files under `src/domain/entities/`; view and non-persistable entities are DTO files under `src/application/dto/`; each supported server flow is an individual use-case under `src/application/use_cases/`; HTTP controllers and routes live under `src/presentation/`; repositories, database adapters, and imported-model persistence live under `src/infrastructure/`. Mendix modules remain metadata, rather than becoming nested Rust folders. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. Supported server-side microflows are reconstructed as typed use cases; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a flat, Clean Architecture layout: persisted entities are individual `#[derive(MxEntity)]` structs under `src/domain/entities/` (entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place); view and non-persistable entities are DTO files under `src/application/dto/`; each supported server flow is an individual use-case under `src/application/use_cases/`; HTTP controllers and routes live under `src/presentation/`; repositories, database adapters, and imported-model persistence live under `src/infrastructure/`. Mendix modules remain metadata, rather than becoming nested Rust folders. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. Supported server-side microflows are reconstructed as typed use cases; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -3798,6 +3798,230 @@ fn render_entity_file(
     out
 }
 
+/// Renders a Mendix entity as a typed `#[derive(MxEntity)]` struct — the
+/// same authoring surface a hand author uses — instead of an imperative IR
+/// dump. Returns `None` when the entity carries something the derive cannot
+/// yet express (an image, an OQL view source, indexes, lifecycle callbacks,
+/// or names that do not survive as Rust identifiers); those fall back to
+/// [`render_entity_file`], so nothing is lost, only less eloquent.
+///
+/// Equivalence with the IR renderer is deliberate, not incidental: the
+/// derive lowers to the same `mxrs-dsl` builder calls, attribute defaults
+/// (`None`, `false`) match [`::mxrs_ir::AttributeDecl::new`], and the
+/// eligibility gate excludes exactly the fields where "preserve imported"
+/// and "explicitly empty" could diverge.
+fn render_typed_entity_file(module_name: &str, entity: &Entity) -> Option<String> {
+    let entity_name = entity.name.as_deref().filter(|name| !name.is_empty())?;
+    if entity.oql_view()
+        || entity
+            .image
+            .as_deref()
+            .is_some_and(|image| !image.is_empty())
+        || !entity.indexes.is_empty()
+        || !entity.lifecycle.is_empty()
+    {
+        return None;
+    }
+    // The struct is UpperCamelCase like any Rust type; when Mendix's own
+    // name differs (`Custom_FormData`), `name = "..."` keeps the model's.
+    let mut type_name = derive_pascal_case(&sanitize_ident(entity_name));
+    if type_name.starts_with(|c: char| c.is_ascii_digit()) {
+        type_name.insert(0, '_');
+    }
+    if type_name.is_empty() || rust_keyword(&type_name) {
+        return None;
+    }
+
+    let mut attributes = entity.attributes.clone();
+    attributes.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut seen = std::collections::HashSet::new();
+    let mut fields = String::new();
+    for attribute in &attributes {
+        let kind = project_attr_keyword(attribute.attribute_type)?;
+        let mendix_name = attribute.name.as_deref().filter(|name| !name.is_empty())?;
+        let field = snake_ident(mendix_name);
+        if rust_keyword(&field) || !seen.insert(field.clone()) {
+            return None;
+        }
+        let mut options = Vec::new();
+        if derive_pascal_case(&field) != mendix_name {
+            options.push(format!("name = {mendix_name:?}"));
+        }
+        // The kinds the derive infers from the field type stay implicit.
+        let (field_type, explicit_kind) = match kind {
+            "string" => ("MxString", false),
+            "integer" => ("MxInteger", false),
+            "long" => ("MxLong", false),
+            "float" => ("MxFloat", false),
+            "decimal" => ("MxDecimal", false),
+            "boolean" => ("MxBool", false),
+            "datetime" => ("MxDateTime", false),
+            "autonumber" => ("MxLong", true),
+            "hash_string" => ("MxString", true),
+            "binary" => ("Vec<u8>", true),
+            "enumeration" => ("MxString", true),
+            _ => return None,
+        };
+        if explicit_kind {
+            options.push(format!("kind = {kind:?}"));
+        }
+        if kind == "enumeration" {
+            let enumeration = attribute
+                .enumeration
+                .as_deref()
+                .filter(|name| !name.is_empty())?;
+            options.push(format!("enumeration = {enumeration:?}"));
+        }
+        if let Some(default) = attribute.default_value.as_deref() {
+            options.push(format!("default = {default:?}"));
+        }
+        if !attribute.documentation.is_empty() {
+            options.push(format!("documentation = {:?}", attribute.documentation));
+        }
+        if let Some(length) = attribute.length {
+            options.push(format!("length = {length}"));
+        }
+        if let Some(localize_date) = attribute.localize_date {
+            options.push(format!("localize_date = {localize_date}"));
+        }
+        if attribute.required {
+            options.push("required".to_string());
+        }
+        if attribute.unique {
+            options.push("unique".to_string());
+        }
+        if !options.is_empty() {
+            let _ = writeln!(fields, "    #[mxrs({})]", options.join(", "));
+        }
+        let _ = writeln!(fields, "    pub {field}: {field_type},");
+    }
+
+    let mut out =
+        String::from("//! Editable Mendix entity declaration.\n\nuse mxrs::prelude::*;\n\n");
+    out.push_str("#[derive(MxEntity)]\n");
+    let mut entity_options = vec![format!("module = {module_name:?}")];
+    if type_name != entity_name {
+        entity_options.insert(0, format!("name = {entity_name:?}"));
+    }
+    if !entity.documentation.is_empty() {
+        entity_options.push(format!("documentation = {:?}", entity.documentation));
+    }
+    if !entity.persistable {
+        entity_options.push("persistable = false".to_string());
+    }
+    let _ = writeln!(out, "#[mxrs({})]", entity_options.join(", "));
+    if fields.is_empty() {
+        let _ = writeln!(out, "pub struct {type_name} {{}}");
+    } else {
+        let _ = writeln!(out, "pub struct {type_name} {{\n{fields}}}");
+    }
+    let _ = writeln!(
+        out,
+        "\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({module_name:?});\n    {type_name}::mx_register(&mut module);\n    module.into_decl()\n}}"
+    );
+    Some(out)
+}
+
+/// The strict and reserved Rust keywords a generated identifier must avoid.
+fn rust_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "union"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+    )
+}
+
+/// A Mendix attribute name as a snake_case Rust field: sanitized first, then
+/// an underscore before each case boundary (`ParameterToMeasure` →
+/// `parameter_to_measure`, `APIKey` → `api_key`).
+fn snake_ident(name: &str) -> String {
+    let sanitized = sanitize_ident(name);
+    let characters: Vec<char> = sanitized.chars().collect();
+    let mut out = String::with_capacity(sanitized.len() + 4);
+    for (index, &character) in characters.iter().enumerate() {
+        if character.is_uppercase() {
+            let after_lower = index > 0
+                && (characters[index - 1].is_lowercase() || characters[index - 1].is_ascii_digit());
+            let before_lower = index > 0
+                && characters[index - 1].is_uppercase()
+                && characters.get(index + 1).is_some_and(|c| c.is_lowercase());
+            if (after_lower || before_lower) && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.extend(character.to_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+/// `#[derive(MxEntity)]`'s own field-name fallback, copied so the exporter
+/// can omit `name = "..."` exactly when the derive would reconstruct it.
+fn derive_pascal_case(field_name: &str) -> String {
+    field_name
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
 fn layer_file_stem(module_name: &str, entity_name: &str, dto: bool) -> String {
     let mut stem = format!(
         "{}_{}",
@@ -3861,7 +4085,8 @@ fn write_entity_layer_sources(destination: &Path, modules: &[Module]) -> Result<
             let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
             let dto = !entity.persistable || entity.oql_view();
             let stem = layer_file_stem(module_name, entity_name, dto);
-            let source = render_entity_file(module_name, entity, &microflows);
+            let source = render_typed_entity_file(module_name, entity)
+                .unwrap_or_else(|| render_entity_file(module_name, entity, &microflows));
             let directory = if dto {
                 destination.join("src/application/dto")
             } else {
@@ -4037,6 +4262,170 @@ mod tests {
         assert_eq!(sanitize_ident("2FA"), "_2FA");
         assert_eq!(sanitize_ident(""), "_");
         assert_eq!(sanitize_ident("Order"), "Order");
+    }
+
+    fn bare_entity(name: &str) -> Entity {
+        use mxrs_model::entity::{Location, SystemMembers};
+        Entity {
+            id: None,
+            name: Some(name.to_string()),
+            qualified_name: None,
+            documentation: String::new(),
+            persistable: true,
+            location: Location { x: 0, y: 0 },
+            data_storage_guid: None,
+            image: None,
+            export_level: String::new(),
+            generalization: None,
+            access_rules: Vec::new(),
+            indexes: Vec::new(),
+            system_members: SystemMembers::default(),
+            lifecycle: Vec::new(),
+            validation_rules: Vec::new(),
+            source: None,
+            oql_query: None,
+            native_type: None,
+            attributes: Vec::new(),
+        }
+    }
+
+    fn attribute(name: &str, attribute_type: AttributeType) -> mxrs_model::attribute::Attribute {
+        mxrs_model::attribute::Attribute {
+            id: None,
+            name: Some(name.to_string()),
+            documentation: String::new(),
+            attribute_type,
+            default_value: None,
+            data_storage_guid: None,
+            export_level: String::new(),
+            raw_type_doc: None,
+            raw_value_doc: None,
+            length: None,
+            localize_date: None,
+            enumeration: None,
+            required: false,
+            unique: false,
+        }
+    }
+
+    /// The typed renderer is the authoring surface a hand author uses: the
+    /// whole file is pinned so a regression in eloquence — a stray absolute
+    /// path, a lost option, a broken field name — fails loudly.
+    #[test]
+    fn typed_entity_files_are_derive_structs_pinned_whole() {
+        let mut entity = bare_entity("Parameter");
+        entity.documentation = "Catalog parameter.".to_string();
+        let mut limit = attribute("Limit", AttributeType::Enum);
+        limit.enumeration = Some("Catalogs.ENUM_Limit".to_string());
+        limit.default_value = Some(String::new());
+        entity.attributes.push(limit);
+        let mut measure = attribute("ParameterToMeasure", AttributeType::String);
+        measure.length = Some(50);
+        measure.required = true;
+        entity.attributes.push(measure);
+        let mut sequence = attribute("APIKey", AttributeType::AutoNumber);
+        sequence.unique = true;
+        entity.attributes.push(sequence);
+        let mut updated = attribute("UpdatedAt", AttributeType::DateTime);
+        updated.localize_date = Some(false);
+        entity.attributes.push(updated);
+
+        let rendered = render_typed_entity_file("Catalogs", &entity).expect("typed-eligible");
+        assert_eq!(
+            rendered,
+            r#"//! Editable Mendix entity declaration.
+
+use mxrs::prelude::*;
+
+#[derive(MxEntity)]
+#[mxrs(module = "Catalogs", documentation = "Catalog parameter.")]
+pub struct Parameter {
+    #[mxrs(name = "APIKey", kind = "autonumber", unique)]
+    pub api_key: MxLong,
+    #[mxrs(kind = "enumeration", enumeration = "Catalogs.ENUM_Limit", default = "")]
+    pub limit: MxString,
+    #[mxrs(length = 50, required)]
+    pub parameter_to_measure: MxString,
+    #[mxrs(localize_date = false)]
+    pub updated_at: MxDateTime,
+}
+
+pub fn declaration() -> ModuleDecl {
+    let mut module = ModuleBuilder::new("Catalogs");
+    Parameter::mx_register(&mut module);
+    module.into_decl()
+}
+"#
+        );
+
+        // A non-persistable Mendix object says so once, at the entity level.
+        let mut dto = bare_entity("AccountPasswordData");
+        dto.persistable = false;
+        let rendered = render_typed_entity_file("Administration", &dto).expect("typed-eligible");
+        assert!(
+            rendered.contains("#[mxrs(module = \"Administration\", persistable = false)]"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pub struct AccountPasswordData {}"),
+            "{rendered}"
+        );
+    }
+
+    /// What the derive cannot yet express falls back to the IR renderer —
+    /// less eloquent, never lost.
+    #[test]
+    fn entities_beyond_the_derive_surface_fall_back_to_the_ir_renderer() {
+        use mxrs_model::entity::EntityIndex;
+
+        let mut indexed = bare_entity("Order");
+        indexed
+            .attributes
+            .push(attribute("Number", AttributeType::String));
+        indexed.indexes.push(EntityIndex {
+            id: None,
+            guid: None,
+            include_offline: false,
+            members: Vec::new(),
+            raw: mxrs_bson::Document::new(),
+        });
+        assert!(render_typed_entity_file("Sales", &indexed).is_none());
+
+        let mut pictured = bare_entity("Asset");
+        pictured.image = Some("Assets.Image".to_string());
+        assert!(render_typed_entity_file("Assets", &pictured).is_none());
+
+        // Attribute names that collide once snake_cased cannot become two
+        // struct fields.
+        let mut colliding = bare_entity("Pair");
+        colliding
+            .attributes
+            .push(attribute("FooBar", AttributeType::String));
+        colliding
+            .attributes
+            .push(attribute("Foo_Bar", AttributeType::String));
+        assert!(render_typed_entity_file("Sales", &colliding).is_none());
+
+        // A keyword survives as neither a field nor a struct name.
+        let mut keyword = bare_entity("Order");
+        keyword
+            .attributes
+            .push(attribute("Type", AttributeType::String));
+        assert!(render_typed_entity_file("Sales", &keyword).is_none());
+    }
+
+    #[test]
+    fn snake_idents_break_on_case_boundaries_like_readers_expect() {
+        assert_eq!(snake_ident("ParameterToMeasure"), "parameter_to_measure");
+        assert_eq!(snake_ident("APIKey"), "api_key");
+        assert_eq!(snake_ident("WikiUrl"), "wiki_url");
+        assert_eq!(snake_ident("Max_Retries"), "max_retries");
+        assert_eq!(snake_ident("2FA"), "_2_fa");
+        assert_eq!(
+            derive_pascal_case("parameter_to_measure"),
+            "ParameterToMeasure"
+        );
+        assert_eq!(derive_pascal_case("api_key"), "ApiKey");
     }
 
     #[test]

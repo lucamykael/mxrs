@@ -36,7 +36,11 @@ impl OqlViewSourceBuilder {
 }
 
 impl ModuleBuilder {
-    pub(crate) fn new(name: impl Into<String>) -> Self {
+    /// Starts a standalone module. Public so a declaration that lives in its
+    /// own file — an entity generated as `#[derive(MxEntity)]`, say — can
+    /// assemble the one module it contributes without dragging in a whole
+    /// [`ProjectBuilder`](crate::ProjectBuilder).
+    pub fn new(name: impl Into<String>) -> Self {
         ModuleBuilder {
             decl: ModuleDecl {
                 name: name.into(),
@@ -57,7 +61,9 @@ impl ModuleBuilder {
         }
     }
 
-    pub(crate) fn into_decl(self) -> ModuleDecl {
+    /// Finishes the module. The counterpart of [`ModuleBuilder::new`] for a
+    /// standalone declaration file.
+    pub fn into_decl(self) -> ModuleDecl {
         self.decl
     }
 
