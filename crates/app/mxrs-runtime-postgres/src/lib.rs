@@ -209,6 +209,29 @@ const CATALOG_ATTRIBUTES_SQL: &str = "SELECT entity_key, storage_key, logical_na
      logical_type, required, unique_value FROM mxrb_schema_attributes";
 const CATALOG_ASSOCIATIONS_SQL: &str =
     "SELECT storage_key, logical_name, table_name FROM mxrb_schema_associations";
+const CATALOG_PRESENT_SQL: &str = "SELECT table_name FROM information_schema.tables \
+     WHERE table_schema = current_schema() AND table_name = 'mxrb_schema_entities'";
+
+/// Whether this database was written by MXRS's own schema applier.
+///
+/// `mxrb_schema_entities` is created by [`migrate`] and by the SQLite
+/// migrator, and by nothing else — a Mendix Runtime synchronizing the same
+/// model never creates it. That makes its presence the fingerprint of which of
+/// the two legitimate layouts a database has, which is what lets `mxrs serve`
+/// choose between physical and Mendix Runtime naming for OQL instead of
+/// assuming one.
+///
+/// The question is provenance, not content: a catalog with no rows yet still
+/// says the database belongs to MXRS. It is asked through
+/// `information_schema`, so an absent table is an empty result rather than a
+/// failed statement.
+///
+/// # Errors
+///
+/// [`PostgresError::Session`] when the catalog cannot be read.
+pub fn catalog_present(session: &impl SqlSession) -> Result<bool> {
+    Ok(!session.query(CATALOG_PRESENT_SQL)?.is_empty())
+}
 
 /// Brings `session`'s database in line with `schema`.
 ///
@@ -1134,6 +1157,32 @@ mod tests {
         assert_eq!(sql_literal("no", AttributeType::Boolean), "false");
         assert_eq!(sql_literal(" 42 ", AttributeType::Integer), "42");
         assert_eq!(sql_literal("O'Hara", AttributeType::String), "'O''Hara'");
+    }
+
+    /// Answers exactly one statement — the probe — so the test also pins that
+    /// the probe asks `information_schema` about `mxrb_schema_entities` and
+    /// nothing else.
+    struct ProbeSession(Vec<Map<String, Value>>);
+
+    impl SqlSession for ProbeSession {
+        fn query(&self, sql: &str) -> Result<Vec<Map<String, Value>>> {
+            assert_eq!(sql, CATALOG_PRESENT_SQL);
+            Ok(self.0.clone())
+        }
+
+        fn execute(&self, script: &str) -> Result<()> {
+            panic!("the probe must not write: {script}");
+        }
+    }
+
+    #[test]
+    fn the_catalog_probe_asks_for_the_table_not_its_rows() {
+        let row = json!({"table_name": "mxrb_schema_entities"});
+        let present = ProbeSession(vec![row.as_object().expect("a row object").clone()]);
+        assert!(catalog_present(&present).unwrap());
+        // An empty catalog is still MXRS's: the question is provenance.
+        let absent = ProbeSession(Vec::new());
+        assert!(!catalog_present(&absent).unwrap());
     }
 
     #[test]

@@ -85,7 +85,7 @@ fn command_options(
             ],
             &[],
         ),
-        "serve" => (&["--port", "--db-port"], &["--no-up"], &[]),
+        "serve" => (&["--port", "--db-port", "--oql-layout"], &["--no-up"], &[]),
         "run" => (
             &[
                 "--host",
@@ -256,7 +256,7 @@ commands! {
     "scheduled-event", "new <Module.Event> [--target DIR] [--dry-run] [--json]", "Scaffold a scheduled event and its handler microflow", run_scheduled_event;
     "search", "<file.mpr> <query> [--limit N] [--json]", "Search artifact names and documentation", run_semantic_search;
     "security", "init <Module> [--target DIR] [--dry-run] [--json]", "Scaffold module roles and project security", run_security;
-    "serve", "<file.mpr> [--port PORT] [--db-port PORT] [--no-up]", "Serve loopback read-only SQL and OQL queries over the project database", run_serve;
+    "serve", "<file.mpr> [--port PORT] [--db-port PORT] [--no-up] [--oql-layout auto|physical|mendix]", "Serve loopback read-only SQL and OQL queries over the project database", run_serve;
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
     "translate-oql", "<query> [--dialect postgresql|sql_server|ansi]", "Translate the supported safe OQL subset", run_translate_oql;
     "team-server", "login --pat-file FILE [--json] | status DIR [--json]", "Configure a PAT pointer or inspect a local Team Server repository", run_team_server;
@@ -2853,8 +2853,21 @@ fn run_serve(mut args: Vec<String>) -> ExitCode {
         }
     };
     let prepare = !take_flag(&mut args, "--no-up");
+    let layout = match take_value(&mut args, "--oql-layout")
+        .as_deref()
+        .unwrap_or("auto")
+        .parse::<mxrs_cli::serve::OqlLayout>()
+    {
+        Ok(layout) => layout,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     if args.len() != 1 {
-        eprintln!("Usage: mxrs serve <file.mpr> [--port PORT] [--db-port PORT] [--no-up]");
+        eprintln!(
+            "Usage: mxrs serve <file.mpr> [--port PORT] [--db-port PORT] [--no-up] [--oql-layout auto|physical|mendix]"
+        );
         return ExitCode::FAILURE;
     }
     let workspace = match mxrs_cli::database::DatabaseWorkspace::open(&args[0], database_port) {
@@ -2868,8 +2881,16 @@ fn run_serve(mut args: Vec<String>) -> ExitCode {
         eprintln!("[mxrs] error: {error}");
         return ExitCode::FAILURE;
     }
+    let (translator, chosen) = match mxrs_cli::serve::oql_translator(layout, &workspace, &args[0]) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let server = match mxrs_query_server::QueryServer::new(
         std::sync::Arc::new(mxrs_cli::serve::WorkspaceQueries(workspace)),
+        translator,
         "127.0.0.1",
         port,
     ) {
@@ -2881,6 +2902,7 @@ fn run_serve(mut args: Vec<String>) -> ExitCode {
     };
     println!("[mxrs] Read-only query server: http://127.0.0.1:{port}/query");
     println!("[mxrs] Accepts POST JSON with an sql or oql field");
+    println!("[mxrs] OQL layout: {chosen}");
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

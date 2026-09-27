@@ -153,15 +153,15 @@ backfill rows that already exist. Adding a *required* attribute to a table
 that already has rows, with no default to give them, fails the whole migration
 — PostgreSQL refuses the column and the transaction rolls back.
 
-**`db sync` does not make `mxrs serve`'s OQL queries resolve.** The two target
-different physical layouts: `sync` writes MXRS's own (`mxrb_entity_<hash>`,
-shared with the SQLite backend and with MXRB's `SchemaMigrator`), while
-`serve` translates OQL to Mendix Runtime naming (`"Sales$Order"`), which is
-what MXRB's OQL server reads because MXRB's `db sync` produces it via the
-Runtime. Raw SQL against the tables `sync` creates works today; OQL against
-them needs `serve` to be given the physical catalog, which `mxrs-oql` can
-already produce (`confidence: "physical"`) but `serve` does not pass. That is
-a named gap, not a surprise.
+**Two physical layouts exist, and `serve` chooses per database.** `sync`
+writes MXRS's own layout (`mxrb_entity_<hash>`, shared with the SQLite backend
+and with MXRB's `SchemaMigrator`), while a database the Mendix Runtime
+synchronized uses Mendix Runtime naming (`"Sales$Order"`) — the only layout
+MXRB's OQL server ever reads. `mxrs serve` probes for the `mxrb_schema_*`
+catalog `sync` leaves behind and translates OQL to whichever layout the
+database actually has (`--oql-layout` in
+[the serve contract](serve.md) overrides the probe). So after a `sync`, both
+raw SQL and OQL resolve against the created tables.
 
 ## Cumulative statistics
 

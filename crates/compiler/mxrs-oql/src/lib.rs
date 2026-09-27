@@ -68,10 +68,27 @@ struct EntityRelation {
     columns: BTreeMap<String, String>,
 }
 
+/// The storage identities a model deploys to: which table each entity lives
+/// in and which column each attribute becomes, under the same stable SHA-256
+/// naming contract every MXRS storage backend uses.
+///
+/// Deriving it parses the whole model, so a long-lived caller — `mxrs serve`
+/// answering one request after another — derives it once and keeps it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct RuntimeCatalog {
+pub struct RuntimeCatalog {
     entities: BTreeMap<String, EntityRelation>,
     associations: Vec<AssociationRelation>,
+}
+
+impl RuntimeCatalog {
+    /// Derives the catalog from a model.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the model's own error when its modules cannot be read.
+    pub fn from_project(project: &mxrs_model::Project) -> Result<Self> {
+        runtime_catalog(project)
+    }
 }
 
 /// Derives the association tables using the same stable SHA-256 naming
@@ -258,20 +275,36 @@ pub fn parameters(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// Projects OQL onto Mendix Runtime naming (`"Sales$Order"`, `o."Number"`) —
+/// the layout a database the Mendix Runtime created has. Without storage
+/// identities an association path cannot be expanded, so those queries come
+/// back unsupported instead of guessed.
 pub fn translate(source: &str, dialect: Dialect) -> Projection {
     translate_with_catalog(source, dialect, None)
 }
 
-/// Projects OQL stored in an MPR onto the physical tables created by MXRS's
-/// SQLite runtime. Unlike [`translate`], this mode has the storage identities
-/// needed to expand an association-path `JOIN` without guessing.
+/// Projects OQL onto the physical tables MXRS's own storage backends create.
+/// Unlike [`translate`], this mode has the storage identities needed to expand
+/// an association-path `JOIN` without guessing.
+#[must_use]
+pub fn translate_physical(source: &str, dialect: Dialect, catalog: &RuntimeCatalog) -> Projection {
+    translate_with_catalog(source, dialect, Some(catalog))
+}
+
+/// [`translate_physical`] for a caller that has the model rather than a
+/// derived catalog. Deriving parses the whole model; a caller translating more
+/// than one query should hold a [`RuntimeCatalog`] instead.
+///
+/// # Errors
+///
+/// Propagates the model's own error when its modules cannot be read.
 pub fn translate_project(
     source: &str,
     dialect: Dialect,
     project: &mxrs_model::Project,
 ) -> Result<Projection> {
-    let catalog = runtime_catalog(project)?;
-    Ok(translate_with_catalog(source, dialect, Some(&catalog)))
+    let catalog = RuntimeCatalog::from_project(project)?;
+    Ok(translate_physical(source, dialect, &catalog))
 }
 
 type Aliases = BTreeMap<String, Option<EntityRelation>>;

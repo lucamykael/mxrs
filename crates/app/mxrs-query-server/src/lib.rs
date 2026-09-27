@@ -7,6 +7,12 @@
 //! the executor, whose own read-only statement validation is the enforcement
 //! boundary. The server never opens a database itself — callers inject a
 //! [`QueryRows`] executor, which keeps the HTTP contract testable offline.
+//!
+//! Which table naming the translation targets is the caller's decision too:
+//! two legitimate layouts exist (the Mendix Runtime's, and the physical one
+//! MXRS's own `db sync` writes), and only the caller knows which one the
+//! database it opened actually has. The [`TranslateOql`] seam carries that
+//! decision; [`LogicalOql`] is mxrb's — Mendix Runtime naming.
 
 use std::future::{Future, pending};
 use std::net::SocketAddr;
@@ -46,6 +52,25 @@ pub trait QueryRows: Send + Sync {
     ) -> Result<Vec<Map<String, Value>>, QueryError>;
 }
 
+/// How an `oql` request becomes SQL. The projection carries its own outcome:
+/// `sql: None` plus warnings is a refusal the server reports as the client's
+/// error, exactly like mxrb's translator.
+pub trait TranslateOql: Send + Sync {
+    fn translate(&self, oql: &str) -> mxrs_oql::Projection;
+}
+
+/// Mendix Runtime naming (`"Sales$Order"`, `o."Number"`) — the layout of a
+/// database the Mendix Runtime created, and the only one mxrb's server knows.
+/// Use it to serve such a database; a database written by MXRS's own
+/// `db sync` needs the caller to supply a physical translator instead.
+pub struct LogicalOql;
+
+impl TranslateOql for LogicalOql {
+    fn translate(&self, oql: &str) -> mxrs_oql::Projection {
+        mxrs_oql::translate(oql, mxrs_oql::Dialect::PostgreSql)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("the query server must bind to a loopback address")]
@@ -56,15 +81,25 @@ pub enum ServerError {
     Serve(#[source] std::io::Error),
 }
 
-pub struct QueryServer {
+/// What a request handler needs: where queries run and how OQL becomes SQL.
+struct ServerState {
     executor: Arc<dyn QueryRows>,
+    translator: Arc<dyn TranslateOql>,
+}
+
+pub struct QueryServer {
+    state: Arc<ServerState>,
     host: String,
     port: u16,
 }
 
 impl QueryServer {
+    /// The translator is explicit because no default is safe: against the
+    /// wrong layout every OQL query fails with `relation ... does not exist`.
+    /// Pass [`LogicalOql`] for mxrb's behavior.
     pub fn new(
         executor: Arc<dyn QueryRows>,
+        translator: Arc<dyn TranslateOql>,
         host: impl Into<String>,
         port: u16,
     ) -> Result<Self, ServerError> {
@@ -73,7 +108,10 @@ impl QueryServer {
             return Err(ServerError::NotLoopback);
         }
         Ok(Self {
-            executor,
+            state: Arc::new(ServerState {
+                executor,
+                translator,
+            }),
             host,
             port,
         })
@@ -92,7 +130,7 @@ impl QueryServer {
     pub fn router(&self) -> Router {
         Router::new()
             .fallback(dispatch)
-            .with_state(self.executor.clone())
+            .with_state(self.state.clone())
     }
 
     pub async fn serve(self) -> Result<(), ServerError> {
@@ -131,9 +169,9 @@ impl QueryServer {
 /// Runs one already-parsed request payload. Public so the CLI can offer the
 /// same contract without HTTP if it ever needs to, and so tests can bypass
 /// the transport.
-pub fn execute(executor: &dyn QueryRows, payload: &Value) -> Value {
+pub fn execute(executor: &dyn QueryRows, translator: &dyn TranslateOql, payload: &Value) -> Value {
     let started = Instant::now();
-    match query_sql(payload) {
+    match query_sql(translator, payload) {
         Ok((sql, warnings, params)) => match executor.query_rows(&sql, &params) {
             Ok(rows) => {
                 json!({
@@ -153,7 +191,7 @@ pub fn execute(executor: &dyn QueryRows, payload: &Value) -> Value {
 /// A statement ready to execute: SQL, translator warnings, bound parameters.
 type PreparedQuery = (String, Vec<String>, Map<String, Value>);
 
-fn query_sql(payload: &Value) -> Result<PreparedQuery, String> {
+fn query_sql(translator: &dyn TranslateOql, payload: &Value) -> Result<PreparedQuery, String> {
     let Value::Object(payload) = payload else {
         return Err("JSON body must be an object".to_string());
     };
@@ -170,11 +208,15 @@ fn query_sql(payload: &Value) -> Result<PreparedQuery, String> {
     if !sql.is_empty() {
         return Ok((sql, Vec::new(), params));
     }
-    translate_oql(&oql, params)
+    translate_oql(translator, &oql, params)
 }
 
-fn translate_oql(oql: &str, params: Map<String, Value>) -> Result<PreparedQuery, String> {
-    let projection = mxrs_oql::translate(oql, mxrs_oql::Dialect::PostgreSql);
+fn translate_oql(
+    translator: &dyn TranslateOql,
+    oql: &str,
+    params: Map<String, Value>,
+) -> Result<PreparedQuery, String> {
+    let projection = translator.translate(oql);
     let Some(sql) = projection.sql else {
         return Err(projection.warnings.join("; "));
     };
@@ -221,7 +263,7 @@ fn error_payload(error: &QueryError, started: Instant) -> Value {
     })
 }
 
-async fn dispatch(State(executor): State<Arc<dyn QueryRows>>, request: Request) -> Response {
+async fn dispatch(State(state): State<Arc<ServerState>>, request: Request) -> Response {
     if request.method() != Method::POST {
         return render(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -255,14 +297,17 @@ async fn dispatch(State(executor): State<Arc<dyn QueryRows>>, request: Request) 
             );
         }
     };
-    let result =
-        match tokio::task::spawn_blocking(move || execute(executor.as_ref(), &payload)).await {
-            Ok(result) => result,
-            Err(_) => json!({
-                "ok": false,
-                "error": { "code": "query_failed", "message": "query execution panicked" },
-            }),
-        };
+    let result = match tokio::task::spawn_blocking(move || {
+        execute(state.executor.as_ref(), state.translator.as_ref(), &payload)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => json!({
+            "ok": false,
+            "error": { "code": "query_failed", "message": "query execution panicked" },
+        }),
+    };
     let status = if result["ok"] == Value::Bool(true) {
         StatusCode::OK
     } else if result["error"]["code"] == "invalid_request" {
@@ -318,7 +363,7 @@ mod tests {
     }
 
     fn server(executor: impl QueryRows + 'static) -> QueryServer {
-        QueryServer::new(Arc::new(executor), "127.0.0.1", 4567).unwrap()
+        QueryServer::new(Arc::new(executor), Arc::new(LogicalOql), "127.0.0.1", 4567).unwrap()
     }
 
     async fn post(router: Router, body: &str) -> (StatusCode, Value) {
@@ -340,10 +385,23 @@ mod tests {
     #[test]
     fn the_server_only_binds_loopback_hosts() {
         for host in ["127.0.0.1", "::1", "localhost"] {
-            assert!(QueryServer::new(Arc::new(FakeRows(Ok(Vec::new()))), host, 4567).is_ok());
+            assert!(
+                QueryServer::new(
+                    Arc::new(FakeRows(Ok(Vec::new()))),
+                    Arc::new(LogicalOql),
+                    host,
+                    4567
+                )
+                .is_ok()
+            );
         }
         assert!(matches!(
-            QueryServer::new(Arc::new(FakeRows(Ok(Vec::new()))), "0.0.0.0", 4567),
+            QueryServer::new(
+                Arc::new(FakeRows(Ok(Vec::new()))),
+                Arc::new(LogicalOql),
+                "0.0.0.0",
+                4567
+            ),
             Err(ServerError::NotLoopback)
         ));
     }
@@ -431,7 +489,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn oql_is_translated_and_its_parameters_must_match_exactly() {
         let capture = Arc::new(Capture::default());
-        let router = QueryServer::new(capture.clone(), "127.0.0.1", 4567)
+        let router = QueryServer::new(capture.clone(), Arc::new(LogicalOql), "127.0.0.1", 4567)
             .unwrap()
             .router();
         let (status, payload) = post(
@@ -476,6 +534,37 @@ mod tests {
                 .push((sql.to_string(), params.clone()));
             Ok(Vec::new())
         }
+    }
+
+    /// Rewrites every query to a fixed statement, so the test can tell the
+    /// executor received the *injected* translation, not [`LogicalOql`]'s.
+    struct FixedTranslation;
+
+    impl TranslateOql for FixedTranslation {
+        fn translate(&self, _oql: &str) -> mxrs_oql::Projection {
+            let mut projection = mxrs_oql::translate("FROM A.B SELECT C", mxrs_oql::Dialect::Ansi);
+            projection.sql = Some("SELECT 'physical'".to_string());
+            projection
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oql_goes_through_the_injected_translator_not_a_default() {
+        let capture = Arc::new(Capture::default());
+        let router = QueryServer::new(
+            capture.clone(),
+            Arc::new(FixedTranslation),
+            "127.0.0.1",
+            4567,
+        )
+        .unwrap()
+        .router();
+        let (status, payload) =
+            post(router, r#"{"oql": "FROM Sales.Order AS o SELECT o/Total"}"#).await;
+        assert_eq!(status, StatusCode::OK, "{payload}");
+        let calls = capture.calls.lock().unwrap();
+        let (sql, _) = calls.first().expect("executor called");
+        assert_eq!(sql, "SELECT 'physical'");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -4,8 +4,9 @@
 //! PostgreSQL only. Mendix Runtime boot, schema synchronization and workload
 //! statistics remain outside this surface.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use mxrs_oql::index_advisor::{IndexAdvice, IndexAdvisor};
 use mxrs_oql::plan::{IndexCatalogEntry, PlanAnalyzer, PlanReport};
@@ -271,6 +272,25 @@ impl DatabaseWorkspace {
         )?)
     }
 
+    /// Whether this workspace's database carries MXRS's own schema catalog —
+    /// the question `mxrs serve` asks to decide which table naming its OQL
+    /// should target. See [`mxrs_runtime_postgres::catalog_present`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database cannot be read.
+    pub fn catalog_present(&self) -> Result<bool, DatabaseError> {
+        self.catalog_present_with(&CommandDocker)
+    }
+
+    fn catalog_present_with(&self, docker: &impl Docker) -> Result<bool, DatabaseError> {
+        let session = WorkspaceSession {
+            workspace: self,
+            docker,
+        };
+        mxrs_runtime_postgres::catalog_present(&session).map_err(DatabaseError::from)
+    }
+
     /// The relational schema the model declares, derived the same way every
     /// backend and the OQL projection derive it.
     fn runtime_schema(&self) -> Result<RuntimeSchema, DatabaseError> {
@@ -516,8 +536,14 @@ impl DatabaseWorkspace {
     ) -> Result<Vec<Map<String, Value>>, DatabaseError> {
         let statement = read_only_statement(sql)?;
         let (statement, variables) = bind_parameters(&statement, params)?;
-        let mut arguments = vec![
-            "exec".to_string(),
+        let bound = !variables.is_empty();
+        let mut arguments = vec!["exec".to_string()];
+        if bound {
+            // The statement travels on stdin (see below), which docker only
+            // forwards when exec is interactive.
+            arguments.push("--interactive".to_string());
+        }
+        arguments.extend([
             "--env".to_string(),
             "PGOPTIONS=-c default_transaction_read_only=on".to_string(),
             self.container.clone(),
@@ -525,7 +551,7 @@ impl DatabaseWorkspace {
             "--no-psqlrc".to_string(),
             "--set".to_string(),
             "ON_ERROR_STOP=1".to_string(),
-        ];
+        ]);
         arguments.extend(variables);
         arguments.extend([
             "--username".to_string(),
@@ -534,14 +560,25 @@ impl DatabaseWorkspace {
             DATABASE.to_string(),
             "--csv".to_string(),
             "--quiet".to_string(),
-            "--command".to_string(),
-            format!("COPY ({statement}) TO STDOUT WITH CSV HEADER"),
         ]);
-        // Classified like every other statement: a query the server rejects is
-        // the caller's to fix, and `mxrs serve` turns that distinction into
-        // HTTP 400 rather than 422. Without it a missing relation reaches the
-        // client as "Docker is unavailable".
-        let output = classify(docker.output(&arguments)?)?;
+        let statement = format!("COPY ({statement}) TO STDOUT WITH CSV HEADER");
+        // A statement with bound parameters must reach psql on stdin: psql's
+        // `--command` performs no variable interpolation, so its `:'mxrs_*'`
+        // references would reach PostgreSQL verbatim and fail as syntax
+        // errors. One without them keeps `--command` — mxrb's transport —
+        // and one request either way; read_only_statement already refused
+        // multi-statement input, so stdin cannot smuggle a second one.
+        //
+        // Both paths classify: a query the server rejects is the caller's to
+        // fix, and `mxrs serve` turns that distinction into HTTP 400 rather
+        // than 422. Without it a missing relation reaches the client as
+        // "Docker is unavailable".
+        let output = if bound {
+            classify(docker.output_with_input(&arguments, &statement)?)?
+        } else {
+            arguments.extend(["--command".to_string(), statement]);
+            classify(docker.output(&arguments)?)?
+        };
         parse_csv_rows(&output)
     }
 
@@ -771,6 +808,20 @@ struct Inspection {
 trait Docker {
     fn output(&self, arguments: &[String]) -> Result<DockerOutput, DatabaseError>;
 
+    /// Like [`Docker::output`], with `input` fed to the command on stdin.
+    ///
+    /// This exists because psql's `--command` sends its string to the server
+    /// in a single request and performs **no variable interpolation** on it —
+    /// a statement carrying `:'mxrs_name'` references reaches PostgreSQL
+    /// verbatim and dies with a syntax error. A statement read from stdin is
+    /// interpolated. Documented psql behavior, confirmed live against a real
+    /// workspace (2026-09-27); the offline argv pins alone never caught it.
+    fn output_with_input(
+        &self,
+        arguments: &[String],
+        input: &str,
+    ) -> Result<DockerOutput, DatabaseError>;
+
     /// One tick of the readiness poll. A trait method so a test can wait for a
     /// server that is never actually starting without waiting for it in real
     /// time.
@@ -825,6 +876,27 @@ trait Docker {
     }
 }
 
+/// A borrowed Docker is a Docker, so a caller can lend one to a
+/// [`WorkspaceSession`] and keep it — which is how the tests hand a
+/// `MockDocker` to code that wants ownership.
+impl<D: Docker> Docker for &D {
+    fn output(&self, arguments: &[String]) -> Result<DockerOutput, DatabaseError> {
+        (**self).output(arguments)
+    }
+
+    fn output_with_input(
+        &self,
+        arguments: &[String],
+        input: &str,
+    ) -> Result<DockerOutput, DatabaseError> {
+        (**self).output_with_input(arguments, input)
+    }
+
+    fn sleep(&self) {
+        (**self).sleep();
+    }
+}
+
 struct CommandDocker;
 
 impl Docker for CommandDocker {
@@ -832,6 +904,34 @@ impl Docker for CommandDocker {
         let output = Command::new("docker")
             .args(arguments)
             .output()
+            .map_err(|error| DatabaseError::Docker(error.to_string()))?;
+        Ok(DockerOutput {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    fn output_with_input(
+        &self,
+        arguments: &[String],
+        input: &str,
+    ) -> Result<DockerOutput, DatabaseError> {
+        let mut child = Command::new("docker")
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| DatabaseError::Docker(error.to_string()))?;
+        child
+            .stdin
+            .take()
+            .expect("stdin was requested")
+            .write_all(input.as_bytes())
+            .map_err(|error| DatabaseError::Docker(error.to_string()))?;
+        let output = child
+            .wait_with_output()
             .map_err(|error| DatabaseError::Docker(error.to_string()))?;
         Ok(DockerOutput {
             success: output.status.success(),
@@ -1235,6 +1335,8 @@ mod tests {
     struct MockDocker {
         responses: RefCell<VecDeque<DockerOutput>>,
         calls: RefCell<Vec<Vec<String>>>,
+        /// The stdin payload of each `output_with_input` call, in call order.
+        inputs: RefCell<Vec<String>>,
     }
 
     impl MockDocker {
@@ -1242,6 +1344,7 @@ mod tests {
             Self {
                 responses: RefCell::new(responses.into()),
                 calls: RefCell::new(Vec::new()),
+                inputs: RefCell::new(Vec::new()),
             }
         }
     }
@@ -1253,6 +1356,15 @@ mod tests {
                 .borrow_mut()
                 .pop_front()
                 .ok_or_else(|| DatabaseError::Docker("unexpected call".to_string()))
+        }
+
+        fn output_with_input(
+            &self,
+            arguments: &[String],
+            input: &str,
+        ) -> Result<DockerOutput, DatabaseError> {
+            self.inputs.borrow_mut().push(input.to_string());
+            self.output(arguments)
         }
 
         /// The readiness poll waits on a real clock in production; a test that
@@ -1408,6 +1520,10 @@ mod tests {
         );
     }
 
+    /// A parameterized statement travels on stdin — psql's `--command`
+    /// performs no variable interpolation, so `:'mxrs_*'` references inside
+    /// one reach PostgreSQL verbatim and fail (found live 2026-09-27) —
+    /// through an `--interactive` exec so docker forwards it.
     #[test]
     fn query_rows_binds_parameters_through_psql_variables_and_enforces_read_only() {
         let directory = tempfile::tempdir().unwrap();
@@ -1429,9 +1545,10 @@ mod tests {
             .unwrap();
         let call = &docker.calls.borrow()[0];
         assert_eq!(
-            call[..8],
+            call[..9],
             [
                 "exec",
+                "--interactive",
                 "--env",
                 "PGOPTIONS=-c default_transaction_read_only=on",
                 workspace.container.as_str(),
@@ -1441,18 +1558,39 @@ mod tests {
                 "ON_ERROR_STOP=1",
             ]
         );
-        assert_eq!(call[8..10], ["--set", "mxrs_minimum=5"]);
+        assert_eq!(call[9..11], ["--set", "mxrs_minimum=5"]);
         assert!(!call.iter().any(|argument| argument.contains("mxrs_label")));
+        // The statement is stdin, not an argument.
+        assert!(!call.iter().any(|argument| argument.contains("COPY")));
+        assert_eq!(call[call.len() - 2..], ["--csv", "--quiet"]);
         assert_eq!(
-            call.last().unwrap(),
+            docker.inputs.borrow()[0],
             "COPY (SELECT name, total FROM orders WHERE total > :'mxrs_minimum' AND label IS NULL) TO STDOUT WITH CSV HEADER"
         );
-        assert_eq!(call[call.len() - 4..call.len() - 2], ["--csv", "--quiet"]);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["name"], Value::String("Sales".to_string()));
         assert_eq!(rows[0]["total"], Value::String(String::new()));
         assert_eq!(rows[1]["name"], Value::Null);
         assert_eq!(rows[1]["total"], Value::String("a\"b".to_string()));
+    }
+
+    /// Without parameters there is nothing to interpolate, and the statement
+    /// keeps mxrb's transport: one `--command`, no stdin, no `--interactive`.
+    #[test]
+    fn query_rows_without_parameters_keeps_the_command_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+        let docker = MockDocker::new(vec![output(true, "count\n3\n", "")]);
+        workspace
+            .query_rows_with(&docker, "SELECT count(*) FROM orders", &Map::new())
+            .unwrap();
+        let call = &docker.calls.borrow()[0];
+        assert_eq!(call[..2], ["exec", "--env"]);
+        assert_eq!(
+            call.last().unwrap(),
+            "COPY (SELECT count(*) FROM orders) TO STDOUT WITH CSV HEADER"
+        );
+        assert!(docker.inputs.borrow().is_empty());
     }
 
     #[test]
@@ -1534,6 +1672,32 @@ mod tests {
             case(&[("minimum", Value::from(1))], "SELECT '5'::int, :minimum"),
             case(&[("minimum", Value::from(1))], "SELECT :minimum"),
         );
+    }
+
+    /// The layout probe `mxrs serve` runs before answering OQL: a read-only
+    /// query over `information_schema`, where an absent catalog is an empty
+    /// result — not an error — and an empty catalog still counts as MXRS's.
+    #[test]
+    fn the_catalog_probe_is_read_only_and_reads_presence_not_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = workspace(&directory);
+
+        let docker = MockDocker::new(vec![output(true, "table_name\nmxrb_schema_entities\n", "")]);
+        assert!(workspace.catalog_present_with(&docker).unwrap());
+        let call = &docker.calls.borrow()[0];
+        assert!(
+            call.contains(&"PGOPTIONS=-c default_transaction_read_only=on".to_string()),
+            "{call:?}"
+        );
+        let command = call.last().unwrap();
+        assert!(command.contains("information_schema.tables"), "{command}");
+        assert!(command.contains("'mxrb_schema_entities'"), "{command}");
+
+        let docker = MockDocker::new(vec![output(true, "table_name\n", "")]);
+        assert!(!workspace.catalog_present_with(&docker).unwrap());
+
+        let docker = MockDocker::new(vec![output(false, "", "daemon permission denied")]);
+        assert!(workspace.catalog_present_with(&docker).is_err());
     }
 
     #[test]
