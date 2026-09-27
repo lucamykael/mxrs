@@ -9,6 +9,11 @@ read-only behavioral oracle; never edit it.
   idiomatic, concise, expressive, discoverable, warning-free, and organized by
   clean architecture. Exploit Rust's type system to make invalid Mendix models
   difficult or impossible to express.
+- MXRS is not a transliteration of MXRB. Where MXRB does something the Ruby
+  way, MXRS does it the Rust way — and grows its own Rust-native surfaces:
+  generated Mendix-to-Rust code leans on MXRS's own macros, DSL and style
+  conventions, reads eloquently, and is formatted exactly as rustfmt would
+  leave it. Parity of behavior, never parity of idiom.
 - Zero known errors, silent loss, misleading diagnostics, opaque generated
   Rust, placeholder implementations, or untracked partial behavior is the
   completion standard. Preserve unsupported native data losslessly outside the

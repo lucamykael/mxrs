@@ -120,6 +120,11 @@ fn command_options(
         "oql" => (&["--dialect"], &["--json"], &[]),
         "analyze" => (&["--dialect", "--sql", "--oql"], &["--json"], &[]),
         "pack" => (&["--output", "--deployment"], &["--force"], &[]),
+        "portable" => (
+            &["--output", "--deployment", "--mendix-home"],
+            &["--force"],
+            &[],
+        ),
         "package" => (&["--web", "--output", "-o"], &[], &[]),
         "search" => (&["--limit"], &["--json"], &[]),
         "translate-oql" => (&["--dialect"], &[], &[]),
@@ -240,6 +245,7 @@ commands! {
     "pack", "<file.mpr> [--output FILE.mda] [--deployment DIR] [--force]", "Package a materialized deployment into an MDA", run_pack;
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
     "portability", "<file.mpr> [--json] [--verify-round-trip] [--require-typed]", "Audit typed authoring versus lossless model preservation", run_portability;
+    "portable", "<file.mpr> [--output runtime.zip] [--deployment DIR] [--mendix-home DIR] [--force]", "Build an executable portable Runtime ZIP", run_portable;
     "page", "new <Module.Page> [--template NAME] [--chain CHAIN] [--role Module.Role] [--target DIR] [--dry-run] [--json] | templates [--json]", "Scaffold a page declaration, a page-led vertical slice, or list page templates", run_page;
     "preflight", "<file.mpr> [--json]", "Audit native compiler and runtime compatibility", run_preflight;
     "protocols", "<file.mpr> [--json]", "Audit imported Marketplace protocol connectors", run_protocols;
@@ -2980,6 +2986,49 @@ fn run_pack(mut args: Vec<String>) -> ExitCode {
         Ok(report) => {
             println!(
                 "[mxrs] Packed {} files for Mendix {}",
+                report.files, report.mendix_version
+            );
+            println!("[mxrs] SHA-256 {}", report.sha256);
+            println!("[mxrs] {}", report.path.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_portable(mut args: Vec<String>) -> ExitCode {
+    let output = take_value(&mut args, "--output");
+    let deployment = take_value(&mut args, "--deployment");
+    let mendix_home = take_value(&mut args, "--mendix-home");
+    let force = take_flag(&mut args, "--force");
+    let [path] = args.as_slice() else {
+        eprintln!(
+            "[mxrs] error: usage: mxrs portable <file.mpr> [--output runtime.zip] [--deployment DIR] [--mendix-home DIR] [--force]"
+        );
+        return ExitCode::FAILURE;
+    };
+    let model = Path::new(path);
+    // MXRB's default: `<project>/build/runtime.zip` beside the model.
+    let output = output.map(PathBuf::from).unwrap_or_else(|| {
+        model
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("build")
+            .join("runtime.zip")
+    });
+    match mxrs_packager::pack_portable(
+        model,
+        deployment.as_deref().map(Path::new),
+        mendix_home.as_deref().map(Path::new),
+        &output,
+        force,
+    ) {
+        Ok(report) => {
+            println!(
+                "[mxrs] Packed portable Runtime with {} files for Mendix {}",
                 report.files, report.mendix_version
             );
             println!("[mxrs] SHA-256 {}", report.sha256);

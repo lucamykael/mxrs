@@ -59,9 +59,16 @@ pub enum PackageError {
     StaleDeployment { compiled: String, mpr: String },
     #[error("deployment contains symlink {0}")]
     DeploymentSymlink(String),
+    #[error("Mendix Runtime is incomplete at {runtime}; missing {missing}")]
+    RuntimeIncomplete { runtime: String, missing: String },
+    #[error("portable input contains symlink {0}")]
+    PortableSymlink(String),
 }
 
 pub type Result<T> = std::result::Result<T, PackageError>;
+
+mod portable;
+pub use portable::{PortableReport, pack_portable};
 
 #[derive(Debug, Clone)]
 pub struct PackageOptions {

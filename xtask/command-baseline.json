@@ -46,7 +46,7 @@
   "pack": "partial",
   "page": "partial",
   "portability": "partial",
-  "portable": "partial",
+  "portable": "verified",
   "preflight": "partial",
   "presentation": "verified",
   "project": "verified",

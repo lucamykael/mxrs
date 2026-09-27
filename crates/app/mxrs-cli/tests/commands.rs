@@ -367,6 +367,234 @@ fn pack_refuses_unmaterialized_stale_mismatched_and_symlinked_deployments() {
     }
 }
 
+/// A synthetic Runtime tree exercising every portable input: the required
+/// launcher, an executable, a hidden file, PAD start-script templates (BOM,
+/// comment, placeholder) and PAD `etc` files.
+fn runtime_tree(root: &Path) -> PathBuf {
+    let runtime = root.join("mendix-home/runtime");
+    for directory in ["launcher", "lib/native", "pad/bin", "pad/etc"] {
+        std::fs::create_dir_all(runtime.join(directory)).unwrap();
+    }
+    std::fs::write(runtime.join("launcher/runtimelauncher.jar"), b"launcher").unwrap();
+    std::fs::write(runtime.join("lib/native/.hidden"), b"dot").unwrap();
+    std::fs::write(runtime.join("lib/tool"), b"#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            runtime.join("lib/tool"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        runtime.join("pad/bin/start.hbs"),
+        b"\xEF\xBB\xBF{{!-- generated\nheader --}}\n#!/bin/sh\nCONFIG={{DefaultConfig}}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        runtime.join("pad/bin/start.bat.hbs"),
+        b"@echo {{DefaultConfig}}\r\n",
+    )
+    .unwrap();
+    std::fs::write(runtime.join("pad/etc/example.conf"), b"# pad example\n").unwrap();
+    std::fs::write(runtime.join("pad/etc/variables.conf"), b"# pad variables\n").unwrap();
+    runtime
+}
+
+/// The whole portable contract in one archive: MXRB's layout (Runtime under
+/// `lib/runtime`, deployment roots plus `run` under `app/`, first-boot state
+/// directories, rendered start scripts and HOCON configuration), really-fixed
+/// timestamps, and refusals carrying MXRB's messages.
+#[test]
+fn portable_bundles_runtime_application_and_configuration_deterministically() {
+    let (directory, path) = fixture(false);
+    let deployment = materialized_deployment(directory.path(), "11.12.1");
+    let runtime = runtime_tree(directory.path());
+    let output = directory.path().join("runtime.zip");
+    let packed = cli(&[
+        "portable",
+        path.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--deployment",
+        deployment.to_str().unwrap(),
+        "--mendix-home",
+        runtime.to_str().unwrap(),
+    ]);
+    assert!(packed.status.success(), "{}", text_err(&packed));
+    let report = String::from_utf8(packed.stdout).unwrap();
+    assert!(
+        report.contains("Packed portable Runtime with") && report.contains("for Mendix 11.12.1"),
+        "{report}"
+    );
+    assert!(report.contains("SHA-256"), "{report}");
+
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+    let names: Vec<String> = (0..archive.len())
+        .map(|index| archive.by_index(index).unwrap().name().to_string())
+        .collect();
+    // The Runtime tree, hidden files included, lives under lib/runtime.
+    assert!(names.contains(&"lib/runtime/launcher/runtimelauncher.jar".to_string()));
+    assert!(names.contains(&"lib/runtime/lib/native/.hidden".to_string()));
+    // Deployment roots — `run` included, unlike pack — live under app/.
+    assert!(names.contains(&"app/model/model.mdp".to_string()));
+    assert!(names.contains(&"app/web/.dotfile".to_string()));
+    assert!(names.contains(&"app/run/local.bin".to_string()));
+    // data/ and log/ ship empty: local state must not reach the bundle.
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with("app/data/") && !name.ends_with('/'))
+    );
+    assert!(names.contains(&"app/data/database/".to_string()));
+    assert!(names.contains(&"app/log/".to_string()));
+    // Start scripts render from the PAD templates; etc comes from PAD files.
+    let read = |archive: &mut zip::ZipArchive<std::fs::File>, name: &str| {
+        use std::io::Read as _;
+        let mut content = String::new();
+        archive
+            .by_name(name)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+        content
+    };
+    assert_eq!(
+        read(&mut archive, "bin/start"),
+        "#!/bin/sh\nCONFIG=Default\n"
+    );
+    assert_eq!(read(&mut archive, "bin/start.bat"), "@echo Default\r\n");
+    assert_eq!(read(&mut archive, "etc/example.conf"), "# pad example\n");
+    assert_eq!(
+        read(&mut archive, "etc/variables.conf"),
+        "# pad variables\n"
+    );
+    // The rendered configuration names the model's constants section.
+    assert!(read(&mut archive, "etc/StudioPro.conf").contains("HashAlgorithm = \"BCRYPT:12\""));
+    assert!(read(&mut archive, "etc/Default").contains("include file(\"etc/StudioPro.conf\")"));
+    // Only `start` is executable; timestamps really are fixed.
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            archive.by_name("bin/start").unwrap().unix_mode(),
+            Some(0o100_755)
+        );
+        assert_eq!(
+            archive.by_name("bin/start.bat").unwrap().unix_mode(),
+            Some(0o100_644)
+        );
+        assert_eq!(
+            archive.by_name("lib/runtime/lib/tool").unwrap().unix_mode(),
+            Some(0o100_755)
+        );
+    }
+    assert_eq!(
+        archive
+            .by_name("bin/start")
+            .unwrap()
+            .last_modified()
+            .unwrap()
+            .year(),
+        2000
+    );
+
+    // Repacking after touching an unchanged source is byte-identical — the
+    // fixed time is real here, not dead code as in MXRB.
+    let first = std::fs::read(&output).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(deployment.join("web/index.html"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+    let again = cli(&[
+        "portable",
+        path.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--deployment",
+        deployment.to_str().unwrap(),
+        "--mendix-home",
+        runtime.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(again.status.success(), "{}", text_err(&again));
+    assert_eq!(first, std::fs::read(&output).unwrap());
+
+    // An existing archive is preserved unless the caller says otherwise.
+    let refused = cli(&[
+        "portable",
+        path.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--deployment",
+        deployment.to_str().unwrap(),
+        "--mendix-home",
+        runtime.to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(text_err(&refused).contains("file already exists"));
+}
+
+/// A Runtime distribution without PAD templates gets the fallback POSIX
+/// start script, and an incomplete Runtime tree is refused by name.
+#[test]
+fn portable_falls_back_without_pad_and_refuses_an_incomplete_runtime() {
+    let (directory, path) = fixture(false);
+    let deployment = materialized_deployment(directory.path(), "11.12.1");
+    let bare = directory.path().join("bare-runtime/runtime");
+    std::fs::create_dir_all(bare.join("launcher")).unwrap();
+    std::fs::write(bare.join("launcher/runtimelauncher.jar"), b"launcher").unwrap();
+    let output = directory.path().join("bare.zip");
+    let packed = cli(&[
+        "portable",
+        path.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--deployment",
+        deployment.to_str().unwrap(),
+        "--mendix-home",
+        bare.to_str().unwrap(),
+    ]);
+    assert!(packed.status.success(), "{}", text_err(&packed));
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+    {
+        use std::io::Read as _;
+        let mut start = String::new();
+        archive
+            .by_name("bin/start")
+            .unwrap()
+            .read_to_string(&mut start)
+            .unwrap();
+        assert!(start.starts_with("#!/bin/sh\nset -eu\n"), "{start}");
+        assert!(start.contains("runtimelauncher.jar"), "{start}");
+    }
+    // The fallback etc files ship when PAD provides none.
+    assert!(archive.by_name("etc/example.conf").is_ok());
+    assert!(archive.by_name("etc/variables.conf").is_ok());
+
+    let incomplete = directory.path().join("incomplete/runtime");
+    std::fs::create_dir_all(&incomplete).unwrap();
+    let refused = cli(&[
+        "portable",
+        path.to_str().unwrap(),
+        "--output",
+        directory.path().join("never.zip").to_str().unwrap(),
+        "--deployment",
+        deployment.to_str().unwrap(),
+        "--mendix-home",
+        incomplete.to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        text_err(&refused).contains("Mendix Runtime is incomplete at")
+            && text_err(&refused).contains("missing launcher/runtimelauncher.jar"),
+        "{}",
+        text_err(&refused)
+    );
+}
+
 #[test]
 fn benchmark_rejects_invalid_iterations_and_missing_models() {
     for iterations in ["0", "101", "one"] {
