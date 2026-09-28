@@ -285,6 +285,7 @@ fn import_cargo_project_inner(
     let marker_manifest = marker_manifest(&modules);
     let markers_source = mxrs_typegen::generate(&marker_manifest)?;
     let typed_markers_source = flow_export::typed_attribute_markers(&modules);
+    let action_documents = collect_action_documents(&project)?;
     drop(project);
 
     let imported = destination.join("model/imported");
@@ -360,6 +361,7 @@ fn import_cargo_project_inner(
         &documents_export.derived_enumerations,
     )?;
     let service_ports = collect_service_ports(&modules, &typed_entities);
+    let action_ports = assemble_action_ports(&action_documents, &typed_entities);
 
     write_text(
         &destination.join("Cargo.toml"),
@@ -392,12 +394,18 @@ fn import_cargo_project_inner(
     )?;
     write_text(
         &destination.join("src/domain/ports/mod.rs"),
-        &render_ports_index(&service_ports),
+        &render_ports_index(&service_ports, &action_ports),
     )?;
     for port in &service_ports {
         write_text(
             &destination.join(format!("src/domain/ports/{}.rs", port.file_stem)),
             &render_service_port(port),
+        )?;
+    }
+    for module in &action_ports {
+        write_text(
+            &destination.join(format!("src/domain/ports/{}.rs", module.file_stem)),
+            &render_action_port_file(module),
         )?;
     }
     write_text(
@@ -509,19 +517,34 @@ fn import_cargo_project_inner(
         &destination.join("src/infrastructure/database/mod.rs"),
         "//! Connection pools, migrations and database adapters belong here.\n",
     )?;
-    if service_ports.is_empty() {
-        write_text(
-            &destination.join("src/infrastructure/adapters/mod.rs"),
-            "//! External services and Mendix-specific adapters belong here.\n",
-        )?;
-    } else {
-        write_text(
-            &destination.join("src/infrastructure/adapters/mod.rs"),
-            "//! External services and Mendix-specific adapters belong here.\n\npub mod runtime_services;\n",
-        )?;
+    let mut adapters_index =
+        String::from("//! External services and Mendix-specific adapters belong here.\n");
+    if !service_ports.is_empty() || !action_ports.is_empty() {
+        adapters_index.push('\n');
+    }
+    for module in &action_ports {
+        let _ = writeln!(adapters_index, "pub mod {};", module.file_stem);
+    }
+    if !service_ports.is_empty() {
+        adapters_index.push_str("pub mod runtime_services;\n");
+    }
+    write_text(
+        &destination.join("src/infrastructure/adapters/mod.rs"),
+        &adapters_index,
+    )?;
+    if !service_ports.is_empty() {
         write_text(
             &destination.join("src/infrastructure/adapters/runtime_services.rs"),
             &render_runtime_services(&service_ports),
+        )?;
+    }
+    for module in &action_ports {
+        write_text(
+            &destination.join(format!(
+                "src/infrastructure/adapters/{}.rs",
+                module.file_stem
+            )),
+            &render_action_registry_file(module, &module.file_stem),
         )?;
     }
     write_text(
@@ -4332,15 +4355,21 @@ fn render_service_port(port: &ServicePort) -> String {
     out
 }
 
-fn render_ports_index(ports: &[ServicePort]) -> String {
-    if ports.is_empty() {
+fn render_ports_index(ports: &[ServicePort], actions: &[ActionPortModule]) -> String {
+    if ports.is_empty() && actions.is_empty() {
         return "//! Repository and external-service contracts belong here.\n".to_string();
     }
     let mut out = String::from(
-        "//! Contracts the domain exposes: one service port per Mendix module\n//! with runnable microflows. Hand-written repository and external-service\n//! contracts belong here too.\n\n",
+        "//! Contracts the domain exposes: a service port per Mendix module\n//! with runnable microflows, and action ports for the Java actions the\n//! model expects hand-written Rust to fulfill. Hand-written repository\n//! and external-service contracts belong here too.\n\n",
     );
-    for port in ports {
-        let _ = writeln!(out, "pub mod {};", port.file_stem);
+    let mut stems: Vec<&str> = ports
+        .iter()
+        .map(|port| port.file_stem.as_str())
+        .chain(actions.iter().map(|module| module.file_stem.as_str()))
+        .collect();
+    stems.sort_unstable();
+    for stem in stems {
+        let _ = writeln!(out, "pub mod {stem};");
     }
     out
 }
@@ -4428,6 +4457,331 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
             out.push_str("    }\n");
         }
         out.push_str("}\n");
+    }
+    out
+}
+
+/// One module's action ports: the Rust contracts its model-declared Java
+/// actions expect hand-written code to fulfill, plus the registration glue
+/// that adapts an implementation onto `FlowEngine::with_java_action`.
+struct ActionPortModule {
+    module_name: String,
+    file_stem: String,
+    actions: Vec<ActionPort>,
+}
+
+struct ActionPort {
+    action_name: String,
+    trait_name: String,
+    register_fn: String,
+    /// `(mendix name, argument ident, marker type, runtime type)` per
+    /// parameter, in declaration order.
+    parameters: Vec<(String, String, String, String)>,
+    /// `(marker type, runtime type)`; `None` returns unit (a void action).
+    result: Option<(String, String)>,
+}
+
+impl ActionPort {
+    fn touches_object_handles(&self) -> bool {
+        self.parameters
+            .iter()
+            .any(|(_, _, _, runtime)| runtime.contains("ObjectHandle"))
+            || self
+                .result
+                .as_ref()
+                .is_some_and(|(_, runtime)| runtime.contains("ObjectHandle"))
+    }
+}
+
+/// The `(marker, runtime)` port pair for one `CodeActions$*` type document.
+/// `None` when the type has no port representation (enumerations, generic
+/// entity types, or an entity that keeps the IR form).
+fn code_action_port_type(
+    doc: &mxrs_bson::Document,
+    typed_entities: &HashMap<String, TypedEntityTarget>,
+) -> Option<(String, String)> {
+    let raw = doc.get_str("$Type").ok()?;
+    let kind = raw
+        .strip_prefix("JavaActions$")
+        .map(|rest| format!("CodeActions${rest}"))
+        .unwrap_or_else(|| raw.to_string());
+    Some(match kind.as_str() {
+        "CodeActions$StringType" => ("mxrs::MxString".into(), "String".into()),
+        "CodeActions$BooleanType" => ("mxrs::MxBool".into(), "bool".into()),
+        "CodeActions$IntegerType" | "CodeActions$LongType" => ("mxrs::MxLong".into(), "i64".into()),
+        "CodeActions$DecimalType" | "CodeActions$FloatType" => {
+            ("mxrs::MxDecimal".into(), "f64".into())
+        }
+        "CodeActions$DateTimeType" => ("mxrs::MxDateTime".into(), "f64".into()),
+        "CodeActions$ConcreteEntityType" => {
+            let target = typed_entities.get(doc.get_str("Entity").ok()?)?;
+            if target.dto {
+                return None;
+            }
+            let path = format!(
+                "crate::domain::entities::{}::{}",
+                target.file_stem, target.type_name
+            );
+            (
+                format!("mxrs::MxObject<{path}>"),
+                format!("ObjectHandle<{path}>"),
+            )
+        }
+        "CodeActions$ListType" => {
+            let parameter = doc.get_document("Parameter").ok()?;
+            let raw_element = parameter.get_str("$Type").ok()?;
+            let element = raw_element
+                .strip_prefix("JavaActions$")
+                .map(|rest| format!("CodeActions${rest}"))
+                .unwrap_or_else(|| raw_element.to_string());
+            if element != "CodeActions$ConcreteEntityType" {
+                return None;
+            }
+            let target = typed_entities.get(parameter.get_str("Entity").ok()?)?;
+            if target.dto {
+                return None;
+            }
+            let path = format!(
+                "crate::domain::entities::{}::{}",
+                target.file_stem, target.type_name
+            );
+            (
+                format!("mxrs::MxList<{path}>"),
+                format!("Vec<ObjectHandle<{path}>>"),
+            )
+        }
+        _ => return None,
+    })
+}
+
+/// Every `JavaActions$JavaAction` declaration and the module that owns it,
+/// read while the project is still open.
+fn collect_action_documents(project: &Project) -> Result<Vec<(String, mxrs_bson::Document)>> {
+    let units = project.all_units()?;
+    let module_by_id = project
+        .modules()?
+        .into_iter()
+        .filter_map(|module| Some((module.id, module.name?)))
+        .collect::<HashMap<_, _>>();
+    let parent_by_id = units
+        .iter()
+        .map(|unit| (unit.unit_id.clone(), unit.container_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut documents = Vec::new();
+    for unit in &units {
+        let document = project
+            .mpr()
+            .parse_contents(unit)
+            .map_err(mxrs_model::ModelError::from)?;
+        if document.get_str("$Type").ok() != Some("JavaActions$JavaAction") {
+            continue;
+        }
+        let Some(module) = owning_module(&unit.container_id, &parent_by_id, &module_by_id) else {
+            continue;
+        };
+        documents.push((module, document));
+    }
+    Ok(documents)
+}
+
+/// Assembles the Java actions each module declares with a fully port-typed
+/// signature: basic parameters and a concrete return type only. Actions
+/// with string templates, generics, microflow parameters, enumerations or
+/// unresolvable entities stay on the engine's string-keyed registration.
+fn assemble_action_ports(
+    documents: &[(String, mxrs_bson::Document)],
+    typed_entities: &HashMap<String, TypedEntityTarget>,
+) -> Vec<ActionPortModule> {
+    let mut by_module: HashMap<String, Vec<ActionPort>> = HashMap::new();
+    for (module, document) in documents {
+        let Some(action) = action_port(document, typed_entities) else {
+            continue;
+        };
+        by_module.entry(module.clone()).or_default().push(action);
+    }
+    let mut modules: Vec<ActionPortModule> = by_module
+        .into_iter()
+        .filter_map(|(module_name, mut actions)| {
+            let mut stem = sanitize_ident(&module_name);
+            stem.make_ascii_lowercase();
+            if stem.is_empty() || stem.starts_with(|c: char| c.is_ascii_digit()) {
+                return None;
+            }
+            actions.sort_by(|left, right| left.action_name.cmp(&right.action_name));
+            let mut seen = std::collections::HashSet::new();
+            actions.retain(|action| seen.insert(action.trait_name.clone()));
+            Some(ActionPortModule {
+                module_name,
+                file_stem: format!("{stem}_actions"),
+                actions,
+            })
+        })
+        .collect();
+    modules.sort_by(|left, right| left.file_stem.cmp(&right.file_stem));
+    modules
+}
+
+fn action_port(
+    document: &mxrs_bson::Document,
+    typed_entities: &HashMap<String, TypedEntityTarget>,
+) -> Option<ActionPort> {
+    let action_name = document
+        .get_str("Name")
+        .ok()
+        .filter(|name| !name.is_empty())?;
+    let trait_name = derive_pascal_case(&sanitize_ident(action_name));
+    if trait_name.is_empty()
+        || trait_name.starts_with(|c: char| c.is_ascii_digit())
+        || rust_keyword(&trait_name)
+    {
+        return None;
+    }
+    let register_fn = format!("register_{}", snake_ident(action_name));
+    // Generic actions need type arguments the port cannot express.
+    if document
+        .get_array("TypeParameters")
+        .ok()
+        .is_some_and(|parameters| {
+            !mxrs_bson::parse_array(Some(parameters.as_slice()))
+                .items
+                .is_empty()
+        })
+    {
+        return None;
+    }
+    let result = match document.get_document("JavaReturnType").ok() {
+        None => None,
+        Some(return_doc) => {
+            let raw = return_doc.get_str("$Type").ok()?;
+            if raw == "CodeActions$VoidType" || raw == "JavaActions$VoidType" {
+                None
+            } else {
+                Some(code_action_port_type(return_doc, typed_entities)?)
+            }
+        }
+    };
+    let mut parameters = Vec::new();
+    let mut idents = std::collections::HashSet::new();
+    for parameter in
+        mxrs_bson::parse_array(document.get_array("Parameters").ok().map(Vec::as_slice)).items
+    {
+        let mxrs_bson::Bson::Document(parameter) = parameter else {
+            continue;
+        };
+        let name = parameter
+            .get_str("Name")
+            .ok()
+            .filter(|name| !name.is_empty())?;
+        let ident = snake_ident(name);
+        if ident.is_empty()
+            || rust_keyword(&ident)
+            || ident == "self"
+            || ident == "engine"
+            || !idents.insert(ident.clone())
+        {
+            return None;
+        }
+        let parameter_type = parameter.get_document("ParameterType").ok()?;
+        if parameter_type.get_str("$Type").ok() != Some("CodeActions$BasicParameterType") {
+            return None;
+        }
+        let (marker, runtime) =
+            code_action_port_type(parameter_type.get_document("Type").ok()?, typed_entities)?;
+        parameters.push((name.to_string(), ident, marker, runtime));
+    }
+    Some(ActionPort {
+        action_name: action_name.to_string(),
+        trait_name,
+        register_fn,
+        parameters,
+        result,
+    })
+}
+
+fn render_action_port_file(module: &ActionPortModule) -> String {
+    let handles = module
+        .actions
+        .iter()
+        .any(ActionPort::touches_object_handles);
+    let mut out = format!(
+        "//! Action ports for the {} Mendix module: the contracts its declared\n//! Java actions expect hand-written Rust to fulfill.\n\nuse mxrs::ports::{{{}ServiceError}};\n",
+        module.module_name,
+        if handles { "ObjectHandle, " } else { "" },
+    );
+    for action in &module.actions {
+        let _ = writeln!(
+            out,
+            "\n/// Contract of the `{}.{}` Java action.\npub trait {} {{\n    fn call(&self{}) -> Result<{}, ServiceError>;\n}}",
+            module.module_name,
+            action.action_name,
+            action.trait_name,
+            action
+                .parameters
+                .iter()
+                .map(|(_, ident, _, runtime)| format!(", {ident}: Option<{runtime}>"))
+                .collect::<String>(),
+            match &action.result {
+                Some((_, runtime)) => format!("Option<{runtime}>"),
+                None => "()".to_string(),
+            },
+        );
+    }
+    out
+}
+
+fn render_action_registry_file(module: &ActionPortModule, ports_stem: &str) -> String {
+    let uses_port_value = module
+        .actions
+        .iter()
+        .any(|action| !action.parameters.is_empty() || action.result.is_some());
+    let mut out = format!(
+        "//! Registers hand-written `{ports}` implementations on the flow\n//! engine under the names the model calls them by.\n\nuse std::collections::BTreeMap;\n\nuse mxrs::ports::{{FlowEngine, FlowError, FlowValue, JavaAction{port_value}}};\n\nuse crate::domain::ports::{ports}::*;\n",
+        ports = ports_stem,
+        port_value = if uses_port_value { ", PortValue" } else { "" },
+    );
+    for action in &module.actions {
+        let qualified = format!("{}.{}", module.module_name, action.action_name);
+        let arguments_ident = if action.parameters.is_empty() {
+            "_arguments"
+        } else {
+            "arguments"
+        };
+        let _ = write!(
+            out,
+            "\n/// Registers a [`{trait_name}`] implementation for `{qualified}`.\npub fn {register}(\n    engine: FlowEngine,\n    action: impl {trait_name} + Send + Sync + 'static,\n) -> FlowEngine {{\n    struct Adapter<T>(T);\n    impl<T: {trait_name} + Send + Sync> JavaAction for Adapter<T> {{\n        fn call(&self, {arguments_ident}: &BTreeMap<String, FlowValue>) -> Result<FlowValue, FlowError> {{\n",
+            trait_name = action.trait_name,
+            register = action.register_fn,
+        );
+        for (name, ident, marker, _) in &action.parameters {
+            let _ = writeln!(
+                out,
+                "            let {ident} = <{marker} as PortValue>::from_flow_optional(\n                arguments.get({name:?}).cloned().unwrap_or(FlowValue::Empty),\n            )\n            .map_err(|error| FlowError::native(error.to_string()))?;"
+            );
+        }
+        let call_arguments = action
+            .parameters
+            .iter()
+            .map(|(_, ident, _, _)| ident.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match &action.result {
+            Some((marker, _)) => {
+                let _ = writeln!(
+                    out,
+                    "            let result = self\n                .0\n                .call({call_arguments})\n                .map_err(|error| FlowError::native(error.to_string()))?;\n            Ok(<{marker} as PortValue>::to_flow_optional(result))"
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "            self.0\n                .call({call_arguments})\n                .map_err(|error| FlowError::native(error.to_string()))?;\n            Ok(FlowValue::Empty)"
+                );
+            }
+        }
+        let _ = writeln!(
+            out,
+            "        }}\n    }}\n    engine.with_java_action({qualified:?}, Adapter(action))\n}}"
+        );
     }
     out
 }
@@ -5402,6 +5756,90 @@ pub fn declaration() -> ModuleDecl {
         assert!(render_typed_entity_file("Sales", &entity, &HashMap::new(), &ctx).is_none());
     }
 
+    /// A declared Java action with a fully port-typed signature becomes an
+    /// action port trait plus registration glue; generics and untypable
+    /// shapes stay on the engine's string-keyed registration.
+    #[test]
+    fn action_ports_type_declared_java_actions_and_skip_the_rest() {
+        let mut typed = HashMap::new();
+        typed.insert(
+            "Sales.Order".to_string(),
+            TypedEntityTarget {
+                file_stem: "sales_order".to_string(),
+                type_name: "Order".to_string(),
+                dto: false,
+            },
+        );
+        let action = mxrs_bson::doc! {
+            "$Type": "JavaActions$JavaAction",
+            "Name": "CommitInBatches",
+            "JavaReturnType": { "$Type": "CodeActions$BooleanType" },
+            "Parameters": mxrs_bson::build_array(vec![
+                mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                    "$Type": "JavaActions$JavaActionParameter",
+                    "Name": "Items",
+                    "ParameterType": {
+                        "$Type": "CodeActions$BasicParameterType",
+                        "Type": {
+                            "$Type": "CodeActions$ListType",
+                            "Parameter": { "$Type": "CodeActions$ConcreteEntityType", "Entity": "Sales.Order" },
+                        },
+                    },
+                }),
+                mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                    "$Type": "JavaActions$JavaActionParameter",
+                    "Name": "BatchSize",
+                    "ParameterType": {
+                        "$Type": "CodeActions$BasicParameterType",
+                        "Type": { "$Type": "CodeActions$IntegerType" },
+                    },
+                }),
+            ], 3),
+        };
+        let generic = mxrs_bson::doc! {
+            "$Type": "JavaActions$JavaAction",
+            "Name": "Generic",
+            "JavaReturnType": { "$Type": "CodeActions$VoidType" },
+            "TypeParameters": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "CodeActions$TypeParameter", "Name": "T",
+            })], 2),
+        };
+        let modules = assemble_action_ports(
+            &[
+                ("Sales".to_string(), action),
+                ("Sales".to_string(), generic),
+            ],
+            &typed,
+        );
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].actions.len(), 1);
+
+        let port = render_action_port_file(&modules[0]);
+        assert!(port.contains("pub trait CommitInBatches"), "{port}");
+        assert!(
+            port.contains(
+                "fn call(&self, items: Option<Vec<ObjectHandle<crate::domain::entities::sales_order::Order>>>, batch_size: Option<i64>) -> Result<Option<bool>, ServiceError>;"
+            ),
+            "{port}"
+        );
+        assert!(!port.contains("Generic"), "{port}");
+
+        let registry = render_action_registry_file(&modules[0], &modules[0].file_stem);
+        assert!(
+            registry.contains("pub fn register_commit_in_batches"),
+            "{registry}"
+        );
+        assert!(
+            registry
+                .contains("engine.with_java_action(\"Sales.CommitInBatches\", Adapter(action))"),
+            "{registry}"
+        );
+        assert!(
+            registry.contains("arguments.get(\"BatchSize\")"),
+            "{registry}"
+        );
+    }
+
     /// An enumeration that rendered as a real Rust enum becomes the field's
     /// type — imported once when the short name is free, spelled by its full
     /// path on a collision, and left as the string form when the enum never
@@ -6230,6 +6668,57 @@ pub fn declaration() -> ModuleDecl {
         });
         mxrs_writer::write_project(&source_path, &builder.build()).unwrap();
 
+        // The DSL cannot author Java actions yet; inject one the way a real
+        // model carries it, so the action-port surface is exercised
+        // end-to-end.
+        {
+            let mut mpr = mxrs_mpr::MprFile::open(&source_path, false).unwrap();
+            let sales_id = mpr
+                .all_units()
+                .unwrap()
+                .into_iter()
+                .find(|unit| {
+                    let Ok(document) = mpr.parse_contents(unit) else {
+                        return false;
+                    };
+                    document.get_str("$Type").ok() == Some("Projects$Module")
+                        && document.get_str("Name").ok() == Some("Sales")
+                })
+                .map(|unit| unit.unit_id)
+                .expect("the written project has a Sales module unit");
+            mpr.insert_unit(
+                &sales_id,
+                "Documents",
+                mxrs_bson::doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": "JavaActions$JavaAction",
+                    "Name": "ReverseText",
+                    "Documentation": "",
+                    "Excluded": false,
+                    "ExportLevel": "Hidden",
+                    "JavaReturnType": {
+                        "$ID": uuid::Uuid::new_v4().to_string(),
+                        "$Type": "CodeActions$StringType",
+                    },
+                    "Parameters": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$ID": uuid::Uuid::new_v4().to_string(),
+                        "$Type": "JavaActions$JavaActionParameter",
+                        "Name": "Input",
+                        "ParameterType": {
+                            "$ID": uuid::Uuid::new_v4().to_string(),
+                            "$Type": "CodeActions$BasicParameterType",
+                            "Type": {
+                                "$ID": uuid::Uuid::new_v4().to_string(),
+                                "$Type": "CodeActions$StringType",
+                            },
+                        },
+                    })], 3),
+                },
+                None,
+            )
+            .unwrap();
+        }
+
         let imported = import_cargo_project(&source_path, &generated, Some(workspace)).unwrap();
         assert!(imported.imported_units > 1);
         assert_eq!(imported.imported_assets, 1);
@@ -6441,6 +6930,36 @@ pub fn declaration() -> ModuleDecl {
             "{adapter}"
         );
         assert!(adapter.contains("\"Sales.ACT_Ping\""), "{adapter}");
+        // The injected Java action surfaces as an action port with typed
+        // registration glue.
+        assert!(
+            ports_index.contains("pub mod sales_actions;"),
+            "{ports_index}"
+        );
+        let sales_actions =
+            std::fs::read_to_string(generated.join("src/domain/ports/sales_actions.rs")).unwrap();
+        assert!(
+            sales_actions.contains("pub trait ReverseText"),
+            "{sales_actions}"
+        );
+        assert!(
+            sales_actions.contains(
+                "fn call(&self, input: Option<String>) -> Result<Option<String>, ServiceError>;"
+            ),
+            "{sales_actions}"
+        );
+        let action_registry =
+            std::fs::read_to_string(generated.join("src/infrastructure/adapters/sales_actions.rs"))
+                .unwrap();
+        assert!(
+            action_registry.contains("pub fn register_reverse_text"),
+            "{action_registry}"
+        );
+        assert!(
+            action_registry
+                .contains("engine.with_java_action(\"Sales.ReverseText\", Adapter(action))"),
+            "{action_registry}"
+        );
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
         assert!(security.contains("ProjectSecurityDecl {"));
