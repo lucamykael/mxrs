@@ -21,8 +21,13 @@ mxrs-oql = { path = "../../compiler/mxrs-oql" }
 mxrs-packager = { path = "../mxrs-packager" }
 mxrs-project = { path = "../mxrs-project" }
 mxrs-runtime = { path = "../mxrs-runtime" }
+mxrs-runtime-flows = { path = "../mxrs-runtime-flows" }
 mxrs-runtime-http = { path = "../mxrs-runtime-http" }
 mxrs-runtime-sqlite = { path = "../mxrs-runtime-sqlite" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
+
+[dev-dependencies]
+mxrs-model = { path = "../../model/mxrs-model" }
+tempfile = "3.27.0"

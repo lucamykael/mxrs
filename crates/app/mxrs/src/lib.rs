@@ -62,6 +62,8 @@ pub use mxrs_semantic::{
 };
 pub use mxrs_writer::{synchronize_project, write_project};
 
+pub mod ports;
+
 /// Implemented by `#[mxrs::application]` for the root application type.
 pub trait ApplicationDefinition {
     const MENDIX_VERSION: &'static str;

@@ -717,15 +717,18 @@ dependencies = [
  "mxrs-ir",
  "mxrs-macros",
  "mxrs-materializers",
+ "mxrs-model",
  "mxrs-oql",
  "mxrs-packager",
  "mxrs-project",
  "mxrs-runtime",
+ "mxrs-runtime-flows",
  "mxrs-runtime-http",
  "mxrs-runtime-sqlite",
  "mxrs-scaffold",
  "mxrs-semantic",
  "mxrs-writer",
+ "tempfile",
 ]
 
 [[package]]
