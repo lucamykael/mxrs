@@ -766,6 +766,71 @@ struct DerivedEnumeration {
     type_name: String,
 }
 
+/// Where one entity's generated Rust lives and what the file declares, for
+/// entities currently assumed to render as `#[derive(MxEntity)]` structs.
+struct TypedEntityTarget {
+    file_stem: String,
+    type_name: String,
+    dto: bool,
+}
+
+/// Project-wide context the entity layer renders against: who owns which
+/// associations, how entity ids resolve to qualified names, which entities
+/// the project declares, and which of them render as typed structs.
+struct EntityLayerContext<'a> {
+    associations_by_entity: HashMap<&'a str, Vec<&'a Association>>,
+    qualified_by_id: HashMap<&'a str, String>,
+    declared: std::collections::HashSet<String>,
+    typed: HashMap<String, TypedEntityTarget>,
+}
+
+/// One association the entity's generated file must restate. The writer
+/// preserves only associations whose target lives outside the declared
+/// project; an association between declared entities that no entity file
+/// re-declares would silently disappear from the rebuilt model.
+struct DeclarableAssociation<'a> {
+    association: &'a Association,
+    name: &'a str,
+    /// Qualified `Module.Entity` the association points at.
+    target: String,
+}
+
+fn declarable_associations<'a>(
+    entity: &Entity,
+    ctx: &EntityLayerContext<'a>,
+) -> Vec<DeclarableAssociation<'a>> {
+    let Some(id) = entity.id.as_deref() else {
+        return Vec::new();
+    };
+    let mut list = Vec::new();
+    for association in ctx.associations_by_entity.get(id).into_iter().flatten() {
+        let Some(name) = association.name.as_deref() else {
+            continue;
+        };
+        let Some(raw_target) = association.to_entity_id.as_deref() else {
+            continue;
+        };
+        let Some(target) = ctx.qualified_by_id.get(raw_target).cloned().or_else(|| {
+            ctx.declared
+                .contains(raw_target)
+                .then(|| raw_target.to_string())
+        }) else {
+            continue;
+        };
+        if !ctx.declared.contains(&target) {
+            // The writer's own unmodeled-external rule keeps this one.
+            continue;
+        }
+        list.push(DeclarableAssociation {
+            association,
+            name,
+            target,
+        });
+    }
+    list.sort_by(|left, right| left.name.cmp(right.name));
+    list
+}
+
 fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
     let mut declarations = collect_editable_documents(project)?;
     let mut counts = HashMap::new();
@@ -3828,6 +3893,7 @@ fn render_entity_file(
     module_name: &str,
     entity: &Entity,
     known_microflows: &std::collections::HashSet<String>,
+    declarable: &[DeclarableAssociation<'_>],
 ) -> String {
     let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
     let mut out = String::from("//! Editable Mendix entity declaration.\n\n");
@@ -3917,6 +3983,48 @@ fn render_entity_file(
         );
         let _ = writeln!(out, "        required: {},", attribute.required);
         let _ = writeln!(out, "        unique: {},", attribute.unique);
+        out.push_str("    });\n");
+    }
+
+    // Associations between declared entities must be restated — the writer
+    // preserves only associations whose target lives outside the project.
+    for declared in declarable {
+        let association = declared.association;
+        let _ = writeln!(
+            out,
+            "    entity.associations.push(::mxrs_ir::AssociationDecl {{"
+        );
+        let _ = writeln!(out, "        name: {:?}.to_string(),", declared.name);
+        let _ = writeln!(out, "        target: {:?}.to_string(),", declared.target);
+        let _ = writeln!(
+            out,
+            "        association_type: ::mxrs_ir::AssociationType::{},",
+            match association.association_type {
+                mxrs_model::association::AssociationType::Reference => "Reference",
+                mxrs_model::association::AssociationType::ReferenceSet => "ReferenceSet",
+            }
+        );
+        let _ = writeln!(
+            out,
+            "        owner: ::mxrs_ir::AssociationOwner::{},",
+            match association.owner {
+                mxrs_model::association::Owner::Default => "Default",
+                mxrs_model::association::Owner::Both => "Both",
+            }
+        );
+        let _ = writeln!(
+            out,
+            "        storage: ::mxrs_ir::AssociationStorage::{},",
+            match association.storage_format {
+                mxrs_model::association::StorageFormat::Column => "Column",
+                mxrs_model::association::StorageFormat::Table => "Table",
+            }
+        );
+        let _ = writeln!(
+            out,
+            "        documentation: {:?}.to_string(),",
+            association.documentation
+        );
         out.push_str("    });\n");
     }
 
@@ -4022,6 +4130,7 @@ fn render_typed_entity_file(
     module_name: &str,
     entity: &Entity,
     derived_enums: &HashMap<String, DerivedEnumeration>,
+    ctx: &EntityLayerContext<'_>,
 ) -> Option<String> {
     let entity_name = entity.name.as_deref().filter(|name| !name.is_empty())?;
     if entity.oql_view()
@@ -4047,14 +4156,27 @@ fn render_typed_entity_file(
     let mut attributes = entity.attributes.clone();
     attributes.sort_by(|left, right| left.name.cmp(&right.name));
 
-    // Enumeration attributes whose enumeration rendered as a real Rust enum
-    // use that type directly; the derive then resolves the qualified name
-    // through the type's `EnumerationMarker` instead of an embedded string.
-    // A short name is imported once; a name that collides — with another
-    // referenced enum, this entity, or an item `declaration()` needs from
-    // the prelude — is spelled by its full path instead.
-    let mut imported: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
-    let mut colliding = std::collections::HashSet::new();
+    // Associations between declared entities become Reference<T> fields on
+    // this struct; every target must itself be a typed struct this file can
+    // name, and a domain entity cannot reach into the application layer.
+    let own_qualified = format!("{module_name}.{entity_name}");
+    let own_dto = !entity.persistable;
+    let declarable = declarable_associations(entity, ctx);
+    for declared in &declarable {
+        if declared.target == own_qualified {
+            continue;
+        }
+        let target = ctx.typed.get(&declared.target)?;
+        if !own_dto && target.dto {
+            return None;
+        }
+    }
+
+    // A referenced Rust type — a derived enum, or the target struct of an
+    // association — is imported once by its short name; a name that
+    // collides with another import, this entity, or an item `declaration()`
+    // needs from the prelude is spelled by its full path instead.
+    let mut requests: Vec<(&str, String)> = Vec::new();
     for attribute in &attributes {
         let Some(derived) = attribute
             .enumeration
@@ -4066,17 +4188,47 @@ fn render_typed_entity_file(
         if enum_type_shadows_scalar(&derived.type_name) {
             continue;
         }
-        if let Some(stem) = imported.insert(&derived.type_name, &derived.file_stem)
-            && stem != derived.file_stem
+        requests.push((
+            &derived.type_name,
+            format!("crate::domain::enumerations::{}", derived.file_stem),
+        ));
+    }
+    for declared in &declarable {
+        if declared.target == own_qualified {
+            continue;
+        }
+        let target = ctx.typed.get(&declared.target)?;
+        if enum_type_shadows_scalar(&target.type_name) {
+            // The full path is unambiguous for an association target; only
+            // the bare import would shadow a prelude scalar.
+            continue;
+        }
+        requests.push((&target.type_name, typed_entity_module_path(target)));
+    }
+    let mut imported: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    let mut colliding = std::collections::HashSet::new();
+    for (name, path) in &requests {
+        if let Some(existing) = imported.insert(name, path.as_str())
+            && existing != path.as_str()
         {
-            colliding.insert(derived.type_name.as_str());
+            colliding.insert(*name);
         }
     }
     imported.retain(|name, _| {
         !colliding.contains(name)
             && *name != type_name
-            && !matches!(*name, "ModuleBuilder" | "ModuleDecl" | "MxEntity")
+            && !matches!(
+                *name,
+                "ModuleBuilder" | "ModuleDecl" | "MxEntity" | "Reference" | "ReferenceSet"
+            )
     });
+    let spell = |name: &str, path: &str| -> String {
+        if imported.get(name).is_some_and(|found| *found == path) {
+            name.to_string()
+        } else {
+            format!("{path}::{name}")
+        }
+    };
     let enum_spellings: HashMap<&str, String> = attributes
         .iter()
         .filter_map(|attribute| {
@@ -4085,15 +4237,8 @@ fn render_typed_entity_file(
             if enum_type_shadows_scalar(&derived.type_name) {
                 return None;
             }
-            let spelling = if imported.contains_key(derived.type_name.as_str()) {
-                derived.type_name.clone()
-            } else {
-                format!(
-                    "crate::domain::enumerations::{}::{}",
-                    derived.file_stem, derived.type_name
-                )
-            };
-            Some((qualified, spelling))
+            let path = format!("crate::domain::enumerations::{}", derived.file_stem);
+            Some((qualified, spell(&derived.type_name, &path)))
         })
         .collect();
 
@@ -4165,12 +4310,68 @@ fn render_typed_entity_file(
         let _ = writeln!(fields, "    pub {field}: {field_type},");
     }
 
+    for declared in &declarable {
+        // The derive names an association `{Entity}_{PascalField}` by
+        // default; a name of that shape round-trips from the field alone.
+        let (field, explicit_name) = match declared
+            .name
+            .strip_prefix(&format!("{entity_name}_"))
+            .filter(|rest| !rest.is_empty())
+        {
+            Some(rest) => {
+                let field = snake_ident(rest);
+                let explicit = derive_pascal_case(&field) != rest;
+                (field, explicit)
+            }
+            None => (snake_ident(declared.name), true),
+        };
+        if field.is_empty() || rust_keyword(&field) || !seen.insert(field.clone()) {
+            return None;
+        }
+        let spelling = if declared.target == own_qualified {
+            type_name.clone()
+        } else {
+            let target = ctx.typed.get(&declared.target)?;
+            spell(&target.type_name, &typed_entity_module_path(target))
+        };
+        let container = match declared.association.association_type {
+            mxrs_model::association::AssociationType::Reference => "Reference",
+            mxrs_model::association::AssociationType::ReferenceSet => "ReferenceSet",
+        };
+        let mut options = Vec::new();
+        if explicit_name {
+            options.push(format!("association = {:?}", declared.name));
+        }
+        if !declared.association.documentation.is_empty() {
+            options.push(format!(
+                "documentation = {:?}",
+                declared.association.documentation
+            ));
+        }
+        if matches!(
+            declared.association.owner,
+            mxrs_model::association::Owner::Both
+        ) {
+            options.push("owner = \"Both\"".to_string());
+        }
+        if matches!(
+            declared.association.storage_format,
+            mxrs_model::association::StorageFormat::Table
+        ) {
+            options.push("storage = \"Table\"".to_string());
+        }
+        if !options.is_empty() {
+            let _ = writeln!(fields, "    #[mxrs({})]", options.join(", "));
+        }
+        let _ = writeln!(fields, "    pub {field}: {container}<{spelling}>,");
+    }
+
     let mut out =
         String::from("//! Editable Mendix entity declaration.\n\nuse mxrs::prelude::*;\n");
     if !imported.is_empty() {
         out.push('\n');
-        for (name, stem) in &imported {
-            let _ = writeln!(out, "use crate::domain::enumerations::{stem}::{name};");
+        for (name, path) in &imported {
+            let _ = writeln!(out, "use {path}::{name};");
         }
     }
     out.push('\n');
@@ -4196,6 +4397,15 @@ fn render_typed_entity_file(
         "\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({module_name:?});\n    {type_name}::mx_register(&mut module);\n    module.into_decl()\n}}"
     );
     Some(out)
+}
+
+/// The module path a typed entity's struct is importable from.
+fn typed_entity_module_path(target: &TypedEntityTarget) -> String {
+    if target.dto {
+        format!("crate::application::dto::{}", target.file_stem)
+    } else {
+        format!("crate::domain::entities::{}", target.file_stem)
+    }
 }
 
 /// Enum type names the entity derive would mistake for a scalar kind when
@@ -4382,6 +4592,77 @@ fn write_entity_layer_sources(
     let mut entities = Vec::new();
     let mut dtos = Vec::new();
 
+    let mut ctx = EntityLayerContext {
+        associations_by_entity: HashMap::new(),
+        qualified_by_id: HashMap::new(),
+        declared: std::collections::HashSet::new(),
+        typed: HashMap::new(),
+    };
+    for module in modules {
+        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+        for entity in module.entities() {
+            let Some(entity_name) = entity.name.as_deref().filter(|name| !name.is_empty()) else {
+                continue;
+            };
+            let qualified = format!("{module_name}.{entity_name}");
+            ctx.declared.insert(qualified.clone());
+            if let Some(id) = entity.id.as_deref() {
+                ctx.qualified_by_id.insert(id, qualified.clone());
+            }
+            let mut type_name = derive_pascal_case(&sanitize_ident(entity_name));
+            if type_name.starts_with(|c: char| c.is_ascii_digit()) {
+                type_name.insert(0, '_');
+            }
+            if type_name.is_empty() || rust_keyword(&type_name) {
+                continue;
+            }
+            let dto = !entity.persistable || entity.oql_view();
+            ctx.typed.insert(
+                qualified,
+                TypedEntityTarget {
+                    file_stem: layer_file_stem(module_name, entity_name, dto),
+                    type_name,
+                    dto,
+                },
+            );
+        }
+        for association in module.associations() {
+            if let Some(from) = association.from_entity_id.as_deref() {
+                ctx.associations_by_entity
+                    .entry(from)
+                    .or_default()
+                    .push(association);
+            }
+        }
+    }
+    // Typed eligibility is mutual: a Reference<T> field needs its target to
+    // render as a struct too, so entities that fall back to the IR form
+    // demote their referrers until the set is stable.
+    loop {
+        let mut demoted = Vec::new();
+        for module in modules {
+            let module_name = module.name.as_deref().unwrap_or("Unnamed");
+            for entity in module.entities() {
+                let Some(entity_name) = entity.name.as_deref() else {
+                    continue;
+                };
+                let qualified = format!("{module_name}.{entity_name}");
+                if !ctx.typed.contains_key(&qualified) {
+                    continue;
+                }
+                if render_typed_entity_file(module_name, entity, derived_enums, &ctx).is_none() {
+                    demoted.push(qualified);
+                }
+            }
+        }
+        if demoted.is_empty() {
+            break;
+        }
+        for qualified in demoted {
+            ctx.typed.remove(&qualified);
+        }
+    }
+
     for module in modules {
         let module_name = module.name.as_deref().unwrap_or("Unnamed");
         let mut module_entities = module.entities().iter().collect::<Vec<_>>();
@@ -4390,8 +4671,18 @@ fn write_entity_layer_sources(
             let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
             let dto = !entity.persistable || entity.oql_view();
             let stem = layer_file_stem(module_name, entity_name, dto);
-            let source = render_typed_entity_file(module_name, entity, derived_enums)
-                .unwrap_or_else(|| render_entity_file(module_name, entity, &microflows));
+            let qualified = format!("{module_name}.{entity_name}");
+            let source = if ctx.typed.contains_key(&qualified) {
+                render_typed_entity_file(module_name, entity, derived_enums, &ctx)
+                    .expect("the fixed point above only keeps renderable entities")
+            } else {
+                render_entity_file(
+                    module_name,
+                    entity,
+                    &microflows,
+                    &declarable_associations(entity, &ctx),
+                )
+            };
             let directory = if dto {
                 destination.join("src/application/dto")
             } else {
@@ -4613,6 +4904,15 @@ mod tests {
         }
     }
 
+    fn empty_layer_context() -> EntityLayerContext<'static> {
+        EntityLayerContext {
+            associations_by_entity: HashMap::new(),
+            qualified_by_id: HashMap::new(),
+            declared: std::collections::HashSet::new(),
+            typed: HashMap::new(),
+        }
+    }
+
     /// The typed renderer is the authoring surface a hand author uses: the
     /// whole file is pinned so a regression in eloquence — a stray absolute
     /// path, a lost option, a broken field name — fails loudly.
@@ -4636,7 +4936,8 @@ mod tests {
         entity.attributes.push(updated);
 
         let rendered =
-            render_typed_entity_file("Catalogs", &entity, &HashMap::new()).expect("typed-eligible");
+            render_typed_entity_file("Catalogs", &entity, &HashMap::new(), &empty_layer_context())
+                .expect("typed-eligible");
         assert_eq!(
             rendered,
             r#"//! Editable Mendix entity declaration.
@@ -4667,8 +4968,13 @@ pub fn declaration() -> ModuleDecl {
         // A non-persistable Mendix object says so once, at the entity level.
         let mut dto = bare_entity("AccountPasswordData");
         dto.persistable = false;
-        let rendered = render_typed_entity_file("Administration", &dto, &HashMap::new())
-            .expect("typed-eligible");
+        let rendered = render_typed_entity_file(
+            "Administration",
+            &dto,
+            &HashMap::new(),
+            &empty_layer_context(),
+        )
+        .expect("typed-eligible");
         assert!(
             rendered.contains("#[mxrs(module = \"Administration\", persistable = false)]"),
             "{rendered}"
@@ -4677,6 +4983,105 @@ pub fn declaration() -> ModuleDecl {
             rendered.contains("pub struct AccountPasswordData {}"),
             "{rendered}"
         );
+    }
+
+    /// Associations between declared entities become Reference<T> fields: a
+    /// self-reference names the entity's own struct, a default-shaped name
+    /// needs no restatement, and non-default name/owner/storage/
+    /// documentation are restated as field options.
+    #[test]
+    fn entity_association_fields_reference_the_typed_targets() {
+        use mxrs_model::association::{Association, AssociationType, Owner, StorageFormat};
+
+        let association =
+            |name: &str, to: &str, set: bool, owner, storage, docs: &str| Association {
+                id: None,
+                name: Some(name.to_string()),
+                documentation: docs.to_string(),
+                from_entity_id: Some("t1".to_string()),
+                to_entity_id: Some(to.to_string()),
+                association_type: if set {
+                    AssociationType::ReferenceSet
+                } else {
+                    AssociationType::Reference
+                },
+                owner,
+                storage_format: storage,
+                source: None,
+                guid: None,
+                delete_behavior: None,
+                export_level: "Hidden".to_string(),
+            };
+        let owned = [
+            association(
+                "Ticket_Parent",
+                "t1",
+                false,
+                Owner::Default,
+                StorageFormat::Column,
+                "",
+            ),
+            association(
+                "Assigned",
+                "o1",
+                true,
+                Owner::Both,
+                StorageFormat::Table,
+                "Who.",
+            ),
+        ];
+
+        let mut ctx = empty_layer_context();
+        ctx.associations_by_entity
+            .insert("t1", owned.iter().collect());
+        ctx.qualified_by_id.insert("t1", "Sales.Ticket".to_string());
+        ctx.qualified_by_id.insert("o1", "Sales.Order".to_string());
+        ctx.declared.insert("Sales.Ticket".to_string());
+        ctx.declared.insert("Sales.Order".to_string());
+        ctx.typed.insert(
+            "Sales.Ticket".to_string(),
+            TypedEntityTarget {
+                file_stem: "sales_ticket".to_string(),
+                type_name: "Ticket".to_string(),
+                dto: false,
+            },
+        );
+        ctx.typed.insert(
+            "Sales.Order".to_string(),
+            TypedEntityTarget {
+                file_stem: "sales_order".to_string(),
+                type_name: "Order".to_string(),
+                dto: false,
+            },
+        );
+
+        let mut entity = bare_entity("Ticket");
+        entity.id = Some("t1".to_string());
+        let rendered = render_typed_entity_file("Sales", &entity, &HashMap::new(), &ctx)
+            .expect("typed-eligible");
+        assert!(
+            rendered.contains("use crate::domain::entities::sales_order::Order;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pub parent: Reference<Ticket>,"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "#[mxrs(association = \"Assigned\", documentation = \"Who.\", owner = \"Both\", storage = \"Table\")]"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pub assigned: ReferenceSet<Order>,"),
+            "{rendered}"
+        );
+
+        // A target that keeps the IR form demotes the referrer too — the
+        // struct cannot name a type that does not exist.
+        ctx.typed.remove("Sales.Order");
+        assert!(render_typed_entity_file("Sales", &entity, &HashMap::new(), &ctx).is_none());
     }
 
     /// An enumeration that rendered as a real Rust enum becomes the field's
@@ -4724,7 +5129,8 @@ pub fn declaration() -> ModuleDecl {
         entity.attributes.push(opaque);
 
         let rendered =
-            render_typed_entity_file("Catalogs", &entity, &derived).expect("typed-eligible");
+            render_typed_entity_file("Catalogs", &entity, &derived, &empty_layer_context())
+                .expect("typed-eligible");
         assert_eq!(
             rendered,
             r#"//! Editable Mendix entity declaration.
@@ -4757,8 +5163,8 @@ pub fn declaration() -> ModuleDecl {
         let mut current = attribute("Current", AttributeType::Enum);
         current.enumeration = Some("Sales.Status".to_string());
         status.attributes.push(current);
-        let rendered =
-            render_typed_entity_file("Sales", &status, &derived).expect("typed-eligible");
+        let rendered = render_typed_entity_file("Sales", &status, &derived, &empty_layer_context())
+            .expect("typed-eligible");
         assert!(
             rendered.contains("pub current: crate::domain::enumerations::sales_status::Status,"),
             "{rendered}"
@@ -4780,7 +5186,8 @@ pub fn declaration() -> ModuleDecl {
         value.enumeration = Some("Sales.MxString".to_string());
         wrapper.attributes.push(value);
         let rendered =
-            render_typed_entity_file("Sales", &wrapper, &shadowing).expect("typed-eligible");
+            render_typed_entity_file("Sales", &wrapper, &shadowing, &empty_layer_context())
+                .expect("typed-eligible");
         assert!(
             rendered.contains(r#"#[mxrs(kind = "enumeration", enumeration = "Sales.MxString")]"#),
             "{rendered}"
@@ -4861,11 +5268,17 @@ pub fn declaration() -> ModuleDecl {
             members: Vec::new(),
             raw: mxrs_bson::Document::new(),
         });
-        assert!(render_typed_entity_file("Sales", &indexed, &HashMap::new()).is_none());
+        assert!(
+            render_typed_entity_file("Sales", &indexed, &HashMap::new(), &empty_layer_context())
+                .is_none()
+        );
 
         let mut pictured = bare_entity("Asset");
         pictured.image = Some("Assets.Image".to_string());
-        assert!(render_typed_entity_file("Assets", &pictured, &HashMap::new()).is_none());
+        assert!(
+            render_typed_entity_file("Assets", &pictured, &HashMap::new(), &empty_layer_context())
+                .is_none()
+        );
 
         // Attribute names that collide once snake_cased cannot become two
         // struct fields.
@@ -4876,14 +5289,20 @@ pub fn declaration() -> ModuleDecl {
         colliding
             .attributes
             .push(attribute("Foo_Bar", AttributeType::String));
-        assert!(render_typed_entity_file("Sales", &colliding, &HashMap::new()).is_none());
+        assert!(
+            render_typed_entity_file("Sales", &colliding, &HashMap::new(), &empty_layer_context())
+                .is_none()
+        );
 
         // A keyword survives as neither a field nor a struct name.
         let mut keyword = bare_entity("Order");
         keyword
             .attributes
             .push(attribute("Type", AttributeType::String));
-        assert!(render_typed_entity_file("Sales", &keyword, &HashMap::new()).is_none());
+        assert!(
+            render_typed_entity_file("Sales", &keyword, &HashMap::new(), &empty_layer_context())
+                .is_none()
+        );
     }
 
     #[test]
@@ -5392,6 +5811,7 @@ pub fn declaration() -> ModuleDecl {
                         .xpath("[Number != empty]")
                         .xpath_caption("Orders with a number");
                 });
+                entity.association::<sales_markers::Order_Order_Customer>();
             });
             module.entity("OrderReport", |entity| {
                 entity.oql_view("Sales.OrderSource");
@@ -5408,10 +5828,14 @@ pub fn declaration() -> ModuleDecl {
                 enumeration.value("Low");
                 enumeration.value("High");
             });
+            module.entity("Customer", |entity| {
+                entity.string("Name");
+            });
             module.entity("Ticket", |entity| {
                 entity
                     .enumeration("Priority", "Sales.Priority")
                     .default_value = Some("Low".to_string());
+                entity.association::<sales_markers::Ticket_Ticket_Customer>();
             });
             module.constant("MaximumOrders", |constant| {
                 constant
@@ -5610,6 +6034,34 @@ pub fn declaration() -> ModuleDecl {
         assert!(ticket.contains("#[mxrs(default = \"Low\")]"), "{ticket}");
         assert!(ticket.contains("pub priority: Priority,"), "{ticket}");
         assert!(!ticket.contains("enumeration = "), "{ticket}");
+        // The association to the typed Customer entity is a Reference<T>
+        // field importing the target struct; the default-shaped name needs
+        // no #[mxrs(association = ...)] restatement.
+        assert!(
+            ticket.contains("use crate::domain::entities::sales_customer::Customer;"),
+            "{ticket}"
+        );
+        assert!(
+            ticket.contains("pub customer: Reference<Customer>,"),
+            "{ticket}"
+        );
+        assert!(!ticket.contains("association = "), "{ticket}");
+        // Order keeps the IR form (image + index), so its association is
+        // restated as an AssociationDecl rather than silently dropped.
+        let order_source =
+            std::fs::read_to_string(generated.join("src/domain/entities/sales_order.rs")).unwrap();
+        assert!(
+            order_source.contains("entity.associations.push(::mxrs_ir::AssociationDecl {"),
+            "{order_source}"
+        );
+        assert!(
+            order_source.contains("name: \"Order_Customer\".to_string(),"),
+            "{order_source}"
+        );
+        assert!(
+            order_source.contains("target: \"Sales.Customer\".to_string(),"),
+            "{order_source}"
+        );
         let documents =
             std::fs::read_to_string(generated.join("src/domain/documents/sales.rs")).unwrap();
         assert!(documents.contains("use mxrs::prelude::*;"));
@@ -5802,7 +6254,11 @@ pub fn declaration() -> ModuleDecl {
         drop(rebuilt);
         let rebuilt = Project::open(&output, true).unwrap();
         let modules = rebuilt.modules().unwrap();
-        let order = &modules[0].entities()[0];
+        let order = modules[0]
+            .entities()
+            .iter()
+            .find(|entity| entity.name.as_deref() == Some("Order"))
+            .unwrap();
         let number = order
             .attributes
             .iter()
@@ -5818,6 +6274,34 @@ pub fn declaration() -> ModuleDecl {
             .find(|attribute| attribute.name.as_deref() == Some("SubmittedAt"))
             .unwrap();
         assert_eq!(submitted_at.localize_date, Some(false));
+        // Associations between declared entities must survive the round
+        // trip through both renderers: the typed Ticket restates its as a
+        // Reference<T> field, the IR-form Order as an AssociationDecl.
+        let rebuilt_association_names = modules[0]
+            .associations()
+            .iter()
+            .map(|association| association.name.clone())
+            .collect::<Vec<_>>();
+        let ticket_id = modules[0]
+            .entities()
+            .iter()
+            .find(|entity| entity.name.as_deref() == Some("Ticket"))
+            .and_then(|entity| entity.id.clone())
+            .expect("rebuilt Ticket entity has an id");
+        assert!(
+            modules[0].associations().iter().any(|association| {
+                association.name.as_deref() == Some("Ticket_Customer")
+                    && association.from_entity_id.as_deref() == Some(ticket_id.as_str())
+            }),
+            "Ticket_Customer association was lost in the rebuild; remaining: {rebuilt_association_names:?}"
+        );
+        assert!(
+            modules[0]
+                .associations()
+                .iter()
+                .any(|association| association.name.as_deref() == Some("Order_Customer")),
+            "Order_Customer association was lost in the rebuild; remaining: {rebuilt_association_names:?}"
+        );
         // Proves `pages::home()` actually got pushed into the rebuilt
         // `.mpr`, not just that the generated crate compiles and runs.
         let page = modules[0]
@@ -5888,6 +6372,18 @@ pub fn declaration() -> ModuleDecl {
             type From = Order;
             type To = Customer;
             const NAME: &'static str = "Order_Customer";
+            const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
+        }
+        pub struct Ticket;
+        impl mxrs_ir::EntityMarker for Ticket {
+            const MODULE: &'static str = "Sales";
+            const NAME: &'static str = "Ticket";
+        }
+        pub struct Ticket_Ticket_Customer;
+        impl mxrs_ir::AssociationMarker for Ticket_Ticket_Customer {
+            type From = Ticket;
+            type To = Customer;
+            const NAME: &'static str = "Ticket_Customer";
             const ASSOCIATION_TYPE: mxrs_ir::AssociationType = mxrs_ir::AssociationType::Reference;
         }
     }
