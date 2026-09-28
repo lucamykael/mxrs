@@ -1047,53 +1047,95 @@ fn reconcile_attribute_doc(
     qualified_name: &str,
     identity: ProjectIdentity,
 ) -> Document {
-    let built = model_attribute(
-        decl,
-        Some(identity.artifact_id(ArtifactKind::Attribute, qualified_name)),
-        Some(identity.artifact_id(ArtifactKind::DataStorage, qualified_name)),
-    );
-    match previous {
-        Some(prev) => {
-            let prior = Attribute::from_bson(prev);
-            let generated = Attribute {
-                id: prior.id,
-                data_storage_guid: prior.data_storage_guid,
-                export_level: prior.export_level,
-                ..built
-            }
-            .to_bson();
-            let mut output = prev.clone();
-            for (lower, upper) in [
-                ("name", "Name"),
-                ("documentation", "Documentation"),
-                ("type", "Type"),
-                ("value", "Value"),
-            ] {
-                let output_key = native_key(prev, lower, upper);
-                if lower == "value"
-                    && decl.default_value.is_none()
-                    && prev.get_document(output_key).ok().is_none_or(|value| {
-                        !value.contains_key("defaultValue") && !value.contains_key("DefaultValue")
-                    })
-                {
-                    continue;
-                }
-                let generated_key = native_key(&generated, lower, upper);
-                if let Some(mut value) = generated.get(generated_key).cloned() {
-                    if matches!(lower, "type" | "value")
-                        && let (Bson::Document(new_doc), Some(Bson::Document(old_doc))) =
-                            (&mut value, prev.get(output_key))
-                        && let Some(id) = old_doc.get("$ID")
-                    {
-                        new_doc.insert("$ID", id.clone());
-                    }
-                    output.insert(output_key, value);
-                }
-            }
-            output
+    let Some(prev) = previous else {
+        return model_attribute(
+            decl,
+            Some(identity.artifact_id(ArtifactKind::Attribute, qualified_name)),
+            Some(identity.artifact_id(ArtifactKind::DataStorage, qualified_name)),
+        )
+        .to_bson();
+    };
+    // Mirrors mxrb `Writer#attribute_doc`: merge onto the prior raw doc,
+    // keep every field at its native key casing, and rebuild the nested
+    // type document only when the storage type actually changed — so a
+    // resynchronized attribute stays byte-identical unless the declaration
+    // really moved something.
+    let mut output = prev.clone();
+    let name_key = native_key(prev, "name", "Name");
+    output.insert(name_key, decl.name.clone());
+    let documentation_key = native_key(prev, "documentation", "Documentation");
+    output.insert(documentation_key, decl.documentation.clone());
+
+    let storage_type = model_attribute_type(decl.attribute_type).storage_type();
+    let type_key = ["type", "Type", "newType", "NewType"]
+        .into_iter()
+        .find(|key| prev.contains_key(key))
+        .unwrap_or("NewType");
+    let previous_type = prev.get_document(type_key).ok();
+    let mut type_doc = match previous_type {
+        Some(previous_type) if previous_type.get_str("$Type").ok() == Some(storage_type) => {
+            previous_type.clone()
         }
-        None => built.to_bson(),
+        _ => mxrs_bson::doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": storage_type,
+        },
+    };
+    if matches!(decl.attribute_type, AttributeType::Enumeration) {
+        type_doc.remove("enumeration");
+        type_doc.remove("Enumeration");
+        if let Some(enumeration) = &decl.enumeration {
+            type_doc.insert("Enumeration", enumeration.clone());
+        }
     }
+    if matches!(decl.attribute_type, AttributeType::String)
+        && (decl.length.is_some()
+            || previous_type
+                .is_none_or(|doc| !doc.contains_key("length") && !doc.contains_key("Length")))
+    {
+        let length_key = previous_type.map_or("Length", |doc| native_key(doc, "length", "Length"));
+        type_doc.insert(
+            length_key,
+            decl.length
+                .unwrap_or(mxrs_model::attribute::DEFAULT_STRING_LENGTH),
+        );
+    }
+    if matches!(decl.attribute_type, AttributeType::DateTime)
+        && let Some(localize_date) = decl.localize_date
+    {
+        let localize_key = previous_type.map_or("LocalizeDate", |doc| {
+            native_key(doc, "localizeDate", "LocalizeDate")
+        });
+        type_doc.insert(localize_key, localize_date);
+    }
+    output.insert(type_key, type_doc);
+
+    let value_key = native_key(prev, "value", "Value");
+    let previous_value = prev.get_document(value_key).ok();
+    match previous_value {
+        Some(previous_value)
+            if decl.default_value.is_none()
+                && previous_value.get_str("$Type").ok() != Some("DomainModels$OqlViewValue") => {}
+        Some(previous_value)
+            if previous_value.get_str("$Type").ok() == Some("DomainModels$StoredValue") =>
+        {
+            let mut value = previous_value.clone();
+            let default_key = native_key(previous_value, "defaultValue", "DefaultValue");
+            value.insert(default_key, decl.default_value.clone().unwrap_or_default());
+            output.insert(value_key, value);
+        }
+        _ => {
+            output.insert(
+                value_key,
+                mxrs_bson::doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": "DomainModels$StoredValue",
+                    "DefaultValue": decl.default_value.clone().unwrap_or_default(),
+                },
+            );
+        }
+    }
+    output
 }
 
 fn reconcile_oql_attribute_value(

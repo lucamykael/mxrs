@@ -31,10 +31,11 @@ pub(crate) fn synchronize_module_security(
         .iter()
         .map(|role| {
             let mut document = previous_roles.get(&role.name).cloned().unwrap_or_default();
+            // `$ID` is stored as a binary UUID in real projects — `get_str`
+            // would miss it and mint a fresh identity on every rebuild.
             let id = document
-                .get_str("$ID")
-                .ok()
-                .map(str::to_string)
+                .get("$ID")
+                .and_then(mxrs_bson::extract_id)
                 .unwrap_or_else(|| {
                     identity.artifact_id(
                         ArtifactKind::ModuleRole,
@@ -93,9 +94,8 @@ pub(crate) fn synchronize_project_security(
         .map(|role| {
             let mut document = previous_roles.get(&role.name).cloned().unwrap_or_default();
             let id = document
-                .get_str("$ID")
-                .ok()
-                .map(str::to_string)
+                .get("$ID")
+                .and_then(mxrs_bson::extract_id)
                 .unwrap_or_else(|| identity.artifact_id(ArtifactKind::UserRole, &role.name));
             let guid = document.get("GUID").cloned().unwrap_or_else(|| {
                 Bson::String(
@@ -181,9 +181,8 @@ pub(crate) fn synchronize_project_security(
         .cloned()
         .unwrap_or_default();
     let policy_id = policy
-        .get_str("$ID")
-        .ok()
-        .map(str::to_string)
+        .get("$ID")
+        .and_then(mxrs_bson::extract_id)
         .unwrap_or_else(|| identity.artifact_id(ArtifactKind::PasswordPolicy, "project"));
     policy.insert("$ID", policy_id);
     policy.insert("$Type", "Security$PasswordPolicySettings");
