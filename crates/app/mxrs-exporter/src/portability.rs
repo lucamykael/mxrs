@@ -114,10 +114,7 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
             .entry(page.source_type().to_string())
             .or_default() += 1;
     }
-    let (_, editable_documents) = super::render_documents_module(
-        &project,
-        project.mendix_version()?.as_deref().unwrap_or(""),
-    )?;
+    let editable_documents = super::render_documents_module(&project)?.counts;
     let converted_flows = super::flow_export::collect(&project, &modules)?;
 
     let mut families = Vec::with_capacity(counts.len());

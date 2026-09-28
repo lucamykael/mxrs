@@ -280,7 +280,7 @@ fn import_cargo_project_inner(
     });
     let security_source = render_security_module(&modules, security_document.as_ref());
     let navigation_source = render_navigation_module(&project.navigation()?);
-    let (documents_source, _) = render_documents_module(&project, &mendix_version)?;
+    let documents_export = render_documents_module(&project)?;
     let task_queues_source = render_task_queues_module(&project, &mendix_version)?;
     let marker_manifest = marker_manifest(&modules);
     let markers_source = mxrs_typegen::generate(&marker_manifest)?;
@@ -339,6 +339,9 @@ fn import_cargo_project_inner(
     let documents_directory = domain_directory.join("documents");
     std::fs::create_dir_all(&documents_directory)
         .map_err(|source| io_error(&documents_directory, source))?;
+    let enumerations_directory = domain_directory.join("enumerations");
+    std::fs::create_dir_all(&enumerations_directory)
+        .map_err(|source| io_error(&enumerations_directory, source))?;
     for directory in [
         domain_directory.join("services"),
         domain_directory.join("ports"),
@@ -442,9 +445,29 @@ fn import_cargo_project_inner(
         &destination.join("src/presentation/routes/mod.rs"),
         &render_routes_module(api_mode),
     )?;
+    let mut document_entries = Vec::new();
+    for (stem, source, qualified) in &documents_export.module_files {
+        write_text(
+            &destination.join(format!("src/domain/documents/{stem}.rs")),
+            source,
+        )?;
+        document_entries.push((stem.clone(), qualified.clone()));
+    }
     write_text(
         &destination.join("src/domain/documents/mod.rs"),
-        &documents_source,
+        &render_entity_layer_index(&document_entries),
+    )?;
+    let mut enumeration_entries = Vec::new();
+    for (stem, source, qualified) in &documents_export.enumeration_files {
+        write_text(
+            &destination.join(format!("src/domain/enumerations/{stem}.rs")),
+            source,
+        )?;
+        enumeration_entries.push((stem.clone(), qualified.clone()));
+    }
+    write_text(
+        &destination.join("src/domain/enumerations/mod.rs"),
+        &render_entity_layer_index(&enumeration_entries),
     )?;
     if let Some(pages_module_source) = &pages_module_source {
         let pages_directory = presentation_directory.join("pages");
@@ -514,12 +537,14 @@ fn render_domain_module() -> String {
     "//! Business entities, domain services and ports.\n\n\
      pub mod documents;\n\
      pub mod entities;\n\
+     pub mod enumerations;\n\
      pub mod modules;\n\
      pub mod ports;\n\
      pub mod security;\n\n\
      pub mod services;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
          entities::apply(project);\n\
+         enumerations::apply(project);\n\
          documents::apply(project);\n\
          modules::apply(project);\n\
          security::apply(project);\n\
@@ -714,12 +739,22 @@ enum EditableDocument {
     },
 }
 
-fn render_documents_module(
-    project: &Project,
-    mendix_version: &str,
-) -> Result<(String, HashMap<&'static str, usize>)> {
+/// The document layer, one file per concept: each Mendix module's constants,
+/// regular expressions, scheduled events and standalone menus in its own
+/// `domain/documents/<module>.rs`, and each enumeration in its own
+/// `domain/enumerations/<module>_<name>.rs` — as `#[derive(MxEnumeration)]`
+/// when the derive can express it.
+struct DocumentsExport {
+    /// `(file_stem, source, qualified name)` per Mendix module with documents.
+    module_files: Vec<(String, String, String)>,
+    /// `(file_stem, source, qualified name)` per enumeration.
+    enumeration_files: Vec<(String, String, String)>,
+    counts: HashMap<&'static str, usize>,
+}
+
+fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
     let mut declarations = collect_editable_documents(project)?;
-    let mut editable_counts = HashMap::new();
+    let mut counts = HashMap::new();
     for declaration in &declarations {
         let native_type = match declaration {
             EditableDocument::Enumeration { .. } => "Enumerations$Enumeration",
@@ -729,57 +764,172 @@ fn render_documents_module(
             EditableDocument::Menu { .. } => "Menus$MenuDocument",
             EditableDocument::TaskQueue { .. } => "Queues$Queue",
         };
-        *editable_counts.entry(native_type).or_default() += 1;
+        *counts.entry(native_type).or_default() += 1;
     }
 
     declarations.retain(|document| !matches!(document, EditableDocument::TaskQueue { .. }));
-    Ok((
-        render_editable_documents_source(declarations, mendix_version),
-        editable_counts,
-    ))
-}
-
-fn render_editable_documents_source(
-    mut declarations: Vec<EditableDocument>,
-    mendix_version: &str,
-) -> String {
     declarations
         .sort_by(|left, right| editable_document_key(left).cmp(&editable_document_key(right)));
-    let mutable = if declarations.is_empty() { "" } else { "mut " };
-    let mut source = format!(
-        "//! Editable Cargo-native module documents.\n\n\
-         fn declarations() -> ::mxrs_ir::ProjectDecl {{\n\
-             let {mutable}project = ::mxrs_dsl::ProjectBuilder::new({});\n",
-        rust_string(mendix_version),
-    );
-    let mut current_module = None::<String>;
+
+    let mut enumeration_files = Vec::new();
+    let mut documents_by_module: Vec<(String, Vec<EditableDocument>)> = Vec::new();
     for declaration in declarations {
-        let module = editable_document_module(&declaration);
-        if current_module.as_deref() != Some(module) {
-            if current_module.is_some() {
-                source.push_str("    });\n");
-            }
-            let _ = writeln!(
-                source,
-                "    project.module({}, |module| {{",
-                rust_string(module)
-            );
-            current_module = Some(module.to_string());
+        if let EditableDocument::Enumeration {
+            module,
+            name,
+            documentation,
+            values,
+        } = declaration
+        {
+            let stem = layer_file_stem(&module, &name, false);
+            enumeration_files.push((
+                stem,
+                render_enumeration_file(&module, &name, &documentation, &values),
+                format!("{module}.{name}"),
+            ));
+            continue;
         }
+        let module = editable_document_module(&declaration).to_string();
+        match documents_by_module.last_mut() {
+            Some((current, documents)) if *current == module => documents.push(declaration),
+            _ => documents_by_module.push((module, vec![declaration])),
+        }
+    }
+
+    let module_files = documents_by_module
+        .into_iter()
+        .map(|(module, documents)| {
+            let mut stem = sanitize_ident(&module);
+            stem.make_ascii_lowercase();
+            let source = render_module_documents_file(&module, documents);
+            (stem, source, module)
+        })
+        .collect();
+
+    Ok(DocumentsExport {
+        module_files,
+        enumeration_files,
+        counts,
+    })
+}
+
+/// One Mendix module's non-enumeration documents, on the standalone
+/// [`ModuleBuilder`] the prelude exports.
+fn render_module_documents_file(module_name: &str, documents: Vec<EditableDocument>) -> String {
+    let mut source = format!(
+        "//! Editable {module_name} documents: constants, regular expressions,\n\
+         //! scheduled events, and standalone menus.\n\n\
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n\
+             let mut module = ModuleBuilder::new({});\n",
+        rust_string(module_name),
+    );
+    for declaration in documents {
         render_editable_document_body(&mut source, declaration);
     }
-    if current_module.is_some() {
-        source.push_str("    });\n");
-    }
-    source.push_str(
-        "    project.build()\n}\n\n\
-         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-             for declared in declarations().modules {\n\
-                 project.merge_module(declared);\n\
-             }\n\
-         }\n",
-    );
+    source.push_str("    module.into_decl()\n}\n");
     source
+}
+
+/// One Mendix enumeration as `#[derive(MxEnumeration)]` — a real Rust enum —
+/// when the derive can express it: exactly one caption per value, and names
+/// that survive as identifiers. Anything else keeps the builder form in the
+/// same one-file-per-enumeration slot.
+fn render_enumeration_file(
+    module_name: &str,
+    name: &str,
+    documentation: &str,
+    values: &[(String, Vec<(String, String)>)],
+) -> String {
+    if let Some(derived) = render_derived_enumeration(module_name, name, documentation, values) {
+        return derived;
+    }
+    let mut source = format!(
+        "//! Editable Mendix enumeration.\n\n\
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n\
+             let mut module = ModuleBuilder::new({});\n",
+        rust_string(module_name),
+    );
+    render_editable_document_body(
+        &mut source,
+        EditableDocument::Enumeration {
+            module: module_name.to_string(),
+            name: name.to_string(),
+            documentation: documentation.to_string(),
+            values: values.to_vec(),
+        },
+    );
+    source.push_str("    module.into_decl()\n}\n");
+    source
+}
+
+fn render_derived_enumeration(
+    module_name: &str,
+    name: &str,
+    documentation: &str,
+    values: &[(String, Vec<(String, String)>)],
+) -> Option<String> {
+    let mut type_name = derive_pascal_case(&sanitize_ident(name));
+    if type_name.starts_with(|c: char| c.is_ascii_digit()) {
+        type_name.insert(0, '_');
+    }
+    if type_name.is_empty() || rust_keyword(&type_name) {
+        return None;
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut variants = String::new();
+    for (value, captions) in values {
+        // The derive writes exactly one caption per value; zero or several
+        // need the builder form.
+        let [(language, caption)] = captions.as_slice() else {
+            return None;
+        };
+        let mut variant = derive_pascal_case(&sanitize_ident(value));
+        if variant.starts_with(|c: char| c.is_ascii_digit()) {
+            variant.insert(0, '_');
+        }
+        if variant.is_empty() || rust_keyword(&variant) || !seen.insert(variant.clone()) {
+            return None;
+        }
+        let mut options = Vec::new();
+        if variant != *value {
+            options.push(format!("name = {value:?}"));
+        }
+        if caption != value {
+            options.push(format!("caption = {caption:?}"));
+        }
+        if language != "en_US" {
+            options.push(format!("language = {language:?}"));
+        }
+        if !options.is_empty() {
+            let _ = writeln!(variants, "    #[mxrs({})]", options.join(", "));
+        }
+        let _ = writeln!(variants, "    {variant},");
+    }
+
+    let mut out = String::from("//! Editable Mendix enumeration.\n\nuse mxrs::prelude::*;\n\n");
+    out.push_str("#[derive(MxEnumeration)]\n");
+    let mut options = vec![format!("module = {module_name:?}")];
+    if type_name != name {
+        options.insert(0, format!("name = {name:?}"));
+    }
+    if !documentation.is_empty() {
+        options.push(format!("documentation = {documentation:?}"));
+    }
+    let _ = writeln!(out, "#[mxrs({})]", options.join(", "));
+    if variants.is_empty() {
+        let _ = writeln!(out, "pub enum {type_name} {{}}");
+    } else {
+        let _ = writeln!(out, "pub enum {type_name} {{\n{variants}}}");
+    }
+    let _ = writeln!(
+        out,
+        "\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({});\n    {type_name}::mx_register(&mut module);\n    module.into_decl()\n}}",
+        rust_string(module_name),
+    );
+    Some(out)
 }
 
 fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>> {
@@ -1091,7 +1241,42 @@ fn render_task_queue(source: &mut String, queue: &mxrs_ir::TaskQueueDecl) {
 fn render_task_queues_module(project: &Project, mendix_version: &str) -> Result<String> {
     let mut queues = collect_editable_documents(project)?;
     queues.retain(|document| matches!(document, EditableDocument::TaskQueue { .. }));
-    Ok(render_editable_documents_source(queues, mendix_version))
+    queues.sort_by(|left, right| editable_document_key(left).cmp(&editable_document_key(right)));
+    let mutable = if queues.is_empty() { "" } else { "mut " };
+    let mut source = format!(
+        "//! Editable Cargo-native module documents.\n\n\
+         fn declarations() -> ::mxrs_ir::ProjectDecl {{\n\
+             let {mutable}project = ::mxrs_dsl::ProjectBuilder::new({});\n",
+        rust_string(mendix_version),
+    );
+    let mut current_module = None::<String>;
+    for declaration in queues {
+        let module = editable_document_module(&declaration);
+        if current_module.as_deref() != Some(module) {
+            if current_module.is_some() {
+                source.push_str("    });\n");
+            }
+            let _ = writeln!(
+                source,
+                "    project.module({}, |module| {{",
+                rust_string(module)
+            );
+            current_module = Some(module.to_string());
+        }
+        render_editable_document_body(&mut source, declaration);
+    }
+    if current_module.is_some() {
+        source.push_str("    });\n");
+    }
+    source.push_str(
+        "    project.build()\n}\n\n\
+         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+             for declared in declarations().modules {\n\
+                 project.merge_module(declared);\n\
+             }\n\
+         }\n",
+    );
+    Ok(source)
 }
 
 fn parse_complete_scheduled_event(
@@ -1582,7 +1767,7 @@ fn render_editable_document_body(source: &mut String, declaration: EditableDocum
             }
             let _ = writeln!(
                 source,
-                "            constant.value_type(::mxrs_ir::ConstantType::{value_type});"
+                "            constant.value_type(ConstantType::{value_type});"
             );
             match value {
                 Some(value) => {
@@ -1639,7 +1824,7 @@ fn render_editable_document_body(source: &mut String, declaration: EditableDocum
             if export_level != "Hidden" {
                 let _ = writeln!(
                     source,
-                    "            regular_expression.export_level(::mxrs_ir::ExportLevel::{export_level});"
+                    "            regular_expression.export_level(ExportLevel::{export_level});"
                 );
             }
             source.push_str("        });\n");
@@ -1658,7 +1843,7 @@ fn render_editable_document_body(source: &mut String, declaration: EditableDocum
 fn render_scheduled_event_body(source: &mut String, event: &mxrs_ir::ScheduledEventDecl) {
     let _ = writeln!(
         source,
-        "        module.scheduled_event({}, {}, ::mxrs_ir::ScheduleUnit::{:?}, |event| {{",
+        "        module.scheduled_event({}, {}, ScheduleUnit::{:?}, |event| {{",
         rust_string(&event.name),
         rust_string(&event.microflow),
         event.unit,
@@ -1683,7 +1868,7 @@ fn render_scheduled_event_body(source: &mut String, event: &mxrs_ir::ScheduledEv
     );
     let _ = writeln!(
         source,
-        "            event.on_overlap(::mxrs_ir::OnOverlap::{:?});",
+        "            event.on_overlap(OnOverlap::{:?});",
         event.on_overlap
     );
     if !event.enabled {
@@ -1695,7 +1880,7 @@ fn render_scheduled_event_body(source: &mut String, event: &mxrs_ir::ScheduledEv
     if event.export_level != mxrs_ir::ExportLevel::Hidden {
         let _ = writeln!(
             source,
-            "            event.export_level(::mxrs_ir::ExportLevel::{:?});",
+            "            event.export_level(ExportLevel::{:?});",
             event.export_level
         );
     }
@@ -1706,23 +1891,21 @@ fn render_scheduled_event_body(source: &mut String, event: &mxrs_ir::ScheduledEv
 
 fn render_event_schedule(schedule: &mxrs_ir::ScheduledEventSchedule) -> String {
     match schedule {
-        mxrs_ir::ScheduledEventSchedule::None => {
-            "::mxrs_ir::ScheduledEventSchedule::None".to_string()
-        }
+        mxrs_ir::ScheduledEventSchedule::None => "ScheduledEventSchedule::None".to_string(),
         mxrs_ir::ScheduledEventSchedule::Minute { multiplier } => {
-            format!("::mxrs_ir::ScheduledEventSchedule::Minute {{ multiplier: {multiplier} }}")
+            format!("ScheduledEventSchedule::Minute {{ multiplier: {multiplier} }}")
         }
         mxrs_ir::ScheduledEventSchedule::Hour {
             multiplier,
             minute_offset,
         } => format!(
-            "::mxrs_ir::ScheduledEventSchedule::Hour {{ multiplier: {multiplier}, minute_offset: {minute_offset} }}"
+            "ScheduledEventSchedule::Hour {{ multiplier: {multiplier}, minute_offset: {minute_offset} }}"
         ),
         mxrs_ir::ScheduledEventSchedule::Day {
             hour_of_day,
             minute_of_hour,
         } => format!(
-            "::mxrs_ir::ScheduledEventSchedule::Day {{ hour_of_day: {hour_of_day}, minute_of_hour: {minute_of_hour} }}"
+            "ScheduledEventSchedule::Day {{ hour_of_day: {hour_of_day}, minute_of_hour: {minute_of_hour} }}"
         ),
         mxrs_ir::ScheduledEventSchedule::Week {
             hour_of_day,
@@ -1735,7 +1918,7 @@ fn render_event_schedule(schedule: &mxrs_ir::ScheduledEventSchedule) -> String {
             saturday,
             sunday,
         } => format!(
-            "::mxrs_ir::ScheduledEventSchedule::Week {{ hour_of_day: {hour_of_day}, minute_of_hour: {minute_of_hour}, monday: {monday}, tuesday: {tuesday}, wednesday: {wednesday}, thursday: {thursday}, friday: {friday}, saturday: {saturday}, sunday: {sunday} }}"
+            "ScheduledEventSchedule::Week {{ hour_of_day: {hour_of_day}, minute_of_hour: {minute_of_hour}, monday: {monday}, tuesday: {tuesday}, wednesday: {wednesday}, thursday: {thursday}, friday: {friday}, saturday: {saturday}, sunday: {sunday} }}"
         ),
     }
 }
@@ -1759,7 +1942,7 @@ fn render_menu_body(source: &mut String, menu: &mxrs_ir::MenuDecl) {
     if menu.export_level != mxrs_ir::ExportLevel::Hidden {
         let _ = writeln!(
             source,
-            "            menu.export_level(::mxrs_ir::ExportLevel::{:?});",
+            "            menu.export_level(ExportLevel::{:?});",
             menu.export_level
         );
     }
@@ -1863,7 +2046,7 @@ fn menu_action_expression(action: &mxrs_ir::MenuActionDecl) -> String {
         mxrs_ir::MenuActionDecl::None {
             disabled_during_execution,
         } => format!(
-            "::mxrs_ir::MenuActionDecl::None {{ disabled_during_execution: {disabled_during_execution} }}"
+            "MenuActionDecl::None {{ disabled_during_execution: {disabled_during_execution} }}"
         ),
         mxrs_ir::MenuActionDecl::OpenPage {
             page,
@@ -1871,7 +2054,7 @@ fn menu_action_expression(action: &mxrs_ir::MenuActionDecl) -> String {
             pages_to_close,
             title_override,
         } => format!(
-            "::mxrs_ir::MenuActionDecl::OpenPage {{ page: {}.to_string(), disabled_during_execution: {disabled_during_execution}, pages_to_close: {}, title_override: {} }}",
+            "MenuActionDecl::OpenPage {{ page: {}.to_string(), disabled_during_execution: {disabled_during_execution}, pages_to_close: {}, title_override: {} }}",
             rust_string(page),
             option_u32(*pages_to_close),
             option_localized_text(title_override.as_ref()),
@@ -1883,7 +2066,7 @@ fn menu_action_expression(action: &mxrs_ir::MenuActionDecl) -> String {
             pages_to_close,
             title_override,
         } => format!(
-            "::mxrs_ir::MenuActionDecl::CreateObjectAndOpenPage {{ entity: {}.to_string(), page: {}.to_string(), disabled_during_execution: {disabled_during_execution}, pages_to_close: {}, title_override: {} }}",
+            "MenuActionDecl::CreateObjectAndOpenPage {{ entity: {}.to_string(), page: {}.to_string(), disabled_during_execution: {disabled_during_execution}, pages_to_close: {}, title_override: {} }}",
             rust_string(entity),
             rust_string(page),
             option_u32(*pages_to_close),
@@ -2613,7 +2796,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a flat, Clean Architecture layout: persisted entities are individual `#[derive(MxEntity)]` structs under `src/domain/entities/` (entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place); view and non-persistable entities are DTO files under `src/application/dto/`; each supported server flow is an individual use-case under `src/application/use_cases/`; HTTP controllers and routes live under `src/presentation/`; repositories, database adapters, and imported-model persistence live under `src/infrastructure/`. Mendix modules remain metadata, rather than becoming nested Rust folders. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\n`src/domain/documents/mod.rs` contains editable enumerations, constants, regular expressions, scheduled events, and standalone menus. Supported server-side microflows are reconstructed as typed use cases; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a flat, Clean Architecture layout: persisted entities are individual `#[derive(MxEntity)]` structs under `src/domain/entities/` (entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place); view and non-persistable entities are DTO files under `src/application/dto/`; each supported server flow is an individual use-case under `src/application/use_cases/`; HTTP controllers and routes live under `src/presentation/`; repositories, database adapters, and imported-model persistence live under `src/infrastructure/`. Mendix modules remain metadata, rather than becoming nested Rust folders. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nEach enumeration is an individual `#[derive(MxEnumeration)]` Rust enum under `src/domain/enumerations/`, and each Mendix module's constants, regular expressions, scheduled events, and standalone menus live in their own file under `src/domain/documents/`. Supported server-side microflows are reconstructed as typed use cases; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -4372,6 +4555,60 @@ pub fn declaration() -> ModuleDecl {
         );
     }
 
+    /// Enumerations with one caption per value become real Rust enums; the
+    /// whole file is pinned like the entity render.
+    #[test]
+    fn single_caption_enumerations_are_derived_rust_enums_pinned_whole() {
+        let values = vec![
+            (
+                "Open".to_string(),
+                vec![("en_US".to_string(), "Open".to_string())],
+            ),
+            (
+                "_10_Minutes".to_string(),
+                vec![("pt_BR".to_string(), "Dez minutos".to_string())],
+            ),
+        ];
+        let rendered = render_enumeration_file("Sales", "ENUM_Status", "Lifecycle.", &values);
+        assert_eq!(
+            rendered,
+            r#"//! Editable Mendix enumeration.
+
+use mxrs::prelude::*;
+
+#[derive(MxEnumeration)]
+#[mxrs(name = "ENUM_Status", module = "Sales", documentation = "Lifecycle.")]
+pub enum ENUMStatus {
+    Open,
+    #[mxrs(name = "_10_Minutes", caption = "Dez minutos", language = "pt_BR")]
+    _10Minutes,
+}
+
+pub fn declaration() -> ModuleDecl {
+    let mut module = ModuleBuilder::new("Sales");
+    ENUMStatus::mx_register(&mut module);
+    module.into_decl()
+}
+"#
+        );
+
+        // Multi-language captions keep the builder form, still one file.
+        let multi = vec![(
+            "Open".to_string(),
+            vec![
+                ("en_US".to_string(), "Open".to_string()),
+                ("pt_BR".to_string(), "Aberto".to_string()),
+            ],
+        )];
+        let rendered = render_enumeration_file("Sales", "Status", "", &multi);
+        assert!(
+            rendered.contains("module.enumeration(\"Status\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("use mxrs::prelude::*;"));
+        assert!(!rendered.contains("derive(MxEnumeration)"));
+    }
+
     /// What the derive cannot yet express falls back to the IR renderer —
     /// less eloquent, never lost.
     #[test]
@@ -5098,12 +5335,28 @@ pub fn declaration() -> ModuleDecl {
         assert!(persistence.contains("Order projection"));
         assert!(persistence.contains("source.excluded(true)"));
         assert!(persistence.contains("ExportLevel::Published"));
-        let documents =
+        // Documents split per concept: the multi-language enumeration keeps
+        // the builder form in its own file, the constants land in the
+        // module's documents file, and both are indexed by mod.rs.
+        let documents_index =
             std::fs::read_to_string(generated.join("src/domain/documents/mod.rs")).unwrap();
-        assert!(documents.contains("module.enumeration(\"Status\""));
-        assert!(documents.contains("(\"pt_BR\".to_string(), \"Aberto\".to_string())"));
+        assert!(documents_index.contains("pub mod sales;"));
+        assert!(documents_index.contains("project.merge_module(sales::declaration());"));
+        let enumerations_index =
+            std::fs::read_to_string(generated.join("src/domain/enumerations/mod.rs")).unwrap();
+        assert!(enumerations_index.contains("pub mod sales_status;"));
+        let status =
+            std::fs::read_to_string(generated.join("src/domain/enumerations/sales_status.rs"))
+                .unwrap();
+        assert!(status.contains("module.enumeration(\"Status\""), "{status}");
+        assert!(status.contains("(\"pt_BR\".to_string(), \"Aberto\".to_string())"));
+        assert!(!status.contains("derive(MxEnumeration)"), "{status}");
+        let documents =
+            std::fs::read_to_string(generated.join("src/domain/documents/sales.rs")).unwrap();
+        assert!(documents.contains("use mxrs::prelude::*;"));
         assert!(documents.contains("module.constant(\"MaximumOrders\""));
         assert!(documents.contains("ConstantType::Integer"));
+        assert!(!documents.contains("::mxrs_ir::"), "{documents}");
         assert!(documents.contains("constant.exposed_to_client(true)"));
         assert!(documents.contains("constant.value_from_env(\"MXRS_SALES_APITOKEN\")"));
         assert!(!documents.contains("super-secret-value"));
