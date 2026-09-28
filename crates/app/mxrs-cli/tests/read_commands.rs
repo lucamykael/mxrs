@@ -119,10 +119,10 @@ fn mda_accepts_directory_entries_and_compares_files_with_native_status_names() {
 fn project_inspection_normalizes_root_and_reports_unreadable_inventory() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    std::fs::create_dir_all(root.join("src/domain/modules/zulu")).unwrap();
-    std::fs::write(root.join("src/domain/modules/zulu/mod.rs"), "").unwrap();
-    std::fs::create_dir_all(root.join("src/domain/modules/.hidden")).unwrap();
-    std::fs::write(root.join("src/domain/modules/.hidden/mod.rs"), "").unwrap();
+    std::fs::create_dir_all(root.join("src/modules/zulu")).unwrap();
+    std::fs::write(root.join("src/modules/zulu/mod.rs"), "").unwrap();
+    std::fs::create_dir_all(root.join("src/modules/.hidden")).unwrap();
+    std::fs::write(root.join("src/modules/.hidden/mod.rs"), "").unwrap();
     std::fs::write(root.join(".hidden.mpr"), "inventory only").unwrap();
     let path = root.join("absent/..");
     let data: serde_json::Value = serde_json::from_str(&success(cli(&[

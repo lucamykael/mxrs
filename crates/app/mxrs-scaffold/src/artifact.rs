@@ -15,7 +15,7 @@
 //! by `cargo`. Two consequences follow from that and are not stylistic:
 //!
 //! 1. Rust module paths must be identifiers, so directories are snake_cased
-//!    (`src/domain/modules/sales`, not `.../Sales`). The Mendix name stays
+//!    (`src/modules/sales`, not `.../Sales`). The Mendix name stays
 //!    verbatim inside the generated declaration and in the registry key.
 //! 2. Aggregators cannot be "a list of files to evaluate". Each one exposes an
 //!    `apply` function plus a `const` table of function pointers, so adding an
@@ -29,7 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::templates::{DECLARATIONS_LIST, DECLARE, FAMILIES_LIST, MODULES_LIST, snake_case};
+use crate::templates::{DECLARATIONS_LIST, DECLARE, snake_case};
 use crate::transaction::Transaction;
 use crate::{Result, ScaffoldError, io_error, page_templates, registry, templates};
 
@@ -84,7 +84,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "init",
         argument: "<Module>",
         summary: "Initialize presentation and the application layout",
-        destination: "src/presentation/modules/<module>",
+        destination: "src/modules/<module>/presentation",
         kind: ArtifactKind::Presentation,
     },
     ScaffoldCommand {
@@ -100,7 +100,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Client>",
         summary: "Create a consumed REST adapter microflow",
-        destination: "src/application/modules/<module>/integrations",
+        destination: "src/modules/<module>/integrations",
         kind: ArtifactKind::ConsumedRest,
     },
     ScaffoldCommand {
@@ -116,7 +116,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Constant>",
         summary: "Create a string constant declaration",
-        destination: "src/domain/modules/<module>/constants",
+        destination: "src/modules/<module>/domain/documents",
         kind: ArtifactKind::Constant,
     },
     ScaffoldCommand {
@@ -124,7 +124,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Adapter>",
         summary: "Create an integration adapter microflow",
-        destination: "src/application/modules/<module>/integrations",
+        destination: "src/modules/<module>/integrations",
         kind: ArtifactKind::Integration,
     },
     ScaffoldCommand {
@@ -132,7 +132,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Entity>",
         summary: "Create a domain entity declaration",
-        destination: "src/domain/modules/<module>/entities",
+        destination: "src/modules/<module>/domain/entities",
         kind: ArtifactKind::Entity,
     },
     ScaffoldCommand {
@@ -140,7 +140,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Enumeration>",
         summary: "Create an enumeration declaration",
-        destination: "src/domain/modules/<module>/enumerations",
+        destination: "src/modules/<module>/domain/enumerations",
         kind: ArtifactKind::Enumeration,
     },
     ScaffoldCommand {
@@ -156,7 +156,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Adapter>",
         summary: "Create a Java Action adapter microflow",
-        destination: "src/application/modules/<module>/actions",
+        destination: "src/modules/<module>/actions",
         kind: ArtifactKind::JavaAction,
     },
     ScaffoldCommand {
@@ -164,7 +164,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module>",
         summary: "Create an editable module declaration layer",
-        destination: "src/domain/modules/<module>",
+        destination: "src/modules/<module>",
         kind: ArtifactKind::Module,
     },
     ScaffoldCommand {
@@ -172,7 +172,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create a client nanoflow declaration",
-        destination: "src/presentation/modules/<module>/nanoflows",
+        destination: "src/modules/<module>/presentation/nanoflows",
         kind: ArtifactKind::Nanoflow,
     },
     ScaffoldCommand {
@@ -180,7 +180,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Page>",
         summary: "Create a page declaration and its module layout",
-        destination: "src/presentation/modules/<module>/pages",
+        destination: "src/modules/<module>/presentation/pages",
         kind: ArtifactKind::Page,
     },
     ScaffoldCommand {
@@ -188,7 +188,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Handler>",
         summary: "Create a published REST handler microflow",
-        destination: "src/application/modules/<module>/endpoints",
+        destination: "src/modules/<module>/presentation/http",
         kind: ArtifactKind::PublishedRest,
     },
     ScaffoldCommand {
@@ -204,7 +204,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Event>",
         summary: "Create a scheduled event and its handler microflow",
-        destination: "src/application/modules/<module>/jobs",
+        destination: "src/modules/<module>/domain/documents",
         kind: ArtifactKind::ScheduledEvent,
     },
     ScaffoldCommand {
@@ -212,7 +212,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "init",
         argument: "<Module>",
         summary: "Create module roles and project security",
-        destination: "src/domain/modules/<module>/security",
+        destination: "src/modules/<module>/domain",
         kind: ArtifactKind::Security,
     },
     // Listed after `security`: a demo user requires initialized project
@@ -223,7 +223,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Name>",
         summary: "Create a local Mendix demo user backed by an ignored .env secret",
-        destination: "src/domain/security/demo_users",
+        destination: "src/domain/demo_users",
         kind: ArtifactKind::DemoUser,
     },
     ScaffoldCommand {
@@ -239,7 +239,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application validation microflow",
-        destination: "src/application/modules/<module>/validations",
+        destination: "src/modules/<module>/services",
         kind: ArtifactKind::Validation,
     },
     ScaffoldCommand {
@@ -247,7 +247,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application use-case microflow",
-        destination: "src/application/modules/<module>/use_cases",
+        destination: "src/modules/<module>/services",
         kind: ArtifactKind::UseCase,
     },
 ];
@@ -278,54 +278,6 @@ impl ArtifactKind {
             Self::Design => "design",
             Self::Module => "module",
             Self::Presentation => "presentation",
-        }
-    }
-
-    fn family(self) -> &'static str {
-        match self {
-            Self::Entity => "entities",
-            Self::Enumeration => "enumerations",
-            Self::Constant => "constants",
-            Self::ScheduledEvent => "jobs",
-            Self::UseCase => "use_cases",
-            Self::Page => "pages",
-            Self::Nanoflow => "nanoflows",
-            Self::PublishedRest => "endpoints",
-            Self::ConsumedRest => "integrations",
-            Self::JavaAction => "actions",
-            Self::FunctionalTest => "functional_tests",
-            Self::Evaluation => "evaluations",
-            Self::Validation => "validations",
-            Self::Integration => "integrations",
-            Self::Ci => "ci",
-            Self::Repository => "repositories",
-            Self::Security | Self::Module | Self::DemoUser => "security",
-            Self::Design => "design",
-            Self::Presentation => "presentation",
-        }
-    }
-
-    fn layer(self) -> &'static str {
-        match self {
-            Self::Entity | Self::Enumeration | Self::Constant | Self::Security | Self::Module => {
-                "domain"
-            }
-            Self::Page | Self::Nanoflow | Self::Presentation => "presentation",
-            Self::ScheduledEvent
-            | Self::UseCase
-            | Self::PublishedRest
-            | Self::ConsumedRest
-            | Self::JavaAction
-            | Self::Validation
-            | Self::Integration => "application",
-            Self::FunctionalTest
-            | Self::Evaluation
-            | Self::Ci
-            | Self::Repository
-            | Self::DemoUser
-            | Self::Design => {
-                unreachable!("artifact is handled outside layered module families")
-            }
         }
     }
 
@@ -506,7 +458,7 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
 
 /// Facts about a Cargo-native project workspace, for `mxrs project inspect`.
 /// `modules` lists the snake-cased Rust directories under
-/// `src/domain/modules`; the verbatim Mendix names appear in
+/// `src/modules`; the verbatim Mendix names appear in
 /// `registered_scaffolds` as `module:<Name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectInspection {
@@ -538,10 +490,10 @@ pub fn inspect_project(target: impl AsRef<Path>) -> Result<ProjectInspection> {
     }
     mprs.sort();
     let mut modules = Vec::new();
-    if let Some(entries) = optional_directory(&root.join("src/domain/modules"))? {
+    if let Some(entries) = optional_directory(&root.join("src/modules"))? {
         for entry in entries {
             let path = entry
-                .map_err(|error| io_error(&root.join("src/domain/modules"), error))?
+                .map_err(|error| io_error(&root.join("src/modules"), error))?
                 .path();
             if !is_hidden(&path)
                 && path.join("mod.rs").is_file()
@@ -717,23 +669,14 @@ fn create_module_layer(
     module_name: &str,
 ) -> Result<()> {
     let directory = snake_case(module_name);
-    let aggregator = root.join(format!("src/domain/modules/{directory}/mod.rs"));
+    let aggregator = root.join(format!("src/modules/{directory}/mod.rs"));
     if aggregator.is_file() {
         return Err(ScaffoldError::ModuleExists(
             aggregator.display().to_string(),
         ));
     }
-    connect_modules_aggregator(transaction, root, "domain")?;
-    transaction.create(&aggregator, templates::module_aggregator(module_name))?;
-    let modules = root.join("src/domain/modules/mod.rs");
-    let stem = rust_module_path(&directory)?;
-    declare_child_module(transaction, &modules, &directory)?;
-    append_list_entry(
-        transaction,
-        &modules,
-        MODULES_LIST,
-        &format!("{stem}::apply"),
-    )
+    connect_module_folder(transaction, root, module_name, "domain")?;
+    Ok(())
 }
 
 /// Ports mxrb's `scaffold_demo_user` to the Cargo-native layout: the
@@ -786,15 +729,11 @@ fn create_demo_user(
             .collect::<String>()
     );
 
-    let aggregator = root.join("src/domain/security/demo_users/mod.rs");
+    let aggregator = root.join("src/domain/demo_users/mod.rs");
     if transaction.content(&aggregator)?.is_none() {
         transaction.create(&aggregator, templates::demo_users_aggregator())?;
-        declare_child_module(transaction, &security, "demo_users")?;
-        connect_build(
-            transaction,
-            root,
-            "security::demo_users::apply(&mut project);",
-        )?;
+        declare_child_module(transaction, &root.join("src/domain/mod.rs"), "demo_users")?;
+        connect_build(transaction, root, "demo_users::apply(&mut project);")?;
     }
     let stem = snake_case(name);
     let file = aggregator.with_file_name(format!("{stem}.rs"));
@@ -852,7 +791,7 @@ fn validate_demo_user_entity(root: &Path, entity: &str) -> Result<()> {
         return Err(invalid());
     }
     let declaration = root.join(format!(
-        "src/domain/modules/{}/entities/{}.rs",
+        "src/modules/{}/domain/entities/{}.rs",
         snake_case(module_name),
         snake_case(entity_name)
     ));
@@ -944,11 +883,11 @@ fn create_module_security(
     module_name: &str,
 ) -> Result<()> {
     require_module(root, module_name)?;
-    create_family_file(
+    create_concept_file(
         transaction,
         root,
         module_name,
-        ArtifactKind::Security,
+        module_folder(ArtifactKind::Security),
         "module_roles",
         templates::module_roles(module_name),
     )?;
@@ -983,39 +922,39 @@ fn create_page_slice(
     let stem = snake_case(artifact_name);
 
     if template.data_backed {
-        create_family_file(
+        create_concept_file(
             transaction,
             root,
             module_name,
-            ArtifactKind::Entity,
+            module_folder(ArtifactKind::Entity),
             &stem,
             templates::page_chain_entity(module_name, artifact_name),
         )?;
-        create_family_file(
+        create_concept_file(
             transaction,
             root,
             module_name,
-            ArtifactKind::UseCase,
+            module_folder(ArtifactKind::UseCase),
             &format!("act_load_{stem}"),
             templates::page_chain_loader(module_name, artifact_name),
         )?;
     }
     if chain.is_some_and(PageChain::has_microflow) {
-        create_family_file(
+        create_concept_file(
             transaction,
             root,
             module_name,
-            ArtifactKind::UseCase,
+            module_folder(ArtifactKind::UseCase),
             &format!("act_refresh_{stem}"),
             templates::page_chain_action(module_name, artifact_name),
         )?;
     }
     if let Some(chain) = chain.filter(|chain| chain.has_nanoflow()) {
-        create_family_file(
+        create_concept_file(
             transaction,
             root,
             module_name,
-            ArtifactKind::Nanoflow,
+            module_folder(ArtifactKind::Nanoflow),
             &format!("nan_refresh_{stem}"),
             templates::page_chain_nanoflow(module_name, artifact_name, chain.has_microflow()),
         )?;
@@ -1028,11 +967,11 @@ fn create_page_slice(
             templates::RefreshAction::Microflow
         }
     });
-    create_family_file(
+    create_concept_file(
         transaction,
         root,
         module_name,
-        ArtifactKind::Page,
+        module_folder(ArtifactKind::Page),
         &stem,
         templates::page_from_template(
             module_name,
@@ -1125,11 +1064,11 @@ fn create_artifact(
             unreachable!("handled by the caller")
         }
     };
-    create_family_file(
+    create_concept_file(
         transaction,
         root,
         module_name,
-        options.kind,
+        module_folder(options.kind),
         &snake_case(artifact_name),
         source,
     )
@@ -1206,125 +1145,153 @@ fn ensure_module_layout(
     module_name: &str,
 ) -> Result<()> {
     let family = root.join(format!(
-        "src/presentation/modules/{}/layouts/mod.rs",
+        "src/modules/{}/presentation/layouts/mod.rs",
         snake_case(module_name)
     ));
     if transaction.content(&family)?.is_some() {
         return Ok(());
     }
-    connect_family(
+    create_concept_file(
         transaction,
         root,
         module_name,
-        ArtifactKind::Page,
-        "layouts",
-    )?;
-    let file = family.with_file_name("application_layout.rs");
-    transaction.create(&file, templates::layouts(module_name, LAYOUT_PARAMETER))?;
-    declare_child_module(transaction, &family, "application_layout")?;
-    append_list_entry(
-        transaction,
-        &family,
-        DECLARATIONS_LIST,
-        &format!("application_layout::{DECLARE}"),
+        "presentation/layouts",
+        "application_layout",
+        templates::layouts(module_name, LAYOUT_PARAMETER),
     )
 }
 
-fn create_family_file(
+/// Where a scaffolded artifact lives inside its module's folder. These are
+/// the importer's own folders, so a scaffolded concept and an imported one
+/// are the same file in the same place.
+fn module_folder(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Entity => "domain/entities",
+        ArtifactKind::Enumeration => "domain/enumerations",
+        ArtifactKind::Constant | ArtifactKind::ScheduledEvent => "domain/documents",
+        ArtifactKind::UseCase | ArtifactKind::Validation => "services",
+        ArtifactKind::Page => "presentation/pages",
+        ArtifactKind::Nanoflow => "presentation/nanoflows",
+        ArtifactKind::PublishedRest => "presentation/http",
+        ArtifactKind::ConsumedRest | ArtifactKind::Integration => "integrations",
+        ArtifactKind::JavaAction => "actions",
+        ArtifactKind::Security | ArtifactKind::Module | ArtifactKind::Presentation => "domain",
+        ArtifactKind::FunctionalTest
+        | ArtifactKind::Evaluation
+        | ArtifactKind::Ci
+        | ArtifactKind::Repository
+        | ArtifactKind::DemoUser
+        | ArtifactKind::Design => {
+            unreachable!("artifact is handled outside module folders")
+        }
+    }
+}
+
+/// Writes one artifact file into its module folder and registers it the way
+/// the importer does: `pub mod <stem>;` plus a `merge_module` call in the
+/// folder's `apply`.
+fn create_concept_file(
     transaction: &mut Transaction,
     root: &Path,
     module_name: &str,
-    kind: ArtifactKind,
+    folder: &str,
     stem: &str,
     source: String,
 ) -> Result<()> {
-    let family = kind.family();
-    let layer = kind.layer();
-    connect_family(transaction, root, module_name, kind, family)?;
-    let aggregator = root.join(format!(
-        "src/{layer}/modules/{}/{family}/mod.rs",
-        snake_case(module_name)
-    ));
-    let path = aggregator.with_file_name(format!("{stem}.rs"));
+    let index = connect_module_folder(transaction, root, module_name, folder)?;
+    let path = index.with_file_name(format!("{stem}.rs"));
     let rust_path = rust_module_path(stem)?;
     transaction.create(&path, source)?;
-    declare_child_module(transaction, &aggregator, stem)?;
-    append_list_entry(
+    declare_child_module(transaction, &index, stem)?;
+    connect_apply_call(
         transaction,
-        &aggregator,
-        DECLARATIONS_LIST,
-        &format!("{rust_path}::{DECLARE}"),
+        &index,
+        &format!("project.merge_module({rust_path}::declaration());"),
     )
 }
 
-fn connect_family(
+/// Creates the `mod.rs` chain from the crate root down to `folder`, and
+/// answers with the folder's own index. Every level is the shape the
+/// importer writes: a header, `pub mod` declarations, and one `apply`.
+fn connect_module_folder(
     transaction: &mut Transaction,
     root: &Path,
     module_name: &str,
-    kind: ArtifactKind,
-    family: &str,
-) -> Result<()> {
-    let layer = kind.layer();
+    folder: &str,
+) -> Result<PathBuf> {
+    let src = root.join("src");
+    let modules = src.join("modules/mod.rs");
+    if transaction.content(&modules)?.is_none() {
+        transaction.create(&modules, templates::modules_index())?;
+        declare_child_module(transaction, &src.join("lib.rs"), "modules")?;
+        connect_build(transaction, root, "crate::modules::apply(&mut project);")?;
+    }
     let directory = snake_case(module_name);
-    let module = root.join(format!("src/{layer}/modules/{directory}/mod.rs"));
-    if transaction.content(&module)?.is_none() {
-        connect_modules_aggregator(transaction, root, layer)?;
-        transaction.create(&module, templates::module_aggregator(module_name))?;
-        let modules = root.join(format!("src/{layer}/modules/mod.rs"));
-        let stem = rust_module_path(&directory)?;
+    let module_root = src.join("modules").join(&directory).join("mod.rs");
+    if transaction.content(&module_root)?.is_none() {
+        transaction.create(&module_root, templates::module_index(module_name))?;
         declare_child_module(transaction, &modules, &directory)?;
-        append_list_entry(
+        connect_apply_call(
             transaction,
             &modules,
-            MODULES_LIST,
-            &format!("{stem}::apply"),
+            &format!("{}::apply(project);", rust_module_path(&directory)?),
         )?;
     }
-    let aggregator = root.join(format!("src/{layer}/modules/{directory}/{family}/mod.rs"));
-    if transaction.content(&aggregator)?.is_some() {
-        return Ok(());
+    let mut parent = module_root;
+    let mut current = src.join("modules").join(&directory);
+    for segment in folder.split('/') {
+        current = current.join(segment);
+        let index = current.join("mod.rs");
+        if transaction.content(&index)?.is_none() {
+            transaction.create(&index, templates::folder_index(module_name, segment))?;
+            declare_child_module(transaction, &parent, segment)?;
+            connect_apply_call(
+                transaction,
+                &parent,
+                &format!("{}::apply(project);", rust_module_path(segment)?),
+            )?;
+        }
+        parent = index;
     }
-    transaction.create(
-        &aggregator,
-        templates::family_aggregator(module_name, family),
-    )?;
-    declare_child_module(transaction, &module, family)?;
-    append_list_entry(
-        transaction,
-        &module,
-        FAMILIES_LIST,
-        &format!("{family}::apply"),
-    )
+    Ok(parent)
 }
 
-fn connect_modules_aggregator(
-    transaction: &mut Transaction,
-    root: &Path,
-    layer: &str,
-) -> Result<()> {
-    let modules = root.join(format!("src/{layer}/modules/mod.rs"));
-    if transaction.content(&modules)?.is_some() {
+/// Inserts `call` as the last statement of the file's `apply` function.
+/// An index created empty takes `_project`; the first call renames it.
+fn connect_apply_call(transaction: &mut Transaction, path: &Path, call: &str) -> Result<()> {
+    let source = transaction
+        .content(path)?
+        .ok_or_else(|| ScaffoldError::AggregatorNotFound(path.display().to_string()))?;
+    if source.lines().any(|line| line.trim() == call) {
         return Ok(());
     }
-    transaction.create(&modules, templates::modules_aggregator())?;
-    let layer_module = root.join(format!("src/{layer}/mod.rs"));
-    declare_child_module(transaction, &layer_module, "modules")?;
-    match layer {
-        "domain" => connect_build(transaction, root, "modules::apply(&mut project);"),
-        "application" => connect_layer_apply(
-            transaction,
-            &layer_module,
-            "modules::apply(&mut project);",
-            IMPORTED_BUILD_TAIL,
-        ),
-        "presentation" => connect_layer_apply(
-            transaction,
-            &layer_module,
-            "modules::apply(project);",
-            "\n}\n",
-        ),
-        _ => unreachable!("known generated source layer"),
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.starts_with("pub fn apply("))
+    else {
+        return Err(ScaffoldError::UnrecognizedProjectBuild(
+            path.display().to_string(),
+        ));
+    };
+    lines[start] = lines[start].replace("_project:", "project:");
+    // An index with nothing registered yet carries an empty body on one
+    // line; the first call opens it into a block.
+    if let Some(head) = lines[start].strip_suffix("{}") {
+        let head = format!("{head}{{");
+        lines.splice(
+            start..=start,
+            [head, format!("    {call}"), "}".to_string()],
+        );
+        return transaction.write(path, join(&lines));
     }
+    let Some(end) = lines[start..].iter().position(|line| line == "}") else {
+        return Err(ScaffoldError::UnrecognizedProjectBuild(
+            path.display().to_string(),
+        ));
+    };
+    lines.insert(start + end, format!("    {call}"));
+    transaction.write(path, join(&lines))
 }
 
 const IMPORTED_BUILD_TAIL: &str = "\n    project\n}\n";
@@ -1465,10 +1432,7 @@ fn join(lines: &[String]) -> String {
 }
 
 fn require_module(root: &Path, module_name: &str) -> Result<()> {
-    let aggregator = root.join(format!(
-        "src/domain/modules/{}/mod.rs",
-        snake_case(module_name)
-    ));
+    let aggregator = root.join(format!("src/modules/{}/mod.rs", snake_case(module_name)));
     if aggregator.is_file() {
         return Ok(());
     }
@@ -1529,7 +1493,7 @@ fn initialize_presentation(
     module_name: &str,
 ) -> Result<()> {
     let directory = snake_case(module_name);
-    let base = root.join(format!("src/presentation/modules/{directory}"));
+    let base = root.join(format!("src/modules/{directory}/presentation"));
     let aggregator = base.join("mod.rs");
     let keeps = ["pages", "snippets", "nanoflows"].map(|family| base.join(family).join(".keep"));
     if transaction.content(&aggregator)?.is_some()
@@ -1550,30 +1514,22 @@ fn initialize_presentation(
     {
         return Err(ScaffoldError::FileExists(layout_file.display().to_string()));
     }
-    connect_family(
-        transaction,
-        root,
-        module_name,
-        ArtifactKind::Presentation,
-        "layouts",
-    )?;
     if transaction.content(&layout_file)?.is_none() {
-        transaction.create(&layout_file, templates::presentation_layout(module_name))?;
-        declare_child_module(transaction, &layout_family, "application_layout")?;
-        append_list_entry(
-            transaction,
-            &layout_family,
-            DECLARATIONS_LIST,
-            &format!("application_layout::{DECLARE}"),
-        )?;
-    }
-    for (family, keep) in ["pages", "snippets", "nanoflows"].iter().zip(keeps) {
-        connect_family(
+        create_concept_file(
             transaction,
             root,
             module_name,
-            ArtifactKind::Presentation,
-            family,
+            "presentation/layouts",
+            "application_layout",
+            templates::presentation_layout(module_name),
+        )?;
+    }
+    for (family, keep) in ["pages", "snippets", "nanoflows"].iter().zip(keeps) {
+        connect_module_folder(
+            transaction,
+            root,
+            module_name,
+            &format!("presentation/{family}"),
         )?;
         if transaction.content(&keep)?.is_none() {
             transaction.create(keep, String::new())?;

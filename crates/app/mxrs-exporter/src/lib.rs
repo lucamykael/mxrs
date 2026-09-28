@@ -290,15 +290,12 @@ fn import_cargo_project_inner(
     let package_name = cargo_package_name(&manifest.project_name);
     let crate_name = package_name.replace('-', "_");
     let infrastructure_directory = destination.join("src/infrastructure");
-    let domain_directory = destination.join("src/domain");
-    let application_directory = destination.join("src/application");
     let presentation_directory = destination.join("src/presentation");
     // Only folders that receive generated content exist: an empty
     // placeholder folder is noise the reader has to rule out.
     for directory in [
-        domain_directory.join("modules"),
-        application_directory.join("modules"),
-        presentation_directory.join("modules"),
+        destination.join("src/domain"),
+        destination.join("src/application"),
         presentation_directory.join("http"),
         infrastructure_directory.join("adapters"),
     ] {
@@ -419,10 +416,6 @@ fn import_cargo_project_inner(
     write_text(&destination.join("src/domain/mod.rs"), &domain_source)?;
     write_text(&destination.join("src/composition.rs"), &composition_source)?;
     write_text(
-        &destination.join("src/domain/modules/mod.rs"),
-        &render_scaffold_modules_module(),
-    )?;
-    write_text(
         &destination.join("src/application/mod.rs"),
         &application_source,
     )?;
@@ -435,20 +428,12 @@ fn import_cargo_project_inner(
         &task_queues_source,
     )?;
     write_text(
-        &destination.join("src/application/modules/mod.rs"),
-        &render_scaffold_modules_module(),
-    )?;
-    write_text(
         &destination.join("src/domain/security.rs"),
         &security_source,
     )?;
     write_text(
         &destination.join("src/presentation/navigation.rs"),
         &navigation_source,
-    )?;
-    write_text(
-        &destination.join("src/presentation/modules/mod.rs"),
-        &render_scaffold_modules_module(),
     )?;
     match api_mode {
         ApiMode::Axum => {
@@ -552,10 +537,8 @@ fn render_domain_module() -> String {
     "//! Project-level security, plus the aggregator `mxrs add` wires\n\
      //! scaffolded modules into. Each Mendix module's own domain model\n\
      //! lives in `crate::modules`.\n\n\
-     pub mod modules;\n\
      pub mod security;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-     \x20   modules::apply(project);\n\
      \x20   security::apply(project);\n\
      }\n"
     .to_string()
@@ -565,11 +548,9 @@ fn render_application_module() -> String {
     "//! Project-level task queues, plus the aggregator `mxrs add` wires\n\
      //! scaffolded modules into. Each Mendix module's services and DTOs\n\
      //! live in `crate::modules`.\n\n\
-     pub mod modules;\n\
      pub mod task_queues;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
      \x20   task_queues::apply(project);\n\
-     \x20   modules::apply(project);\n\
      }\n"
     .to_string()
 }
@@ -581,11 +562,9 @@ fn render_presentation_module(api_mode: ApiMode) -> String {
          //! Each Mendix module's pages, nanoflows and published REST\n\
          //! services live in `crate::modules`.\n\n\
          pub mod http;\n\
-         pub mod modules;\n\
          pub mod navigation;\n\n\
          pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
          \x20   navigation::apply(project);\n\
-         \x20   modules::apply(project);\n\
          }\n",
     );
     let _ = writeln!(
@@ -693,17 +672,6 @@ fn render_persistence_module(modules: &[Module], mendix_version: &str) -> String
         "    for declared in declarations.build().modules { project.merge_module(declared); }\n}\n",
     );
     out
-}
-
-fn render_scaffold_modules_module() -> String {
-    "//! Scaffolded Mendix modules composed into this architectural layer.\n\n\
-     pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-         for declare in MODULES {\n\
-             declare(project);\n\
-         }\n\
-     }\n\n\
-     const MODULES: &[fn(&mut ::mxrs_ir::ProjectDecl)] = &[];\n"
-        .to_string()
 }
 
 #[derive(Debug)]
@@ -6254,10 +6222,11 @@ mod tests {
         assert!(!presentation.contains("pub mod pages;"));
         assert!(!presentation.contains("pub mod microflows;"));
 
-        // Every layer carries the aggregator `mxrs add` wires scaffolded
-        // modules into, so a scaffold never has to invent one.
+        // Modules are not a per-layer concern any more: `mxrs add` writes
+        // into `crate::modules` like the importer does, so no layer carries
+        // an aggregator of its own.
         for layer in [&domain, &application, &presentation] {
-            assert!(layer.contains("pub mod modules;"));
+            assert!(!layer.contains("pub mod modules;"), "{layer}");
         }
 
         let composition = render_composition_module("11.12.1");
@@ -7974,18 +7943,13 @@ pub fn declaration() -> ModuleDecl {
         assert!(crate_root.contains("pub fn build() -> ::mxrs_ir::ProjectDecl"));
         assert!(crate_root.contains("composition::build()"));
         assert!(crate_root.contains("project = crate::build"));
-        // Every layer ships the aggregator `mxrs add` wires scaffolded modules
-        // into, so a later scaffold never has to invent one.
-        for relative in [
-            "src/domain/modules/mod.rs",
-            "src/application/modules/mod.rs",
-            "src/presentation/modules/mod.rs",
-        ] {
-            assert!(generated.join(relative).is_file(), "{relative} is missing");
-        }
         // Empty placeholder folders are noise; only what receives generated
-        // content exists.
+        // content exists. `mxrs add` writes into `src/modules` like the
+        // importer, so no layer carries a scaffold aggregator either.
         for absent in [
+            "src/domain/modules",
+            "src/application/modules",
+            "src/presentation/modules",
             "src/domain/ports",
             "src/domain/services",
             "src/presentation/controllers",
@@ -7998,9 +7962,6 @@ pub fn declaration() -> ModuleDecl {
                 "{absent} should not exist"
             );
         }
-        assert!(domain_source.contains("pub mod modules;"));
-        assert!(application_source.contains("modules::apply(project);"));
-        assert!(presentation_source.contains("modules::apply(project);"));
         // The pre-split layout must not survive alongside the layered one:
         // two homes for the same concept is exactly the ambiguity the split
         // exists to remove.

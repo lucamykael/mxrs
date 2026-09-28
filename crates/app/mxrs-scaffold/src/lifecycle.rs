@@ -154,15 +154,14 @@ fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<b
     let application = root.join("src/application/mod.rs");
     let presentation = root.join("src/presentation/mod.rs");
     transaction.create(&application, crate::templates::application_layer())?;
-    transaction.create(
-        root.join("src/application/modules/mod.rs"),
-        crate::templates::modules_aggregator(),
-    )?;
+    // A project that already carries the module index keeps it; migration
+    // adds what is missing rather than replacing what is there.
+    let modules = root.join("src/modules/mod.rs");
+    if transaction.content(&modules)?.is_none() {
+        transaction.create(modules, crate::templates::modules_index())?;
+    }
     transaction.create(&presentation, crate::templates::empty_presentation_layer())?;
-    transaction.create(
-        root.join("src/presentation/modules/mod.rs"),
-        crate::templates::modules_aggregator(),
-    )?;
+
     let infrastructure = root.join("src/infrastructure/mod.rs");
     if transaction.content(&infrastructure)?.is_none() {
         transaction.create(infrastructure, crate::templates::infrastructure_layer())?;
@@ -200,17 +199,14 @@ fn layout_from(root: &Path, library: &str) -> ProjectLayout {
 }
 
 fn complete_layered_layout(root: &Path, library: &str) -> bool {
-    [
-        "src/application/modules/mod.rs",
-        "src/infrastructure/mod.rs",
-        "src/presentation/modules/mod.rs",
-    ]
-    .iter()
-    .all(|relative| root.join(relative).is_file())
+    ["src/modules/mod.rs", "src/infrastructure/mod.rs"]
+        .iter()
+        .all(|relative| root.join(relative).is_file())
         && [
             "pub mod application;",
             "pub mod domain;",
             "pub mod infrastructure;",
+            "pub mod modules;",
             "pub mod presentation;",
         ]
         .iter()
@@ -233,6 +229,8 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
                 | "pub mod domain;"
                 | "mod infrastructure;"
                 | "pub mod infrastructure;"
+                | "mod modules;"
+                | "pub mod modules;"
                 | "mod presentation;"
                 | "pub mod presentation;"
         );
@@ -246,6 +244,7 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
                         "pub mod application;",
                         "pub mod domain;",
                         "pub mod infrastructure;",
+                        "pub mod modules;",
                         "pub mod presentation;",
                     ]
                     .map(str::to_string),
@@ -406,6 +405,7 @@ mod tests {
                     "pub mod application;\n",
                     "pub mod domain;\n",
                     "pub mod infrastructure;\n",
+                    "pub mod modules;\n",
                     "pub mod presentation;\n\n",
                     "pub fn build() {}\n\n",
                     "#[mxrs::application(version = \"11.12.1\", ",
@@ -413,11 +413,10 @@ mod tests {
                 ),
             ),
             ("src/domain/mod.rs", "pub fn build() {}\n"),
-            ("src/application/mod.rs", "pub mod modules;\n"),
-            ("src/application/modules/mod.rs", ""),
+            ("src/application/mod.rs", ""),
+            ("src/modules/mod.rs", ""),
             ("src/infrastructure/mod.rs", ""),
-            ("src/presentation/mod.rs", "pub mod modules;\n"),
-            ("src/presentation/modules/mod.rs", ""),
+            ("src/presentation/mod.rs", ""),
         ] {
             write(root, relative, body);
         }
@@ -652,9 +651,9 @@ mod tests {
             assert!(applied.applied);
             for relative in [
                 "src/application/mod.rs",
-                "src/application/modules/mod.rs",
+                "src/modules/mod.rs",
                 "src/presentation/mod.rs",
-                "src/presentation/modules/mod.rs",
+                "src/modules/mod.rs",
                 "src/infrastructure/mod.rs",
             ] {
                 assert!(root.join(relative).is_file(), "missing {relative}");
@@ -738,7 +737,7 @@ mod tests {
                 std::fs::read_to_string(root.join("src/domain/mod.rs")).unwrap(),
                 domain
             );
-            assert!(!root.join("src/presentation/modules/mod.rs").exists());
+            assert!(!root.join("src/modules/mod.rs").exists());
         }
     }
 

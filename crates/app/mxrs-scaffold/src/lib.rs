@@ -88,7 +88,7 @@ pub enum ScaffoldError {
     )]
     UnknownDemoUserRole(String),
     #[error(
-        "demo user entity {0:?} was not found in this project's domain layer (expected `Module.Entity` with src/domain/modules/<module>/entities/<entity>.rs, or `System.User`)"
+        "demo user entity {0:?} was not found in this project's domain layer (expected `Module.Entity` with src/modules/<module>/domain/entities/<entity>.rs, or `System.User`)"
     )]
     UnknownDemoUserEntity(String),
 }
@@ -226,31 +226,23 @@ fn project_files(
         (
             "src/lib.rs",
             format!(
-                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut project = application::build();\n    presentation::apply(&mut project);\n    project\n}}\n\n#[mxrs::application(version = {version}, project = crate::build)]\npub struct Application;\n"
+                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod modules;\npub mod presentation;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut project = application::build();\n    presentation::apply(&mut project);\n    project\n}}\n\n#[mxrs::application(version = {version}, project = crate::build)]\npub struct Application;\n"
             ),
         ),
         (
             "src/domain/mod.rs",
             format!(
-                "pub mod modules;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut builder = mxrs::ProjectBuilder::new({version});\n    builder.module(\"Main\", |_module| {{}});\n    let mut project = builder.build();\n    modules::apply(&mut project);\n    project\n}}\n"
+                "pub fn build() -> mxrs::ProjectDecl {{\n    let mut builder = mxrs::ProjectBuilder::new({version});\n    builder.module(\"Main\", |_module| {{}});\n    let mut project = builder.build();\n    crate::modules::apply(&mut project);\n    project\n}}\n"
             ),
         ),
-        ("src/domain/modules/mod.rs", templates::modules_aggregator()),
+        ("src/modules/mod.rs", templates::modules_index()),
         ("src/application/mod.rs", templates::application_layer()),
-        (
-            "src/application/modules/mod.rs",
-            templates::modules_aggregator(),
-        ),
         (
             "src/presentation/mod.rs",
             format!(
-                "pub mod modules;\n\npub fn apply(project: &mut mxrs::ProjectDecl) {{\n    let mut builder = mxrs::ProjectBuilder::new(project.mendix_version.clone());\n    builder.module(\"Main\", |module| {{\n        module.layout(\"ApplicationLayout\", |layout| {{\n            layout.placeholder(\"Main\");\n        }});\n        module.page(\"Home\", |page| {{\n            page.layout(\"Main.ApplicationLayout\", \"Main\");\n            page.text(\"Welcome to {}\");\n        }});\n    }});\n    builder.navigation(|navigation| {{\n        navigation.profile(\"Responsive\", |profile| {{\n            profile.home_page(\"Main.Home\");\n        }});\n    }});\n    let presentation = builder.build();\n    for module in presentation.modules {{\n        project.merge_module(module);\n    }}\n    project.navigation = presentation.navigation;\n    modules::apply(project);\n}}\n",
+                "pub fn apply(project: &mut mxrs::ProjectDecl) {{\n    let mut builder = mxrs::ProjectBuilder::new(project.mendix_version.clone());\n    builder.module(\"Main\", |module| {{\n        module.layout(\"ApplicationLayout\", |layout| {{\n            layout.placeholder(\"Main\");\n        }});\n        module.page(\"Home\", |page| {{\n            page.layout(\"Main.ApplicationLayout\", \"Main\");\n            page.text(\"Welcome to {}\");\n        }});\n    }});\n    builder.navigation(|navigation| {{\n        navigation.profile(\"Responsive\", |profile| {{\n            profile.home_page(\"Main.Home\");\n        }});\n    }});\n    let presentation = builder.build();\n    for module in presentation.modules {{\n        project.merge_module(module);\n    }}\n    project.navigation = presentation.navigation;\n}}\n",
                 escape_rust_string(&options.name)
             ),
-        ),
-        (
-            "src/presentation/modules/mod.rs",
-            templates::modules_aggregator(),
         ),
         (
             "src/infrastructure/mod.rs",
@@ -592,11 +584,18 @@ mod tests {
         assert!(!presentation.contains("pub fn build()"));
         assert!(!presentation.contains("crate::application"));
 
-        // Every layer carries the aggregator `mxrs add` wires modules into.
+        // One index for every Mendix module, the same one the importer
+        // writes, instead of an aggregator per architectural layer.
+        let modules = std::fs::read_to_string(destination.join("src/modules/mod.rs")).unwrap();
+        assert!(
+            modules.contains("pub fn apply(_project: &mut ::mxrs::ProjectDecl) {}"),
+            "{modules}"
+        );
+        assert!(crate_root.contains("pub mod modules;"), "{crate_root}");
         for layer in ["domain", "application", "presentation"] {
             let source =
                 std::fs::read_to_string(destination.join(format!("src/{layer}/mod.rs"))).unwrap();
-            assert!(source.contains("pub mod modules;"), "{layer}: {source}");
+            assert!(!source.contains("pub mod modules;"), "{layer}: {source}");
         }
     }
 
@@ -619,14 +618,12 @@ mod tests {
             "Cargo.toml",
             "README.md",
             "src/application/mod.rs",
-            "src/application/modules/mod.rs",
             "src/domain/mod.rs",
-            "src/domain/modules/mod.rs",
             "src/infrastructure/mod.rs",
             "src/lib.rs",
             "src/main.rs",
+            "src/modules/mod.rs",
             "src/presentation/mod.rs",
-            "src/presentation/modules/mod.rs",
         ];
         for relative in expected {
             assert!(

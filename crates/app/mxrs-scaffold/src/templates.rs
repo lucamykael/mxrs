@@ -14,17 +14,13 @@
 /// aggregator's `DECLARATIONS` table points at.
 pub(crate) const DECLARE: &str = "declare";
 pub(crate) const DECLARATIONS_LIST: &str = "DECLARATIONS";
-pub(crate) const FAMILIES_LIST: &str = "FAMILIES";
-pub(crate) const MODULES_LIST: &str = "MODULES";
 
 pub(crate) fn application_layer() -> String {
-    "pub mod modules;\n\npub fn build() -> mxrs::ProjectDecl {\n    let mut project = crate::domain::build();\n    modules::apply(&mut project);\n    project\n}\n"
-        .to_string()
+    "pub fn build() -> mxrs::ProjectDecl {\n    crate::domain::build()\n}\n".to_string()
 }
 
 pub(crate) fn empty_presentation_layer() -> String {
-    "pub mod modules;\n\npub fn apply(project: &mut mxrs::ProjectDecl) {\n    modules::apply(project);\n}\n"
-        .to_string()
+    "pub fn apply(_project: &mut mxrs::ProjectDecl) {}\n".to_string()
 }
 
 pub(crate) fn page_navigation_aggregator() -> String {
@@ -67,8 +63,11 @@ pub(crate) fn entity(module_name: &str, name: &str) -> String {
         "//! Domain entity `{module_name}.{name}`.\n\
          //!\n\
          //! Attribute and association vocabulary: `mxrs::EntityBuilder`.\n\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
-         module.entity({name:?}, |_entity| {{}});\n\
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
+         module.entity({name:?}, |_entity| {{}});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -78,8 +77,11 @@ pub(crate) fn enumeration(module_name: &str, name: &str) -> String {
         "//! Enumeration `{module_name}.{name}`.\n\
          //!\n\
          //! Value vocabulary: `mxrs::EnumerationBuilder`.\n\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
-         module.enumeration({name:?}, |_enumeration| {{}});\n\
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
+         module.enumeration({name:?}, |_enumeration| {{}});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -93,10 +95,13 @@ pub(crate) fn constant(module_name: &str, name: &str) -> String {
         "//! Constant `{module_name}.{name}`.\n\
          //!\n\
          //! Type and value vocabulary: `mxrs::ConstantBuilder`.\n\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
          module.constant({name:?}, |constant| {{\n        \
          constant.value(\"\");\n    \
-         }});\n\
+         }});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -112,9 +117,12 @@ pub(crate) fn scheduled_event(module_name: &str, name: &str) -> String {
          //!\n\
          //! Cadence vocabulary: `mxrs::ScheduledEventBuilder`. Day schedules\n\
          //! run once per day; `every` applies to minutes and hours.\n\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
          module.microflow({name:?}, |_flow| {{}});\n    \
-         module.scheduled_event({name:?}, {name:?}, ::mxrs::ScheduleUnit::Days, |_event| {{}});\n\
+         module.scheduled_event({name:?}, {name:?}, ::mxrs::ScheduleUnit::Days, |_event| {{}});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -241,8 +249,11 @@ fn flow(
         "//! {description} `{module_name}.{name}`.\n\
          {note}//!\n\
          //! Activity vocabulary: `mxrs::FlowBuilder`.\n\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
-         module.{builder_method}({name:?}, |_flow| {{}});\n\
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
+         module.{builder_method}({name:?}, |_flow| {{}});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -264,13 +275,16 @@ pub(crate) fn page(
         "//! Page `{module_name}.{name}`.\n\
          //!\n\
          //! Widget vocabulary: `mxrs::PageBuilder`.\n\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
          module.page({name:?}, |page| {{\n        \
          page.title({title:?});\n        \
          page.layout(\"{module_name}.ApplicationLayout\", {layout_parameter:?});\n\
          {allowed}        \
          page.text({title:?});\n    \
-         }});\n\
+         }});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -282,10 +296,13 @@ pub(crate) fn layouts(module_name: &str, layout_parameter: &str) -> String {
          //! Scaffolded pages reference `{module_name}.ApplicationLayout`, so the\n\
          //! page scaffold creates this alongside the first page rather than\n\
          //! emitting a declaration that resolves to nothing.\n\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
          module.layout(\"ApplicationLayout\", |layout| {{\n        \
          layout.placeholder({layout_parameter:?});\n    \
-         }});\n\
+         }});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -297,9 +314,12 @@ pub(crate) fn module_roles(module_name: &str) -> String {
          //! Declaring roles here makes them authoritative for this module: the\n\
          //! writer replaces the module's persisted role set rather than merging\n\
          //! into it (see `mxrs_ir::ModuleDecl::roles`).\n\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
          module.role(\"User\", \"Application user\");\n    \
-         module.role(\"Administrator\", \"Module administrator\");\n\
+         module.role(\"Administrator\", \"Module administrator\");\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -408,49 +428,27 @@ pub(crate) fn demo_user(name: &str, entity: &str, roles: &[String], password_env
     )
 }
 
-pub(crate) fn family_aggregator(module_name: &str, family: &str) -> String {
+pub(crate) fn modules_index() -> String {
+    "//! One folder per Mendix module: its domain model, services, ports,\n\
+     //! presentation and markers together, the way the module reads in Studio\n\
+     //! Pro.\n\n\
+     pub fn apply(_project: &mut ::mxrs::ProjectDecl) {}\n"
+        .to_string()
+}
+
+pub(crate) fn module_index(module_name: &str) -> String {
     format!(
-        "//! `{family}` declarations for the `{module_name}` Mendix module.\n\n\
-         pub fn apply(module: &mut ::mxrs::ModuleBuilder) {{\n    \
-         for declare in {DECLARATIONS_LIST} {{\n        \
-         declare(module);\n    \
-         }}\n\
-         }}\n\n\
-         const {DECLARATIONS_LIST}: &[fn(&mut ::mxrs::ModuleBuilder)] = &[];\n"
+        "//! The {module_name} Mendix module.\n\n\
+         pub fn apply(_project: &mut ::mxrs::ProjectDecl) {{}}\n"
     )
 }
 
-/// Merges rather than pushing a module, so scaffolding into a project
-/// imported from an existing `.mpr` extends that module instead of declaring
-/// a second one with the same name.
-pub(crate) fn module_aggregator(module_name: &str) -> String {
+/// One concept folder inside a module — `domain`, `entities`, `services` —
+/// in the same shape the importer writes.
+pub(crate) fn folder_index(module_name: &str, folder: &str) -> String {
     format!(
-        "//! Cargo-native declarations for the `{module_name}` Mendix module.\n\n\
-         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         let mut builder = ::mxrs::ProjectBuilder::new(project.mendix_version.clone());\n    \
-         builder.module({module_name:?}, |module| {{\n        \
-         for family in {FAMILIES_LIST} {{\n            \
-         family(module);\n        \
-         }}\n    \
-         }});\n    \
-         for declared in builder.build().modules {{\n        \
-         project.merge_module(declared);\n    \
-         }}\n\
-         }}\n\n\
-         const {FAMILIES_LIST}: &[fn(&mut ::mxrs::ModuleBuilder)] = &[];\n"
-    )
-}
-
-pub(crate) fn modules_aggregator() -> String {
-    format!(
-        "//! Scaffolded Mendix modules, applied on top of whatever `build()`\n\
-         //! has already composed.\n\n\
-         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         for declare in {MODULES_LIST} {{\n        \
-         declare(project);\n    \
-         }}\n\
-         }}\n\n\
-         const {MODULES_LIST}: &[fn(&mut ::mxrs::ProjectDecl)] = &[];\n"
+        "//! The {module_name} module's `{folder}`.\n\n\
+         pub fn apply(_project: &mut ::mxrs::ProjectDecl) {{}}\n"
     )
 }
 
@@ -523,7 +521,7 @@ pub(crate) fn functional_test(module_name: &str, name: &str) -> String {
 
 pub(crate) fn presentation_layout(module_name: &str) -> String {
     format!(
-        "//! Application layout for `{module_name}`.\n\npub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    module.layout(\"ApplicationLayout\", |layout| {{\n        layout.class(\"mxrb-application-shell\");\n        layout.application_shell(\"ApplicationLayout\", Some(\"Responsive\"));\n    }});\n}}\n"
+        "//! Application layout for `{module_name}`.\n\nuse mxrs::prelude::*;\n\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({module_name:?});\n    module.layout(\"ApplicationLayout\", |layout| {{\n        layout.class(\"mxrb-application-shell\");\n        layout.application_shell(\"ApplicationLayout\", Some(\"Responsive\"));\n    }});\n    module.into_decl()\n}}\n"
     )
 }
 
@@ -567,24 +565,37 @@ mod tests {
             layouts("Sales", "Main"),
             module_roles("Sales"),
         ];
+        // Every scaffolded artifact is the same file an import would have
+        // written: the prelude, one `declaration()`, one module builder.
         for source in &sources {
+            assert!(source.contains("use mxrs::prelude::*;"), "{source}");
             assert!(
-                source.contains("pub fn declare(module: &mut ::mxrs::ModuleBuilder) {"),
+                source.contains("pub fn declaration() -> ModuleDecl {"),
                 "{source}"
             );
+            assert!(
+                source.contains("let mut module = ModuleBuilder::new(\"Sales\");"),
+                "{source}"
+            );
+            assert!(source.contains("module.into_decl()"), "{source}");
             assert!(source.ends_with("}\n"), "{source}");
         }
         assert!(sources[7].contains("page.allow_role(\"Sales.User\");"));
         assert!(sources[7].contains("page.layout(\"Sales.ApplicationLayout\", \"Main\");"));
         assert!(project_security("Sales").contains("pub fn apply(project"));
-        assert!(
-            family_aggregator("Sales", "entities")
-                .contains("const DECLARATIONS: &[fn(&mut ::mxrs::ModuleBuilder)] = &[];")
-        );
-        assert!(module_aggregator("Sales").contains("project.merge_module(declared);"));
-        assert!(
-            modules_aggregator().contains("const MODULES: &[fn(&mut ::mxrs::ProjectDecl)] = &[];")
-        );
+        // Every index the scaffold creates has the shape the importer
+        // writes: a header and one `apply`, empty until something registers.
+        for index in [
+            modules_index(),
+            module_index("Sales"),
+            folder_index("Sales", "entities"),
+        ] {
+            assert!(
+                index.contains("pub fn apply(_project: &mut ::mxrs::ProjectDecl) {}"),
+                "{index}"
+            );
+            assert!(index.starts_with("//!"), "{index}");
+        }
     }
 }
 
@@ -666,12 +677,15 @@ pub(crate) fn page_chain_entity(module_name: &str, name: &str) -> String {
         "//! Backing entity for the executable vertical slice generated by\n\
          //! `mxrs page new --chain`.\n\n\
          {markers}\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
          module.entity({name:?}, |entity| {{\n        \
          entity.string(\"Reference\").length = Some(80);\n        \
          entity.decimal(\"Total\").default_value = Some(\"0\".into());\n        \
          entity.boolean(\"Active\").default_value = Some(\"true\".into());\n    \
-         }});\n\
+         }});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -681,7 +695,7 @@ pub(crate) fn page_chain_entity(module_name: &str, name: &str) -> String {
 /// the record uncommitted with the same seed values.
 pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> String {
     let entity_path = format!(
-        "crate::domain::modules::{}::entities::{}::markers",
+        "crate::modules::{}::domain::entities::{}::markers",
         snake_case(module_name),
         snake_case(feature)
     );
@@ -693,7 +707,9 @@ pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> String {
          //! Returns an uncommitted record for the page's data view to bind to.\n\n\
          use {entity_path}::{{{feature}, {feature}_Active, {feature}_Reference, {feature}_Total}};\n\n\
          {markers}\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
          module.microflow({name:?}, |flow| {{\n        \
          let record = flow.create_object(\n            \
          \"record\",\n            \
@@ -706,7 +722,8 @@ pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> String {
          false,\n        \
          );\n        \
          flow.return_value(record);\n    \
-         }});\n\
+         }});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -724,8 +741,11 @@ pub(crate) fn page_chain_action(module_name: &str, feature: &str) -> String {
          //! Body intentionally empty: mxrb's template logs a message here and\n\
          //! `mxrs_ir::Activity` has no log activity to mirror it with.\n\n\
          {markers}\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
-         module.microflow({name:?}, |_flow| {{}});\n\
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
+         module.microflow({name:?}, |_flow| {{}});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -743,7 +763,7 @@ pub(crate) fn page_chain_nanoflow(
     let markers = flow_marker(module_name, &name, "NanoflowMarker");
     let (note, body) = if calls_microflow {
         let action_path = format!(
-            "crate::application::modules::{}::use_cases::act_refresh_{}::markers::ACT_Refresh{feature}",
+            "crate::modules::{}::services::act_refresh_{}::markers::ACT_Refresh{feature}",
             snake_case(module_name),
             snake_case(feature)
         );
@@ -775,8 +795,11 @@ pub(crate) fn page_chain_nanoflow(
          //!\n\
          {note}\n\
          {markers}\n\
-         pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
-         module.nanoflow({name:?}, {body});\n\
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
+         module.nanoflow({name:?}, {body});\n    \
+         module.into_decl()\n\
          }}\n"
     )
 }
@@ -803,7 +826,8 @@ pub(crate) fn page_from_template(
         .map(|role| format!("        page.allow_role({role:?});\n"))
         .collect::<String>();
     let header = format!(
-        "pub fn declare(module: &mut ::mxrs::ModuleBuilder) {{\n    \
+        "pub fn declaration() -> ModuleDecl {{\n    \
+         let mut module = ModuleBuilder::new({module_name:?});\n    \
          module.page({name:?}, |page| {{\n        \
          page.title({title:?});\n        \
          page.layout(\"{module_name}.ApplicationLayout\", {layout_parameter:?});\n\
@@ -848,20 +872,21 @@ pub(crate) fn page_from_template(
     };
     let imports = if template == DATA_BACKED_TEMPLATE {
         format!(
-            "use crate::domain::modules::{}::entities::{}::markers::{{\n    \
+            "use mxrs::prelude::*;\n\n\
+             use crate::modules::{}::domain::entities::{}::markers::{{\n    \
              {name}_Active, {name}_Reference, {name}_Total,\n\
              }};\n\n",
             snake_case(module_name),
             snake_case(name)
         )
     } else {
-        String::new()
+        "use mxrs::prelude::*;\n\n".to_string()
     };
     format!(
         "//! Page `{module_name}.{name}` from the `{template}` template.\n\
          //!\n\
          //! Widget vocabulary: `mxrs::PageBuilder`.\n\n\
-         {imports}{header}{body}    }});\n}}\n"
+         {imports}{header}{body}    }});\n    module.into_decl()\n}}\n"
     )
 }
 
@@ -913,7 +938,7 @@ fn form_vertical_body(
     refresh: Option<RefreshAction>,
 ) -> String {
     let loader = format!(
-        "crate::application::modules::{}::use_cases::act_load_{}::markers::ACT_Load{name}",
+        "crate::modules::{}::services::act_load_{}::markers::ACT_Load{name}",
         snake_case(module_name),
         snake_case(name)
     );
@@ -961,14 +986,14 @@ fn refresh_button(
     let call = match refresh {
         RefreshAction::Microflow => format!(
             "b.call_microflow(::mxrs::MicroflowRef::<\
-             crate::application::modules::{}::use_cases::act_refresh_{}::markers::ACT_Refresh{name}\
+             crate::modules::{}::services::act_refresh_{}::markers::ACT_Refresh{name}\
              >::new());",
             snake_case(module_name),
             snake_case(name)
         ),
         RefreshAction::Nanoflow => format!(
             "b.call_nanoflow(::mxrs::NanoflowRef::<\
-             crate::presentation::modules::{}::nanoflows::nan_refresh_{}::markers::NAN_Refresh{name}\
+             crate::modules::{}::presentation::nanoflows::nan_refresh_{}::markers::NAN_Refresh{name}\
              >::new());",
             snake_case(module_name),
             snake_case(name)

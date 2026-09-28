@@ -219,8 +219,7 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     assert_eq!(support.get_str("UserName").unwrap(), "Support");
     assert_eq!(support.get_str("Password").unwrap(), "FromEnv1!");
     assert_eq!(support.get_str("Entity").unwrap(), "System.User");
-    let generated =
-        std::fs::read_to_string(root.join("src/domain/security/demo_users/support.rs")).unwrap();
+    let generated = std::fs::read_to_string(root.join("src/domain/demo_users/support.rs")).unwrap();
     assert!(
         !generated.contains("FromEnv1!"),
         "the password value must never appear in generated source"
@@ -293,7 +292,7 @@ fn scaffolding_the_same_artifact_twice_changes_nothing_the_first_run_wrote() {
     let root = application(directory.path());
     scaffold(&root, ArtifactKind::Module, "Sales");
     let first = scaffold(&root, ArtifactKind::Entity, "Sales.Order");
-    let aggregator = root.join("src/domain/modules/sales/entities/mod.rs");
+    let aggregator = root.join("src/modules/sales/domain/entities/mod.rs");
     let before = std::fs::read_to_string(&aggregator).unwrap();
     assert!(matches!(
         scaffold_artifact(&ArtifactScaffold::new(
@@ -312,7 +311,11 @@ fn scaffolding_the_same_artifact_twice_changes_nothing_the_first_run_wrote() {
     scaffold(&root, ArtifactKind::Entity, "Sales.Invoice");
     let after = std::fs::read_to_string(&aggregator).unwrap();
     assert!(after.contains("pub mod order;\npub mod invoice;\n"));
-    assert!(after.contains("    order::declare,\n    invoice::declare,\n"));
+    assert!(
+        after.contains("    project.merge_module(order::declaration());\n")
+            && after.contains("    project.merge_module(invoice::declaration());\n"),
+        "{after}"
+    );
     // The first entity also creates the family aggregator; the second reuses it.
     assert_eq!(first.len(), 2);
 
@@ -370,17 +373,18 @@ fn a_formatted_project_can_still_be_scaffolded_into() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let aggregator = root.join("src/domain/modules/sales/entities/mod.rs");
+    let aggregator = root.join("src/modules/sales/domain/entities/mod.rs");
     assert!(
         std::fs::read_to_string(&aggregator)
             .unwrap()
-            .contains("&[order::declare];")
+            .contains("project.merge_module(order::declaration());")
     );
     scaffold(&root, ArtifactKind::Entity, "Sales.Invoice");
+    let aggregator_source = std::fs::read_to_string(&aggregator).unwrap();
     assert!(
-        std::fs::read_to_string(&aggregator)
-            .unwrap()
-            .contains("    order::declare,\n    invoice::declare,\n")
+        aggregator_source.contains("project.merge_module(order::declaration());")
+            && aggregator_source.contains("project.merge_module(invoice::declaration());"),
+        "{aggregator_source}"
     );
     let output = cargo(&root, &["build", "--offline", "--quiet"]);
     assert!(
@@ -420,7 +424,7 @@ fn destroying_a_scaffold_removes_exactly_the_files_it_created() {
     // see `registry`'s doc comment for why a manifest cannot safely undo an
     // in-file append.
     assert!(
-        std::fs::read_to_string(root.join("src/domain/modules/sales/mod.rs"))
+        std::fs::read_to_string(root.join("src/modules/sales/domain/mod.rs"))
             .unwrap()
             .contains("pub mod entities;")
     );
@@ -461,11 +465,11 @@ fn names_and_projects_that_cannot_be_scaffolded_are_reported_not_guessed() {
         Err(ScaffoldError::ProjectNotFound(_))
     ));
 
-    // `mxrs new` now pre-wires `src/domain/modules/mod.rs`, so the guard that
+    // `mxrs new` now pre-wires `src/modules/mod.rs`, so the guard that
     // refuses to guess how to edit an unrecognized `build()` is only reachable
     // for source generated before the layering split. Reproduce that shape
     // rather than dropping the guard from the suite.
-    std::fs::remove_dir_all(root.join("src/domain/modules")).unwrap();
+    std::fs::remove_dir_all(root.join("src/modules")).unwrap();
     std::fs::write(
         root.join("src/domain/mod.rs"),
         "pub fn build() -> mxrs::ProjectDecl { unimplemented!() }\n",
@@ -475,7 +479,7 @@ fn names_and_projects_that_cannot_be_scaffolded_are_reported_not_guessed() {
         scaffold_artifact(&ArtifactScaffold::new(ArtifactKind::Module, "Sales", &root)),
         Err(ScaffoldError::UnrecognizedProjectBuild(_))
     ));
-    assert!(!root.join("src/domain/modules").exists());
+    assert!(!root.join("src/modules").exists());
 }
 
 /// Every layered artifact family must land in the layer its catalog entry
@@ -515,27 +519,25 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
 
         // `repository` is the one deliberately two-layer artifact: its port
         // lives in `application` and its adapter in `infrastructure`.
-        let layers: Vec<&str> = if advertised.contains('{') {
-            vec!["src/application", "src/infrastructure"]
+        let expected: Vec<String> = if advertised.contains('{') {
+            vec![
+                "src/application".to_string(),
+                "src/infrastructure".to_string(),
+            ]
         } else {
-            vec![&advertised[..advertised[4..].find('/').unwrap() + 4]]
+            let module = match (command.kind, command.argument) {
+                (ArtifactKind::Module, _) => format!("module{index}"),
+                (_, "<Module>") => "sales".to_string(),
+                _ => "sales".to_string(),
+            };
+            vec![advertised.replace("<module>", &module)]
         };
-        for layer in &layers {
+        for destination in &expected {
             assert!(
                 files
                     .iter()
-                    .any(|file| file.to_string_lossy().contains(layer)),
-                "{name} wrote nothing under {layer}; catalog advertises {advertised}"
-            );
-        }
-        // Application and presentation artifacts must never leak back into the
-        // domain tree, which is what the pre-split catalog did.
-        if !layers.contains(&"src/domain") {
-            assert!(
-                !files
-                    .iter()
-                    .any(|file| file.to_string_lossy().contains("src/domain/modules")),
-                "{name} wrote into src/domain/modules despite {advertised}"
+                    .any(|file| file.to_string_lossy().contains(destination.as_str())),
+                "{name} wrote nothing under {destination}; catalog advertises {advertised}"
             );
         }
     }
@@ -544,19 +546,19 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
     assert_eq!(checked, 17);
 }
 
-/// A project generated before the layering split has no `src/application/` or
-/// `src/presentation/` tree. Scaffolding into it must fail closed and name the
-/// aggregator it cannot find, rather than inventing a layer around it.
+/// Module content composes through `src/domain/mod.rs`'s `build()` and the
+/// crate root. A project missing either is reported rather than repaired by
+/// guesswork, so a scaffold never invents the shape it wanted to find.
 #[test]
-fn scaffolding_a_layer_a_pre_split_project_lacks_fails_closed() {
-    for (layer, kind, name) in [
+fn scaffolding_into_a_project_missing_its_composition_root_fails_closed() {
+    for (removed, kind, name) in [
         (
-            "application",
+            "src/domain/mod.rs",
             ArtifactKind::UseCase,
             "Sales.ACT_CreateOrder",
         ),
         (
-            "presentation",
+            "src/lib.rs",
             ArtifactKind::Nanoflow,
             "Sales.NAN_RefreshOrder",
         ),
@@ -564,15 +566,19 @@ fn scaffolding_a_layer_a_pre_split_project_lacks_fails_closed() {
         let directory = tempfile::tempdir().unwrap();
         let root = application(directory.path());
         scaffold(&root, ArtifactKind::Module, "Sales");
-        std::fs::remove_dir_all(root.join(format!("src/{layer}"))).unwrap();
+        std::fs::remove_dir_all(root.join("src/modules")).unwrap();
+        std::fs::remove_file(root.join(removed)).unwrap();
+        let error = scaffold_artifact(&ArtifactScaffold::new(kind, name, &root)).unwrap_err();
         assert!(
             matches!(
-                scaffold_artifact(&ArtifactScaffold::new(kind, name, &root)),
-                Err(ScaffoldError::AggregatorNotFound(_))
+                error,
+                ScaffoldError::AggregatorNotFound(_)
+                    | ScaffoldError::ProjectNotFound(_)
+                    | ScaffoldError::ModuleNotFound(_)
             ),
-            "{layer}"
+            "{removed}: {error:?}"
         );
-        assert!(!root.join(format!("src/{layer}")).exists());
+        assert!(!root.join("src/modules").exists(), "{removed}");
     }
 }
 
@@ -649,29 +655,36 @@ fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
 fn a_hand_removed_layer_apply_call_is_spliced_back_instead_of_refused() {
     let directory = tempfile::tempdir().unwrap();
     let root = application(directory.path());
-    let calls = [
-        ("domain", "modules::apply(&mut project);"),
-        ("application", "modules::apply(&mut project);"),
-        ("presentation", "modules::apply(project);"),
-    ];
-    for (layer, call) in calls {
-        let path = root.join(format!("src/{layer}/mod.rs"));
-        let source = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, source.replace(&format!("    {call}\n"), "")).unwrap();
-        std::fs::remove_dir_all(root.join(format!("src/{layer}/modules"))).unwrap();
-    }
+    // The module index and the call that composes it are both removed by
+    // hand; scaffolding must put them back exactly once.
+    let domain = root.join("src/domain/mod.rs");
+    let source = std::fs::read_to_string(&domain).unwrap();
+    std::fs::write(
+        &domain,
+        source.replace("    crate::modules::apply(&mut project);\n", ""),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(root.join("src/modules")).unwrap();
 
     scaffold(&root, ArtifactKind::Module, "Sales");
     scaffold(&root, ArtifactKind::Entity, "Sales.Order");
     scaffold(&root, ArtifactKind::UseCase, "Sales.ACT_CreateOrder");
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
 
-    for (layer, call) in calls {
-        let source = std::fs::read_to_string(root.join(format!("src/{layer}/mod.rs"))).unwrap();
-        assert!(source.contains("pub mod modules;"), "{layer}: {source}");
-        // Exactly one call, not one per scaffolded artifact.
-        assert_eq!(source.matches(call).count(), 1, "{layer}: {source}");
-    }
+    let source = std::fs::read_to_string(&domain).unwrap();
+    // Exactly one call, not one per scaffolded artifact.
+    assert_eq!(
+        source.matches("modules::apply(&mut project);").count(),
+        1,
+        "{source}"
+    );
+    let modules = std::fs::read_to_string(root.join("src/modules/mod.rs")).unwrap();
+    assert!(modules.contains("pub mod sales;"), "{modules}");
+    assert_eq!(
+        modules.matches("sales::apply(project);").count(),
+        1,
+        "{modules}"
+    );
 
     let output = cargo(
         &root,
@@ -842,7 +855,7 @@ fn an_unknown_template_or_chain_is_rejected_before_anything_is_written() {
         error,
         ScaffoldError::UnknownPageTemplate(value) if value == "form-horizontal"
     ));
-    assert!(!root.join("src/domain/modules/sales/pages").exists());
+    assert!(!root.join("src/modules/sales/presentation/pages").exists());
 }
 
 #[test]
@@ -851,9 +864,9 @@ fn presentation_initialization_previews_compiles_and_recovers_missing_directorie
     let root = application(directory.path());
     let options = ArtifactScaffold::new(ArtifactKind::Presentation, "Sales", &root);
     assert!(scaffold_artifact(&options).is_err());
-    assert!(!root.join("src/presentation/modules/sales").exists());
+    assert!(!root.join("src/modules/sales/presentation").exists());
     scaffold(&root, ArtifactKind::Module, "Sales");
-    let orphan = root.join("src/presentation/modules/sales/layouts/application_layout.rs");
+    let orphan = root.join("src/modules/sales/presentation/layouts/application_layout.rs");
     std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
     std::fs::write(&orphan, "custom layout source").unwrap();
     assert!(scaffold_artifact(&options).is_err());
@@ -862,19 +875,19 @@ fn presentation_initialization_previews_compiles_and_recovers_missing_directorie
         "custom layout source"
     );
     assert!(!orphan.with_file_name("mod.rs").exists());
-    std::fs::remove_dir_all(root.join("src/presentation/modules/sales")).unwrap();
+    std::fs::remove_dir_all(root.join("src/modules/sales/presentation")).unwrap();
     let before = registry::entries(&root).unwrap();
     let preview = scaffold_artifact(&options.clone().dry_run(true)).unwrap();
-    assert!(!root.join("src/presentation/modules/sales").exists());
+    assert!(!root.join("src/modules/sales/presentation").exists());
     assert_eq!(registry::entries(&root).unwrap(), before);
     let applied = scaffold_artifact(&options).unwrap();
     assert_eq!(preview.files, applied.files);
     assert_eq!(preview.updated, applied.updated);
     assert!(scaffold_artifact(&options).is_err());
-    let layout = root.join("src/presentation/modules/sales/layouts/application_layout.rs");
+    let layout = root.join("src/modules/sales/presentation/layouts/application_layout.rs");
     let source = std::fs::read_to_string(&layout).unwrap();
     assert!(source.contains("application_shell("));
-    std::fs::remove_file(root.join("src/presentation/modules/sales/snippets/.keep")).unwrap();
+    std::fs::remove_file(root.join("src/modules/sales/presentation/snippets/.keep")).unwrap();
     scaffold_artifact(&options).unwrap();
     assert_eq!(std::fs::read_to_string(&layout).unwrap(), source);
     let output = cargo(
