@@ -354,7 +354,11 @@ fn import_cargo_project_inner(
         std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
     }
 
-    write_entity_layer_sources(destination, &modules)?;
+    write_entity_layer_sources(
+        destination,
+        &modules,
+        &documents_export.derived_enumerations,
+    )?;
 
     write_text(
         &destination.join("Cargo.toml"),
@@ -749,7 +753,17 @@ struct DocumentsExport {
     module_files: Vec<(String, String, String)>,
     /// `(file_stem, source, qualified name)` per enumeration.
     enumeration_files: Vec<(String, String, String)>,
+    /// Qualified `Module.Name` → the Rust enum a typed entity field can
+    /// reference, for enumerations rendered as `#[derive(MxEnumeration)]`.
+    derived_enumerations: HashMap<String, DerivedEnumeration>,
     counts: HashMap<&'static str, usize>,
+}
+
+/// One enumeration that rendered as a real Rust enum: where it lives under
+/// `domain/enumerations/` and the type name the file declares.
+struct DerivedEnumeration {
+    file_stem: String,
+    type_name: String,
 }
 
 fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
@@ -772,6 +786,7 @@ fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
         .sort_by(|left, right| editable_document_key(left).cmp(&editable_document_key(right)));
 
     let mut enumeration_files = Vec::new();
+    let mut derived_enumerations = HashMap::new();
     let mut documents_by_module: Vec<(String, Vec<EditableDocument>)> = Vec::new();
     for declaration in declarations {
         if let EditableDocument::Enumeration {
@@ -782,11 +797,18 @@ fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
         } = declaration
         {
             let stem = layer_file_stem(&module, &name, false);
-            enumeration_files.push((
-                stem,
-                render_enumeration_file(&module, &name, &documentation, &values),
-                format!("{module}.{name}"),
-            ));
+            let (source, derived_type) =
+                render_enumeration_file(&module, &name, &documentation, &values);
+            if let Some(type_name) = derived_type {
+                derived_enumerations.insert(
+                    format!("{module}.{name}"),
+                    DerivedEnumeration {
+                        file_stem: stem.clone(),
+                        type_name,
+                    },
+                );
+            }
+            enumeration_files.push((stem, source, format!("{module}.{name}")));
             continue;
         }
         let module = editable_document_module(&declaration).to_string();
@@ -809,6 +831,7 @@ fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
     Ok(DocumentsExport {
         module_files,
         enumeration_files,
+        derived_enumerations,
         counts,
     })
 }
@@ -840,9 +863,11 @@ fn render_enumeration_file(
     name: &str,
     documentation: &str,
     values: &[(String, Vec<(String, String)>)],
-) -> String {
-    if let Some(derived) = render_derived_enumeration(module_name, name, documentation, values) {
-        return derived;
+) -> (String, Option<String>) {
+    if let Some((source, type_name)) =
+        render_derived_enumeration(module_name, name, documentation, values)
+    {
+        return (source, Some(type_name));
     }
     let mut source = format!(
         "//! Editable Mendix enumeration.\n\n\
@@ -861,7 +886,7 @@ fn render_enumeration_file(
         },
     );
     source.push_str("    module.into_decl()\n}\n");
-    source
+    (source, None)
 }
 
 fn render_derived_enumeration(
@@ -869,7 +894,7 @@ fn render_derived_enumeration(
     name: &str,
     documentation: &str,
     values: &[(String, Vec<(String, String)>)],
-) -> Option<String> {
+) -> Option<(String, String)> {
     let mut type_name = derive_pascal_case(&sanitize_ident(name));
     if type_name.starts_with(|c: char| c.is_ascii_digit()) {
         type_name.insert(0, '_');
@@ -929,7 +954,7 @@ fn render_derived_enumeration(
         "\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({});\n    {type_name}::mx_register(&mut module);\n    module.into_decl()\n}}",
         rust_string(module_name),
     );
-    Some(out)
+    Some((out, type_name))
 }
 
 fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>> {
@@ -3993,7 +4018,11 @@ fn render_entity_file(
 /// (`None`, `false`) match [`::mxrs_ir::AttributeDecl::new`], and the
 /// eligibility gate excludes exactly the fields where "preserve imported"
 /// and "explicitly empty" could diverge.
-fn render_typed_entity_file(module_name: &str, entity: &Entity) -> Option<String> {
+fn render_typed_entity_file(
+    module_name: &str,
+    entity: &Entity,
+    derived_enums: &HashMap<String, DerivedEnumeration>,
+) -> Option<String> {
     let entity_name = entity.name.as_deref().filter(|name| !name.is_empty())?;
     if entity.oql_view()
         || entity
@@ -4017,6 +4046,57 @@ fn render_typed_entity_file(module_name: &str, entity: &Entity) -> Option<String
 
     let mut attributes = entity.attributes.clone();
     attributes.sort_by(|left, right| left.name.cmp(&right.name));
+
+    // Enumeration attributes whose enumeration rendered as a real Rust enum
+    // use that type directly; the derive then resolves the qualified name
+    // through the type's `EnumerationMarker` instead of an embedded string.
+    // A short name is imported once; a name that collides — with another
+    // referenced enum, this entity, or an item `declaration()` needs from
+    // the prelude — is spelled by its full path instead.
+    let mut imported: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    let mut colliding = std::collections::HashSet::new();
+    for attribute in &attributes {
+        let Some(derived) = attribute
+            .enumeration
+            .as_deref()
+            .and_then(|qualified| derived_enums.get(qualified))
+        else {
+            continue;
+        };
+        if enum_type_shadows_scalar(&derived.type_name) {
+            continue;
+        }
+        if let Some(stem) = imported.insert(&derived.type_name, &derived.file_stem)
+            && stem != derived.file_stem
+        {
+            colliding.insert(derived.type_name.as_str());
+        }
+    }
+    imported.retain(|name, _| {
+        !colliding.contains(name)
+            && *name != type_name
+            && !matches!(*name, "ModuleBuilder" | "ModuleDecl" | "MxEntity")
+    });
+    let enum_spellings: HashMap<&str, String> = attributes
+        .iter()
+        .filter_map(|attribute| {
+            let qualified = attribute.enumeration.as_deref()?;
+            let derived = derived_enums.get(qualified)?;
+            if enum_type_shadows_scalar(&derived.type_name) {
+                return None;
+            }
+            let spelling = if imported.contains_key(derived.type_name.as_str()) {
+                derived.type_name.clone()
+            } else {
+                format!(
+                    "crate::domain::enumerations::{}::{}",
+                    derived.file_stem, derived.type_name
+                )
+            };
+            Some((qualified, spelling))
+        })
+        .collect();
+
     let mut seen = std::collections::HashSet::new();
     let mut fields = String::new();
     for attribute in &attributes {
@@ -4031,7 +4111,7 @@ fn render_typed_entity_file(module_name: &str, entity: &Entity) -> Option<String
             options.push(format!("name = {mendix_name:?}"));
         }
         // The kinds the derive infers from the field type stay implicit.
-        let (field_type, explicit_kind) = match kind {
+        let (scalar_type, explicit_kind) = match kind {
             "string" => ("MxString", false),
             "integer" => ("MxInteger", false),
             "long" => ("MxLong", false),
@@ -4045,15 +4125,21 @@ fn render_typed_entity_file(module_name: &str, entity: &Entity) -> Option<String
             "enumeration" => ("MxString", true),
             _ => return None,
         };
-        if explicit_kind {
-            options.push(format!("kind = {kind:?}"));
-        }
+        let mut field_type = scalar_type.to_string();
         if kind == "enumeration" {
             let enumeration = attribute
                 .enumeration
                 .as_deref()
                 .filter(|name| !name.is_empty())?;
-            options.push(format!("enumeration = {enumeration:?}"));
+            match enum_spellings.get(enumeration) {
+                Some(spelling) => field_type = spelling.clone(),
+                None => {
+                    options.push(format!("kind = {kind:?}"));
+                    options.push(format!("enumeration = {enumeration:?}"));
+                }
+            }
+        } else if explicit_kind {
+            options.push(format!("kind = {kind:?}"));
         }
         if let Some(default) = attribute.default_value.as_deref() {
             options.push(format!("default = {default:?}"));
@@ -4080,7 +4166,14 @@ fn render_typed_entity_file(module_name: &str, entity: &Entity) -> Option<String
     }
 
     let mut out =
-        String::from("//! Editable Mendix entity declaration.\n\nuse mxrs::prelude::*;\n\n");
+        String::from("//! Editable Mendix entity declaration.\n\nuse mxrs::prelude::*;\n");
+    if !imported.is_empty() {
+        out.push('\n');
+        for (name, stem) in &imported {
+            let _ = writeln!(out, "use crate::domain::enumerations::{stem}::{name};");
+        }
+    }
+    out.push('\n');
     out.push_str("#[derive(MxEntity)]\n");
     let mut entity_options = vec![format!("module = {module_name:?}")];
     if type_name != entity_name {
@@ -4103,6 +4196,27 @@ fn render_typed_entity_file(module_name: &str, entity: &Entity) -> Option<String
         "\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({module_name:?});\n    {type_name}::mx_register(&mut module);\n    module.into_decl()\n}}"
     );
     Some(out)
+}
+
+/// Enum type names the entity derive would mistake for a scalar kind when
+/// inferring the attribute from the field type; entities referencing an
+/// enumeration spelled like one of these keep the string form.
+fn enum_type_shadows_scalar(name: &str) -> bool {
+    matches!(
+        name,
+        "String"
+            | "MxString"
+            | "MxInteger"
+            | "MxLong"
+            | "MxFloat"
+            | "MxDecimal"
+            | "MxBool"
+            | "MxDateTime"
+            | "MxBinary"
+            | "Vec"
+            | "Option"
+            | "MxEnumeration"
+    )
 }
 
 /// The strict and reserved Rust keywords a generated identifier must avoid.
@@ -4259,7 +4373,11 @@ fn render_flow_layer_index(entries: &[flow_export::RenderedFlowSource]) -> Strin
 /// Writes each persisted entity to `domain/entities` and every non-persisted
 /// Mendix object to `application/dto`.  File names are deliberately flat:
 /// Mendix modules remain model metadata, not a second Rust package hierarchy.
-fn write_entity_layer_sources(destination: &Path, modules: &[Module]) -> Result<()> {
+fn write_entity_layer_sources(
+    destination: &Path,
+    modules: &[Module],
+    derived_enums: &HashMap<String, DerivedEnumeration>,
+) -> Result<()> {
     let microflows = known_microflows(modules);
     let mut entities = Vec::new();
     let mut dtos = Vec::new();
@@ -4272,7 +4390,7 @@ fn write_entity_layer_sources(destination: &Path, modules: &[Module]) -> Result<
             let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
             let dto = !entity.persistable || entity.oql_view();
             let stem = layer_file_stem(module_name, entity_name, dto);
-            let source = render_typed_entity_file(module_name, entity)
+            let source = render_typed_entity_file(module_name, entity, derived_enums)
                 .unwrap_or_else(|| render_entity_file(module_name, entity, &microflows));
             let directory = if dto {
                 destination.join("src/application/dto")
@@ -4517,7 +4635,8 @@ mod tests {
         updated.localize_date = Some(false);
         entity.attributes.push(updated);
 
-        let rendered = render_typed_entity_file("Catalogs", &entity).expect("typed-eligible");
+        let rendered =
+            render_typed_entity_file("Catalogs", &entity, &HashMap::new()).expect("typed-eligible");
         assert_eq!(
             rendered,
             r#"//! Editable Mendix entity declaration.
@@ -4548,13 +4667,122 @@ pub fn declaration() -> ModuleDecl {
         // A non-persistable Mendix object says so once, at the entity level.
         let mut dto = bare_entity("AccountPasswordData");
         dto.persistable = false;
-        let rendered = render_typed_entity_file("Administration", &dto).expect("typed-eligible");
+        let rendered = render_typed_entity_file("Administration", &dto, &HashMap::new())
+            .expect("typed-eligible");
         assert!(
             rendered.contains("#[mxrs(module = \"Administration\", persistable = false)]"),
             "{rendered}"
         );
         assert!(
             rendered.contains("pub struct AccountPasswordData {}"),
+            "{rendered}"
+        );
+    }
+
+    /// An enumeration that rendered as a real Rust enum becomes the field's
+    /// type — imported once when the short name is free, spelled by its full
+    /// path on a collision, and left as the string form when the enum never
+    /// derived.
+    #[test]
+    fn entity_enumeration_fields_reference_the_derived_enum_types() {
+        let mut derived = HashMap::new();
+        derived.insert(
+            "Catalogs.ENUM_Limit".to_string(),
+            DerivedEnumeration {
+                file_stem: "catalogs_enum_limit".into(),
+                type_name: "ENUMLimit".into(),
+            },
+        );
+        derived.insert(
+            "Sales.Status".to_string(),
+            DerivedEnumeration {
+                file_stem: "sales_status".into(),
+                type_name: "Status".into(),
+            },
+        );
+        derived.insert(
+            "Support.Status".to_string(),
+            DerivedEnumeration {
+                file_stem: "support_status".into(),
+                type_name: "Status".into(),
+            },
+        );
+
+        let mut entity = bare_entity("Parameter");
+        let mut limit = attribute("Limit", AttributeType::Enum);
+        limit.enumeration = Some("Catalogs.ENUM_Limit".to_string());
+        limit.default_value = Some("Ten".to_string());
+        entity.attributes.push(limit);
+        let mut sales = attribute("SalesStatus", AttributeType::Enum);
+        sales.enumeration = Some("Sales.Status".to_string());
+        entity.attributes.push(sales);
+        let mut support = attribute("SupportStatus", AttributeType::Enum);
+        support.enumeration = Some("Support.Status".to_string());
+        entity.attributes.push(support);
+        let mut opaque = attribute("Opaque", AttributeType::Enum);
+        opaque.enumeration = Some("Catalogs.Unknown".to_string());
+        entity.attributes.push(opaque);
+
+        let rendered =
+            render_typed_entity_file("Catalogs", &entity, &derived).expect("typed-eligible");
+        assert_eq!(
+            rendered,
+            r#"//! Editable Mendix entity declaration.
+
+use mxrs::prelude::*;
+
+use crate::domain::enumerations::catalogs_enum_limit::ENUMLimit;
+
+#[derive(MxEntity)]
+#[mxrs(module = "Catalogs")]
+pub struct Parameter {
+    #[mxrs(default = "Ten")]
+    pub limit: ENUMLimit,
+    #[mxrs(kind = "enumeration", enumeration = "Catalogs.Unknown")]
+    pub opaque: MxString,
+    pub sales_status: crate::domain::enumerations::sales_status::Status,
+    pub support_status: crate::domain::enumerations::support_status::Status,
+}
+
+pub fn declaration() -> ModuleDecl {
+    let mut module = ModuleBuilder::new("Catalogs");
+    Parameter::mx_register(&mut module);
+    module.into_decl()
+}
+"#
+        );
+
+        // An enum sharing the entity's own type name keeps its full path.
+        let mut status = bare_entity("Status");
+        let mut current = attribute("Current", AttributeType::Enum);
+        current.enumeration = Some("Sales.Status".to_string());
+        status.attributes.push(current);
+        let rendered =
+            render_typed_entity_file("Sales", &status, &derived).expect("typed-eligible");
+        assert!(
+            rendered.contains("pub current: crate::domain::enumerations::sales_status::Status,"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("use crate::"), "{rendered}");
+
+        // An enum whose Rust name the derive would read as a scalar kind
+        // keeps the explicit string form.
+        let mut shadowing = HashMap::new();
+        shadowing.insert(
+            "Sales.MxString".to_string(),
+            DerivedEnumeration {
+                file_stem: "sales_mx_string".into(),
+                type_name: "MxString".into(),
+            },
+        );
+        let mut wrapper = bare_entity("Wrapper");
+        let mut value = attribute("Value", AttributeType::Enum);
+        value.enumeration = Some("Sales.MxString".to_string());
+        wrapper.attributes.push(value);
+        let rendered =
+            render_typed_entity_file("Sales", &wrapper, &shadowing).expect("typed-eligible");
+        assert!(
+            rendered.contains(r#"#[mxrs(kind = "enumeration", enumeration = "Sales.MxString")]"#),
             "{rendered}"
         );
     }
@@ -4573,7 +4801,9 @@ pub fn declaration() -> ModuleDecl {
                 vec![("pt_BR".to_string(), "Dez minutos".to_string())],
             ),
         ];
-        let rendered = render_enumeration_file("Sales", "ENUM_Status", "Lifecycle.", &values);
+        let (rendered, derived_type) =
+            render_enumeration_file("Sales", "ENUM_Status", "Lifecycle.", &values);
+        assert_eq!(derived_type.as_deref(), Some("ENUMStatus"));
         assert_eq!(
             rendered,
             r#"//! Editable Mendix enumeration.
@@ -4604,7 +4834,8 @@ pub fn declaration() -> ModuleDecl {
                 ("pt_BR".to_string(), "Aberto".to_string()),
             ],
         )];
-        let rendered = render_enumeration_file("Sales", "Status", "", &multi);
+        let (rendered, derived_type) = render_enumeration_file("Sales", "Status", "", &multi);
+        assert_eq!(derived_type, None);
         assert!(
             rendered.contains("module.enumeration(\"Status\""),
             "{rendered}"
@@ -4630,11 +4861,11 @@ pub fn declaration() -> ModuleDecl {
             members: Vec::new(),
             raw: mxrs_bson::Document::new(),
         });
-        assert!(render_typed_entity_file("Sales", &indexed).is_none());
+        assert!(render_typed_entity_file("Sales", &indexed, &HashMap::new()).is_none());
 
         let mut pictured = bare_entity("Asset");
         pictured.image = Some("Assets.Image".to_string());
-        assert!(render_typed_entity_file("Assets", &pictured).is_none());
+        assert!(render_typed_entity_file("Assets", &pictured, &HashMap::new()).is_none());
 
         // Attribute names that collide once snake_cased cannot become two
         // struct fields.
@@ -4645,14 +4876,14 @@ pub fn declaration() -> ModuleDecl {
         colliding
             .attributes
             .push(attribute("Foo_Bar", AttributeType::String));
-        assert!(render_typed_entity_file("Sales", &colliding).is_none());
+        assert!(render_typed_entity_file("Sales", &colliding, &HashMap::new()).is_none());
 
         // A keyword survives as neither a field nor a struct name.
         let mut keyword = bare_entity("Order");
         keyword
             .attributes
             .push(attribute("Type", AttributeType::String));
-        assert!(render_typed_entity_file("Sales", &keyword).is_none());
+        assert!(render_typed_entity_file("Sales", &keyword, &HashMap::new()).is_none());
     }
 
     #[test]
@@ -5173,6 +5404,15 @@ pub fn declaration() -> ModuleDecl {
                     ("pt_BR".to_string(), "Aberto".to_string()),
                 ];
             });
+            module.enumeration("Priority", |enumeration| {
+                enumeration.value("Low");
+                enumeration.value("High");
+            });
+            module.entity("Ticket", |entity| {
+                entity
+                    .enumeration("Priority", "Sales.Priority")
+                    .default_value = Some("Low".to_string());
+            });
             module.constant("MaximumOrders", |constant| {
                 constant
                     .documentation("Limit")
@@ -5355,6 +5595,21 @@ pub fn declaration() -> ModuleDecl {
         assert!(status.contains("module.enumeration(\"Status\""), "{status}");
         assert!(status.contains("(\"pt_BR\".to_string(), \"Aberto\".to_string())"));
         assert!(!status.contains("derive(MxEnumeration)"), "{status}");
+        // The single-caption enumeration derives, and the entity referencing
+        // it uses the Rust type itself — no embedded qualified-name string.
+        let priority =
+            std::fs::read_to_string(generated.join("src/domain/enumerations/sales_priority.rs"))
+                .unwrap();
+        assert!(priority.contains("derive(MxEnumeration)"), "{priority}");
+        let ticket =
+            std::fs::read_to_string(generated.join("src/domain/entities/sales_ticket.rs")).unwrap();
+        assert!(
+            ticket.contains("use crate::domain::enumerations::sales_priority::Priority;"),
+            "{ticket}"
+        );
+        assert!(ticket.contains("#[mxrs(default = \"Low\")]"), "{ticket}");
+        assert!(ticket.contains("pub priority: Priority,"), "{ticket}");
+        assert!(!ticket.contains("enumeration = "), "{ticket}");
         let documents =
             std::fs::read_to_string(generated.join("src/domain/documents/sales.rs")).unwrap();
         assert!(documents.contains("use mxrs::prelude::*;"));
