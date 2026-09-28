@@ -157,10 +157,14 @@ fn generated_build_preserves_opaque_native_fields_and_externally_referenced_page
     assert_eq!(imported.page_export.typed_candidates, 1);
     assert_eq!(imported.page_export.opaque, 2);
     let pages_source =
-        std::fs::read_to_string(generated.join("src/modules/sales/presentation/pages.rs")).unwrap();
-    assert!(pages_source.contains("pub fn supported"));
-    assert!(!pages_source.contains("pub fn metadata"));
-    assert!(!pages_source.contains("pub fn referenced"));
+        std::fs::read_to_string(generated.join("src/modules/sales/presentation/pages/mod.rs"))
+            .unwrap();
+    assert!(
+        pages_source.contains("pub mod supported;"),
+        "{pages_source}"
+    );
+    assert!(!pages_source.contains("metadata"), "{pages_source}");
+    assert!(!pages_source.contains("referenced"), "{pages_source}");
     let output = std::process::Command::new(env!("CARGO"))
         .args(["run", "--quiet", "--offline", "--manifest-path"])
         .arg(generated.join("Cargo.toml"))

@@ -319,8 +319,10 @@ fn import_cargo_project_inner(
             .enumerations
             .push((stem.clone(), source.clone()));
     }
-    for (module_name, source) in &documents_export.module_files {
-        generated_module(&mut generated_modules, module_name).documents = Some(source.clone());
+    for (module_name, stem, source) in &documents_export.module_files {
+        generated_module(&mut generated_modules, module_name)
+            .documents
+            .push((stem.clone(), source.clone()));
     }
     for module in &modules {
         let Some(module_name) = module.name.as_deref() else {
@@ -352,13 +354,9 @@ fn import_cargo_project_inner(
                 .push(page);
         }
         for (module_name, pages) in pages_by_module {
-            if let Some(source) = page_export::render_pages_module(&pages) {
-                let functions = pages
-                    .iter()
-                    .map(|page| page.function_name.clone())
-                    .collect();
-                generated_module(&mut generated_modules, &module_name).pages =
-                    Some((source, functions));
+            let files = page_export::render_page_files(&pages);
+            if !files.is_empty() {
+                generated_module(&mut generated_modules, &module_name).pages = files;
             }
         }
     }
@@ -752,8 +750,8 @@ enum EditableDocument {
 /// `domain/enumerations/<module>_<name>.rs` — as `#[derive(MxEnumeration)]`
 /// when the derive can express it.
 struct DocumentsExport {
-    /// `(module name, source)` per Mendix module with documents.
-    module_files: Vec<(String, String)>,
+    /// `(module name, file stem, source)` per non-enumeration document.
+    module_files: Vec<(String, String, String)>,
     /// `(module name, file stem, source)` per enumeration.
     enumeration_files: Vec<(String, String, String)>,
     /// Qualified `Module.Name` → the Rust enum a typed entity field can
@@ -765,7 +763,7 @@ struct DocumentsExport {
 /// The folder name one Mendix module's generated Rust lives under —
 /// `src/modules/<stem>/`.
 fn module_stem(module_name: &str) -> String {
-    let mut stem = snake_ident(module_name);
+    let mut stem = collapse_underscores(&snake_ident(module_name));
     if rust_keyword(&stem) {
         stem.push_str("_module");
     }
@@ -876,7 +874,7 @@ fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
 
     let mut enumeration_files = Vec::new();
     let mut derived_enumerations = HashMap::new();
-    let mut documents_by_module: Vec<(String, Vec<EditableDocument>)> = Vec::new();
+    let mut documents_by_module: Vec<(String, String, String)> = Vec::new();
     for declaration in declarations {
         if let EditableDocument::Enumeration {
             module,
@@ -902,19 +900,12 @@ fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
             continue;
         }
         let module = editable_document_module(&declaration).to_string();
-        match documents_by_module.last_mut() {
-            Some((current, documents)) if *current == module => documents.push(declaration),
-            _ => documents_by_module.push((module, vec![declaration])),
-        }
+        let stem = inner_file_stem(editable_document_key(&declaration).2);
+        let source = render_document_file(&module, declaration);
+        documents_by_module.push((module, stem, source));
     }
 
-    let module_files = documents_by_module
-        .into_iter()
-        .map(|(module, documents)| {
-            let source = render_module_documents_file(&module, documents);
-            (module, source)
-        })
-        .collect();
+    let module_files = documents_by_module;
 
     Ok(DocumentsExport {
         module_files,
@@ -926,18 +917,26 @@ fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
 
 /// One Mendix module's non-enumeration documents, on the standalone
 /// [`ModuleBuilder`] the prelude exports.
-fn render_module_documents_file(module_name: &str, documents: Vec<EditableDocument>) -> String {
+/// One Mendix document — a constant, regular expression, scheduled event
+/// or standalone menu — as its own editable file, the same shape every
+/// other generated concept has.
+fn render_document_file(module_name: &str, document: EditableDocument) -> String {
+    let kind = match &document {
+        EditableDocument::Constant { .. } => "constant",
+        EditableDocument::RegularExpression { .. } => "regular expression",
+        EditableDocument::ScheduledEvent { .. } => "scheduled event",
+        EditableDocument::Menu { .. } => "menu",
+        EditableDocument::Enumeration { .. } | EditableDocument::TaskQueue { .. } => "document",
+    };
+    let name = editable_document_key(&document).2.to_string();
     let mut source = format!(
-        "//! Editable {module_name} documents: constants, regular expressions,\n\
-         //! scheduled events, and standalone menus.\n\n\
+        "//! Editable Mendix {kind} `{module_name}.{name}`.\n\n\
          use mxrs::prelude::*;\n\n\
          pub fn declaration() -> ModuleDecl {{\n\
              let mut module = ModuleBuilder::new({});\n",
         rust_string(module_name),
     );
-    for declaration in documents {
-        render_editable_document_body(&mut source, declaration);
-    }
+    render_editable_document_body(&mut source, document);
     source.push_str("    module.into_decl()\n}\n");
     source
 }
@@ -5755,17 +5754,17 @@ struct GeneratedModule {
     dtos: Vec<(String, String)>,
     /// `(file stem, source)` per enumeration.
     enumerations: Vec<(String, String)>,
-    /// The module's constants, regular expressions, scheduled events and
-    /// standalone menus, as one `declaration()` source.
-    documents: Option<String>,
+    /// `(file stem, source)` per constant, regular expression, scheduled
+    /// event and standalone menu the module declares.
+    documents: Vec<(String, String)>,
     /// The module's role declarations, as an `apply` source.
     security: Option<String>,
     /// `(file stem, source)` per reconstructed microflow service.
     services: Vec<(String, String)>,
     /// `(file stem, source)` per reconstructed nanoflow.
     nanoflows: Vec<(String, String)>,
-    /// The module's typed pages plus the page-function names to wire.
-    pages: Option<(String, Vec<String>)>,
+    /// `(file stem, source)` per typed page.
+    pages: Vec<(String, String)>,
     /// `ports/services.rs` — the module's service port trait.
     ports_services: Option<String>,
     /// `ports/actions.rs` — the module's action port traits.
@@ -5816,16 +5815,24 @@ fn write_modules_layer(
 
         let has_domain = !module.entities.is_empty()
             || !module.enumerations.is_empty()
-            || module.documents.is_some()
+            || !module.documents.is_empty()
             || module.security.is_some();
         if has_domain {
             let domain = directory.join("domain");
             std::fs::create_dir_all(&domain).map_err(|source| io_error(&domain, source))?;
             let mut domain_index = format!("//! The {} module's domain model.\n\n", module.name);
             let mut domain_apply = String::new();
-            if module.documents.is_some() {
+            if !module.documents.is_empty() {
                 domain_index.push_str("pub mod documents;\n");
-                domain_apply.push_str("    project.merge_module(documents::declaration());\n");
+                domain_apply.push_str("    documents::apply(project);\n");
+                write_concept_files(
+                    &domain.join("documents"),
+                    &format!(
+                        "//! The {} module's constants, regular expressions,\n//! scheduled events and standalone menus.\n\n",
+                        module.name
+                    ),
+                    &module.documents,
+                )?;
             }
             if !module.entities.is_empty() {
                 domain_index.push_str("pub mod entities;\n");
@@ -5854,9 +5861,6 @@ fn write_modules_layer(
                 "\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n{domain_apply}}}\n"
             );
             write_text(&domain.join("mod.rs"), &domain_index)?;
-            if let Some(documents) = &module.documents {
-                write_text(&domain.join("documents.rs"), documents)?;
-            }
             if let Some(security) = &module.security {
                 write_text(&domain.join("security.rs"), security)?;
             }
@@ -5884,7 +5888,7 @@ fn write_modules_layer(
         }
 
         let has_presentation =
-            !module.nanoflows.is_empty() || module.pages.is_some() || module.http.is_some();
+            !module.nanoflows.is_empty() || !module.pages.is_empty() || module.http.is_some();
         if has_presentation {
             let presentation = directory.join("presentation");
             std::fs::create_dir_all(&presentation)
@@ -5912,16 +5916,29 @@ fn write_modules_layer(
                     write_text(&http.join(format!("{stem}.rs")), source)?;
                 }
             }
-            if let Some((source, functions)) = &module.pages {
+            if !module.pages.is_empty() {
                 presentation_index.push_str("pub mod pages;\n");
-                for function in functions {
+                let pages = presentation.join("pages");
+                std::fs::create_dir_all(&pages).map_err(|source| io_error(&pages, source))?;
+                let mut pages_index =
+                    format!("//! The {} module's editable pages.\n\n", module.name);
+                for (stem, _) in &module.pages {
+                    let _ = writeln!(pages_index, "pub mod {stem};");
+                }
+                pages_index.push_str("\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n");
+                for (stem, _) in &module.pages {
                     let _ = writeln!(
-                        presentation_apply,
-                        "    project.module_mut({:?}).pages.push(pages::{function}());",
+                        pages_index,
+                        "    project.module_mut({:?}).pages.push({stem}::declaration());",
                         module.name,
                     );
                 }
-                write_text(&presentation.join("pages.rs"), source)?;
+                pages_index.push_str("}\n");
+                write_text(&pages.join("mod.rs"), &pages_index)?;
+                for (stem, source) in &module.pages {
+                    write_text(&pages.join(format!("{stem}.rs")), source)?;
+                }
+                presentation_apply.push_str("    pages::apply(project);\n");
             }
             let parameter = if presentation_apply.is_empty() {
                 "_project"
@@ -6131,13 +6148,35 @@ fn collect_entity_layer(
 }
 
 /// File stem for one concept inside its module folder: snake_case, like
-/// any other Rust module file.
+/// any other Rust module file. A Mendix name that already separates words
+/// with underscores (`Jabil_User__EU__Location`) must not turn into a
+/// module name Rust warns about, so runs collapse to one.
 fn inner_file_stem(name: &str) -> String {
-    let mut stem = snake_ident(name);
+    let mut stem = collapse_underscores(&snake_ident(name));
     if rust_keyword(&stem) {
         stem.push('_');
     }
     stem
+}
+
+/// Collapses underscore runs and trims the edges, keeping a leading one
+/// when it is all that makes the name a valid identifier.
+fn collapse_underscores(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for character in name.chars() {
+        if character == '_' && out.ends_with('_') {
+            continue;
+        }
+        out.push(character);
+    }
+    let trimmed = out.trim_end_matches('_');
+    let leading_digit = trimmed
+        .trim_start_matches('_')
+        .starts_with(|c: char| c.is_ascii_digit());
+    if trimmed.starts_with('_') && !leading_digit {
+        return trimmed.trim_start_matches('_').to_string();
+    }
+    trimmed.to_string()
 }
 
 /// A defensive, not exhaustive, Mendix-name → Rust-identifier sanitizer:
@@ -6907,6 +6946,19 @@ pub fn declaration() -> ModuleDecl {
     }
 
     #[test]
+    fn file_stems_never_carry_underscore_runs_rust_warns_about() {
+        assert_eq!(
+            inner_file_stem("Jabil_User__EU__Location"),
+            "jabil_user_eu_location"
+        );
+        assert_eq!(inner_file_stem("SPCProgram"), "spc_program");
+        assert_eq!(inner_file_stem("_Legacy_"), "legacy");
+        assert_eq!(inner_file_stem("2FA"), "_2_fa");
+        assert_eq!(module_stem("API_Rest"), "api_rest");
+        assert_eq!(module_stem("Jabil__Commons"), "jabil_commons");
+    }
+
+    #[test]
     fn snake_idents_break_on_case_boundaries_like_readers_expect() {
         assert_eq!(snake_ident("ParameterToMeasure"), "parameter_to_measure");
         assert_eq!(snake_ident("APIKey"), "api_key");
@@ -7614,7 +7666,7 @@ pub fn declaration() -> ModuleDecl {
         );
         assert!(
             generated
-                .join("src/modules/sales/domain/documents.rs")
+                .join("src/modules/sales/domain/documents/mod.rs")
                 .is_file()
         );
         assert!(generated.join("src/domain/security.rs").is_file());
@@ -7640,20 +7692,31 @@ pub fn declaration() -> ModuleDecl {
         // comment) — the `cargo check`/`cargo run` calls below, plus the
         // rebuilt-project assertions further down, prove it actually
         // contributes to the output `.mpr`, not just that it parses.
-        let pages_source =
-            std::fs::read_to_string(generated.join("src/modules/sales/presentation/pages.rs"))
+        let home =
+            std::fs::read_to_string(generated.join("src/modules/sales/presentation/pages/home.rs"))
                 .unwrap();
-        assert!(pages_source.contains("pub fn home"));
-        assert!(pages_source.contains("w.text_with(\"Welcome\""));
-        assert!(pages_source.contains("w.name("));
-        assert!(pages_source.contains("b.close_page()"));
-        assert!(pages_source.contains("pub fn order_detail"));
-        assert!(pages_source.contains("data_view_from_microflow"));
-        assert!(pages_source.contains("Order_Number"));
-        assert!(pages_source.contains("b.call_nanoflow"));
-        assert!(pages_source.contains("p.data_grid_2"));
-        assert!(pages_source.contains("p.gallery"));
-        assert!(pages_source.contains("p.combo_box"));
+        assert!(home.contains("pub fn declaration() -> ::mxrs_ir::page::PageDecl"));
+        assert!(home.contains("w.text_with(\"Welcome\""));
+        assert!(home.contains("w.name("));
+        assert!(home.contains("b.close_page()"));
+        let detail = std::fs::read_to_string(
+            generated.join("src/modules/sales/presentation/pages/order_detail.rs"),
+        )
+        .unwrap();
+        assert!(detail.contains("data_view_from_microflow"));
+        assert!(detail.contains("Order_Number"));
+        assert!(detail.contains("b.call_nanoflow"));
+        assert!(detail.contains("p.data_grid_2"));
+        assert!(detail.contains("p.gallery"));
+        assert!(detail.contains("p.combo_box"));
+        let pages_index =
+            std::fs::read_to_string(generated.join("src/modules/sales/presentation/pages/mod.rs"))
+                .unwrap();
+        assert!(pages_index.contains("pub mod home;"), "{pages_index}");
+        assert!(
+            pages_index.contains("pages.push(home::declaration());"),
+            "{pages_index}"
+        );
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(domain_source.contains("pub mod security;"));
         assert!(domain_source.contains("security::apply(project);"));
@@ -7757,16 +7820,32 @@ pub fn declaration() -> ModuleDecl {
             order_source.contains("target: \"Sales.Customer\".to_string(),"),
             "{order_source}"
         );
-        let documents =
-            std::fs::read_to_string(generated.join("src/modules/sales/domain/documents.rs"))
+        // One file per document, each with the same `declaration()` shape
+        // every other generated concept has.
+        let maximum_orders = std::fs::read_to_string(
+            generated.join("src/modules/sales/domain/documents/maximum_orders.rs"),
+        )
+        .unwrap();
+        assert!(maximum_orders.contains("use mxrs::prelude::*;"));
+        assert!(maximum_orders.contains("pub fn declaration() -> ModuleDecl"));
+        assert!(maximum_orders.contains("module.constant(\"MaximumOrders\""));
+        assert!(maximum_orders.contains("ConstantType::Integer"));
+        assert!(!maximum_orders.contains("::mxrs_ir::"), "{maximum_orders}");
+        assert!(maximum_orders.contains("constant.exposed_to_client(true)"));
+        // A cryptographic constant never carries its value into source.
+        let api_token = std::fs::read_to_string(
+            generated.join("src/modules/sales/domain/documents/api_token.rs"),
+        )
+        .unwrap();
+        assert!(api_token.contains("constant.value_from_env(\"MXRS_SALES_APITOKEN\")"));
+        assert!(!api_token.contains("super-secret-value"));
+        let documents_index =
+            std::fs::read_to_string(generated.join("src/modules/sales/domain/documents/mod.rs"))
                 .unwrap();
-        assert!(documents.contains("use mxrs::prelude::*;"));
-        assert!(documents.contains("module.constant(\"MaximumOrders\""));
-        assert!(documents.contains("ConstantType::Integer"));
-        assert!(!documents.contains("::mxrs_ir::"), "{documents}");
-        assert!(documents.contains("constant.exposed_to_client(true)"));
-        assert!(documents.contains("constant.value_from_env(\"MXRS_SALES_APITOKEN\")"));
-        assert!(!documents.contains("super-secret-value"));
+        assert!(
+            documents_index.contains("project.merge_module(maximum_orders::declaration());"),
+            "{documents_index}"
+        );
         assert!(!generated.join("src/infrastructure/ids.rs").exists());
         assert!(!generated.join("src/infrastructure/imported.rs").exists());
         let markers =
