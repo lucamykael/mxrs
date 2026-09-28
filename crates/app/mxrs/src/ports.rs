@@ -53,7 +53,7 @@ use mxrs_ir::EntityMarker;
 pub use mxrs_runtime_boot::{Boot, BootError, boot};
 pub use mxrs_runtime_flows::{
     Adapter, AdapterKind, Execution, FlowEngine, FlowError, FlowValue, JavaAction, ObjectRef,
-    Variables,
+    Variables, member_to_json,
 };
 
 /// A generated service port failed: either the flow itself, or a value at

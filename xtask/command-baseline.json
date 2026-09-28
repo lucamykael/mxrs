@@ -34,6 +34,7 @@
   "inspect": "verified",
   "integration": "verified",
   "java-action": "verified",
+  "javascript-action": "missing",
   "lint": "verified",
   "marketplace": "verified",
   "mda": "verified",

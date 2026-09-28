@@ -275,6 +275,12 @@ fn import_cargo_project_inner(
     let markers_source = mxrs_typegen::generate(&marker_manifest)?;
     let typed_markers_source = flow_export::typed_attribute_markers(&modules);
     let action_documents = collect_action_documents(&project)?;
+    // The HTTP layer is generated for the axum adapter only; the other two
+    // presets keep their server stub until their routers are ported.
+    let published_services = match api_mode {
+        ApiMode::Axum => collect_published_services(&project)?,
+        _ => Vec::new(),
+    };
     drop(project);
 
     let imported = destination.join("model/imported");
@@ -297,7 +303,7 @@ fn import_cargo_project_inner(
         presentation_directory.join("controllers"),
         presentation_directory.join("modules"),
         presentation_directory.join("navigation"),
-        presentation_directory.join("routes"),
+        presentation_directory.join("http"),
         infrastructure_directory.join("repositories"),
         infrastructure_directory.join("database"),
         infrastructure_directory.join("adapters"),
@@ -371,6 +377,23 @@ fn import_cargo_project_inner(
     for module in &action_ports {
         generated_module(&mut generated_modules, &module.module_name).ports_actions =
             Some(render_action_port_file(module));
+    }
+    for stem in published_services
+        .iter()
+        .map(|service| module_stem(&service.module_name))
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let owned: Vec<&PublishedService> = published_services
+            .iter()
+            .filter(|service| module_stem(&service.module_name) == stem)
+            .collect();
+        let module_name = owned[0].module_name.clone();
+        let files = owned
+            .iter()
+            .map(|service| (service.file_stem.clone(), render_published_service(service)))
+            .collect();
+        generated_module(&mut generated_modules, &module_name).http =
+            Some((render_module_http_index(&module_name, &owned), files));
     }
     collect_marker_sources(
         &marker_manifest,
@@ -449,10 +472,26 @@ fn import_cargo_project_inner(
         &destination.join("src/presentation/controllers/mod.rs"),
         "//! Framework-neutral presentation controllers.\n\npub fn apply(_project: &mut ::mxrs_ir::ProjectDecl) {}\n",
     )?;
-    write_text(
-        &destination.join("src/presentation/routes/mod.rs"),
-        &render_routes_module(api_mode),
-    )?;
+    match api_mode {
+        ApiMode::Axum => {
+            write_text(
+                &destination.join("src/presentation/http/mod.rs"),
+                &render_http_module(&published_services),
+            )?;
+            write_text(
+                &destination.join("src/presentation/http/state.rs"),
+                &render_http_state(&manifest.project_name),
+            )?;
+            write_text(
+                &destination.join("src/presentation/http/error.rs"),
+                &render_http_error(),
+            )?;
+        }
+        _ => write_text(
+            &destination.join("src/presentation/http/mod.rs"),
+            &render_server_stub(api_mode),
+        )?,
+    }
     write_text(
         &destination.join("src/main.rs"),
         &build_binary_source(&crate_name, &manifest.project_name, api_mode),
@@ -473,13 +512,19 @@ fn import_cargo_project_inner(
         &destination.join("src/infrastructure/database/mod.rs"),
         "//! Connection pools, migrations and database adapters belong here.\n",
     )?;
+    // The axum state boots through the flow runtime, so the adapter exists
+    // for every axum project, with or without typed service ports.
+    let needs_flow_runtime = !service_ports.is_empty() || matches!(api_mode, ApiMode::Axum);
     let mut adapters_index =
         String::from("//! External services and Mendix-specific adapters belong here.\n");
-    if !service_ports.is_empty() || !action_ports.is_empty() {
+    if needs_flow_runtime || !action_ports.is_empty() {
         adapters_index.push('\n');
     }
     for module in &action_ports {
         let _ = writeln!(adapters_index, "pub mod {}_actions;", module.module_stem);
+    }
+    if needs_flow_runtime {
+        adapters_index.push_str("pub mod flow_runtime;\n");
     }
     if !service_ports.is_empty() {
         adapters_index.push_str("pub mod runtime_services;\n");
@@ -488,6 +533,12 @@ fn import_cargo_project_inner(
         &destination.join("src/infrastructure/adapters/mod.rs"),
         &adapters_index,
     )?;
+    if needs_flow_runtime {
+        write_text(
+            &destination.join("src/infrastructure/adapters/flow_runtime.rs"),
+            &render_flow_runtime(),
+        )?;
+    }
     if !service_ports.is_empty() {
         write_text(
             &destination.join("src/infrastructure/adapters/runtime_services.rs"),
@@ -560,13 +611,18 @@ fn render_application_module() -> String {
 
 fn render_presentation_module(api_mode: ApiMode) -> String {
     let mut source = String::from(
-        "//! Project-level presentation: controllers, navigation and routes.\n//! Each Mendix module's pages and nanoflows live in `crate::modules`.\n\n\
+        "//! Project-level presentation: controllers, navigation and the HTTP\n\
+         //! surface. Each Mendix module's pages, nanoflows and published REST\n\
+         //! services live in `crate::modules`.\n\n\
          pub mod controllers;\n\
-         pub mod navigation;\n",
-    );
-    source.push_str("pub mod modules;\npub mod routes;\n");
-    source.push_str(
-        "\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n    controllers::apply(project);\n    routes::apply(project);\n    modules::apply(project);\n}\n",
+         pub mod http;\n\
+         pub mod modules;\n\
+         pub mod navigation;\n\n\
+         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+         \x20   controllers::apply(project);\n\
+         \x20   navigation::apply(project);\n\
+         \x20   modules::apply(project);\n\
+         }\n",
     );
     let _ = writeln!(
         source,
@@ -588,7 +644,9 @@ fn render_infrastructure_module() -> String {
         .to_string()
 }
 
-fn render_routes_module(api_mode: ApiMode) -> String {
+/// The non-axum presets keep their framework's server stub until their
+/// published-REST routers are ported.
+fn render_server_stub(api_mode: ApiMode) -> String {
     let server = match api_mode {
         ApiMode::Axum => {
             "use axum::{Router, routing::get};\n\npub fn router() -> Router {\n    Router::new().route(\"/health\", get(|| async { \"ok\" }))\n}\n\npub async fn serve() -> Result<(), Box<dyn std::error::Error>> {\n    let listener = tokio::net::TcpListener::bind(\"0.0.0.0:3000\").await?;\n    axum::serve(listener, router()).await?;\n    Ok(())\n}\n"
@@ -601,7 +659,7 @@ fn render_routes_module(api_mode: ApiMode) -> String {
         }
     };
     format!(
-        "//! {} HTTP routes.\n\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n    crate::presentation::navigation::apply(project);\n}}\n\npub mod server {{\n{}\n}}\n",
+        "//! {} server stub. Published REST services are routed for the axum\n//! preset only; this preset keeps the model routes in model/imported\n//! until its router is ported.\n\npub mod server {{\n{}\n}}\n",
         api_mode.name(),
         indent(server, 4)
     )
@@ -733,8 +791,7 @@ struct DocumentsExport {
 /// The folder name one Mendix module's generated Rust lives under —
 /// `src/modules/<stem>/`.
 fn module_stem(module_name: &str) -> String {
-    let mut stem = sanitize_ident(module_name);
-    stem.make_ascii_lowercase();
+    let mut stem = snake_ident(module_name);
     if rust_keyword(&stem) {
         stem.push_str("_module");
     }
@@ -2781,7 +2838,7 @@ fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>, api_mode: A
     };
     let api_dependencies = match api_mode {
         ApiMode::Axum => {
-            "axum = \"0.8\"\ntokio = { version = \"1\", features = [\"macros\", \"rt-multi-thread\", \"net\"] }\n"
+            "axum = \"0.8\"\nserde_json = \"1\"\ntokio = { version = \"1\", features = [\"macros\", \"rt-multi-thread\", \"net\"] }\n"
         }
         ApiMode::ActixWeb => "actix-web = \"4\"\n",
         ApiMode::Rocket => "rocket = \"0.5\"\n",
@@ -2795,13 +2852,13 @@ fn build_binary_source(crate_name: &str, project_name: &str, api_mode: ApiMode) 
     let default_output = format!("build/{project_name}.mpr");
     let serve = match api_mode {
         ApiMode::Axum => format!(
-            "#[tokio::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        return {crate_name}::presentation::routes::server::serve().await;\n    }}\n    build()\n}}\n"
+            "#[tokio::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        return {crate_name}::presentation::http::serve(\n            std::env::args().nth(2).unwrap_or_else(|| {crate_name}::presentation::http::DEFAULT_MODEL.to_string()),\n            \"0.0.0.0:3000\",\n        )\n        .await;\n    }}\n    build()\n}}\n"
         ),
         ApiMode::ActixWeb => format!(
-            "#[actix_web::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::presentation::routes::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
+            "#[actix_web::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::presentation::http::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
         ),
         ApiMode::Rocket => format!(
-            "#[rocket::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::presentation::routes::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
+            "#[rocket::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::presentation::http::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
         ),
     };
     format!(
@@ -2830,7 +2887,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source is organized module-first, the way the project reads in Studio Pro: each Mendix module owns a folder under `src/modules/<module>/` carrying its domain model (`domain/entities/` with one `#[derive(MxEntity)]` struct per persisted entity, `domain/enumerations/` with one `#[derive(MxEnumeration)]` enum per enumeration, `domain/documents.rs` for constants/regular expressions/scheduled events/menus, `domain/security.rs` for module roles), its non-persistent entities under `dto/`, each supported server microflow as an individual service declaration under `services/`, client-side pages and nanoflows under `presentation/`, generated port contracts under `ports/`, and its compile-time model markers in `markers.rs`. Entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place. Project-level concerns stay in the crate-wide layers: HTTP controllers, navigation and routes under `src/presentation/`; repositories, database adapters, the markers facade, and imported-model persistence under `src/infrastructure/`; project security under `src/domain/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nSupported server-side microflows are reconstructed as typed service declarations; each module's `presentation/nanoflows/` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source is organized module-first, the way the project reads in Studio Pro: each Mendix module owns a folder under `src/modules/<module>/` carrying its domain model (`domain/entities/` with one `#[derive(MxEntity)]` struct per persisted entity, `domain/enumerations/` with one `#[derive(MxEnumeration)]` enum per enumeration, `domain/documents.rs` for constants/regular expressions/scheduled events/menus, `domain/security.rs` for module roles), its non-persistent entities under `dto/`, each supported server microflow as an individual service declaration under `services/`, client-side pages and nanoflows under `presentation/`, generated port contracts under `ports/`, and its compile-time model markers in `markers.rs`. Entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place. Published REST services become real axum routers: each module's `presentation/http/` carries one file per service with a handler per operation, calling the microflow the model bound to it. Project-level concerns stay in the crate-wide layers: the shared axum state and error type under `src/presentation/http/`, controllers and navigation beside them; repositories, database adapters, the markers facade, and imported-model persistence under `src/infrastructure/`; project security under `src/domain/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nSupported server-side microflows are reconstructed as typed service declarations; each module's `presentation/nanoflows/` is the client-side counterpart. `cargo run -- serve [model.mpr]` boots the built model and serves the published routes; a REST operation answers with the entity's stored attributes, because the model's export mappings are preserved in `model/imported` and are not applied yet. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -4294,8 +4351,88 @@ fn render_service_port(port: &ServicePort) -> String {
     out
 }
 
+/// The one place the generated crate owns a booted flow engine and store:
+/// the service-port adapter and the HTTP layer both drive the model through
+/// it, so there is a single definition of "call a microflow" and a single
+/// definition of "turn its result into JSON".
+fn render_flow_runtime() -> String {
+    "//! The embedded flow runtime every adapter drives the model through.\n\n\
+     use mxrs::Store;\n\
+     use mxrs::ports::{\n\
+     \x20   BootError, FlowEngine, FlowValue, ObjectRef, ServiceError, Variables, boot, member_to_json,\n\
+     };\n\
+     use serde_json::{Map, Value};\n\n\
+     /// Owns the booted engine and store, and runs one microflow at a time.\n\
+     pub struct FlowRuntime {\n\
+     \x20   engine: FlowEngine,\n\
+     \x20   store: Store,\n\
+     }\n\n\
+     impl FlowRuntime {\n\
+     \x20   /// Boots from a built `.mpr` — the output of `cargo run` or\n\
+     \x20   /// `cargo mxrs build`.\n\
+     \x20   pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {\n\
+     \x20       let booted = boot(path)?;\n\
+     \x20       Ok(Self::new(\n\
+     \x20           FlowEngine::from_modules(&booted.modules).with_policy(booted.security),\n\
+     \x20           Store::new(booted.schema),\n\
+     \x20       ))\n\
+     \x20   }\n\n\
+     \x20   /// Wraps an engine and store the caller assembled.\n\
+     \x20   pub fn new(engine: FlowEngine, store: Store) -> Self {\n\
+     \x20       Self { engine, store }\n\
+     \x20   }\n\n\
+     \x20   /// Runs one microflow as a unit of work.\n\
+     \x20   pub fn call(\n\
+     \x20       &mut self,\n\
+     \x20       flow: &str,\n\
+     \x20       arguments: Variables,\n\
+     \x20   ) -> Result<FlowValue, ServiceError> {\n\
+     \x20       let (result, _) = self.engine.call(&mut self.store, flow, arguments, None)?;\n\
+     \x20       Ok(result)\n\
+     \x20   }\n\n\
+     \x20   /// The backing store, for reading committed state.\n\
+     \x20   pub fn store(&self) -> &Store {\n\
+     \x20       &self.store\n\
+     \x20   }\n\n\
+     \x20   /// Mutable access to the backing store, for seeding data.\n\
+     \x20   pub fn store_mut(&mut self) -> &mut Store {\n\
+     \x20       &mut self.store\n\
+     \x20   }\n\n\
+     \x20   /// Serializes a flow result as JSON, reading object members from\n\
+     \x20   /// the store. This is the entity's own shape — the model's REST\n\
+     \x20   /// export mappings are preserved in `model/imported` and are not\n\
+     \x20   /// applied here yet, so a published operation answers with the\n\
+     \x20   /// stored attributes rather than the mapped document.\n\
+     \x20   pub fn json(&self, value: &FlowValue) -> Value {\n\
+     \x20       match value {\n\
+     \x20           FlowValue::Object(reference) => self.object_json(reference),\n\
+     \x20           FlowValue::List(values) => {\n\
+     \x20               Value::Array(values.iter().map(|value| self.json(value)).collect())\n\
+     \x20           }\n\
+     \x20           other => other.to_json_shallow(),\n\
+     \x20       }\n\
+     \x20   }\n\n\
+     \x20   fn object_json(&self, reference: &ObjectRef) -> Value {\n\
+     \x20       let Ok(objects) = self.store.retrieve(&reference.entity) else {\n\
+     \x20           return Value::Null;\n\
+     \x20       };\n\
+     \x20       let Some(object) = objects.iter().find(|object| object.id == reference.id) else {\n\
+     \x20           return Value::Null;\n\
+     \x20       };\n\
+     \x20       let mut fields = Map::new();\n\
+     \x20       fields.insert(\"id\".to_string(), Value::String(object.id.clone()));\n\
+     \x20       for (name, member) in &object.members {\n\
+     \x20           fields.insert(name.clone(), member_to_json(member));\n\
+     \x20       }\n\
+     \x20       Value::Object(fields)\n\
+     \x20   }\n\
+     }\n"
+        .to_string()
+}
+
 /// The runtime adapter: one struct implementing every generated service
-/// port by marshalling through `mxrs::ports` and driving `FlowEngine::call`.
+/// port by marshalling through `mxrs::ports` and driving the shared
+/// [`FlowRuntime`].
 fn render_runtime_services(ports: &[ServicePort]) -> String {
     let handles = ports
         .iter()
@@ -4305,16 +4442,16 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
         .iter()
         .flat_map(|port| &port.methods)
         .any(|method| !method.parameters.is_empty() || method.result.is_some());
-    let mut imports = vec!["BootError", "FlowEngine"];
+    let mut imports = vec!["BootError"];
     if handles {
         imports.push("ObjectHandle");
     }
     if marshals {
         imports.push("PortValue");
     }
-    imports.extend(["ServiceError", "Variables", "boot"]);
+    imports.extend(["ServiceError", "Variables"]);
     let mut out = format!(
-        "//! Runtime-backed implementations of the domain service ports.\n\nuse mxrs::Store;\nuse mxrs::ports::{{{}}};\n\n/// Drives the model's microflows on the embedded flow engine.\npub struct RuntimeServices {{\n    engine: FlowEngine,\n    store: Store,\n}}\n\nimpl RuntimeServices {{\n    /// Boots the flow engine and store from a built `.mpr` — for example\n    /// the output of `cargo run` or `cargo mxrs build`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        let booted = boot(path)?;\n        Ok(Self::new(\n            FlowEngine::from_modules(&booted.modules).with_policy(booted.security),\n            Store::new(booted.schema),\n        ))\n    }}\n\n    /// Wraps an engine and store the caller assembled.\n    pub fn new(engine: FlowEngine, store: Store) -> Self {{\n        Self {{ engine, store }}\n    }}\n\n    /// The backing store, for reading committed state.\n    pub fn store(&self) -> &Store {{\n        &self.store\n    }}\n\n    /// Mutable access to the backing store, for seeding data.\n    pub fn store_mut(&mut self) -> &mut Store {{\n        &mut self.store\n    }}\n}}\n",
+        "//! Runtime-backed implementations of the domain service ports.\n\nuse mxrs::ports::{{{}}};\n\nuse super::flow_runtime::FlowRuntime;\n\n/// Drives the model's microflows on the embedded flow runtime.\npub struct RuntimeServices {{\n    runtime: FlowRuntime,\n}}\n\nimpl RuntimeServices {{\n    /// Boots the flow runtime from a built `.mpr` — for example the\n    /// output of `cargo run` or `cargo mxrs build`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{ runtime }}\n    }}\n\n    /// The backing runtime, for store reads and untyped calls.\n    pub fn runtime(&self) -> &FlowRuntime {{\n        &self.runtime\n    }}\n\n    /// Mutable access to the backing runtime.\n    pub fn runtime_mut(&mut self) -> &mut FlowRuntime {{\n        &mut self.runtime\n    }}\n}}\n",
         imports.join(", "),
     );
     for port in ports {
@@ -4353,30 +4490,277 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
                     "        arguments.insert({name:?}.to_string(), <{marker} as PortValue>::to_flow_optional({ident}));"
                 );
             }
+            let call = format!(
+                "        {}self.runtime.call({:?}, arguments)?;",
+                if method.result.is_some() {
+                    "let result = "
+                } else {
+                    ""
+                },
+                format!("{}.{}", port.module_name, method.flow_name),
+            );
+            let _ = writeln!(out, "{call}");
             match &method.result {
                 Some((marker, _)) => {
-                    let _ = writeln!(
-                        out,
-                        "        let (result, _) = self.engine.call(&mut self.store, {:?}, arguments, None)?;",
-                        format!("{}.{}", port.module_name, method.flow_name),
-                    );
                     let _ = writeln!(
                         out,
                         "        Ok(<{marker} as PortValue>::from_flow_optional(result)?)"
                     );
                 }
-                None => {
-                    let _ = writeln!(
-                        out,
-                        "        self.engine.call(&mut self.store, {:?}, arguments, None)?;",
-                        format!("{}.{}", port.module_name, method.flow_name),
-                    );
-                    out.push_str("        Ok(())\n");
-                }
+                None => out.push_str("        Ok(())\n"),
             }
             out.push_str("    }\n");
         }
         out.push_str("}\n");
+    }
+    out
+}
+
+/// `presentation/http/state.rs` — the axum state every handler extracts.
+fn render_http_state(project_name: &str) -> String {
+    format!(
+        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse mxrs::ports::{{BootError, FlowValue, ServiceError, Variables}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n        }}\n    }}\n\n    /// Runs one microflow and serializes its result. A poisoned mutex is\n    /// recovered rather than propagated: a handler that panicked left the\n    /// store as it found it, because every call is its own unit of work.\n    pub fn call(&self, flow: &str, arguments: Variables) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(runtime.json(&result))\n    }}\n}}\n",
+        rust_string(&format!("build/{project_name}.mpr")),
+    )
+}
+
+/// `presentation/http/error.rs` — how a flow failure becomes a response.
+fn render_http_error() -> String {
+    "//! The HTTP shape of a failed model call.\n\n\
+     use axum::Json;\n\
+     use axum::http::StatusCode;\n\
+     use axum::response::{IntoResponse, Response};\n\
+     use mxrs::ports::ServiceError;\n\
+     use serde_json::json;\n\n\
+     /// Wraps a [`ServiceError`] so handlers can use `?`.\n\
+     #[derive(Debug)]\n\
+     pub struct ApiError(ServiceError);\n\n\
+     impl From<ServiceError> for ApiError {\n\
+     \x20   fn from(error: ServiceError) -> Self {\n\
+     \x20       Self(error)\n\
+     \x20   }\n\
+     }\n\n\
+     impl IntoResponse for ApiError {\n\
+     \x20   fn into_response(self) -> Response {\n\
+     \x20       // A boundary value the model rejected is the caller's input;\n\
+     \x20       // anything the flow itself raised is the application's.\n\
+     \x20       let status = match &self.0 {\n\
+     \x20           ServiceError::Value(_) => StatusCode::BAD_REQUEST,\n\
+     \x20           ServiceError::Flow(_) => StatusCode::INTERNAL_SERVER_ERROR,\n\
+     \x20       };\n\
+     \x20       (status, Json(json!({ \"error\": self.0.to_string() }))).into_response()\n\
+     \x20   }\n\
+     }\n"
+    .to_string()
+}
+
+/// `presentation/http/mod.rs` — the router every published service merges
+/// into, plus the server that binds it.
+fn render_http_module(services: &[PublishedService]) -> String {
+    let mut out = String::from(
+        "//! The application's axum surface: one router per Mendix module\n\
+         //! with published REST services, merged here behind the shared\n\
+         //! [`AppState`].\n\n\
+         pub mod error;\n\
+         pub mod state;\n\n\
+         use axum::routing::get;\n\
+         use axum::{Json, Router};\n\
+         use serde_json::{Value, json};\n\n\
+         pub use error::ApiError;\n\
+         pub use state::{AppState, DEFAULT_MODEL};\n\n",
+    );
+    let mut modules: Vec<String> = services
+        .iter()
+        .map(|service| module_stem(&service.module_name))
+        .collect();
+    modules.dedup();
+    out.push_str("/// Every route the model publishes, plus a liveness probe.\npub fn router(state: AppState) -> Router {\n    Router::new()\n        .route(\"/health\", get(health))\n");
+    for stem in &modules {
+        let _ = writeln!(
+            out,
+            "        .merge(crate::modules::{stem}::presentation::http::router())"
+        );
+    }
+    out.push_str("        .with_state(state)\n}\n\n");
+    out.push_str(
+        "async fn health() -> Json<Value> {\n    Json(json!({ \"status\": \"ok\" }))\n}\n\n\
+         /// Boots the model at `path` and serves it on `address`.\n\
+         pub async fn serve(\n\
+         \x20   path: impl AsRef<std::path::Path>,\n\
+         \x20   address: &str,\n\
+         ) -> Result<(), Box<dyn std::error::Error>> {\n\
+         \x20   let state = AppState::from_mpr(path)?;\n\
+         \x20   let listener = tokio::net::TcpListener::bind(address).await?;\n\
+         \x20   axum::serve(listener, router(state)).await?;\n\
+         \x20   Ok(())\n\
+         }\n",
+    );
+    out
+}
+
+/// One module's `presentation/http/mod.rs`.
+fn render_module_http_index(module_name: &str, services: &[&PublishedService]) -> String {
+    let mut out = format!("//! The {module_name} module's published REST services.\n\n");
+    for service in services {
+        let _ = writeln!(out, "pub mod {};", service.file_stem);
+    }
+    out.push_str(
+        "\nuse axum::Router;\n\nuse crate::presentation::http::AppState;\n\npub fn router() -> Router<AppState> {\n    Router::new()\n",
+    );
+    for service in services {
+        let _ = writeln!(out, "        .merge({}::router())", service.file_stem);
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// One published REST service: its axum router and one handler per
+/// operation, each calling the microflow the model bound to it.
+fn render_published_service(service: &PublishedService) -> String {
+    let uses_path = service
+        .routes
+        .iter()
+        .flat_map(|route| &route.operations)
+        .any(|operation| {
+            operation
+                .parameters
+                .iter()
+                .any(|parameter| parameter.source == ParameterSource::Path)
+        });
+    let uses_query = service
+        .routes
+        .iter()
+        .flat_map(|route| &route.operations)
+        .any(|operation| {
+            operation
+                .parameters
+                .iter()
+                .any(|parameter| parameter.source == ParameterSource::Query)
+        });
+    let mut extractors = vec!["State"];
+    if uses_path {
+        extractors.insert(0, "Path");
+    }
+    if uses_query {
+        extractors.push("Query");
+    }
+    extractors.sort_unstable();
+    // Only the method opening each route chain is called as a free
+    // function; the rest are chained onto the `MethodRouter` it returns.
+    let mut methods: Vec<&str> = service
+        .routes
+        .iter()
+        .filter_map(|route| route.operations.first().map(|operation| operation.method))
+        .collect();
+    methods.sort_unstable();
+    methods.dedup();
+
+    let mut out = format!(
+        "//! `{}` — the REST service the {} module publishes at `/{}`.\n",
+        service.name, service.module_name, service.base_path,
+    );
+    for line in service
+        .documentation
+        .lines()
+        .filter(|line| !line.is_empty())
+    {
+        let _ = writeln!(out, "//!\n//! {line}");
+    }
+    if uses_path || uses_query {
+        out.push_str("\nuse std::collections::HashMap;\n");
+    }
+    let _ = write!(
+        out,
+        "\nuse axum::extract::{{{}}};\nuse axum::routing::{{{}}};\nuse axum::{{Json, Router}};\nuse mxrs::ports::{{FlowValue, Variables}};\nuse serde_json::Value;\n\nuse crate::presentation::http::{{ApiError, AppState}};\n\npub fn router() -> Router<AppState> {{\n    Router::new()\n",
+        extractors.join(", "),
+        methods.join(", "),
+    );
+    for route in &service.routes {
+        let handlers = route
+            .operations
+            .iter()
+            .map(|operation| format!("{}({})", operation.method, operation.handler))
+            .collect::<Vec<_>>()
+            .join(".");
+        let _ = writeln!(out, "        .route({:?}, {handlers})", route.path);
+    }
+    out.push_str("}\n");
+
+    for operation in service.routes.iter().flat_map(|route| &route.operations) {
+        out.push('\n');
+        if !operation.summary.is_empty() {
+            let _ = writeln!(out, "/// {}", operation.summary);
+        }
+        for line in operation.documentation.lines() {
+            if line.is_empty() {
+                out.push_str("///\n");
+            } else {
+                let _ = writeln!(out, "/// {line}");
+            }
+        }
+        if !operation.summary.is_empty() || !operation.documentation.is_empty() {
+            out.push_str("///\n");
+        }
+        let _ = writeln!(out, "/// Calls `{}`.", operation.microflow);
+        // axum resolves extractors in argument order, so a handler only
+        // declares the ones its operation actually binds.
+        let extracts = |source: ParameterSource, extractor: &'static str| {
+            if operation
+                .parameters
+                .iter()
+                .any(|parameter| parameter.source == source)
+            {
+                extractor
+            } else {
+                ""
+            }
+        };
+        let path = extracts(
+            ParameterSource::Path,
+            "\n    Path(path): Path<HashMap<String, String>>,",
+        );
+        let query = extracts(
+            ParameterSource::Query,
+            "\n    Query(query): Query<HashMap<String, String>>,",
+        );
+        let body = extracts(ParameterSource::Body, "\n    Json(body): Json<Value>,");
+        let _ = writeln!(
+            out,
+            "async fn {}(\n    State(state): State<AppState>,{path}{query}{body}\n) -> Result<Json<Value>, ApiError> {{",
+            operation.handler,
+        );
+        let binding = if operation.parameters.is_empty() {
+            "let arguments"
+        } else {
+            "let mut arguments"
+        };
+        let _ = writeln!(out, "    {binding} = Variables::new();");
+        for parameter in &operation.parameters {
+            let value = match parameter.source {
+                ParameterSource::Path => format!(
+                    "FlowValue::String(path.get({:?}).cloned().unwrap_or_default())",
+                    parameter.name
+                ),
+                ParameterSource::Query => format!(
+                    "query.get({:?}).map_or(FlowValue::Empty, |value| FlowValue::String(value.clone()))",
+                    parameter.name
+                ),
+                ParameterSource::Body => format!(
+                    "body.get({:?}).map_or(FlowValue::Empty, |value| FlowValue::Json(value.clone()))",
+                    parameter.name
+                ),
+            };
+            let _ = writeln!(
+                out,
+                "    arguments.insert({:?}.to_string(), {value});",
+                parameter.microflow_parameter,
+            );
+        }
+        let _ = writeln!(
+            out,
+            "    Ok(Json(state.call({:?}, arguments)?))\n}}",
+            operation.microflow,
+        );
     }
     out
 }
@@ -4476,6 +4860,265 @@ fn code_action_port_type(
 
 /// Every `JavaActions$JavaAction` declaration and the module that owns it,
 /// read while the project is still open.
+/// One `Rest$PublishedRestService` the model declares, lowered into the
+/// axum router its module will expose.
+struct PublishedService {
+    module_name: String,
+    /// Mendix service name, e.g. `API_Service`.
+    name: String,
+    /// The file the module's HTTP folder writes this service to.
+    file_stem: String,
+    /// Service base path, e.g. `api/v1`.
+    base_path: String,
+    documentation: String,
+    /// Operations grouped by route path, in declaration order — axum wants
+    /// one `route` call per path with the methods chained onto it.
+    routes: Vec<ServiceRoute>,
+}
+
+struct ServiceRoute {
+    /// Full axum path, e.g. `/api/v1/spc/{buildingID}`.
+    path: String,
+    operations: Vec<ServiceOperation>,
+}
+
+struct ServiceOperation {
+    /// axum routing method: `get`, `post`, …
+    method: &'static str,
+    /// Generated handler function name.
+    handler: String,
+    /// Qualified microflow the operation calls.
+    microflow: String,
+    summary: String,
+    documentation: String,
+    parameters: Vec<OperationParameter>,
+}
+
+struct OperationParameter {
+    /// REST parameter name, as it appears in the path or query string.
+    name: String,
+    /// Microflow parameter the value binds to.
+    microflow_parameter: String,
+    source: ParameterSource,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum ParameterSource {
+    Path,
+    Query,
+    Body,
+}
+
+fn http_method(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "Get" => "get",
+        "Post" => "post",
+        "Put" => "put",
+        "Patch" => "patch",
+        "Delete" => "delete",
+        _ => return None,
+    })
+}
+
+/// Reads the project's published REST services while it is still open.
+/// Operations the generated router cannot express — an unsupported HTTP
+/// method, a missing microflow, or a parameter with no name — are skipped
+/// so the generated routes never claim more than the model declares.
+fn collect_published_services(project: &Project) -> Result<Vec<PublishedService>> {
+    let units = project.all_units()?;
+    let module_by_id = project
+        .modules()?
+        .into_iter()
+        .filter_map(|module| Some((module.id, module.name?)))
+        .collect::<HashMap<_, _>>();
+    let parent_by_id = units
+        .iter()
+        .map(|unit| (unit.unit_id.clone(), unit.container_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut services = Vec::new();
+    for unit in &units {
+        let document = project
+            .mpr()
+            .parse_contents(unit)
+            .map_err(mxrs_model::ModelError::from)?;
+        if document.get_str("$Type").ok() != Some("Rest$PublishedRestService") {
+            continue;
+        }
+        let Some(module_name) = owning_module(&unit.container_id, &parent_by_id, &module_by_id)
+        else {
+            continue;
+        };
+        let Some(service) = published_service(&document, &module_name) else {
+            continue;
+        };
+        services.push(service);
+    }
+    services.sort_by(|left, right| {
+        (&left.module_name, &left.file_stem).cmp(&(&right.module_name, &right.file_stem))
+    });
+    Ok(services)
+}
+
+fn published_service(
+    document: &mxrs_bson::Document,
+    module_name: &str,
+) -> Option<PublishedService> {
+    if document.get_bool("Excluded").unwrap_or(false) {
+        return None;
+    }
+    let name = document
+        .get_str("Name")
+        .ok()
+        .filter(|name| !name.is_empty())?;
+    let base_path = document
+        .get_str("Path")
+        .unwrap_or_default()
+        .trim_matches('/');
+    let mut routes: Vec<ServiceRoute> = Vec::new();
+    let mut handlers = std::collections::HashSet::new();
+    for resource in documents_in(document, "Resources") {
+        let resource_name = resource.get_str("Name").unwrap_or_default().to_string();
+        for operation in documents_in(&resource, "Operations") {
+            let Some(method) = operation.get_str("HttpMethod").ok().and_then(http_method) else {
+                continue;
+            };
+            let Some(microflow) = operation
+                .get_str("Microflow")
+                .ok()
+                .filter(|name| name.contains('.'))
+            else {
+                continue;
+            };
+            let suffix = operation
+                .get_str("Path")
+                .unwrap_or_default()
+                .trim_matches('/');
+            let path = [base_path, resource_name.trim_matches('/'), suffix]
+                .into_iter()
+                .filter(|segment| !segment.is_empty())
+                .fold(String::new(), |mut path, segment| {
+                    path.push('/');
+                    path.push_str(segment);
+                    path
+                });
+            let path = if path.is_empty() {
+                "/".to_string()
+            } else {
+                path
+            };
+            let mut parameters = Vec::new();
+            let mut malformed = false;
+            for parameter in documents_in(&operation, "Parameters") {
+                let Some(parameter_name) = parameter
+                    .get_str("Name")
+                    .ok()
+                    .filter(|name| !name.is_empty())
+                else {
+                    malformed = true;
+                    break;
+                };
+                let source = match parameter.get_str("ParameterType").unwrap_or_default() {
+                    "Path" => ParameterSource::Path,
+                    "Query" => ParameterSource::Query,
+                    "Body" => ParameterSource::Body,
+                    _ => {
+                        malformed = true;
+                        break;
+                    }
+                };
+                let microflow_parameter = parameter
+                    .get_str("MicroflowParameter")
+                    .unwrap_or_default()
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                if microflow_parameter.is_empty() {
+                    malformed = true;
+                    break;
+                }
+                parameters.push(OperationParameter {
+                    name: parameter_name.to_string(),
+                    microflow_parameter,
+                    source,
+                });
+            }
+            if malformed {
+                continue;
+            }
+            let mut handler = snake_ident(&format!(
+                "{method}_{}_{}",
+                if resource_name.is_empty() {
+                    "root"
+                } else {
+                    &resource_name
+                },
+                microflow.rsplit('.').next().unwrap_or_default()
+            ));
+            if handler.is_empty() || rust_keyword(&handler) {
+                continue;
+            }
+            while !handlers.insert(handler.clone()) {
+                handler.push('_');
+            }
+            let operation = ServiceOperation {
+                method,
+                handler,
+                microflow: microflow.to_string(),
+                summary: operation.get_str("Summary").unwrap_or_default().to_string(),
+                documentation: operation
+                    .get_str("Documentation")
+                    .unwrap_or_default()
+                    .to_string(),
+                parameters,
+            };
+            match routes.iter_mut().find(|route| route.path == path) {
+                Some(route)
+                    if route
+                        .operations
+                        .iter()
+                        .all(|other| other.method != operation.method) =>
+                {
+                    route.operations.push(operation);
+                }
+                // A duplicate method on the same path cannot be routed; the
+                // model stays the record, so the first declaration wins.
+                Some(_) => {}
+                None => routes.push(ServiceRoute {
+                    path,
+                    operations: vec![operation],
+                }),
+            }
+        }
+    }
+    if routes.is_empty() {
+        return None;
+    }
+    Some(PublishedService {
+        module_name: module_name.to_string(),
+        name: name.to_string(),
+        file_stem: inner_file_stem(name),
+        base_path: base_path.to_string(),
+        documentation: document
+            .get_str("Documentation")
+            .unwrap_or_default()
+            .to_string(),
+        routes,
+    })
+}
+
+/// The documents inside a BSON array field, in declaration order.
+fn documents_in(document: &mxrs_bson::Document, field: &str) -> Vec<mxrs_bson::Document> {
+    mxrs_bson::parse_array(document.get_array(field).ok().map(Vec::as_slice))
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            mxrs_bson::Bson::Document(document) => Some(document),
+            _ => None,
+        })
+        .collect()
+}
+
 fn collect_action_documents(project: &Project) -> Result<Vec<(String, mxrs_bson::Document)>> {
     let units = project.all_units()?;
     let module_by_id = project
@@ -5155,6 +5798,9 @@ struct GeneratedModule {
     ports_actions: Option<String>,
     /// `markers.rs` — the module's compile-time model markers.
     markers: Option<String>,
+    /// `presentation/http/` — the module's published REST services: the
+    /// folder index plus one file per service.
+    http: Option<(String, Vec<(String, String)>)>,
 }
 
 fn generated_module<'a>(
@@ -5263,7 +5909,8 @@ fn write_modules_layer(
             )?;
         }
 
-        let has_presentation = !module.nanoflows.is_empty() || module.pages.is_some();
+        let has_presentation =
+            !module.nanoflows.is_empty() || module.pages.is_some() || module.http.is_some();
         if has_presentation {
             let presentation = directory.join("presentation");
             std::fs::create_dir_all(&presentation)
@@ -5282,6 +5929,15 @@ fn write_modules_layer(
                     &module.nanoflows,
                 )?;
             }
+            if let Some((index, files)) = &module.http {
+                presentation_index.push_str("pub mod http;\n");
+                let http = presentation.join("http");
+                std::fs::create_dir_all(&http).map_err(|source| io_error(&http, source))?;
+                write_text(&http.join("mod.rs"), index)?;
+                for (stem, source) in files {
+                    write_text(&http.join(format!("{stem}.rs")), source)?;
+                }
+            }
             if let Some((source, functions)) = &module.pages {
                 presentation_index.push_str("pub mod pages;\n");
                 for function in functions {
@@ -5293,9 +5949,14 @@ fn write_modules_layer(
                 }
                 write_text(&presentation.join("pages.rs"), source)?;
             }
+            let parameter = if presentation_apply.is_empty() {
+                "_project"
+            } else {
+                "project"
+            };
             let _ = write!(
                 presentation_index,
-                "\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n{presentation_apply}}}\n"
+                "\npub fn apply({parameter}: &mut ::mxrs_ir::ProjectDecl) {{\n{presentation_apply}}}\n"
             );
             write_text(&presentation.join("mod.rs"), &presentation_index)?;
         }
@@ -5495,10 +6156,10 @@ fn collect_entity_layer(
     Ok(ctx.typed)
 }
 
-/// File stem for one concept inside its module folder.
+/// File stem for one concept inside its module folder: snake_case, like
+/// any other Rust module file.
 fn inner_file_stem(name: &str) -> String {
-    let mut stem = sanitize_ident(name);
-    stem.make_ascii_lowercase();
+    let mut stem = snake_ident(name);
     if rust_keyword(&stem) {
         stem.push('_');
     }
@@ -5593,20 +6254,33 @@ mod tests {
         assert!(composition.contains("crate::presentation::apply(&mut project);"));
     }
 
+    /// The axum preset routes the model's published REST services through
+    /// its own HTTP layer; the other presets keep a framework server stub
+    /// and say so, rather than claiming routes they do not generate.
     #[test]
     fn api_modes_generate_their_own_server_and_dependency_surface() {
         for (mode, dependency, server_marker) in [
-            (ApiMode::Axum, "axum =", "axum::serve"),
             (ApiMode::ActixWeb, "actix-web =", "HttpServer::new"),
             (ApiMode::Rocket, "rocket =", "rocket::build"),
         ] {
             let manifest = cargo_manifest("sample", None, mode);
-            let routes = render_routes_module(mode);
+            let stub = render_server_stub(mode);
             let binary = build_binary_source("sample", "Sample", mode);
             assert!(manifest.contains(dependency), "{}", mode.name());
-            assert!(routes.contains(server_marker), "{}", mode.name());
-            assert!(binary.contains("presentation::routes::server::serve"));
+            assert!(stub.contains(server_marker), "{}", mode.name());
+            assert!(stub.contains("axum\n//! preset only"), "{}", mode.name());
+            assert!(binary.contains("presentation::http::server::serve"));
         }
+
+        let manifest = cargo_manifest("sample", None, ApiMode::Axum);
+        assert!(manifest.contains("axum ="));
+        assert!(manifest.contains("serde_json ="));
+        let http = render_http_module(&[]);
+        assert!(http.contains("pub fn router(state: AppState) -> Router"));
+        assert!(http.contains("axum::serve(listener, router(state))"));
+        let binary = build_binary_source("sample", "Sample", ApiMode::Axum);
+        assert!(binary.contains("presentation::http::serve("));
+        assert!(binary.contains("presentation::http::DEFAULT_MODEL"));
     }
 
     #[test]
@@ -5855,6 +6529,95 @@ pub fn declaration() -> ModuleDecl {
         // struct cannot name a type that does not exist.
         ctx.typed.remove("Sales.Order");
         assert!(render_typed_entity_file("Sales", &entity, &HashMap::new(), &ctx).is_none());
+    }
+
+    /// A published REST service becomes an axum router: the model's own
+    /// paths and methods, one handler per operation binding the declared
+    /// parameters onto the microflow it calls.
+    #[test]
+    fn published_rest_services_become_axum_routers() {
+        let service = mxrs_bson::doc! {
+            "$Type": "Rest$PublishedRestService",
+            "Name": "API_Service",
+            "Path": "api/v1",
+            "Documentation": "",
+            "Resources": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$PublishedRestServiceResource",
+                "Name": "orders",
+                "Operations": mxrs_bson::build_array(vec![
+                    mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$Type": "Rest$PublishedRestServiceOperation",
+                        "HttpMethod": "Get",
+                        "Path": "{id}",
+                        "Summary": "Get one order",
+                        "Documentation": "",
+                        "Microflow": "Sales.ACT_GetOrder",
+                        "Parameters": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                            "$Type": "Rest$RestOperationParameter",
+                            "Name": "id",
+                            "ParameterType": "Path",
+                            "MicroflowParameter": "Sales.ACT_GetOrder.orderId",
+                        })], 3),
+                    }),
+                    mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$Type": "Rest$PublishedRestServiceOperation",
+                        "HttpMethod": "Post",
+                        "Path": "{id}",
+                        "Summary": "",
+                        "Documentation": "",
+                        "Microflow": "Sales.ACT_PutOrder",
+                        "Parameters": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                            "$Type": "Rest$RestOperationParameter",
+                            "Name": "trace",
+                            "ParameterType": "Query",
+                            "MicroflowParameter": "Sales.ACT_PutOrder.trace",
+                        })], 3),
+                    }),
+                    // An unroutable method is skipped rather than guessed at.
+                    mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$Type": "Rest$PublishedRestServiceOperation",
+                        "HttpMethod": "Options",
+                        "Path": "",
+                        "Microflow": "Sales.ACT_Options",
+                    }),
+                ], 3),
+            })], 3),
+        };
+
+        let service = published_service(&service, "Sales").expect("routable service");
+        assert_eq!(service.routes.len(), 1);
+        assert_eq!(service.routes[0].path, "/api/v1/orders/{id}");
+        assert_eq!(service.routes[0].operations.len(), 2);
+
+        let rendered = render_published_service(&service);
+        assert!(
+            rendered.contains(
+                ".route(\n            \"/api/v1/orders/{id}\",\n            get(get_orders_act_get_order).post(post_orders_act_put_order),\n        )"
+            ) || rendered.contains(
+                ".route(\"/api/v1/orders/{id}\", get(get_orders_act_get_order).post(post_orders_act_put_order))"
+            ),
+            "{rendered}"
+        );
+        // Only the method that opens the chain is imported as a function.
+        assert!(rendered.contains("use axum::routing::{get};"), "{rendered}");
+        assert!(rendered.contains("/// Get one order"), "{rendered}");
+        assert!(
+            rendered.contains("/// Calls `Sales.ACT_GetOrder`."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "arguments.insert(\n        \"orderId\".to_string(),\n        FlowValue::String(path.get(\"id\").cloned().unwrap_or_default()),\n    );"
+            ) || rendered.contains(
+                "arguments.insert(\"orderId\".to_string(), FlowValue::String(path.get(\"id\").cloned().unwrap_or_default()));"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("query.get(\"trace\").map_or(FlowValue::Empty,"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("ACT_Options"), "{rendered}");
     }
 
     /// A declared Java action with a fully port-typed signature becomes an
@@ -6794,6 +7557,40 @@ pub fn declaration() -> ModuleDecl {
                 })
                 .map(|unit| unit.unit_id)
                 .expect("the written project has a Sales module unit");
+            // A published REST service the same way: the model is the only
+            // place routes come from, so the generated router must come
+            // from a real declaration.
+            mpr.insert_unit(
+                &sales_id,
+                "Documents",
+                mxrs_bson::doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": "Rest$PublishedRestService",
+                    "Name": "OrderService",
+                    "Path": "api/v1",
+                    "Documentation": "",
+                    "Excluded": false,
+                    "ExportLevel": "Hidden",
+                    "Resources": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$ID": uuid::Uuid::new_v4().to_string(),
+                        "$Type": "Rest$PublishedRestServiceResource",
+                        "Name": "orders",
+                        "Documentation": "",
+                        "Operations": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                            "$ID": uuid::Uuid::new_v4().to_string(),
+                            "$Type": "Rest$PublishedRestServiceOperation",
+                            "HttpMethod": "Get",
+                            "Path": "",
+                            "Summary": "Ping the order module",
+                            "Documentation": "",
+                            "Microflow": "Sales.ACT_Ping",
+                            "Parameters": mxrs_bson::build_array(vec![], 3),
+                        })], 3),
+                    })], 3),
+                },
+                None,
+            )
+            .unwrap();
             mpr.insert_unit(
                 &sales_id,
                 "Documents",
@@ -6896,7 +7693,8 @@ pub fn declaration() -> ModuleDecl {
         assert!(!application_source.contains("crate::presentation"));
         let presentation_source =
             std::fs::read_to_string(generated.join("src/presentation/mod.rs")).unwrap();
-        assert!(presentation_source.contains("routes::apply(project);"));
+        assert!(presentation_source.contains("navigation::apply(project);"));
+        assert!(presentation_source.contains("pub mod http;"));
         let entities_source =
             std::fs::read_to_string(generated.join("src/modules/sales/domain/entities/order.rs"))
                 .unwrap();
@@ -6915,7 +7713,7 @@ pub fn declaration() -> ModuleDecl {
         assert!(entities_source.contains("pass_event_object: false"));
         assert!(entities_source.contains("Sales.OrderIcon"));
         let report_dto =
-            std::fs::read_to_string(generated.join("src/modules/sales/dto/orderreport.rs"))
+            std::fs::read_to_string(generated.join("src/modules/sales/dto/order_report.rs"))
                 .unwrap();
         assert!(report_dto.contains("OqlView"));
         assert!(report_dto.contains("Sales.OrderSource"));
@@ -7077,6 +7875,36 @@ pub fn declaration() -> ModuleDecl {
             action_registry
                 .contains("engine.with_java_action(\"Sales.ReverseText\", Adapter(action))"),
             "{action_registry}"
+        );
+        // The published REST service becomes a real axum router in the
+        // owning module, behind the project-wide state and error types.
+        let service_router = std::fs::read_to_string(
+            generated.join("src/modules/sales/presentation/http/order_service.rs"),
+        )
+        .unwrap();
+        assert!(
+            service_router.contains("pub fn router() -> Router<AppState>"),
+            "{service_router}"
+        );
+        assert!(
+            service_router.contains("\"/api/v1/orders\", get(get_orders_act_ping)"),
+            "{service_router}"
+        );
+        assert!(
+            service_router.contains("/// Calls `Sales.ACT_Ping`."),
+            "{service_router}"
+        );
+        let http = std::fs::read_to_string(generated.join("src/presentation/http/mod.rs")).unwrap();
+        assert!(
+            http.contains("crate::modules::sales::presentation::http::router()"),
+            "{http}"
+        );
+        assert!(generated.join("src/presentation/http/state.rs").is_file());
+        assert!(generated.join("src/presentation/http/error.rs").is_file());
+        assert!(
+            generated
+                .join("src/infrastructure/adapters/flow_runtime.rs")
+                .is_file()
         );
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
