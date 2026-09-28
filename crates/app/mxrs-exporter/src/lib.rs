@@ -262,13 +262,13 @@ fn import_cargo_project_inner(
     let infrastructure_source = render_infrastructure_module();
     let persistence_source = render_persistence_module(&modules, &mendix_version);
     let converted_flows = flow_export::collect(&project, &modules)?;
-    let microflow_files = flow_export::render_files(&converted_flows, &mendix_version, false);
+    let microflow_files = flow_export::render_files(&converted_flows, false);
     let microflows_source = if !microflow_files.is_empty() {
         render_flow_layer_index(&microflow_files)
     } else {
         render_microflows_module(&mendix_version, &modules)
     };
-    let nanoflow_files = flow_export::render_files(&converted_flows, &mendix_version, true);
+    let nanoflow_files = flow_export::render_files(&converted_flows, true);
     let nanoflows_source = if !nanoflow_files.is_empty() {
         render_flow_layer_index(&nanoflow_files)
     } else {
@@ -308,9 +308,9 @@ fn import_cargo_project_inner(
     let application_directory = destination.join("src/application");
     let dto_directory = application_directory.join("dto");
     std::fs::create_dir_all(&dto_directory).map_err(|source| io_error(&dto_directory, source))?;
-    let use_cases_directory = application_directory.join("use_cases");
-    std::fs::create_dir_all(&use_cases_directory)
-        .map_err(|source| io_error(&use_cases_directory, source))?;
+    let services_directory = application_directory.join("services");
+    std::fs::create_dir_all(&services_directory)
+        .map_err(|source| io_error(&services_directory, source))?;
     let application_modules_directory = application_directory.join("modules");
     std::fs::create_dir_all(&application_modules_directory)
         .map_err(|source| io_error(&application_modules_directory, source))?;
@@ -398,12 +398,12 @@ fn import_cargo_project_inner(
         &presentation_source,
     )?;
     write_text(
-        &destination.join("src/application/use_cases/mod.rs"),
+        &destination.join("src/application/services/mod.rs"),
         &microflows_source,
     )?;
     for flow in &microflow_files {
         write_text(
-            &destination.join(format!("src/application/use_cases/{}.rs", flow.file_name)),
+            &destination.join(format!("src/application/services/{}.rs", flow.file_name)),
             &flow.source,
         )?;
     }
@@ -557,10 +557,10 @@ fn render_application_module() -> String {
      pub mod dto;\n\
      pub mod task_queues;\n\
      pub mod modules;\n\n\
-     pub mod use_cases;\n\n\
+     pub mod services;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
          dto::apply(project);\n\
-         use_cases::apply(project);\n\
+         services::apply(project);\n\
          task_queues::apply(project);\n\
          modules::apply(project);\n\
      }\n"
@@ -2796,7 +2796,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a flat, Clean Architecture layout: persisted entities are individual `#[derive(MxEntity)]` structs under `src/domain/entities/` (entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place); view and non-persistable entities are DTO files under `src/application/dto/`; each supported server flow is an individual use-case under `src/application/use_cases/`; HTTP controllers and routes live under `src/presentation/`; repositories, database adapters, and imported-model persistence live under `src/infrastructure/`. Mendix modules remain metadata, rather than becoming nested Rust folders. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nEach enumeration is an individual `#[derive(MxEnumeration)]` Rust enum under `src/domain/enumerations/`, and each Mendix module's constants, regular expressions, scheduled events, and standalone menus live in their own file under `src/domain/documents/`. Supported server-side microflows are reconstructed as typed use cases; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a flat, Clean Architecture layout: persisted entities are individual `#[derive(MxEntity)]` structs under `src/domain/entities/` (entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place); view and non-persistable entities are DTO files under `src/application/dto/`; each supported server microflow is an individual service declaration under `src/application/services/`; HTTP controllers and routes live under `src/presentation/`; repositories, database adapters, and imported-model persistence live under `src/infrastructure/`. Mendix modules remain metadata, rather than becoming nested Rust folders. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nEach enumeration is an individual `#[derive(MxEnumeration)]` Rust enum under `src/domain/enumerations/`, and each Mendix module's constants, regular expressions, scheduled events, and standalone menus live in their own file under `src/domain/documents/`. Supported server-side microflows are reconstructed as typed service declarations; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -4240,13 +4240,17 @@ fn render_entity_layer_index(entries: &[(String, String)]) -> String {
 }
 
 fn render_flow_layer_index(entries: &[flow_export::RenderedFlowSource]) -> String {
-    let mut out = String::from("//! Individually editable application use cases.\n\n");
+    let mut out = String::from("//! Individually editable flow declarations for this layer.\n\n");
     for entry in entries {
         let _ = writeln!(out, "pub mod {};", entry.file_name);
     }
     out.push_str("\npub fn apply(project: &mut mxrs::ProjectDecl) {\n");
     for entry in entries {
-        let _ = writeln!(out, "    {}::apply(project);", entry.file_name);
+        let _ = writeln!(
+            out,
+            "    project.merge_module({}::declaration());",
+            entry.file_name
+        );
     }
     out.push_str("}\n");
     out
@@ -4349,8 +4353,8 @@ mod tests {
         // sole place that can depend on every architectural layer.
         let application = render_application_module();
         assert!(application.contains("pub mod dto;"));
-        assert!(application.contains("pub mod use_cases;"));
-        assert!(application.contains("use_cases::apply(project);"));
+        assert!(application.contains("pub mod services;"));
+        assert!(application.contains("services::apply(project);"));
         assert!(!application.contains("crate::domain"));
         assert!(!application.contains("crate::presentation"));
         assert!(!application.contains("pub mod nanoflows;"));
@@ -5257,7 +5261,7 @@ pub fn declaration() -> ModuleDecl {
         assert!(generated.join("src/domain/security/mod.rs").is_file());
         assert!(generated.join("src/application/mod.rs").is_file());
         assert!(generated.join("src/application/dto/mod.rs").is_file());
-        assert!(generated.join("src/application/use_cases/mod.rs").is_file());
+        assert!(generated.join("src/application/services/mod.rs").is_file());
         assert!(generated.join("src/presentation/mod.rs").is_file());
         assert!(
             generated
@@ -5299,7 +5303,7 @@ pub fn declaration() -> ModuleDecl {
         let application_source =
             std::fs::read_to_string(generated.join("src/application/mod.rs")).unwrap();
         assert!(application_source.contains("pub mod dto;"));
-        assert!(application_source.contains("use_cases::apply(project);"));
+        assert!(application_source.contains("services::apply(project);"));
         assert!(!application_source.contains("crate::presentation"));
         let presentation_source =
             std::fs::read_to_string(generated.join("src/presentation/mod.rs")).unwrap();
@@ -5370,15 +5374,15 @@ pub fn declaration() -> ModuleDecl {
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_GetOrder"));
         assert!(markers.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
         let microflows =
-            std::fs::read_to_string(generated.join("src/application/use_cases/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/application/services/mod.rs")).unwrap();
         assert!(!microflows.contains("snapshot-backed"));
         assert!(microflows.contains("pub mod sales_act_ping;"));
-        assert!(microflows.contains("sales_act_ping::apply(project);"));
+        assert!(microflows.contains("project.merge_module(sales_act_ping::declaration());"));
         assert!(!microflows.contains("nanoflow"));
         let nanoflows =
             std::fs::read_to_string(generated.join("src/presentation/nanoflows/mod.rs")).unwrap();
         assert!(nanoflows.contains("pub mod sales_nf_validate;"));
-        assert!(nanoflows.contains("sales_nf_validate::apply(project);"));
+        assert!(nanoflows.contains("project.merge_module(sales_nf_validate::declaration());"));
         assert!(!nanoflows.contains("microflow"));
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();

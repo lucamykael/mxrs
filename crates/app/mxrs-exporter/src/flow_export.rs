@@ -423,7 +423,6 @@ fn convert(
             ),
         };
         source.push(format!("let {rust_name} = {call};"));
-        source.push(format!("let _ = &{rust_name};"));
         variables.insert(name, ty);
         declaration.parameters.push(parameter);
     }
@@ -464,8 +463,85 @@ fn convert(
         module: module.into(),
         native_type: doc.get_str("$Type").ok()?.into(),
         declaration,
-        source,
+        source: polish_source(source),
     })
+}
+
+/// Removes the generator's used-suppression scars from a reconstructed
+/// body. Every `let _ = &name;` line goes; a binding or loop parameter that
+/// is genuinely never read again gets Rust's own `_` prefix instead — the
+/// idiom a hand author would have written.
+fn polish_source(source: Vec<String>) -> Vec<String> {
+    let mut lines: Vec<String> = source
+        .into_iter()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !(trimmed.starts_with("let _ = &") && trimmed.ends_with(';'))
+        })
+        .collect();
+    for index in 0..lines.len() {
+        let Some(name) = binding_name(&lines[index]) else {
+            continue;
+        };
+        let used_later = lines[index + 1..]
+            .iter()
+            .any(|line| find_identifier(line, &name).is_some());
+        if !used_later {
+            let position =
+                find_identifier(&lines[index], &name).expect("binding_name came from this line");
+            lines[index].insert(position, '_');
+        }
+    }
+    lines
+}
+
+/// The identifier a line binds: `let name = ...` or a `|flow, name|` loop
+/// closure parameter. `None` for anything else, including bindings already
+/// underscore-prefixed.
+fn binding_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let closure_parameter = ["|flow, ", "|_flow, "]
+        .iter()
+        .find_map(|prefix| trimmed.find(prefix).map(|start| start + prefix.len()));
+    let candidate = if let Some(rest) = trimmed.strip_prefix("let ") {
+        rest.split_once(" = ").map(|(name, _)| name.trim())?
+    } else if let Some(start) = closure_parameter {
+        trimmed[start..]
+            .split_once('|')
+            .map(|(name, _)| name.trim())?
+    } else {
+        return None;
+    };
+    let valid = !candidate.is_empty()
+        && !candidate.starts_with('_')
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+    valid.then(|| candidate.to_string())
+}
+
+/// The byte position of `name` as a whole word, so `value_UserSearch` never
+/// counts as (or receives the underscore of) `value_User`.
+fn find_identifier(line: &str, name: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(position) = line[from..].find(name) {
+        let start = from + position;
+        let end = start + name.len();
+        let before = start
+            .checked_sub(1)
+            .map(|i| bytes[i] as char)
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+        let after = bytes
+            .get(end)
+            .map(|&b| b as char)
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+        if before && after {
+            return Some(start);
+        }
+        from = end;
+    }
+    None
 }
 
 struct Converter<'a> {
@@ -569,7 +645,6 @@ impl Converter<'_> {
                         {
                             return None;
                         }
-                        inner_source.push(format!("let _ = &{variable};"));
                         (
                             format!(
                                 "flow.loop_over(&{}, {}, |flow, {variable}| {{",
@@ -691,7 +766,6 @@ impl Converter<'_> {
                         return None;
                     }
                     source.push(format!("let {variable} = flow.create_object({}, mxrs::Ref::<{}>::new(), {members_source}, {commit});",rust_string(name),marker(&entity)?));
-                    source.push(format!("let _ = &{variable};"));
                     Activity::CreateObject {
                         variable: name.into(),
                         entity,
@@ -755,7 +829,6 @@ impl Converter<'_> {
                         return None;
                     }
                     source.push(format!("let {variable} = flow.call_microflow_result::<{result_tag}>(mxrs::MicroflowRef::<{target_marker}>::new(), {}, {mappings_source});",rust_string(name)));
-                    source.push(format!("let _ = &{variable};"));
                     (Some(name.into()), Some(ty))
                 } else {
                     if !action.get_str("ResultVariableName").ok()?.is_empty() {
@@ -788,7 +861,6 @@ impl Converter<'_> {
                     rust_string(name),
                     marker(entity)?
                 ));
-                source.push(format!("let _ = &{variable};"));
                 Activity::CreateList {
                     variable: name.into(),
                     entity: entity.into(),
@@ -932,11 +1004,7 @@ pub(crate) fn render(flows: &[ConvertedFlow], version: &str, nanoflow: bool) -> 
 /// Renders each recovered flow as its own application/use-case source file.
 /// Mendix module names are kept in the declaration metadata; they do not
 /// become nested Rust folders.
-pub(crate) fn render_files(
-    flows: &[ConvertedFlow],
-    version: &str,
-    nanoflow: bool,
-) -> Vec<RenderedFlowSource> {
+pub(crate) fn render_files(flows: &[ConvertedFlow], nanoflow: bool) -> Vec<RenderedFlowSource> {
     let native = if nanoflow {
         "Microflows$Nanoflow"
     } else {
@@ -950,6 +1018,16 @@ pub(crate) fn render_files(
     selected.sort_by(|left, right| {
         (&left.module, &left.declaration.name).cmp(&(&right.module, &right.declaration.name))
     });
+    let noun = if nanoflow {
+        "nanoflow"
+    } else {
+        "microflow service"
+    };
+    let builder = if nanoflow {
+        "NanoflowModuleBuilder"
+    } else {
+        "MicroflowModuleBuilder"
+    };
     selected
         .into_iter()
         .map(|flow| {
@@ -959,16 +1037,30 @@ pub(crate) fn render_files(
                 ""
             };
             let parameter = if flow.source.is_empty() { "_flow" } else { "flow" };
+            // Reconstructed variables keep Mendix's own names, so files
+            // whose `value_*` bindings carry uppercase allow that casing
+            // rather than rewriting the model's spelling.
+            let allow = if flow.source.iter().any(|line| {
+                line.match_indices("value_").any(|(index, _)| {
+                    line[index + "value_".len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .any(|c| c.is_ascii_uppercase())
+                })
+            }) {
+                "#[allow(non_snake_case)]\n"
+            } else {
+                ""
+            };
             let mut source = format!(
-                "//! Editable {kind} use case.\n\n{imports}#[allow(non_snake_case)]\npub fn apply(project: &mut mxrs::ProjectDecl) {{\n    let mut declarations = mxrs::ProjectBuilder::new({});\n    declarations.{kind}_module({}, |module| {{\n        module.{kind}({}, |{parameter}| {{\n",
-                rust_string(version),
+                "//! Editable {noun} declaration.\n\nuse mxrs::prelude::*;\n\n{imports}{allow}pub fn declaration() -> ModuleDecl {{\n    let mut module = {builder}::new({});\n    module.{kind}({}, |{parameter}| {{\n",
                 rust_string(&flow.module),
                 rust_string(&flow.declaration.name),
             );
             for line in &flow.source {
-                writeln!(source, "            {line}").unwrap();
+                writeln!(source, "        {line}").unwrap();
             }
-            source.push_str("        });\n    });\n    for module in declarations.build().modules { project.merge_module(module); }\n}\n");
+            source.push_str("    });\n    module.into_decl()\n}\n");
             RenderedFlowSource {
                 file_name: flow_file_name(&flow.module, &flow.declaration.name),
                 source,

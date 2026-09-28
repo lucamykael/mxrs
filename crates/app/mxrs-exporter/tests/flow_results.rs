@@ -41,32 +41,31 @@ fn fixture() -> mxrs_ir::ProjectDecl {
 const CALLERS: &str = r#"
 #![deny(warnings)]
 use crate::infrastructure::markers::Calls;
-use mxrs::{CallArgument, MicroflowRef, MxList, MxObject, MxString, ProjectBuilder, ProjectDecl};
+use mxrs::prelude::*;
+use mxrs::{CallArgument, MicroflowRef, MxList, MxString, MxObject};
 
-pub fn apply(project: &mut ProjectDecl) {
-    let mut declarations = ProjectBuilder::new("11.12.1");
-    declarations.microflow_module("Calls", |module| {
-        module.microflow("Caller", |flow| {
-            let object = flow.object_parameter("object", mxrs::Ref::<Calls::Record>::new(), |_| {});
-            let list = flow.list_parameter("list", mxrs::Ref::<Calls::Record>::new(), |_| {});
-            let text = flow.call_microflow_result::<MxString>(
-                MicroflowRef::<Calls::Text>::new(), "text",
-                vec![CallArgument::new("input", mxrs::string("before"))]);
-            let record = flow.call_microflow_result::<MxObject<Calls::Record>>(
-                MicroflowRef::<Calls::Object>::new(), "record",
-                vec![CallArgument::new("input", object)]);
-            flow.commit(&record);
-            let records = flow.call_microflow_result::<MxList<Calls::Record>>(
-                MicroflowRef::<Calls::List>::new(), "records",
-                vec![CallArgument::new("input", list)]);
-            flow.loop_over(&records, "item", |flow, item| { flow.commit(&item); });
-            let result = flow.call_microflow_result::<MxString>(
-                MicroflowRef::<Calls::Text>::new(), "result",
-                vec![CallArgument::new("input", text)]);
-            flow.return_value(result);
-        });
+pub fn declaration() -> ModuleDecl {
+    let mut module = MicroflowModuleBuilder::new("Calls");
+    module.microflow("Caller", |flow| {
+        let object = flow.object_parameter("object", mxrs::Ref::<Calls::Record>::new(), |_| {});
+        let list = flow.list_parameter("list", mxrs::Ref::<Calls::Record>::new(), |_| {});
+        let text = flow.call_microflow_result::<MxString>(
+            MicroflowRef::<Calls::Text>::new(), "text",
+            vec![CallArgument::new("input", mxrs::string("before"))]);
+        let record = flow.call_microflow_result::<MxObject<Calls::Record>>(
+            MicroflowRef::<Calls::Object>::new(), "record",
+            vec![CallArgument::new("input", object)]);
+        flow.commit(&record);
+        let records = flow.call_microflow_result::<MxList<Calls::Record>>(
+            MicroflowRef::<Calls::List>::new(), "records",
+            vec![CallArgument::new("input", list)]);
+        flow.loop_over(&records, "item", |flow, item| { flow.commit(&item); });
+        let result = flow.call_microflow_result::<MxString>(
+            MicroflowRef::<Calls::Text>::new(), "result",
+            vec![CallArgument::new("input", text)]);
+        flow.return_value(result);
     });
-    for module in declarations.build().modules { project.merge_module(module); }
+    module.into_decl()
 }
 "#;
 
@@ -117,7 +116,7 @@ fn imported_callees_survive_typed_caller_edits_and_transactional_rejections() {
     std::fs::remove_dir_all(&source_dir).unwrap();
     // Reuse a registered per-flow module so this edit replaces the typed Text
     // overlay while adding Caller; the imported Text document remains preserved.
-    let editable = generated.join("src/application/use_cases/calls_text.rs");
+    let editable = generated.join("src/application/services/calls_text.rs");
     std::fs::write(&editable, CALLERS).unwrap();
     let built = run(&generated, &output);
     assert!(

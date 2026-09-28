@@ -16,7 +16,10 @@ pub struct MicroflowModuleBuilder {
 }
 
 impl MicroflowModuleBuilder {
-    pub(crate) fn new(name: impl Into<String>) -> Self {
+    /// Starts a standalone server-flow module facet. Public so a service
+    /// declaration that lives in its own file can assemble the one module it
+    /// contributes without a whole `ProjectBuilder`.
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             flows: Vec::new(),
@@ -34,7 +37,9 @@ impl MicroflowModuleBuilder {
         self
     }
 
-    pub(crate) fn into_decl(self) -> ModuleDecl {
+    /// Finishes the module facet; the counterpart of
+    /// [`MicroflowModuleBuilder::new`] for a standalone declaration file.
+    pub fn into_decl(self) -> ModuleDecl {
         ModuleDecl {
             name: self.name,
             microflows: self.flows,
@@ -53,7 +58,9 @@ pub struct NanoflowModuleBuilder {
 }
 
 impl NanoflowModuleBuilder {
-    pub(crate) fn new(name: impl Into<String>) -> Self {
+    /// Starts a standalone client-flow module facet; see
+    /// [`MicroflowModuleBuilder::new`].
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             flows: Vec::new(),
@@ -71,7 +78,9 @@ impl NanoflowModuleBuilder {
         self
     }
 
-    pub(crate) fn into_decl(self) -> ModuleDecl {
+    /// Finishes the module facet; the counterpart of
+    /// [`NanoflowModuleBuilder::new`] for a standalone declaration file.
+    pub fn into_decl(self) -> ModuleDecl {
         ModuleDecl {
             name: self.name,
             nanoflows: self.flows,

@@ -10,7 +10,7 @@ use std::process::Command;
 mod nested_cargo;
 
 fn flow_sources(generated: &Path) -> String {
-    let directory = generated.join("src/application/use_cases");
+    let directory = generated.join("src/application/services");
     let mut paths: Vec<_> = std::fs::read_dir(directory)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -26,7 +26,7 @@ fn flow_sources(generated: &Path) -> String {
 
 fn flow_source_path(generated: &Path, flow_name: &str) -> PathBuf {
     let needle = format!("module.microflow({flow_name:?}");
-    std::fs::read_dir(generated.join("src/application/use_cases"))
+    std::fs::read_dir(generated.join("src/application/services"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .find(|path| {
@@ -167,8 +167,10 @@ fn nested_decisions_and_loops_rebuild_exactly_and_edit_in_place() {
     std::fs::remove_dir_all(source_dir).unwrap();
     run(&generated, &rebuilt);
     assert_eq!(flows(&rebuilt), before);
+    // Plain literals: rustfmt may split `mxrs::string("before")` across
+    // lines in the fmt-cleaned project, so edit the string itself.
     let edited = source
-        .replace("mxrs::string(\"before\")", "mxrs::string(\"after\")")
+        .replace("\"before\"", "\"after\"")
         .replace("value_flag.clone(),", "mxrs::boolean(false),");
     assert_ne!(source, edited);
     std::fs::write(&editable, edited).unwrap();
