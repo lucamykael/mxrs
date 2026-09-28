@@ -21,6 +21,7 @@ mxrs-oql = { path = "../../compiler/mxrs-oql" }
 mxrs-packager = { path = "../mxrs-packager" }
 mxrs-project = { path = "../mxrs-project" }
 mxrs-runtime = { path = "../mxrs-runtime" }
+mxrs-runtime-boot = { path = "../mxrs-runtime-boot" }
 mxrs-runtime-flows = { path = "../mxrs-runtime-flows" }
 mxrs-runtime-http = { path = "../mxrs-runtime-http" }
 mxrs-runtime-sqlite = { path = "../mxrs-runtime-sqlite" }

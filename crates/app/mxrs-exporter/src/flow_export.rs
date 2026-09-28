@@ -110,7 +110,7 @@ pub(crate) fn typed_attribute_markers(modules: &[Module]) -> String {
     source
 }
 
-fn data_type(doc: &Document) -> Option<Ty> {
+pub(crate) fn data_type(doc: &Document) -> Option<Ty> {
     Some(match doc.get_str("$Type").ok()? {
         "DataTypes$StringType" => Ty::String,
         "DataTypes$IntegerType" => Ty::Long,

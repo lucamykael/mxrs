@@ -50,10 +50,44 @@ use mxrs_expr::{
     MxString,
 };
 use mxrs_ir::EntityMarker;
+pub use mxrs_runtime_boot::{Boot, BootError, boot};
 pub use mxrs_runtime_flows::{
     Adapter, AdapterKind, Execution, FlowEngine, FlowError, FlowValue, JavaAction, ObjectRef,
     Variables,
 };
+
+/// A generated service port failed: either the flow itself, or a value at
+/// the port boundary.
+#[derive(Debug, PartialEq)]
+pub enum ServiceError {
+    /// The engine reported a flow error (including security denials).
+    Flow(FlowError),
+    /// A boundary value did not match the port's declared type.
+    Value(PortValueError),
+}
+
+impl fmt::Display for ServiceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ServiceError::Flow(error) => error.fmt(f),
+            ServiceError::Value(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ServiceError {}
+
+impl From<FlowError> for ServiceError {
+    fn from(error: FlowError) -> Self {
+        ServiceError::Flow(error)
+    }
+}
+
+impl From<PortValueError> for ServiceError {
+    fn from(error: PortValueError) -> Self {
+        ServiceError::Value(error)
+    }
+}
 
 /// A typed handle to one runtime object: the `(entity, id)` pair the flow
 /// engine's variables hold, carrying the entity as a compile-time marker

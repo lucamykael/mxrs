@@ -722,6 +722,7 @@ dependencies = [
  "mxrs-packager",
  "mxrs-project",
  "mxrs-runtime",
+ "mxrs-runtime-boot",
  "mxrs-runtime-flows",
  "mxrs-runtime-http",
  "mxrs-runtime-sqlite",

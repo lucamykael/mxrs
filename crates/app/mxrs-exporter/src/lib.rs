@@ -354,11 +354,12 @@ fn import_cargo_project_inner(
         std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
     }
 
-    write_entity_layer_sources(
+    let typed_entities = write_entity_layer_sources(
         destination,
         &modules,
         &documents_export.derived_enumerations,
     )?;
+    let service_ports = collect_service_ports(&modules, &typed_entities);
 
     write_text(
         &destination.join("Cargo.toml"),
@@ -391,8 +392,14 @@ fn import_cargo_project_inner(
     )?;
     write_text(
         &destination.join("src/domain/ports/mod.rs"),
-        "//! Repository and external-service contracts belong here.\n",
+        &render_ports_index(&service_ports),
     )?;
+    for port in &service_ports {
+        write_text(
+            &destination.join(format!("src/domain/ports/{}.rs", port.file_stem)),
+            &render_service_port(port),
+        )?;
+    }
     write_text(
         &destination.join("src/application/mod.rs"),
         &application_source,
@@ -502,10 +509,21 @@ fn import_cargo_project_inner(
         &destination.join("src/infrastructure/database/mod.rs"),
         "//! Connection pools, migrations and database adapters belong here.\n",
     )?;
-    write_text(
-        &destination.join("src/infrastructure/adapters/mod.rs"),
-        "//! External services and Mendix-specific adapters belong here.\n",
-    )?;
+    if service_ports.is_empty() {
+        write_text(
+            &destination.join("src/infrastructure/adapters/mod.rs"),
+            "//! External services and Mendix-specific adapters belong here.\n",
+        )?;
+    } else {
+        write_text(
+            &destination.join("src/infrastructure/adapters/mod.rs"),
+            "//! External services and Mendix-specific adapters belong here.\n\npub mod runtime_services;\n",
+        )?;
+        write_text(
+            &destination.join("src/infrastructure/adapters/runtime_services.rs"),
+            &render_runtime_services(&service_ports),
+        )?;
+    }
     write_text(
         &destination.join("src/utils/mod.rs"),
         "//! Small framework-independent utilities.\n",
@@ -4114,6 +4132,306 @@ fn render_entity_file(
     out
 }
 
+/// One generated service port: the `domain/ports` trait for one Mendix
+/// module's runnable microflows, plus everything the runtime adapter impl
+/// needs to drive them through `FlowEngine::call`.
+struct ServicePort {
+    module_name: String,
+    trait_name: String,
+    file_stem: String,
+    methods: Vec<ServiceMethod>,
+}
+
+struct ServiceMethod {
+    flow_name: String,
+    method: String,
+    /// `(mendix name, argument ident, marker type, runtime type)` per
+    /// parameter, in declaration order.
+    parameters: Vec<(String, String, String, String)>,
+    /// `(marker type, runtime type)`; `None` returns unit (a void flow).
+    result: Option<(String, String)>,
+}
+
+impl ServiceMethod {
+    fn touches_object_handles(&self) -> bool {
+        self.parameters
+            .iter()
+            .any(|(_, _, _, runtime)| runtime.contains("ObjectHandle"))
+            || self
+                .result
+                .as_ref()
+                .is_some_and(|(_, runtime)| runtime.contains("ObjectHandle"))
+    }
+}
+
+/// The `(marker, runtime)` type pair a port boundary uses for one flow
+/// type — mirroring `mxrs::ports::PortValue`'s associations. `None` for
+/// types with no port representation (binary, an entity that keeps the IR
+/// form, or a DTO the domain layer cannot name).
+fn port_type(
+    ty: &mxrs_ir::flow::FlowReturnType,
+    typed_entities: &HashMap<String, TypedEntityTarget>,
+) -> Option<(String, String)> {
+    use mxrs_ir::flow::FlowReturnType as Ty;
+    Some(match ty {
+        Ty::String => ("mxrs::MxString".into(), "String".into()),
+        Ty::Integer => ("mxrs::MxInteger".into(), "i32".into()),
+        Ty::Long => ("mxrs::MxLong".into(), "i64".into()),
+        Ty::Boolean => ("mxrs::MxBool".into(), "bool".into()),
+        Ty::Float => ("mxrs::MxFloat".into(), "f64".into()),
+        Ty::Decimal => ("mxrs::MxDecimal".into(), "f64".into()),
+        Ty::DateTime => ("mxrs::MxDateTime".into(), "f64".into()),
+        Ty::Binary => return None,
+        Ty::Object(entity) | Ty::List(entity) => {
+            let target = typed_entities.get(entity)?;
+            if target.dto {
+                return None;
+            }
+            let path = format!(
+                "crate::domain::entities::{}::{}",
+                target.file_stem, target.type_name
+            );
+            let handle = format!("ObjectHandle<{path}>");
+            if matches!(ty, Ty::Object(_)) {
+                (format!("mxrs::MxObject<{path}>"), handle)
+            } else {
+                (format!("mxrs::MxList<{path}>"), format!("Vec<{handle}>"))
+            }
+        }
+    })
+}
+
+/// Collects the microflows each module can expose as a typed service port:
+/// every parameter and the return type must have a port representation, and
+/// every generated name must survive as a Rust identifier. Anything else
+/// stays callable through the engine's string-keyed surface.
+fn collect_service_ports(
+    modules: &[Module],
+    typed_entities: &HashMap<String, TypedEntityTarget>,
+) -> Vec<ServicePort> {
+    let mut ports = Vec::new();
+    for module in modules {
+        let Some(module_name) = module.name.as_deref().filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        let trait_base = derive_pascal_case(&sanitize_ident(module_name));
+        if trait_base.is_empty() || trait_base.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        let mut flows: Vec<_> = module.microflows.iter().collect();
+        flows.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut methods = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        'flows: for flow in flows {
+            let Some(flow_name) = flow.name.as_deref().filter(|name| !name.is_empty()) else {
+                continue;
+            };
+            let method = snake_ident(flow_name);
+            if method.is_empty() || rust_keyword(&method) || !seen.insert(method.clone()) {
+                continue;
+            }
+            let result = match flow.return_type.as_deref() {
+                None | Some("DataTypes$VoidType") => None,
+                Some(_) => {
+                    let Some(mapped) = flow
+                        .return_type_document
+                        .as_ref()
+                        .and_then(flow_export::data_type)
+                        .and_then(|ty| port_type(&ty, typed_entities))
+                    else {
+                        continue;
+                    };
+                    Some(mapped)
+                }
+            };
+            let mut parameters = Vec::new();
+            let mut idents = std::collections::HashSet::new();
+            for parameter in &flow.parameters {
+                let Some(name) = parameter
+                    .get_str("Name")
+                    .or_else(|_| parameter.get_str("name"))
+                    .ok()
+                else {
+                    continue 'flows;
+                };
+                let ident = snake_ident(name);
+                if ident.is_empty()
+                    || rust_keyword(&ident)
+                    || ident == "self"
+                    || !idents.insert(ident.clone())
+                {
+                    continue 'flows;
+                }
+                let Some((marker, runtime)) = parameter
+                    .get_document("VariableType")
+                    .or_else(|_| parameter.get_document("variableType"))
+                    .ok()
+                    .and_then(flow_export::data_type)
+                    .and_then(|ty| port_type(&ty, typed_entities))
+                else {
+                    continue 'flows;
+                };
+                parameters.push((name.to_string(), ident, marker, runtime));
+            }
+            methods.push(ServiceMethod {
+                flow_name: flow_name.to_string(),
+                method,
+                parameters,
+                result,
+            });
+        }
+        if methods.is_empty() {
+            continue;
+        }
+        let mut stem = sanitize_ident(module_name);
+        stem.make_ascii_lowercase();
+        ports.push(ServicePort {
+            module_name: module_name.to_string(),
+            trait_name: format!("{trait_base}Services"),
+            file_stem: format!("{stem}_services"),
+            methods,
+        });
+    }
+    ports.sort_by(|left, right| left.file_stem.cmp(&right.file_stem));
+    ports
+}
+
+fn render_service_port(port: &ServicePort) -> String {
+    let handles = port
+        .methods
+        .iter()
+        .any(ServiceMethod::touches_object_handles);
+    let mut out = format!(
+        "//! Service port for the {} Mendix module: each method drives one of\n//! its microflows on the embedded runtime.\n\nuse mxrs::ports::{{{}ServiceError}};\n\npub trait {} {{\n",
+        port.module_name,
+        if handles { "ObjectHandle, " } else { "" },
+        port.trait_name,
+    );
+    for method in &port.methods {
+        let _ = writeln!(
+            out,
+            "    /// Drives the `{}.{}` microflow.",
+            port.module_name, method.flow_name
+        );
+        let _ = writeln!(
+            out,
+            "    fn {}(&mut self{}) -> Result<{}, ServiceError>;",
+            method.method,
+            method
+                .parameters
+                .iter()
+                .map(|(_, ident, _, runtime)| format!(", {ident}: Option<{runtime}>"))
+                .collect::<String>(),
+            match &method.result {
+                Some((_, runtime)) => format!("Option<{runtime}>"),
+                None => "()".to_string(),
+            },
+        );
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn render_ports_index(ports: &[ServicePort]) -> String {
+    if ports.is_empty() {
+        return "//! Repository and external-service contracts belong here.\n".to_string();
+    }
+    let mut out = String::from(
+        "//! Contracts the domain exposes: one service port per Mendix module\n//! with runnable microflows. Hand-written repository and external-service\n//! contracts belong here too.\n\n",
+    );
+    for port in ports {
+        let _ = writeln!(out, "pub mod {};", port.file_stem);
+    }
+    out
+}
+
+/// The runtime adapter: one struct implementing every generated service
+/// port by marshalling through `mxrs::ports` and driving `FlowEngine::call`.
+fn render_runtime_services(ports: &[ServicePort]) -> String {
+    let handles = ports
+        .iter()
+        .flat_map(|port| &port.methods)
+        .any(ServiceMethod::touches_object_handles);
+    let marshals = ports
+        .iter()
+        .flat_map(|port| &port.methods)
+        .any(|method| !method.parameters.is_empty() || method.result.is_some());
+    let mut imports = vec!["BootError", "FlowEngine"];
+    if handles {
+        imports.push("ObjectHandle");
+    }
+    if marshals {
+        imports.push("PortValue");
+    }
+    imports.extend(["ServiceError", "Variables", "boot"]);
+    let mut out = format!(
+        "//! Runtime-backed implementations of the domain service ports.\n\nuse mxrs::Store;\nuse mxrs::ports::{{{}}};\n\n/// Drives the model's microflows on the embedded flow engine.\npub struct RuntimeServices {{\n    engine: FlowEngine,\n    store: Store,\n}}\n\nimpl RuntimeServices {{\n    /// Boots the flow engine and store from a built `.mpr` — for example\n    /// the output of `cargo run` or `cargo mxrs build`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        let booted = boot(path)?;\n        Ok(Self::new(\n            FlowEngine::from_modules(&booted.modules).with_policy(booted.security),\n            Store::new(booted.schema),\n        ))\n    }}\n\n    /// Wraps an engine and store the caller assembled.\n    pub fn new(engine: FlowEngine, store: Store) -> Self {{\n        Self {{ engine, store }}\n    }}\n\n    /// The backing store, for reading committed state.\n    pub fn store(&self) -> &Store {{\n        &self.store\n    }}\n\n    /// Mutable access to the backing store, for seeding data.\n    pub fn store_mut(&mut self) -> &mut Store {{\n        &mut self.store\n    }}\n}}\n",
+        imports.join(", "),
+    );
+    for port in ports {
+        let _ = writeln!(
+            out,
+            "\nimpl crate::domain::ports::{}::{} for RuntimeServices {{",
+            port.file_stem, port.trait_name
+        );
+        for (index, method) in port.methods.iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            let _ = writeln!(
+                out,
+                "    fn {}(&mut self{}) -> Result<{}, ServiceError> {{",
+                method.method,
+                method
+                    .parameters
+                    .iter()
+                    .map(|(_, ident, _, runtime)| format!(", {ident}: Option<{runtime}>"))
+                    .collect::<String>(),
+                match &method.result {
+                    Some((_, runtime)) => format!("Option<{runtime}>"),
+                    None => "()".to_string(),
+                },
+            );
+            let binding = if method.parameters.is_empty() {
+                "let arguments"
+            } else {
+                "let mut arguments"
+            };
+            let _ = writeln!(out, "        {binding} = Variables::new();");
+            for (name, ident, marker, _) in &method.parameters {
+                let _ = writeln!(
+                    out,
+                    "        arguments.insert({name:?}.to_string(), <{marker} as PortValue>::to_flow_optional({ident}));"
+                );
+            }
+            match &method.result {
+                Some((marker, _)) => {
+                    let _ = writeln!(
+                        out,
+                        "        let (result, _) = self.engine.call(&mut self.store, {:?}, arguments, None)?;",
+                        format!("{}.{}", port.module_name, method.flow_name),
+                    );
+                    let _ = writeln!(
+                        out,
+                        "        Ok(<{marker} as PortValue>::from_flow_optional(result)?)"
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "        self.engine.call(&mut self.store, {:?}, arguments, None)?;",
+                        format!("{}.{}", port.module_name, method.flow_name),
+                    );
+                    out.push_str("        Ok(())\n");
+                }
+            }
+            out.push_str("    }\n");
+        }
+        out.push_str("}\n");
+    }
+    out
+}
+
 /// Renders a Mendix entity as a typed `#[derive(MxEntity)]` struct — the
 /// same authoring surface a hand author uses — instead of an imperative IR
 /// dump. Returns `None` when the entity carries something the derive cannot
@@ -4587,7 +4905,7 @@ fn write_entity_layer_sources(
     destination: &Path,
     modules: &[Module],
     derived_enums: &HashMap<String, DerivedEnumeration>,
-) -> Result<()> {
+) -> Result<HashMap<String, TypedEntityTarget>> {
     let microflows = known_microflows(modules);
     let mut entities = Vec::new();
     let mut dtos = Vec::new();
@@ -4707,7 +5025,7 @@ fn write_entity_layer_sources(
         &destination.join("src/application/dto/mod.rs"),
         &render_entity_layer_index(&dtos),
     )?;
-    Ok(())
+    Ok(ctx.typed)
 }
 
 /// A defensive, not exhaustive, Mendix-name → Rust-identifier sanitizer:
@@ -6091,6 +6409,38 @@ pub fn declaration() -> ModuleDecl {
         assert!(nanoflows.contains("pub mod sales_nf_validate;"));
         assert!(nanoflows.contains("project.merge_module(sales_nf_validate::declaration());"));
         assert!(!nanoflows.contains("microflow"));
+        // Runnable microflows surface as a typed service port plus the
+        // runtime adapter that implements it. ACT_GetOrder returns the
+        // IR-form Order entity, so it stays off the typed surface.
+        let ports_index =
+            std::fs::read_to_string(generated.join("src/domain/ports/mod.rs")).unwrap();
+        assert!(
+            ports_index.contains("pub mod sales_services;"),
+            "{ports_index}"
+        );
+        let sales_port =
+            std::fs::read_to_string(generated.join("src/domain/ports/sales_services.rs")).unwrap();
+        assert!(
+            sales_port.contains("pub trait SalesServices"),
+            "{sales_port}"
+        );
+        assert!(
+            sales_port.contains("fn act_ping(&mut self) -> Result<(), ServiceError>;"),
+            "{sales_port}"
+        );
+        assert!(!sales_port.contains("act_get_order"), "{sales_port}");
+        let adapter = std::fs::read_to_string(
+            generated.join("src/infrastructure/adapters/runtime_services.rs"),
+        )
+        .unwrap();
+        assert!(adapter.contains("pub struct RuntimeServices"), "{adapter}");
+        assert!(
+            adapter.contains(
+                "impl crate::domain::ports::sales_services::SalesServices for RuntimeServices"
+            ),
+            "{adapter}"
+        );
+        assert!(adapter.contains("\"Sales.ACT_Ping\""), "{adapter}");
         let security =
             std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
         assert!(security.contains("ProjectSecurityDecl {"));
