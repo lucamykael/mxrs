@@ -9,15 +9,26 @@ use std::process::Command;
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
 
-fn flow_sources(generated: &Path) -> String {
-    let directory = generated.join("src/application/services");
-    let mut paths: Vec<_> = std::fs::read_dir(directory)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
-        .collect();
+fn service_files(generated: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for module in std::fs::read_dir(generated.join("src/modules")).unwrap() {
+        let services = module.unwrap().path().join("services");
+        if !services.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(services).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|extension| extension == "rs") {
+                paths.push(path);
+            }
+        }
+    }
     paths.sort();
     paths
+}
+
+fn flow_sources(generated: &Path) -> String {
+    service_files(generated)
         .into_iter()
         .map(|path| std::fs::read_to_string(path).unwrap())
         .collect::<Vec<_>>()
@@ -26,9 +37,8 @@ fn flow_sources(generated: &Path) -> String {
 
 fn flow_source_path(generated: &Path, flow_name: &str) -> PathBuf {
     let needle = format!("module.microflow({flow_name:?}");
-    std::fs::read_dir(generated.join("src/application/services"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
+    service_files(generated)
+        .into_iter()
         .find(|path| {
             path.file_name().is_some_and(|name| name != "mod.rs")
                 && std::fs::read_to_string(path).is_ok_and(|source| source.contains(&needle))
@@ -867,12 +877,11 @@ fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_nat
             "{needle}\n{source}"
         );
     }
-    let markers =
-        std::fs::read_to_string(generated.join("src/infrastructure/markers/calls.rs")).unwrap();
+    let markers = std::fs::read_to_string(generated.join("src/modules/calls/markers.rs")).unwrap();
     for name in [
         "Name", "Count", "Serial", "Weight", "Amount", "Active", "When", "Data",
     ] {
-        assert!(markers.contains(&format!("TypedAttributeMarker for Calls::Record_{name}")));
+        assert!(markers.contains(&format!("TypedAttributeMarker for Record_{name}")));
     }
     std::fs::remove_dir_all(source_dir).unwrap();
     run(&generated, &rebuilt);

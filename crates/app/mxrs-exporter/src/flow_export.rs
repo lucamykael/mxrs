@@ -21,6 +21,7 @@ pub(crate) struct ConvertedFlow {
 }
 
 pub(crate) struct RenderedFlowSource {
+    pub module: String,
     pub file_name: String,
     pub source: String,
 }
@@ -1062,16 +1063,17 @@ pub(crate) fn render_files(flows: &[ConvertedFlow], nanoflow: bool) -> Vec<Rende
             }
             source.push_str("    });\n    module.into_decl()\n}\n");
             RenderedFlowSource {
-                file_name: flow_file_name(&flow.module, &flow.declaration.name),
+                module: flow.module.clone(),
+                file_name: flow_file_name(&flow.declaration.name),
                 source,
             }
         })
         .collect()
 }
 
-fn flow_file_name(module: &str, name: &str) -> String {
+fn flow_file_name(name: &str) -> String {
     let mut result = String::new();
-    for character in format!("{module}_{name}").chars() {
+    for character in name.chars() {
         if character.is_ascii_alphanumeric() || character == '_' {
             result.push(character.to_ascii_lowercase());
         } else if !result.ends_with('_') {

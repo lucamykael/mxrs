@@ -19,9 +19,14 @@ read-only behavioral oracle; never edit it.
   completion standard. Preserve unsupported native data losslessly outside the
   editable Rust tree only as a temporary compatibility boundary, then add a
   typed DSL/IR/writer/exporter surface for it.
-- Generated projects separate domain declarations, application/server
-  microflows, presentation/client nanoflows and pages, and infrastructure
-  adapters. Dependencies point inward.
+- Generated projects are module-first (user directive, 2026-09-28): each
+  Mendix module owns a folder under `src/modules/<module>/` carrying its
+  domain model (entities, enumerations, documents, module security), DTOs
+  (everything non-persistent), services (microflows), ports, presentation
+  (pages and nanoflows) and markers — Clean Architecture folders inside
+  each module, mirroring how the module reads in Studio Pro. Project-level
+  layers keep only cross-cutting concerns (project security, navigation,
+  routes, shared infrastructure, composition). Dependencies point inward.
 - Scaffolds must compile immediately, be transactional, refuse overwrites, and
   be configurable through explicit command options and project defaults.
 - Never commit private acceptance projects, their names, paths, metrics, or

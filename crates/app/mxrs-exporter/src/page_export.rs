@@ -468,7 +468,7 @@ fn preserves_value(original: &Bson, compiled: &Bson, identities: &IdentityMap) -
 /// Renders every converted page into one `src/presentation/pages/mod.rs` source file
 /// of real, compiled `pub fn` page-builders. Returns `None` when there is
 /// nothing to show (no point writing an empty file).
-pub fn render_pages_module(pages: &[ConvertedPage]) -> Option<String> {
+pub fn render_pages_module(pages: &[&ConvertedPage]) -> Option<String> {
     if pages.is_empty() {
         return None;
     }
@@ -488,7 +488,7 @@ pub fn render_pages_module(pages: &[ConvertedPage]) -> Option<String> {
     );
     let _ = writeln!(
         out,
-        "// `build()` by src/presentation/mod.rs — edit freely, same as the rest of"
+        "// `build()` by the module's presentation/mod.rs — edit freely, same as the rest of"
     );
     let _ = writeln!(out, "// this crate's generated source.");
     out.push('\n');
@@ -2020,7 +2020,8 @@ mod tests {
         assert_eq!(pages[0].module_name, "Sales");
         assert_eq!(pages[0].function_name, "simple");
 
-        let source = render_pages_module(&pages).expect("one convertible page should render");
+        let refs: Vec<&ConvertedPage> = pages.iter().collect();
+        let source = render_pages_module(&refs).expect("one convertible page should render");
         assert!(source.contains("pub fn simple"));
         assert!(!source.contains("with_visibility"));
     }

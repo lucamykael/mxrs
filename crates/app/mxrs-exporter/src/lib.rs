@@ -254,31 +254,20 @@ fn import_cargo_project_inner(
         &mut converted_pages,
         &mut page_export,
     )?;
-    let pages_module_source = page_export::render_pages_module(&converted_pages);
     let domain_source = render_domain_module();
     let application_source = render_application_module();
-    let presentation_source = render_presentation_module(&converted_pages, api_mode);
+    let presentation_source = render_presentation_module(api_mode);
     let composition_source = render_composition_module(&mendix_version);
     let infrastructure_source = render_infrastructure_module();
     let persistence_source = render_persistence_module(&modules, &mendix_version);
     let converted_flows = flow_export::collect(&project, &modules)?;
     let microflow_files = flow_export::render_files(&converted_flows, false);
-    let microflows_source = if !microflow_files.is_empty() {
-        render_flow_layer_index(&microflow_files)
-    } else {
-        render_microflows_module(&mendix_version, &modules)
-    };
     let nanoflow_files = flow_export::render_files(&converted_flows, true);
-    let nanoflows_source = if !nanoflow_files.is_empty() {
-        render_flow_layer_index(&nanoflow_files)
-    } else {
-        render_nanoflows_module(&mendix_version, &modules)
-    };
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
         (document.get_str("$Type").ok() == Some("Security$ProjectSecurity")).then_some(document)
     });
-    let security_source = render_security_module(&modules, security_document.as_ref());
+    let security_source = render_project_security_module(security_document.as_ref());
     let navigation_source = render_navigation_module(&project.navigation()?);
     let documents_export = render_documents_module(&project)?;
     let task_queues_source = render_task_queues_module(&project, &mendix_version)?;
@@ -295,57 +284,20 @@ fn import_cargo_project_inner(
     let package_name = cargo_package_name(&manifest.project_name);
     let crate_name = package_name.replace('-', "_");
     let infrastructure_directory = destination.join("src/infrastructure");
-    std::fs::create_dir_all(&infrastructure_directory)
-        .map_err(|source| io_error(&infrastructure_directory, source))?;
     let domain_directory = destination.join("src/domain");
-    std::fs::create_dir_all(&domain_directory)
-        .map_err(|source| io_error(&domain_directory, source))?;
-    let entities_directory = domain_directory.join("entities");
-    std::fs::create_dir_all(&entities_directory)
-        .map_err(|source| io_error(&entities_directory, source))?;
-    let domain_modules_directory = domain_directory.join("modules");
-    std::fs::create_dir_all(&domain_modules_directory)
-        .map_err(|source| io_error(&domain_modules_directory, source))?;
     let application_directory = destination.join("src/application");
-    let dto_directory = application_directory.join("dto");
-    std::fs::create_dir_all(&dto_directory).map_err(|source| io_error(&dto_directory, source))?;
-    let services_directory = application_directory.join("services");
-    std::fs::create_dir_all(&services_directory)
-        .map_err(|source| io_error(&services_directory, source))?;
-    let application_modules_directory = application_directory.join("modules");
-    std::fs::create_dir_all(&application_modules_directory)
-        .map_err(|source| io_error(&application_modules_directory, source))?;
     let presentation_directory = destination.join("src/presentation");
-    let controllers_directory = presentation_directory.join("controllers");
-    std::fs::create_dir_all(&controllers_directory)
-        .map_err(|source| io_error(&controllers_directory, source))?;
-    let routes_directory = presentation_directory.join("routes");
-    std::fs::create_dir_all(&routes_directory)
-        .map_err(|source| io_error(&routes_directory, source))?;
-    let task_queues_directory = application_directory.join("task_queues");
-    std::fs::create_dir_all(&task_queues_directory)
-        .map_err(|source| io_error(&task_queues_directory, source))?;
-    let nanoflows_directory = presentation_directory.join("nanoflows");
-    std::fs::create_dir_all(&nanoflows_directory)
-        .map_err(|source| io_error(&nanoflows_directory, source))?;
-    let navigation_directory = presentation_directory.join("navigation");
-    std::fs::create_dir_all(&navigation_directory)
-        .map_err(|source| io_error(&navigation_directory, source))?;
-    let presentation_modules_directory = presentation_directory.join("modules");
-    std::fs::create_dir_all(&presentation_modules_directory)
-        .map_err(|source| io_error(&presentation_modules_directory, source))?;
-    let security_directory = domain_directory.join("security");
-    std::fs::create_dir_all(&security_directory)
-        .map_err(|source| io_error(&security_directory, source))?;
-    let documents_directory = domain_directory.join("documents");
-    std::fs::create_dir_all(&documents_directory)
-        .map_err(|source| io_error(&documents_directory, source))?;
-    let enumerations_directory = domain_directory.join("enumerations");
-    std::fs::create_dir_all(&enumerations_directory)
-        .map_err(|source| io_error(&enumerations_directory, source))?;
     for directory in [
+        domain_directory.join("modules"),
+        domain_directory.join("security"),
         domain_directory.join("services"),
         domain_directory.join("ports"),
+        application_directory.join("modules"),
+        application_directory.join("task_queues"),
+        presentation_directory.join("controllers"),
+        presentation_directory.join("modules"),
+        presentation_directory.join("navigation"),
+        presentation_directory.join("routes"),
         infrastructure_directory.join("repositories"),
         infrastructure_directory.join("database"),
         infrastructure_directory.join("adapters"),
@@ -355,13 +307,82 @@ fn import_cargo_project_inner(
         std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
     }
 
-    let typed_entities = write_entity_layer_sources(
-        destination,
+    let mut generated_modules: std::collections::BTreeMap<String, GeneratedModule> =
+        Default::default();
+    let typed_entities = collect_entity_layer(
         &modules,
         &documents_export.derived_enumerations,
+        &mut generated_modules,
     )?;
     let service_ports = collect_service_ports(&modules, &typed_entities);
     let action_ports = assemble_action_ports(&action_documents, &typed_entities);
+    for (module_name, stem, source) in &documents_export.enumeration_files {
+        generated_module(&mut generated_modules, module_name)
+            .enumerations
+            .push((stem.clone(), source.clone()));
+    }
+    for (module_name, source) in &documents_export.module_files {
+        generated_module(&mut generated_modules, module_name).documents = Some(source.clone());
+    }
+    for module in &modules {
+        let Some(module_name) = module.name.as_deref() else {
+            continue;
+        };
+        if let Some(security) = render_module_security(module_name, &module.module_roles) {
+            generated_module(&mut generated_modules, module_name).security = Some(security);
+        }
+    }
+    for flow in &microflow_files {
+        generated_module(&mut generated_modules, &flow.module)
+            .services
+            .push((flow.file_name.clone(), flow.source.clone()));
+    }
+    for flow in &nanoflow_files {
+        generated_module(&mut generated_modules, &flow.module)
+            .nanoflows
+            .push((flow.file_name.clone(), flow.source.clone()));
+    }
+    {
+        let mut pages_by_module: std::collections::BTreeMap<
+            String,
+            Vec<&page_export::ConvertedPage>,
+        > = Default::default();
+        for page in &converted_pages {
+            pages_by_module
+                .entry(page.module_name.clone())
+                .or_default()
+                .push(page);
+        }
+        for (module_name, pages) in pages_by_module {
+            if let Some(source) = page_export::render_pages_module(&pages) {
+                let functions = pages
+                    .iter()
+                    .map(|page| page.function_name.clone())
+                    .collect();
+                generated_module(&mut generated_modules, &module_name).pages =
+                    Some((source, functions));
+            }
+        }
+    }
+    for port in &service_ports {
+        generated_module(&mut generated_modules, &port.module_name).ports_services =
+            Some(render_service_port(port));
+    }
+    for module in &action_ports {
+        generated_module(&mut generated_modules, &module.module_name).ports_actions =
+            Some(render_action_port_file(module));
+    }
+    collect_marker_sources(
+        &marker_manifest,
+        &markers_source,
+        &typed_markers_source,
+        &mut generated_modules,
+    )?;
+    write_modules_layer(destination, &generated_modules)?;
+    write_text(
+        &destination.join("src/infrastructure/markers.rs"),
+        &render_markers_facade(&generated_modules),
+    )?;
 
     write_text(
         &destination.join("Cargo.toml"),
@@ -378,7 +399,7 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "// Internal aliases keep generated authoring declarations concise.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod application;\npub mod composition;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\npub mod utils;\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    composition::build()\n}}\n\n#[mxrs::application(version = {}, project = crate::build)]\npub struct Application;\n",
+            "// Internal aliases keep generated authoring declarations concise.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod application;\npub mod composition;\npub mod domain;\npub mod infrastructure;\npub mod modules;\npub mod presentation;\npub mod utils;\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    composition::build()\n}}\n\n#[mxrs::application(version = {}, project = crate::build)]\npub struct Application;\n",
             rust_string(&manifest.mendix_version),
         ),
     )?;
@@ -394,20 +415,8 @@ fn import_cargo_project_inner(
     )?;
     write_text(
         &destination.join("src/domain/ports/mod.rs"),
-        &render_ports_index(&service_ports, &action_ports),
+        "//! Hand-written repository and external-service contracts belong here;\n//! each Mendix module's generated ports live in `crate::modules::<m>::ports`.\n",
     )?;
-    for port in &service_ports {
-        write_text(
-            &destination.join(format!("src/domain/ports/{}.rs", port.file_stem)),
-            &render_service_port(port),
-        )?;
-    }
-    for module in &action_ports {
-        write_text(
-            &destination.join(format!("src/domain/ports/{}.rs", module.file_stem)),
-            &render_action_port_file(module),
-        )?;
-    }
     write_text(
         &destination.join("src/application/mod.rs"),
         &application_source,
@@ -417,16 +426,6 @@ fn import_cargo_project_inner(
         &presentation_source,
     )?;
     write_text(
-        &destination.join("src/application/services/mod.rs"),
-        &microflows_source,
-    )?;
-    for flow in &microflow_files {
-        write_text(
-            &destination.join(format!("src/application/services/{}.rs", flow.file_name)),
-            &flow.source,
-        )?;
-    }
-    write_text(
         &destination.join("src/application/task_queues/mod.rs"),
         &task_queues_source,
     )?;
@@ -434,16 +433,6 @@ fn import_cargo_project_inner(
         &destination.join("src/application/modules/mod.rs"),
         &render_scaffold_modules_module(),
     )?;
-    write_text(
-        &destination.join("src/presentation/nanoflows/mod.rs"),
-        &nanoflows_source,
-    )?;
-    for flow in &nanoflow_files {
-        write_text(
-            &destination.join(format!("src/presentation/nanoflows/{}.rs", flow.file_name)),
-            &flow.source,
-        )?;
-    }
     write_text(
         &destination.join("src/domain/security/mod.rs"),
         &security_source,
@@ -464,39 +453,6 @@ fn import_cargo_project_inner(
         &destination.join("src/presentation/routes/mod.rs"),
         &render_routes_module(api_mode),
     )?;
-    let mut document_entries = Vec::new();
-    for (stem, source, qualified) in &documents_export.module_files {
-        write_text(
-            &destination.join(format!("src/domain/documents/{stem}.rs")),
-            source,
-        )?;
-        document_entries.push((stem.clone(), qualified.clone()));
-    }
-    write_text(
-        &destination.join("src/domain/documents/mod.rs"),
-        &render_entity_layer_index(&document_entries),
-    )?;
-    let mut enumeration_entries = Vec::new();
-    for (stem, source, qualified) in &documents_export.enumeration_files {
-        write_text(
-            &destination.join(format!("src/domain/enumerations/{stem}.rs")),
-            source,
-        )?;
-        enumeration_entries.push((stem.clone(), qualified.clone()));
-    }
-    write_text(
-        &destination.join("src/domain/enumerations/mod.rs"),
-        &render_entity_layer_index(&enumeration_entries),
-    )?;
-    if let Some(pages_module_source) = &pages_module_source {
-        let pages_directory = presentation_directory.join("pages");
-        std::fs::create_dir_all(&pages_directory)
-            .map_err(|source| io_error(&pages_directory, source))?;
-        write_text(
-            &destination.join("src/presentation/pages/mod.rs"),
-            pages_module_source,
-        )?;
-    }
     write_text(
         &destination.join("src/main.rs"),
         &build_binary_source(&crate_name, &manifest.project_name, api_mode),
@@ -523,7 +479,7 @@ fn import_cargo_project_inner(
         adapters_index.push('\n');
     }
     for module in &action_ports {
-        let _ = writeln!(adapters_index, "pub mod {};", module.file_stem);
+        let _ = writeln!(adapters_index, "pub mod {}_actions;", module.module_stem);
     }
     if !service_ports.is_empty() {
         adapters_index.push_str("pub mod runtime_services;\n");
@@ -541,21 +497,15 @@ fn import_cargo_project_inner(
     for module in &action_ports {
         write_text(
             &destination.join(format!(
-                "src/infrastructure/adapters/{}.rs",
-                module.file_stem
+                "src/infrastructure/adapters/{}_actions.rs",
+                module.module_stem
             )),
-            &render_action_registry_file(module, &module.file_stem),
+            &render_action_registry_file(module),
         )?;
     }
     write_text(
         &destination.join("src/utils/mod.rs"),
         "//! Small framework-independent utilities.\n",
-    )?;
-    write_marker_layer_sources(
-        destination,
-        &marker_manifest,
-        &markers_source,
-        &typed_markers_source,
     )?;
     format_generated_cargo_project(destination)?;
     write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
@@ -576,21 +526,20 @@ fn import_cargo_project_inner(
     })
 }
 
-/// Builds the domain layer. Composition is owned by `src/composition.rs`, so
-/// this layer never depends outward on application, infrastructure or UI.
+/// Builds the project-level domain layer: project security and the homes
+/// for hand-written domain code. Each Mendix module's own domain model
+/// lives under `src/modules/<m>/domain`. Composition is owned by
+/// `src/composition.rs`, so this layer never depends outward on
+/// application, infrastructure or UI.
 fn render_domain_module() -> String {
-    "//! Business entities, domain services and ports.\n\n\
-     pub mod documents;\n\
-     pub mod entities;\n\
-     pub mod enumerations;\n\
+    "//! Project-level security plus homes for hand-written domain services\n\
+     //! and contracts; each Mendix module's domain model lives in\n\
+     //! `crate::modules`.\n\n\
      pub mod modules;\n\
      pub mod ports;\n\
      pub mod security;\n\n\
      pub mod services;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-         entities::apply(project);\n\
-         enumerations::apply(project);\n\
-         documents::apply(project);\n\
          modules::apply(project);\n\
          security::apply(project);\n\
      }\n"
@@ -598,45 +547,26 @@ fn render_domain_module() -> String {
 }
 
 fn render_application_module() -> String {
-    "//! Application use cases and boundary DTOs.\n\n\
-     pub mod dto;\n\
+    "//! Project-level application concerns; each Mendix module's services\n\
+     //! and DTOs live in `crate::modules`.\n\n\
      pub mod task_queues;\n\
      pub mod modules;\n\n\
-     pub mod services;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-         dto::apply(project);\n\
-         services::apply(project);\n\
          task_queues::apply(project);\n\
          modules::apply(project);\n\
      }\n"
     .to_string()
 }
 
-fn render_presentation_module(pages: &[page_export::ConvertedPage], api_mode: ApiMode) -> String {
+fn render_presentation_module(api_mode: ApiMode) -> String {
     let mut source = String::from(
-        "//! Presentation controllers, routes and client-side UI behavior.\n\n\
+        "//! Project-level presentation: controllers, navigation and routes.\n//! Each Mendix module's pages and nanoflows live in `crate::modules`.\n\n\
          pub mod controllers;\n\
-         pub mod nanoflows;\n\
          pub mod navigation;\n",
     );
     source.push_str("pub mod modules;\npub mod routes;\n");
-    if !pages.is_empty() {
-        source.push_str("pub mod pages;\n");
-    }
-    source.push_str("\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n");
-    for page in pages {
-        let _ = writeln!(
-            source,
-            // `module_mut` is the find-or-create accessor, so this stays one
-            // total expression: open-coding it as a conditional push followed
-            // by `find(..).expect(..)` puts a panic into generated product
-            // code for an invariant the reader cannot check locally.
-            "    project.module_mut({:?}).pages.push(pages::{}());",
-            page.module_name, page.function_name,
-        );
-    }
     source.push_str(
-        "    controllers::apply(project);\n    nanoflows::apply(project);\n    routes::apply(project);\n    modules::apply(project);\n}\n",
+        "\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n    controllers::apply(project);\n    routes::apply(project);\n    modules::apply(project);\n}\n",
     );
     let _ = writeln!(
         source,
@@ -648,7 +578,7 @@ fn render_presentation_module(pages: &[page_export::ConvertedPage], api_mode: Ap
 
 fn render_composition_module(mendix_version: &str) -> String {
     format!(
-        "//! The only layer allowed to compose Clean Architecture dependencies.\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    let mut project = ::mxrs::ProjectBuilder::new({}).build();\n    crate::domain::apply(&mut project);\n    crate::application::apply(&mut project);\n    crate::infrastructure::apply(&mut project);\n    crate::presentation::apply(&mut project);\n    project\n}}\n",
+        "//! The only layer allowed to compose Clean Architecture dependencies.\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    let mut project = ::mxrs::ProjectBuilder::new({}).build();\n    crate::modules::apply(&mut project);\n    crate::domain::apply(&mut project);\n    crate::application::apply(&mut project);\n    crate::infrastructure::apply(&mut project);\n    crate::presentation::apply(&mut project);\n    project\n}}\n",
         rust_string(mendix_version)
     )
 }
@@ -790,9 +720,9 @@ enum EditableDocument {
 /// `domain/enumerations/<module>_<name>.rs` — as `#[derive(MxEnumeration)]`
 /// when the derive can express it.
 struct DocumentsExport {
-    /// `(file_stem, source, qualified name)` per Mendix module with documents.
-    module_files: Vec<(String, String, String)>,
-    /// `(file_stem, source, qualified name)` per enumeration.
+    /// `(module name, source)` per Mendix module with documents.
+    module_files: Vec<(String, String)>,
+    /// `(module name, file stem, source)` per enumeration.
     enumeration_files: Vec<(String, String, String)>,
     /// Qualified `Module.Name` → the Rust enum a typed entity field can
     /// reference, for enumerations rendered as `#[derive(MxEnumeration)]`.
@@ -800,16 +730,38 @@ struct DocumentsExport {
     counts: HashMap<&'static str, usize>,
 }
 
+/// The folder name one Mendix module's generated Rust lives under —
+/// `src/modules/<stem>/`.
+fn module_stem(module_name: &str) -> String {
+    let mut stem = sanitize_ident(module_name);
+    stem.make_ascii_lowercase();
+    if rust_keyword(&stem) {
+        stem.push_str("_module");
+    }
+    stem
+}
+
 /// One enumeration that rendered as a real Rust enum: where it lives under
-/// `domain/enumerations/` and the type name the file declares.
+/// its module's `domain/enumerations/` and the type name the file declares.
 struct DerivedEnumeration {
+    module_stem: String,
     file_stem: String,
     type_name: String,
+}
+
+impl DerivedEnumeration {
+    fn module_path(&self) -> String {
+        format!(
+            "crate::modules::{}::domain::enumerations::{}",
+            self.module_stem, self.file_stem
+        )
+    }
 }
 
 /// Where one entity's generated Rust lives and what the file declares, for
 /// entities currently assumed to render as `#[derive(MxEntity)]` structs.
 struct TypedEntityTarget {
+    module_stem: String,
     file_stem: String,
     type_name: String,
     dto: bool,
@@ -902,19 +854,20 @@ fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
             values,
         } = declaration
         {
-            let stem = layer_file_stem(&module, &name, false);
+            let stem = inner_file_stem(&name);
             let (source, derived_type) =
                 render_enumeration_file(&module, &name, &documentation, &values);
             if let Some(type_name) = derived_type {
                 derived_enumerations.insert(
                     format!("{module}.{name}"),
                     DerivedEnumeration {
+                        module_stem: module_stem(&module),
                         file_stem: stem.clone(),
                         type_name,
                     },
                 );
             }
-            enumeration_files.push((stem, source, format!("{module}.{name}")));
+            enumeration_files.push((module, stem, source));
             continue;
         }
         let module = editable_document_module(&declaration).to_string();
@@ -927,10 +880,8 @@ fn render_documents_module(project: &Project) -> Result<DocumentsExport> {
     let module_files = documents_by_module
         .into_iter()
         .map(|(module, documents)| {
-            let mut stem = sanitize_ident(&module);
-            stem.make_ascii_lowercase();
             let source = render_module_documents_file(&module, documents);
-            (stem, source, module)
+            (module, source)
         })
         .collect();
 
@@ -2429,86 +2380,38 @@ fn constant_environment_variable(module: &str, name: &str) -> String {
     result.trim_end_matches('_').to_string()
 }
 
-/// Creates the editable server-flow composition layer. New typed declarations
-/// merge by module and are then upserted by the writer.
-fn render_microflows_module(mendix_version: &str, _modules: &[Module]) -> String {
-    render_flow_module(
-        mendix_version,
-        "server-side microflow",
-        "microflow_module",
-        "microflow",
-    )
-}
-
-/// Creates the editable client-flow composition layer independently from the
-/// server path, so generated source cannot blur their runtime boundary.
-fn render_nanoflows_module(mendix_version: &str, _modules: &[Module]) -> String {
-    render_flow_module(
-        mendix_version,
-        "client-side nanoflow",
-        "nanoflow_module",
-        "nanoflow",
-    )
-}
-
-fn render_flow_module(
-    mendix_version: &str,
-    description: &str,
-    module_method: &str,
-    builder_method: &str,
-) -> String {
-    let mut source = format!("//! Editable Cargo-native {description} declarations.\n");
-    source.push_str(
-        "\nfn declarations() -> ::mxrs_ir::ProjectDecl {\n\
-             #[allow(unused_mut)]\n\
-             let mut project = ::mxrs_dsl::ProjectBuilder::new(",
+fn render_module_security(
+    module_name: &str,
+    roles: &[mxrs_model::module::ModuleRole],
+) -> Option<String> {
+    if roles.is_empty() {
+        return None;
+    }
+    let mut source = format!(
+        "//! Editable module security for {module_name}.\n\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n    project.module_mut({}).roles = Some(vec![\n",
+        rust_string(module_name),
     );
-    source.push_str(&rust_string(mendix_version));
-    let _ = writeln!(
-        source,
-        ");\n    // Add `project.{module_method}(..., |module| module.{builder_method}(...))` declarations here."
-    );
-    source.push_str(
-        "    project.build()\n\
-         }\n\n\
-         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-             for declared in declarations().modules {\n\
-                 project.merge_module(declared);\n\
-             }\n\
-         }\n",
-    );
-    source
-}
-
-fn render_security_module(modules: &[Module], document: Option<&mxrs_bson::Document>) -> String {
-    let mut source = String::from(
-        "//! Editable Cargo-native project and module security.\n\n\
-         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n",
-    );
-    for module in modules {
-        if module.module_roles.is_empty() {
-            continue;
-        }
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
+    let mut roles = roles.iter().collect::<Vec<_>>();
+    roles.sort_by(|left, right| left.name.cmp(&right.name));
+    for role in roles {
+        let name = role.name.as_deref().unwrap_or("Unnamed");
         let _ = writeln!(
             source,
-            "    if let Some(module) = project.modules.iter_mut().find(|module| module.name == {}) {{",
-            rust_string(module_name)
+            "        ::mxrs_ir::ModuleRoleDecl {{ name: {}.to_string(), description: {}.to_string() }},",
+            rust_string(name),
+            rust_string(&role.description)
         );
-        source.push_str("        module.roles = Some(vec![\n");
-        let mut roles = module.module_roles.iter().collect::<Vec<_>>();
-        roles.sort_by(|left, right| left.name.cmp(&right.name));
-        for role in roles {
-            let name = role.name.as_deref().unwrap_or("Unnamed");
-            let _ = writeln!(
-                source,
-                "            ::mxrs_ir::ModuleRoleDecl {{ name: {}.to_string(), description: {}.to_string() }},",
-                rust_string(name),
-                rust_string(&role.description)
-            );
-        }
-        source.push_str("        ]);\n    }\n");
     }
+    source.push_str("    ]);\n}\n");
+    Some(source)
+}
+
+fn render_project_security_module(document: Option<&mxrs_bson::Document>) -> String {
+    let mut source = String::from(
+        "//! Editable Cargo-native project security; module roles live with\n\
+         //! each module in `crate::modules`.\n\n\
+         pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n",
+    );
 
     if let Some(document) = document
         && let Some(level) = render_security_level(document.get_str("SecurityLevel").ok())
@@ -2927,7 +2830,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a flat, Clean Architecture layout: persisted entities are individual `#[derive(MxEntity)]` structs under `src/domain/entities/` (entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place); view and non-persistable entities are DTO files under `src/application/dto/`; each supported server microflow is an individual service declaration under `src/application/services/`; HTTP controllers and routes live under `src/presentation/`; repositories, database adapters, and imported-model persistence live under `src/infrastructure/`. Mendix modules remain metadata, rather than becoming nested Rust folders. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nEach enumeration is an individual `#[derive(MxEnumeration)]` Rust enum under `src/domain/enumerations/`, and each Mendix module's constants, regular expressions, scheduled events, and standalone menus live in their own file under `src/domain/documents/`. Supported server-side microflows are reconstructed as typed service declarations; `src/presentation/nanoflows/mod.rs` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source is organized module-first, the way the project reads in Studio Pro: each Mendix module owns a folder under `src/modules/<module>/` carrying its domain model (`domain/entities/` with one `#[derive(MxEntity)]` struct per persisted entity, `domain/enumerations/` with one `#[derive(MxEnumeration)]` enum per enumeration, `domain/documents.rs` for constants/regular expressions/scheduled events/menus, `domain/security.rs` for module roles), its non-persistent entities under `dto/`, each supported server microflow as an individual service declaration under `services/`, client-side pages and nanoflows under `presentation/`, generated port contracts under `ports/`, and its compile-time model markers in `markers.rs`. Entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place. Project-level concerns stay in the crate-wide layers: HTTP controllers, navigation and routes under `src/presentation/`; repositories, database adapters, the markers facade, and imported-model persistence under `src/infrastructure/`; project security under `src/domain/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nSupported server-side microflows are reconstructed as typed service declarations; each module's `presentation/nanoflows/` is the client-side counterpart. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -2967,17 +2870,17 @@ fn write_text(path: &Path, contents: &str) -> Result<()> {
     std::fs::write(path, contents).map_err(|source| io_error(path, source))
 }
 
-fn write_marker_layer_sources(
-    destination: &Path,
+/// Slices typegen's whole-model marker source into one `markers.rs` per
+/// Mendix module folder, and routes each module's typed attribute markers
+/// alongside. `src/infrastructure/markers.rs` stays the stable access path
+/// (`crate::infrastructure::markers::<Module>::…`) by re-exporting each
+/// module's markers under its Mendix name.
+fn collect_marker_sources(
     manifest: &mxrs_typegen::Manifest,
     generated: &str,
     typed_markers: &str,
+    generated_modules: &mut std::collections::BTreeMap<String, GeneratedModule>,
 ) -> Result<()> {
-    let directory = destination.join("src/infrastructure/markers");
-    std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
-    let mut index = String::from(
-        "//! Compile-time model markers, split by Mendix module for concise source files.\n\n",
-    );
     let mut file_names = std::collections::HashSet::new();
 
     for module in &manifest.modules {
@@ -3016,30 +2919,68 @@ fn write_marker_layer_sources(
         let source_end = source_end.ok_or_else(|| {
             ExportError::MarkerLayout(format!("module {:?} is not balanced", module.name))
         })?;
-        let mut source = generated[source_start..source_end].to_string();
+        // Unwrap the `#[allow(...)] pub mod <Name> { … }` block: the items
+        // live directly in the module folder's `markers.rs`, with the
+        // attributes as inner attributes.
+        let attributes = generated[source_start..module_start]
+            .trim()
+            .replace("#[", "#![");
+        let inner_start = opening_brace + 1;
+        let inner_end = source_end - 1;
+        let mut source = format!(
+            "//! Compile-time model markers for the {} module.\n{attributes}\n",
+            module.name
+        );
+        // Sibling-module references were `super::<Module>::…` when every
+        // marker module shared one parent; the stable spelling is now the
+        // `infrastructure::markers` facade.
+        source.push_str(
+            generated[inner_start..inner_end]
+                .trim_end()
+                .replace("super::", "crate::infrastructure::markers::")
+                .as_str(),
+        );
         source.push('\n');
         let marker_prefix = format!(" for {}::", module.name);
+        let strip = format!("{}::", module.name);
         for line in typed_markers
             .lines()
             .filter(|line| line.contains(&marker_prefix))
         {
-            source.push_str(line);
+            source.push_str(&line.replace(&strip, ""));
             source.push('\n');
         }
 
-        let mut file_name = sanitize_ident(&module.name);
-        file_name.make_ascii_lowercase();
-        if !file_names.insert(file_name.clone()) {
+        let stem = module_stem(&module.name);
+        if !file_names.insert(stem.clone()) {
             return Err(ExportError::MarkerLayout(format!(
                 "marker filename collision for module {:?}",
                 module.name
             )));
         }
-        let _ = writeln!(index, "include!(\"markers/{file_name}.rs\");");
-        write_text(&directory.join(format!("{file_name}.rs")), &source)?;
+        generated_module(generated_modules, &module.name).markers = Some(source);
     }
+    Ok(())
+}
 
-    write_text(&destination.join("src/infrastructure/markers.rs"), &index)
+/// The stable access path for markers: every module's `markers.rs`
+/// re-exported under its Mendix module name.
+fn render_markers_facade(
+    generated_modules: &std::collections::BTreeMap<String, GeneratedModule>,
+) -> String {
+    let mut index = String::from(
+        "//! Compile-time model markers; each module's markers live in its own\n//! folder and are re-exported here under the Mendix module name.\n\n",
+    );
+    for (stem, module) in generated_modules {
+        if module.markers.is_some() {
+            let _ = writeln!(
+                index,
+                "pub use crate::modules::{stem}::markers as {};",
+                sanitize_ident(&module.name)
+            );
+        }
+    }
+    index
 }
 
 fn format_generated_cargo_project(destination: &Path) -> Result<()> {
@@ -4160,8 +4101,8 @@ fn render_entity_file(
 /// needs to drive them through `FlowEngine::call`.
 struct ServicePort {
     module_name: String,
+    module_stem: String,
     trait_name: String,
-    file_stem: String,
     methods: Vec<ServiceMethod>,
 }
 
@@ -4211,8 +4152,8 @@ fn port_type(
                 return None;
             }
             let path = format!(
-                "crate::domain::entities::{}::{}",
-                target.file_stem, target.type_name
+                "crate::modules::{}::domain::entities::{}::{}",
+                target.module_stem, target.file_stem, target.type_name
             );
             let handle = format!("ObjectHandle<{path}>");
             if matches!(ty, Ty::Object(_)) {
@@ -4306,16 +4247,14 @@ fn collect_service_ports(
         if methods.is_empty() {
             continue;
         }
-        let mut stem = sanitize_ident(module_name);
-        stem.make_ascii_lowercase();
         ports.push(ServicePort {
             module_name: module_name.to_string(),
+            module_stem: module_stem(module_name),
             trait_name: format!("{trait_base}Services"),
-            file_stem: format!("{stem}_services"),
             methods,
         });
     }
-    ports.sort_by(|left, right| left.file_stem.cmp(&right.file_stem));
+    ports.sort_by(|left, right| left.module_stem.cmp(&right.module_stem));
     ports
 }
 
@@ -4355,25 +4294,6 @@ fn render_service_port(port: &ServicePort) -> String {
     out
 }
 
-fn render_ports_index(ports: &[ServicePort], actions: &[ActionPortModule]) -> String {
-    if ports.is_empty() && actions.is_empty() {
-        return "//! Repository and external-service contracts belong here.\n".to_string();
-    }
-    let mut out = String::from(
-        "//! Contracts the domain exposes: a service port per Mendix module\n//! with runnable microflows, and action ports for the Java actions the\n//! model expects hand-written Rust to fulfill. Hand-written repository\n//! and external-service contracts belong here too.\n\n",
-    );
-    let mut stems: Vec<&str> = ports
-        .iter()
-        .map(|port| port.file_stem.as_str())
-        .chain(actions.iter().map(|module| module.file_stem.as_str()))
-        .collect();
-    stems.sort_unstable();
-    for stem in stems {
-        let _ = writeln!(out, "pub mod {stem};");
-    }
-    out
-}
-
 /// The runtime adapter: one struct implementing every generated service
 /// port by marshalling through `mxrs::ports` and driving `FlowEngine::call`.
 fn render_runtime_services(ports: &[ServicePort]) -> String {
@@ -4400,8 +4320,8 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
     for port in ports {
         let _ = writeln!(
             out,
-            "\nimpl crate::domain::ports::{}::{} for RuntimeServices {{",
-            port.file_stem, port.trait_name
+            "\nimpl crate::modules::{}::ports::services::{} for RuntimeServices {{",
+            port.module_stem, port.trait_name
         );
         for (index, method) in port.methods.iter().enumerate() {
             if index > 0 {
@@ -4466,7 +4386,7 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
 /// that adapts an implementation onto `FlowEngine::with_java_action`.
 struct ActionPortModule {
     module_name: String,
-    file_stem: String,
+    module_stem: String,
     actions: Vec<ActionPort>,
 }
 
@@ -4519,8 +4439,8 @@ fn code_action_port_type(
                 return None;
             }
             let path = format!(
-                "crate::domain::entities::{}::{}",
-                target.file_stem, target.type_name
+                "crate::modules::{}::domain::entities::{}::{}",
+                target.module_stem, target.file_stem, target.type_name
             );
             (
                 format!("mxrs::MxObject<{path}>"),
@@ -4542,8 +4462,8 @@ fn code_action_port_type(
                 return None;
             }
             let path = format!(
-                "crate::domain::entities::{}::{}",
-                target.file_stem, target.type_name
+                "crate::modules::{}::domain::entities::{}::{}",
+                target.module_stem, target.file_stem, target.type_name
             );
             (
                 format!("mxrs::MxList<{path}>"),
@@ -4602,8 +4522,7 @@ fn assemble_action_ports(
     let mut modules: Vec<ActionPortModule> = by_module
         .into_iter()
         .filter_map(|(module_name, mut actions)| {
-            let mut stem = sanitize_ident(&module_name);
-            stem.make_ascii_lowercase();
+            let stem = module_stem(&module_name);
             if stem.is_empty() || stem.starts_with(|c: char| c.is_ascii_digit()) {
                 return None;
             }
@@ -4612,12 +4531,12 @@ fn assemble_action_ports(
             actions.retain(|action| seen.insert(action.trait_name.clone()));
             Some(ActionPortModule {
                 module_name,
-                file_stem: format!("{stem}_actions"),
+                module_stem: stem,
                 actions,
             })
         })
         .collect();
-    modules.sort_by(|left, right| left.file_stem.cmp(&right.file_stem));
+    modules.sort_by(|left, right| left.module_stem.cmp(&right.module_stem));
     modules
 }
 
@@ -4729,14 +4648,15 @@ fn render_action_port_file(module: &ActionPortModule) -> String {
     out
 }
 
-fn render_action_registry_file(module: &ActionPortModule, ports_stem: &str) -> String {
+fn render_action_registry_file(module: &ActionPortModule) -> String {
     let uses_port_value = module
         .actions
         .iter()
         .any(|action| !action.parameters.is_empty() || action.result.is_some());
     let mut out = format!(
-        "//! Registers hand-written `{ports}` implementations on the flow\n//! engine under the names the model calls them by.\n\nuse std::collections::BTreeMap;\n\nuse mxrs::ports::{{FlowEngine, FlowError, FlowValue, JavaAction{port_value}}};\n\nuse crate::domain::ports::{ports}::*;\n",
-        ports = ports_stem,
+        "//! Registers hand-written `{name}` action-port implementations on the\n//! flow engine under the names the model calls them by.\n\nuse std::collections::BTreeMap;\n\nuse mxrs::ports::{{FlowEngine, FlowError, FlowValue, JavaAction{port_value}}};\n\nuse crate::modules::{stem}::ports::actions::*;\n",
+        name = module.module_name,
+        stem = module.module_stem,
         port_value = if uses_port_value { ", PortValue" } else { "" },
     );
     for action in &module.actions {
@@ -4860,10 +4780,7 @@ fn render_typed_entity_file(
         if enum_type_shadows_scalar(&derived.type_name) {
             continue;
         }
-        requests.push((
-            &derived.type_name,
-            format!("crate::domain::enumerations::{}", derived.file_stem),
-        ));
+        requests.push((&derived.type_name, derived.module_path()));
     }
     for declared in &declarable {
         if declared.target == own_qualified {
@@ -4909,8 +4826,7 @@ fn render_typed_entity_file(
             if enum_type_shadows_scalar(&derived.type_name) {
                 return None;
             }
-            let path = format!("crate::domain::enumerations::{}", derived.file_stem);
-            Some((qualified, spell(&derived.type_name, &path)))
+            Some((qualified, spell(&derived.type_name, &derived.module_path())))
         })
         .collect();
 
@@ -5074,9 +4990,15 @@ fn render_typed_entity_file(
 /// The module path a typed entity's struct is importable from.
 fn typed_entity_module_path(target: &TypedEntityTarget) -> String {
     if target.dto {
-        format!("crate::application::dto::{}", target.file_stem)
+        format!(
+            "crate::modules::{}::dto::{}",
+            target.module_stem, target.file_stem
+        )
     } else {
-        format!("crate::domain::entities::{}", target.file_stem)
+        format!(
+            "crate::modules::{}::domain::entities::{}",
+            target.module_stem, target.file_stem
+        )
     }
 }
 
@@ -5201,68 +5123,274 @@ fn derive_pascal_case(field_name: &str) -> String {
         .collect()
 }
 
-fn layer_file_stem(module_name: &str, entity_name: &str, dto: bool) -> String {
-    let mut stem = format!(
-        "{}_{}",
-        sanitize_ident(module_name),
-        sanitize_ident(entity_name)
-    );
-    stem.make_ascii_lowercase();
-    if dto && !stem.ends_with("_dto") {
-        stem.push_str("_dto");
-    }
-    stem
+/// Everything one Mendix module contributes to the generated crate. Each
+/// module gets its own folder under `src/modules/<stem>/` carrying its
+/// domain model, DTOs, services, ports, presentation and markers — the
+/// same shape the module has inside Studio Pro, expressed as the crate's
+/// Clean Architecture folders.
+#[derive(Default)]
+struct GeneratedModule {
+    /// Mendix module name, exactly as declared.
+    name: String,
+    /// `(file stem, source)` per persisted entity declaration.
+    entities: Vec<(String, String)>,
+    /// `(file stem, source)` per non-persistable/view entity.
+    dtos: Vec<(String, String)>,
+    /// `(file stem, source)` per enumeration.
+    enumerations: Vec<(String, String)>,
+    /// The module's constants, regular expressions, scheduled events and
+    /// standalone menus, as one `declaration()` source.
+    documents: Option<String>,
+    /// The module's role declarations, as an `apply` source.
+    security: Option<String>,
+    /// `(file stem, source)` per reconstructed microflow service.
+    services: Vec<(String, String)>,
+    /// `(file stem, source)` per reconstructed nanoflow.
+    nanoflows: Vec<(String, String)>,
+    /// The module's typed pages plus the page-function names to wire.
+    pages: Option<(String, Vec<String>)>,
+    /// `ports/services.rs` — the module's service port trait.
+    ports_services: Option<String>,
+    /// `ports/actions.rs` — the module's action port traits.
+    ports_actions: Option<String>,
+    /// `markers.rs` — the module's compile-time model markers.
+    markers: Option<String>,
 }
 
-fn render_entity_layer_index(entries: &[(String, String)]) -> String {
-    let mut out = String::from("//! Individually editable model declarations for this layer.\n\n");
-    for (module, _) in entries {
-        let _ = writeln!(out, "pub mod {module};");
+fn generated_module<'a>(
+    map: &'a mut std::collections::BTreeMap<String, GeneratedModule>,
+    name: &str,
+) -> &'a mut GeneratedModule {
+    let entry = map.entry(module_stem(name)).or_default();
+    if entry.name.is_empty() {
+        entry.name = name.to_string();
     }
-    let project = if entries.is_empty() {
-        "_project"
-    } else {
-        "project"
-    };
-    let _ = writeln!(
-        out,
-        "\npub fn apply({project}: &mut ::mxrs_ir::ProjectDecl) {{"
-    );
-    for (module, _) in entries {
-        let _ = writeln!(out, "    project.merge_module({module}::declaration());");
-    }
-    out.push_str("}\n");
-    out
+    entry
 }
 
-fn render_flow_layer_index(entries: &[flow_export::RenderedFlowSource]) -> String {
-    let mut out = String::from("//! Individually editable flow declarations for this layer.\n\n");
-    for entry in entries {
-        let _ = writeln!(out, "pub mod {};", entry.file_name);
-    }
-    out.push_str("\npub fn apply(project: &mut mxrs::ProjectDecl) {\n");
-    for entry in entries {
-        let _ = writeln!(
-            out,
-            "    project.merge_module({}::declaration());",
-            entry.file_name
-        );
-    }
-    out.push_str("}\n");
-    out
-}
-
-/// Writes each persisted entity to `domain/entities` and every non-persisted
-/// Mendix object to `application/dto`.  File names are deliberately flat:
-/// Mendix modules remain model metadata, not a second Rust package hierarchy.
-fn write_entity_layer_sources(
+/// Writes `src/modules/` — one folder per Mendix module with generated
+/// content, each composing its own domain model, services, ports and
+/// presentation, plus the layer index that applies them all.
+fn write_modules_layer(
     destination: &Path,
+    modules: &std::collections::BTreeMap<String, GeneratedModule>,
+) -> Result<()> {
+    let root = destination.join("src/modules");
+    std::fs::create_dir_all(&root).map_err(|source| io_error(&root, source))?;
+    let mut index = String::from(
+        "//! One folder per Mendix module: its domain model, services, ports,\n//! presentation and markers together, the way the module reads in Studio\n//! Pro.\n\n",
+    );
+    for stem in modules.keys() {
+        let _ = writeln!(index, "pub mod {stem};");
+    }
+    index.push_str("\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n");
+    for stem in modules.keys() {
+        let _ = writeln!(index, "    {stem}::apply(project);");
+    }
+    index.push_str("}\n");
+    write_text(&root.join("mod.rs"), &index)?;
+
+    for (stem, module) in modules {
+        let directory = root.join(stem);
+        std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
+
+        let has_domain = !module.entities.is_empty()
+            || !module.enumerations.is_empty()
+            || module.documents.is_some()
+            || module.security.is_some();
+        if has_domain {
+            let domain = directory.join("domain");
+            std::fs::create_dir_all(&domain).map_err(|source| io_error(&domain, source))?;
+            let mut domain_index = format!("//! The {} module's domain model.\n\n", module.name);
+            let mut domain_apply = String::new();
+            if module.documents.is_some() {
+                domain_index.push_str("pub mod documents;\n");
+                domain_apply.push_str("    project.merge_module(documents::declaration());\n");
+            }
+            if !module.entities.is_empty() {
+                domain_index.push_str("pub mod entities;\n");
+                domain_apply.push_str("    entities::apply(project);\n");
+                write_concept_files(
+                    &domain.join("entities"),
+                    &format!("//! The {} module's persisted entities.\n\n", module.name),
+                    &module.entities,
+                )?;
+            }
+            if !module.enumerations.is_empty() {
+                domain_index.push_str("pub mod enumerations;\n");
+                domain_apply.push_str("    enumerations::apply(project);\n");
+                write_concept_files(
+                    &domain.join("enumerations"),
+                    &format!("//! The {} module's enumerations.\n\n", module.name),
+                    &module.enumerations,
+                )?;
+            }
+            if module.security.is_some() {
+                domain_index.push_str("pub mod security;\n");
+                domain_apply.push_str("    security::apply(project);\n");
+            }
+            let _ = write!(
+                domain_index,
+                "\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n{domain_apply}}}\n"
+            );
+            write_text(&domain.join("mod.rs"), &domain_index)?;
+            if let Some(documents) = &module.documents {
+                write_text(&domain.join("documents.rs"), documents)?;
+            }
+            if let Some(security) = &module.security {
+                write_text(&domain.join("security.rs"), security)?;
+            }
+        }
+
+        if !module.dtos.is_empty() {
+            write_concept_files(
+                &directory.join("dto"),
+                &format!(
+                    "//! The {} module's non-persistable and view entities.\n\n",
+                    module.name
+                ),
+                &module.dtos,
+            )?;
+        }
+        if !module.services.is_empty() {
+            write_concept_files(
+                &directory.join("services"),
+                &format!(
+                    "//! The {} module's microflows as editable service declarations.\n\n",
+                    module.name
+                ),
+                &module.services,
+            )?;
+        }
+
+        let has_presentation = !module.nanoflows.is_empty() || module.pages.is_some();
+        if has_presentation {
+            let presentation = directory.join("presentation");
+            std::fs::create_dir_all(&presentation)
+                .map_err(|source| io_error(&presentation, source))?;
+            let mut presentation_index = format!(
+                "//! The {} module's client-side pages and nanoflows.\n\n",
+                module.name
+            );
+            let mut presentation_apply = String::new();
+            if !module.nanoflows.is_empty() {
+                presentation_index.push_str("pub mod nanoflows;\n");
+                presentation_apply.push_str("    nanoflows::apply(project);\n");
+                write_concept_files(
+                    &presentation.join("nanoflows"),
+                    &format!("//! The {} module's nanoflows.\n\n", module.name),
+                    &module.nanoflows,
+                )?;
+            }
+            if let Some((source, functions)) = &module.pages {
+                presentation_index.push_str("pub mod pages;\n");
+                for function in functions {
+                    let _ = writeln!(
+                        presentation_apply,
+                        "    project.module_mut({:?}).pages.push(pages::{function}());",
+                        module.name,
+                    );
+                }
+                write_text(&presentation.join("pages.rs"), source)?;
+            }
+            let _ = write!(
+                presentation_index,
+                "\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n{presentation_apply}}}\n"
+            );
+            write_text(&presentation.join("mod.rs"), &presentation_index)?;
+        }
+
+        if module.ports_services.is_some() || module.ports_actions.is_some() {
+            let ports = directory.join("ports");
+            std::fs::create_dir_all(&ports).map_err(|source| io_error(&ports, source))?;
+            let mut ports_index = format!(
+                "//! Contracts the {} module exposes to hand-written code.\n\n",
+                module.name
+            );
+            if let Some(actions) = &module.ports_actions {
+                ports_index.push_str("pub mod actions;\n");
+                write_text(&ports.join("actions.rs"), actions)?;
+            }
+            if let Some(services) = &module.ports_services {
+                ports_index.push_str("pub mod services;\n");
+                write_text(&ports.join("services.rs"), services)?;
+            }
+            write_text(&ports.join("mod.rs"), &ports_index)?;
+        }
+
+        if let Some(markers) = &module.markers {
+            write_text(&directory.join("markers.rs"), markers)?;
+        }
+
+        let mut module_index = format!("//! The {} Mendix module.\n\n", module.name);
+        let mut module_apply = String::new();
+        if has_domain {
+            module_index.push_str("pub mod domain;\n");
+            module_apply.push_str("    domain::apply(project);\n");
+        }
+        if !module.dtos.is_empty() {
+            module_index.push_str("pub mod dto;\n");
+            module_apply.push_str("    dto::apply(project);\n");
+        }
+        if module.markers.is_some() {
+            module_index.push_str("pub mod markers;\n");
+        }
+        if module.ports_services.is_some() || module.ports_actions.is_some() {
+            module_index.push_str("pub mod ports;\n");
+        }
+        if has_presentation {
+            module_index.push_str("pub mod presentation;\n");
+        }
+        if !module.services.is_empty() {
+            module_index.push_str("pub mod services;\n");
+            module_apply.push_str("    services::apply(project);\n");
+        }
+        if has_presentation {
+            module_apply.push_str("    presentation::apply(project);\n");
+        }
+        let parameter = if module_apply.is_empty() {
+            "_project"
+        } else {
+            "project"
+        };
+        let _ = write!(
+            module_index,
+            "\npub fn apply({parameter}: &mut ::mxrs_ir::ProjectDecl) {{\n{module_apply}}}\n"
+        );
+        write_text(&directory.join("mod.rs"), &module_index)?;
+    }
+    Ok(())
+}
+
+/// Writes one concept folder — a file per declaration plus the index that
+/// merges each `declaration()` into the project.
+fn write_concept_files(directory: &Path, header: &str, files: &[(String, String)]) -> Result<()> {
+    std::fs::create_dir_all(directory).map_err(|source| io_error(directory, source))?;
+    let mut index = String::from(header);
+    for (stem, _) in files {
+        let _ = writeln!(index, "pub mod {stem};");
+    }
+    index.push_str("\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n");
+    for (stem, _) in files {
+        let _ = writeln!(index, "    project.merge_module({stem}::declaration());");
+    }
+    index.push_str("}\n");
+    write_text(&directory.join("mod.rs"), &index)?;
+    for (stem, source) in files {
+        write_text(&directory.join(format!("{stem}.rs")), source)?;
+    }
+    Ok(())
+}
+
+/// Collects each module's entity declarations: persisted entities into the
+/// module's `domain/entities`, everything non-persistent (including OQL
+/// view entities) into its `dto/` folder.
+fn collect_entity_layer(
     modules: &[Module],
     derived_enums: &HashMap<String, DerivedEnumeration>,
+    generated: &mut std::collections::BTreeMap<String, GeneratedModule>,
 ) -> Result<HashMap<String, TypedEntityTarget>> {
     let microflows = known_microflows(modules);
-    let mut entities = Vec::new();
-    let mut dtos = Vec::new();
 
     let mut ctx = EntityLayerContext {
         associations_by_entity: HashMap::new(),
@@ -5292,7 +5420,8 @@ fn write_entity_layer_sources(
             ctx.typed.insert(
                 qualified,
                 TypedEntityTarget {
-                    file_stem: layer_file_stem(module_name, entity_name, dto),
+                    module_stem: module_stem(module_name),
+                    file_stem: inner_file_stem(entity_name),
                     type_name,
                     dto,
                 },
@@ -5342,7 +5471,7 @@ fn write_entity_layer_sources(
         for entity in module_entities {
             let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
             let dto = !entity.persistable || entity.oql_view();
-            let stem = layer_file_stem(module_name, entity_name, dto);
+            let stem = inner_file_stem(entity_name);
             let qualified = format!("{module_name}.{entity_name}");
             let source = if ctx.typed.contains_key(&qualified) {
                 render_typed_entity_file(module_name, entity, derived_enums, &ctx)
@@ -5355,31 +5484,25 @@ fn write_entity_layer_sources(
                     &declarable_associations(entity, &ctx),
                 )
             };
-            let directory = if dto {
-                destination.join("src/application/dto")
-            } else {
-                destination.join("src/domain/entities")
-            };
-            write_text(&directory.join(format!("{stem}.rs")), &source)?;
-            let entry = (stem, format!("{module_name}.{entity_name}"));
+            let target = generated_module(generated, module_name);
             if dto {
-                dtos.push(entry);
+                target.dtos.push((stem, source));
             } else {
-                entities.push(entry);
+                target.entities.push((stem, source));
             }
         }
     }
-    entities.sort();
-    dtos.sort();
-    write_text(
-        &destination.join("src/domain/entities/mod.rs"),
-        &render_entity_layer_index(&entities),
-    )?;
-    write_text(
-        &destination.join("src/application/dto/mod.rs"),
-        &render_entity_layer_index(&dtos),
-    )?;
     Ok(ctx.typed)
+}
+
+/// File stem for one concept inside its module folder.
+fn inner_file_stem(name: &str) -> String {
+    let mut stem = sanitize_ident(name);
+    stem.make_ascii_lowercase();
+    if rust_keyword(&stem) {
+        stem.push('_');
+    }
+    stem
 }
 
 /// A defensive, not exhaustive, Mendix-name → Rust-identifier sanitizer:
@@ -5430,19 +5553,22 @@ mod tests {
             assert!(!domain.contains(outer), "domain must not declare {outer}");
         }
 
-        // Application owns use cases and DTOs.  The composition root is the
-        // sole place that can depend on every architectural layer.
+        // Per-module content lives in `crate::modules`; the project-level
+        // application layer keeps only cross-cutting concerns. The
+        // composition root is the sole place that can depend on every
+        // architectural layer.
         let application = render_application_module();
-        assert!(application.contains("pub mod dto;"));
-        assert!(application.contains("pub mod services;"));
-        assert!(application.contains("services::apply(project);"));
+        assert!(application.contains("pub mod task_queues;"));
+        assert!(application.contains("task_queues::apply(project);"));
+        assert!(!application.contains("pub mod dto;"));
+        assert!(!application.contains("pub mod services;"));
         assert!(!application.contains("crate::domain"));
         assert!(!application.contains("crate::presentation"));
         assert!(!application.contains("pub mod nanoflows;"));
         assert!(!application.contains("pub mod pages;"));
 
-        let presentation = render_presentation_module(&[], ApiMode::Axum);
-        assert!(presentation.contains("pub mod nanoflows;"));
+        let presentation = render_presentation_module(ApiMode::Axum);
+        assert!(!presentation.contains("pub mod nanoflows;"));
         assert!(presentation.contains("pub mod navigation;"));
         // Presentation contributes through `apply`, never through its own
         // `build`, so the crate root stays the single composition root.
@@ -5480,33 +5606,6 @@ mod tests {
             assert!(manifest.contains(dependency), "{}", mode.name());
             assert!(routes.contains(server_marker), "{}", mode.name());
             assert!(binary.contains("presentation::routes::server::serve"));
-        }
-    }
-
-    /// Each flow module may only reach the builder facet of its own runtime
-    /// side, and merges through `merge_module` so nothing a declaration
-    /// carries is dropped on the way into an existing module.
-    #[test]
-    fn generated_flow_modules_use_the_typed_facet_of_their_own_runtime_side() {
-        let microflows = render_microflows_module("11.12.1", &[]);
-        assert!(
-            microflows.contains("project.microflow_module(..., |module| module.microflow(...))")
-        );
-        assert!(microflows.contains("project.merge_module(declared);"));
-        assert!(!microflows.contains("nanoflow"));
-
-        let nanoflows = render_nanoflows_module("11.12.1", &[]);
-        assert!(nanoflows.contains("project.nanoflow_module(..., |module| module.nanoflow(...))"));
-        assert!(nanoflows.contains("project.merge_module(declared);"));
-        assert!(!nanoflows.contains("microflow"));
-
-        // The hand-rolled upsert this replaced extended one family and pushed
-        // the whole module in the other branch, so a flow declared on the
-        // wrong side was kept or dropped depending on whether the module
-        // already existed.
-        for source in [&microflows, &nanoflows] {
-            assert!(!source.contains("project.modules.push(declared)"));
-            assert!(!source.contains(".extend(declared."));
         }
     }
 
@@ -5713,7 +5812,8 @@ pub fn declaration() -> ModuleDecl {
         ctx.typed.insert(
             "Sales.Ticket".to_string(),
             TypedEntityTarget {
-                file_stem: "sales_ticket".to_string(),
+                module_stem: "sales".to_string(),
+                file_stem: "ticket".to_string(),
                 type_name: "Ticket".to_string(),
                 dto: false,
             },
@@ -5721,7 +5821,8 @@ pub fn declaration() -> ModuleDecl {
         ctx.typed.insert(
             "Sales.Order".to_string(),
             TypedEntityTarget {
-                file_stem: "sales_order".to_string(),
+                module_stem: "sales".to_string(),
+                file_stem: "order".to_string(),
                 type_name: "Order".to_string(),
                 dto: false,
             },
@@ -5732,7 +5833,7 @@ pub fn declaration() -> ModuleDecl {
         let rendered = render_typed_entity_file("Sales", &entity, &HashMap::new(), &ctx)
             .expect("typed-eligible");
         assert!(
-            rendered.contains("use crate::domain::entities::sales_order::Order;"),
+            rendered.contains("use crate::modules::sales::domain::entities::order::Order;"),
             "{rendered}"
         );
         assert!(
@@ -5765,7 +5866,8 @@ pub fn declaration() -> ModuleDecl {
         typed.insert(
             "Sales.Order".to_string(),
             TypedEntityTarget {
-                file_stem: "sales_order".to_string(),
+                module_stem: "sales".to_string(),
+                file_stem: "order".to_string(),
                 type_name: "Order".to_string(),
                 dto: false,
             },
@@ -5818,13 +5920,13 @@ pub fn declaration() -> ModuleDecl {
         assert!(port.contains("pub trait CommitInBatches"), "{port}");
         assert!(
             port.contains(
-                "fn call(&self, items: Option<Vec<ObjectHandle<crate::domain::entities::sales_order::Order>>>, batch_size: Option<i64>) -> Result<Option<bool>, ServiceError>;"
+                "fn call(&self, items: Option<Vec<ObjectHandle<crate::modules::sales::domain::entities::order::Order>>>, batch_size: Option<i64>) -> Result<Option<bool>, ServiceError>;"
             ),
             "{port}"
         );
         assert!(!port.contains("Generic"), "{port}");
 
-        let registry = render_action_registry_file(&modules[0], &modules[0].file_stem);
+        let registry = render_action_registry_file(&modules[0]);
         assert!(
             registry.contains("pub fn register_commit_in_batches"),
             "{registry}"
@@ -5850,21 +5952,24 @@ pub fn declaration() -> ModuleDecl {
         derived.insert(
             "Catalogs.ENUM_Limit".to_string(),
             DerivedEnumeration {
-                file_stem: "catalogs_enum_limit".into(),
+                module_stem: "catalogs".into(),
+                file_stem: "enum_limit".into(),
                 type_name: "ENUMLimit".into(),
             },
         );
         derived.insert(
             "Sales.Status".to_string(),
             DerivedEnumeration {
-                file_stem: "sales_status".into(),
+                module_stem: "sales".into(),
+                file_stem: "status".into(),
                 type_name: "Status".into(),
             },
         );
         derived.insert(
             "Support.Status".to_string(),
             DerivedEnumeration {
-                file_stem: "support_status".into(),
+                module_stem: "support".into(),
+                file_stem: "status".into(),
                 type_name: "Status".into(),
             },
         );
@@ -5893,7 +5998,7 @@ pub fn declaration() -> ModuleDecl {
 
 use mxrs::prelude::*;
 
-use crate::domain::enumerations::catalogs_enum_limit::ENUMLimit;
+use crate::modules::catalogs::domain::enumerations::enum_limit::ENUMLimit;
 
 #[derive(MxEntity)]
 #[mxrs(module = "Catalogs")]
@@ -5902,8 +6007,8 @@ pub struct Parameter {
     pub limit: ENUMLimit,
     #[mxrs(kind = "enumeration", enumeration = "Catalogs.Unknown")]
     pub opaque: MxString,
-    pub sales_status: crate::domain::enumerations::sales_status::Status,
-    pub support_status: crate::domain::enumerations::support_status::Status,
+    pub sales_status: crate::modules::sales::domain::enumerations::status::Status,
+    pub support_status: crate::modules::support::domain::enumerations::status::Status,
 }
 
 pub fn declaration() -> ModuleDecl {
@@ -5922,7 +6027,9 @@ pub fn declaration() -> ModuleDecl {
         let rendered = render_typed_entity_file("Sales", &status, &derived, &empty_layer_context())
             .expect("typed-eligible");
         assert!(
-            rendered.contains("pub current: crate::domain::enumerations::sales_status::Status,"),
+            rendered.contains(
+                "pub current: crate::modules::sales::domain::enumerations::status::Status,"
+            ),
             "{rendered}"
         );
         assert!(!rendered.contains("use crate::"), "{rendered}");
@@ -5933,7 +6040,8 @@ pub fn declaration() -> ModuleDecl {
         shadowing.insert(
             "Sales.MxString".to_string(),
             DerivedEnumeration {
-                file_stem: "sales_mx_string".into(),
+                module_stem: "sales".into(),
+                file_stem: "mx_string".into(),
                 type_name: "MxString".into(),
             },
         );
@@ -6727,16 +6835,29 @@ pub fn declaration() -> ModuleDecl {
         assert!(generated.join("mxrs.toml").is_file());
         assert!(generated.join("src/lib.rs").is_file());
         assert!(generated.join("src/domain/mod.rs").is_file());
-        assert!(generated.join("src/domain/entities/mod.rs").is_file());
-        assert!(generated.join("src/domain/documents/mod.rs").is_file());
+        assert!(generated.join("src/modules/mod.rs").is_file());
+        assert!(
+            generated
+                .join("src/modules/sales/domain/entities/mod.rs")
+                .is_file()
+        );
+        assert!(
+            generated
+                .join("src/modules/sales/domain/documents.rs")
+                .is_file()
+        );
         assert!(generated.join("src/domain/security/mod.rs").is_file());
         assert!(generated.join("src/application/mod.rs").is_file());
-        assert!(generated.join("src/application/dto/mod.rs").is_file());
-        assert!(generated.join("src/application/services/mod.rs").is_file());
+        assert!(generated.join("src/modules/sales/dto/mod.rs").is_file());
+        assert!(
+            generated
+                .join("src/modules/sales/services/mod.rs")
+                .is_file()
+        );
         assert!(generated.join("src/presentation/mod.rs").is_file());
         assert!(
             generated
-                .join("src/presentation/nanoflows/mod.rs")
+                .join("src/modules/sales/presentation/nanoflows/mod.rs")
                 .is_file()
         );
         assert!(
@@ -6753,7 +6874,8 @@ pub fn declaration() -> ModuleDecl {
         // rebuilt-project assertions further down, prove it actually
         // contributes to the output `.mpr`, not just that it parses.
         let pages_source =
-            std::fs::read_to_string(generated.join("src/presentation/pages/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/presentation/pages.rs"))
+                .unwrap();
         assert!(pages_source.contains("pub fn home"));
         assert!(pages_source.contains("w.text_with(\"Welcome\""));
         assert!(pages_source.contains("w.name("));
@@ -6766,24 +6888,18 @@ pub fn declaration() -> ModuleDecl {
         assert!(pages_source.contains("p.gallery"));
         assert!(pages_source.contains("p.combo_box"));
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
-        assert!(domain_source.contains("pub mod entities;"));
-        assert!(domain_source.contains("pub mod documents;"));
         assert!(domain_source.contains("pub mod security;"));
-        assert!(domain_source.contains("documents::apply(project);"));
         assert!(domain_source.contains("security::apply(project);"));
         let application_source =
             std::fs::read_to_string(generated.join("src/application/mod.rs")).unwrap();
-        assert!(application_source.contains("pub mod dto;"));
-        assert!(application_source.contains("services::apply(project);"));
+        assert!(application_source.contains("task_queues::apply(project);"));
         assert!(!application_source.contains("crate::presentation"));
         let presentation_source =
             std::fs::read_to_string(generated.join("src/presentation/mod.rs")).unwrap();
-        assert!(presentation_source.contains("nanoflows::apply(project);"));
         assert!(presentation_source.contains("routes::apply(project);"));
-        assert!(presentation_source.contains("pub mod pages;"));
-        assert!(presentation_source.contains("pages::home()"));
         let entities_source =
-            std::fs::read_to_string(generated.join("src/domain/entities/sales_order.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/domain/entities/order.rs"))
+                .unwrap();
         assert!(
             entities_source.contains("External order number"),
             "{entities_source}"
@@ -6799,7 +6915,7 @@ pub fn declaration() -> ModuleDecl {
         assert!(entities_source.contains("pass_event_object: false"));
         assert!(entities_source.contains("Sales.OrderIcon"));
         let report_dto =
-            std::fs::read_to_string(generated.join("src/application/dto/sales_orderreport_dto.rs"))
+            std::fs::read_to_string(generated.join("src/modules/sales/dto/orderreport.rs"))
                 .unwrap();
         assert!(report_dto.contains("OqlView"));
         assert!(report_dto.contains("Sales.OrderSource"));
@@ -6814,28 +6930,32 @@ pub fn declaration() -> ModuleDecl {
         // the builder form in its own file, the constants land in the
         // module's documents file, and both are indexed by mod.rs.
         let documents_index =
-            std::fs::read_to_string(generated.join("src/domain/documents/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/mod.rs")).unwrap();
         assert!(documents_index.contains("pub mod sales;"));
-        assert!(documents_index.contains("project.merge_module(sales::declaration());"));
+        assert!(documents_index.contains("sales::apply(project);"));
         let enumerations_index =
-            std::fs::read_to_string(generated.join("src/domain/enumerations/mod.rs")).unwrap();
-        assert!(enumerations_index.contains("pub mod sales_status;"));
-        let status =
-            std::fs::read_to_string(generated.join("src/domain/enumerations/sales_status.rs"))
+            std::fs::read_to_string(generated.join("src/modules/sales/domain/enumerations/mod.rs"))
                 .unwrap();
+        assert!(enumerations_index.contains("pub mod status;"));
+        let status = std::fs::read_to_string(
+            generated.join("src/modules/sales/domain/enumerations/status.rs"),
+        )
+        .unwrap();
         assert!(status.contains("module.enumeration(\"Status\""), "{status}");
         assert!(status.contains("(\"pt_BR\".to_string(), \"Aberto\".to_string())"));
         assert!(!status.contains("derive(MxEnumeration)"), "{status}");
         // The single-caption enumeration derives, and the entity referencing
         // it uses the Rust type itself — no embedded qualified-name string.
-        let priority =
-            std::fs::read_to_string(generated.join("src/domain/enumerations/sales_priority.rs"))
-                .unwrap();
+        let priority = std::fs::read_to_string(
+            generated.join("src/modules/sales/domain/enumerations/priority.rs"),
+        )
+        .unwrap();
         assert!(priority.contains("derive(MxEnumeration)"), "{priority}");
         let ticket =
-            std::fs::read_to_string(generated.join("src/domain/entities/sales_ticket.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/domain/entities/ticket.rs"))
+                .unwrap();
         assert!(
-            ticket.contains("use crate::domain::enumerations::sales_priority::Priority;"),
+            ticket.contains("use crate::modules::sales::domain::enumerations::priority::Priority;"),
             "{ticket}"
         );
         assert!(ticket.contains("#[mxrs(default = \"Low\")]"), "{ticket}");
@@ -6845,7 +6965,7 @@ pub fn declaration() -> ModuleDecl {
         // field importing the target struct; the default-shaped name needs
         // no #[mxrs(association = ...)] restatement.
         assert!(
-            ticket.contains("use crate::domain::entities::sales_customer::Customer;"),
+            ticket.contains("use crate::modules::sales::domain::entities::customer::Customer;"),
             "{ticket}"
         );
         assert!(
@@ -6856,7 +6976,8 @@ pub fn declaration() -> ModuleDecl {
         // Order keeps the IR form (image + index), so its association is
         // restated as an AssociationDecl rather than silently dropped.
         let order_source =
-            std::fs::read_to_string(generated.join("src/domain/entities/sales_order.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/domain/entities/order.rs"))
+                .unwrap();
         assert!(
             order_source.contains("entity.associations.push(::mxrs_ir::AssociationDecl {"),
             "{order_source}"
@@ -6870,7 +6991,8 @@ pub fn declaration() -> ModuleDecl {
             "{order_source}"
         );
         let documents =
-            std::fs::read_to_string(generated.join("src/domain/documents/sales.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/domain/documents.rs"))
+                .unwrap();
         assert!(documents.contains("use mxrs::prelude::*;"));
         assert!(documents.contains("module.constant(\"MaximumOrders\""));
         assert!(documents.contains("ConstantType::Integer"));
@@ -6881,34 +7003,33 @@ pub fn declaration() -> ModuleDecl {
         assert!(!generated.join("src/infrastructure/ids.rs").exists());
         assert!(!generated.join("src/infrastructure/imported.rs").exists());
         let markers =
-            std::fs::read_to_string(generated.join("src/infrastructure/markers/sales.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/markers.rs")).unwrap();
         assert!(markers.contains("pub struct Order;"));
         assert!(markers.contains("pub struct Order_Number;"));
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_Ping"));
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_GetOrder"));
         assert!(markers.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
         let microflows =
-            std::fs::read_to_string(generated.join("src/application/services/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/services/mod.rs")).unwrap();
         assert!(!microflows.contains("snapshot-backed"));
-        assert!(microflows.contains("pub mod sales_act_ping;"));
-        assert!(microflows.contains("project.merge_module(sales_act_ping::declaration());"));
+        assert!(microflows.contains("pub mod act_ping;"));
+        assert!(microflows.contains("project.merge_module(act_ping::declaration());"));
         assert!(!microflows.contains("nanoflow"));
-        let nanoflows =
-            std::fs::read_to_string(generated.join("src/presentation/nanoflows/mod.rs")).unwrap();
-        assert!(nanoflows.contains("pub mod sales_nf_validate;"));
-        assert!(nanoflows.contains("project.merge_module(sales_nf_validate::declaration());"));
+        let nanoflows = std::fs::read_to_string(
+            generated.join("src/modules/sales/presentation/nanoflows/mod.rs"),
+        )
+        .unwrap();
+        assert!(nanoflows.contains("pub mod nf_validate;"));
+        assert!(nanoflows.contains("project.merge_module(nf_validate::declaration());"));
         assert!(!nanoflows.contains("microflow"));
         // Runnable microflows surface as a typed service port plus the
         // runtime adapter that implements it. ACT_GetOrder returns the
         // IR-form Order entity, so it stays off the typed surface.
         let ports_index =
-            std::fs::read_to_string(generated.join("src/domain/ports/mod.rs")).unwrap();
-        assert!(
-            ports_index.contains("pub mod sales_services;"),
-            "{ports_index}"
-        );
+            std::fs::read_to_string(generated.join("src/modules/sales/ports/mod.rs")).unwrap();
+        assert!(ports_index.contains("pub mod services;"), "{ports_index}");
         let sales_port =
-            std::fs::read_to_string(generated.join("src/domain/ports/sales_services.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/ports/services.rs")).unwrap();
         assert!(
             sales_port.contains("pub trait SalesServices"),
             "{sales_port}"
@@ -6925,19 +7046,16 @@ pub fn declaration() -> ModuleDecl {
         assert!(adapter.contains("pub struct RuntimeServices"), "{adapter}");
         assert!(
             adapter.contains(
-                "impl crate::domain::ports::sales_services::SalesServices for RuntimeServices"
+                "impl crate::modules::sales::ports::services::SalesServices for RuntimeServices"
             ),
             "{adapter}"
         );
         assert!(adapter.contains("\"Sales.ACT_Ping\""), "{adapter}");
         // The injected Java action surfaces as an action port with typed
         // registration glue.
-        assert!(
-            ports_index.contains("pub mod sales_actions;"),
-            "{ports_index}"
-        );
+        assert!(ports_index.contains("pub mod actions;"), "{ports_index}");
         let sales_actions =
-            std::fs::read_to_string(generated.join("src/domain/ports/sales_actions.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/modules/sales/ports/actions.rs")).unwrap();
         assert!(
             sales_actions.contains("pub trait ReverseText"),
             "{sales_actions}"
@@ -6977,6 +7095,7 @@ pub fn declaration() -> ModuleDecl {
         assert!(crate_root.contains("pub mod application;"));
         assert!(crate_root.contains("pub mod domain;"));
         assert!(crate_root.contains("pub mod presentation;"));
+        assert!(crate_root.contains("pub mod modules;"));
         assert!(crate_root.contains("pub fn build() -> ::mxrs_ir::ProjectDecl"));
         assert!(crate_root.contains("composition::build()"));
         assert!(crate_root.contains("project = crate::build"));

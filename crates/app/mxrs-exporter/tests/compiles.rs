@@ -157,7 +157,7 @@ fn generated_build_preserves_opaque_native_fields_and_externally_referenced_page
     assert_eq!(imported.page_export.typed_candidates, 1);
     assert_eq!(imported.page_export.opaque, 2);
     let pages_source =
-        std::fs::read_to_string(generated.join("src/presentation/pages/mod.rs")).unwrap();
+        std::fs::read_to_string(generated.join("src/modules/sales/presentation/pages.rs")).unwrap();
     assert!(pages_source.contains("pub fn supported"));
     assert!(!pages_source.contains("pub fn metadata"));
     assert!(!pages_source.contains("pub fn referenced"));
