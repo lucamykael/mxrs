@@ -293,22 +293,14 @@ fn import_cargo_project_inner(
     let domain_directory = destination.join("src/domain");
     let application_directory = destination.join("src/application");
     let presentation_directory = destination.join("src/presentation");
+    // Only folders that receive generated content exist: an empty
+    // placeholder folder is noise the reader has to rule out.
     for directory in [
         domain_directory.join("modules"),
-        domain_directory.join("security"),
-        domain_directory.join("services"),
-        domain_directory.join("ports"),
         application_directory.join("modules"),
-        application_directory.join("task_queues"),
-        presentation_directory.join("controllers"),
         presentation_directory.join("modules"),
-        presentation_directory.join("navigation"),
         presentation_directory.join("http"),
-        infrastructure_directory.join("repositories"),
-        infrastructure_directory.join("database"),
         infrastructure_directory.join("adapters"),
-        infrastructure_directory.join("persistence"),
-        destination.join("src/utils"),
     ] {
         std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
     }
@@ -422,7 +414,7 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "// Internal aliases keep generated authoring declarations concise.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod application;\npub mod composition;\npub mod domain;\npub mod infrastructure;\npub mod modules;\npub mod presentation;\npub mod utils;\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    composition::build()\n}}\n\n#[mxrs::application(version = {}, project = crate::build)]\npub struct Application;\n",
+            "// Internal aliases keep generated authoring declarations concise.\nextern crate mxrs as mxrs_dsl;\nextern crate mxrs as mxrs_expr;\nextern crate mxrs as mxrs_ir;\nextern crate mxrs as mxrs_macros;\n\npub mod application;\npub mod composition;\npub mod domain;\npub mod infrastructure;\npub mod modules;\npub mod presentation;\n\npub fn build() -> ::mxrs_ir::ProjectDecl {{\n    composition::build()\n}}\n\n#[mxrs::application(version = {}, project = crate::build)]\npub struct Application;\n",
             rust_string(&manifest.mendix_version),
         ),
     )?;
@@ -433,14 +425,6 @@ fn import_cargo_project_inner(
         &render_scaffold_modules_module(),
     )?;
     write_text(
-        &destination.join("src/domain/services/mod.rs"),
-        "//! Pure domain services belong here.\n",
-    )?;
-    write_text(
-        &destination.join("src/domain/ports/mod.rs"),
-        "//! Hand-written repository and external-service contracts belong here;\n//! each Mendix module's generated ports live in `crate::modules::<m>::ports`.\n",
-    )?;
-    write_text(
         &destination.join("src/application/mod.rs"),
         &application_source,
     )?;
@@ -449,7 +433,7 @@ fn import_cargo_project_inner(
         &presentation_source,
     )?;
     write_text(
-        &destination.join("src/application/task_queues/mod.rs"),
+        &destination.join("src/application/task_queues.rs"),
         &task_queues_source,
     )?;
     write_text(
@@ -457,20 +441,16 @@ fn import_cargo_project_inner(
         &render_scaffold_modules_module(),
     )?;
     write_text(
-        &destination.join("src/domain/security/mod.rs"),
+        &destination.join("src/domain/security.rs"),
         &security_source,
     )?;
     write_text(
-        &destination.join("src/presentation/navigation/mod.rs"),
+        &destination.join("src/presentation/navigation.rs"),
         &navigation_source,
     )?;
     write_text(
         &destination.join("src/presentation/modules/mod.rs"),
         &render_scaffold_modules_module(),
-    )?;
-    write_text(
-        &destination.join("src/presentation/controllers/mod.rs"),
-        "//! Framework-neutral presentation controllers.\n\npub fn apply(_project: &mut ::mxrs_ir::ProjectDecl) {}\n",
     )?;
     match api_mode {
         ApiMode::Axum => {
@@ -501,16 +481,8 @@ fn import_cargo_project_inner(
         &infrastructure_source,
     )?;
     write_text(
-        &destination.join("src/infrastructure/persistence/mod.rs"),
+        &destination.join("src/infrastructure/persistence.rs"),
         &persistence_source,
-    )?;
-    write_text(
-        &destination.join("src/infrastructure/repositories/mod.rs"),
-        "//! Implement `domain::ports` against the selected database here.\n",
-    )?;
-    write_text(
-        &destination.join("src/infrastructure/database/mod.rs"),
-        "//! Connection pools, migrations and database adapters belong here.\n",
     )?;
     // The axum state boots through the flow runtime, so the adapter exists
     // for every axum project, with or without typed service ports.
@@ -554,10 +526,6 @@ fn import_cargo_project_inner(
             &render_action_registry_file(module),
         )?;
     }
-    write_text(
-        &destination.join("src/utils/mod.rs"),
-        "//! Small framework-independent utilities.\n",
-    )?;
     format_generated_cargo_project(destination)?;
     write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
     write_text(
@@ -583,43 +551,41 @@ fn import_cargo_project_inner(
 /// `src/composition.rs`, so this layer never depends outward on
 /// application, infrastructure or UI.
 fn render_domain_module() -> String {
-    "//! Project-level security plus homes for hand-written domain services\n\
-     //! and contracts; each Mendix module's domain model lives in\n\
-     //! `crate::modules`.\n\n\
+    "//! Project-level security, plus the aggregator `mxrs add` wires\n\
+     //! scaffolded modules into. Each Mendix module's own domain model\n\
+     //! lives in `crate::modules`.\n\n\
      pub mod modules;\n\
-     pub mod ports;\n\
      pub mod security;\n\n\
-     pub mod services;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-         modules::apply(project);\n\
-         security::apply(project);\n\
+     \x20   modules::apply(project);\n\
+     \x20   security::apply(project);\n\
      }\n"
     .to_string()
 }
 
 fn render_application_module() -> String {
-    "//! Project-level application concerns; each Mendix module's services\n\
-     //! and DTOs live in `crate::modules`.\n\n\
-     pub mod task_queues;\n\
-     pub mod modules;\n\n\
+    "//! Project-level task queues, plus the aggregator `mxrs add` wires\n\
+     //! scaffolded modules into. Each Mendix module's services and DTOs\n\
+     //! live in `crate::modules`.\n\n\
+     pub mod modules;\n\
+     pub mod task_queues;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-         task_queues::apply(project);\n\
-         modules::apply(project);\n\
+     \x20   task_queues::apply(project);\n\
+     \x20   modules::apply(project);\n\
      }\n"
     .to_string()
 }
 
 fn render_presentation_module(api_mode: ApiMode) -> String {
     let mut source = String::from(
-        "//! Project-level presentation: controllers, navigation and the HTTP\n\
-         //! surface. Each Mendix module's pages, nanoflows and published REST\n\
+        "//! Project-level presentation: the HTTP surface and navigation,\n\
+         //! plus the aggregator `mxrs add` wires scaffolded modules into.\n\
+         //! Each Mendix module's pages, nanoflows and published REST\n\
          //! services live in `crate::modules`.\n\n\
-         pub mod controllers;\n\
          pub mod http;\n\
          pub mod modules;\n\
          pub mod navigation;\n\n\
          pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-         \x20   controllers::apply(project);\n\
          \x20   navigation::apply(project);\n\
          \x20   modules::apply(project);\n\
          }\n",
@@ -640,8 +606,16 @@ fn render_composition_module(mendix_version: &str) -> String {
 }
 
 fn render_infrastructure_module() -> String {
-    "//! Database, repository and Mendix adapter implementations.\n\npub mod adapters;\npub mod database;\npub mod markers;\npub mod persistence;\npub mod repositories;\n\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n    persistence::apply(project);\n}\n"
-        .to_string()
+    "//! Model adapters, compile-time markers and imported-model\n\
+     //! persistence. Hand-written repositories and database plumbing\n\
+     //! belong here too.\n\n\
+     pub mod adapters;\n\
+     pub mod markers;\n\
+     pub mod persistence;\n\n\
+     pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
+     \x20   persistence::apply(project);\n\
+     }\n"
+    .to_string()
 }
 
 /// The non-axum presets keep their framework's server stub until their
@@ -7643,7 +7617,7 @@ pub fn declaration() -> ModuleDecl {
                 .join("src/modules/sales/domain/documents.rs")
                 .is_file()
         );
-        assert!(generated.join("src/domain/security/mod.rs").is_file());
+        assert!(generated.join("src/domain/security.rs").is_file());
         assert!(generated.join("src/application/mod.rs").is_file());
         assert!(generated.join("src/modules/sales/dto/mod.rs").is_file());
         assert!(
@@ -7657,11 +7631,7 @@ pub fn declaration() -> ModuleDecl {
                 .join("src/modules/sales/presentation/nanoflows/mod.rs")
                 .is_file()
         );
-        assert!(
-            generated
-                .join("src/presentation/navigation/mod.rs")
-                .is_file()
-        );
+        assert!(generated.join("src/presentation/navigation.rs").is_file());
         assert!(generated.join("src/infrastructure/mod.rs").is_file());
         assert!(!generated.join("src/generated").exists());
         assert!(generated.join("model/imported/manifest.json").is_file());
@@ -7718,8 +7688,7 @@ pub fn declaration() -> ModuleDecl {
         assert!(report_dto.contains("OqlView"));
         assert!(report_dto.contains("Sales.OrderSource"));
         let persistence =
-            std::fs::read_to_string(generated.join("src/infrastructure/persistence/mod.rs"))
-                .unwrap();
+            std::fs::read_to_string(generated.join("src/infrastructure/persistence.rs")).unwrap();
         assert!(persistence.contains("oql_view_source(\"OrderSource\""));
         assert!(persistence.contains("Order projection"));
         assert!(persistence.contains("source.excluded(true)"));
@@ -7906,14 +7875,13 @@ pub fn declaration() -> ModuleDecl {
                 .join("src/infrastructure/adapters/flow_runtime.rs")
                 .is_file()
         );
-        let security =
-            std::fs::read_to_string(generated.join("src/domain/security/mod.rs")).unwrap();
+        let security = std::fs::read_to_string(generated.join("src/domain/security.rs")).unwrap();
         assert!(security.contains("ProjectSecurityDecl {"));
         assert!(security.contains("check_security: false,"));
         assert!(security.contains("minimum_length: 12"));
         assert!(security.contains("user_roles: vec!"));
         let navigation =
-            std::fs::read_to_string(generated.join("src/presentation/navigation/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/presentation/navigation.rs")).unwrap();
         assert!(navigation.contains("project.navigation = Some"));
         assert!(navigation.contains("NavigationIconDecl::Code(57369)"));
         let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
@@ -7935,6 +7903,21 @@ pub fn declaration() -> ModuleDecl {
             "src/presentation/modules/mod.rs",
         ] {
             assert!(generated.join(relative).is_file(), "{relative} is missing");
+        }
+        // Empty placeholder folders are noise; only what receives generated
+        // content exists.
+        for absent in [
+            "src/domain/ports",
+            "src/domain/services",
+            "src/presentation/controllers",
+            "src/infrastructure/repositories",
+            "src/infrastructure/database",
+            "src/utils",
+        ] {
+            assert!(
+                !generated.join(absent).exists(),
+                "{absent} should not exist"
+            );
         }
         assert!(domain_source.contains("pub mod modules;"));
         assert!(application_source.contains("modules::apply(project);"));

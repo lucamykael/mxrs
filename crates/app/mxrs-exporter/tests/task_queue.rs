@@ -2,7 +2,7 @@
 //! standalone source (must include queue declarations and fail closed on an
 //! unattested native shape, same as any other editable document) and
 //! `import_cargo_project`'s Cargo-native project (must emit editable queues
-//! under `src/application/task_queues/mod.rs` and remain buildable after the
+//! under `src/application/task_queues.rs` and remain buildable after the
 //! source `.mpr` is gone — the whole point of `model/imported/` capturing a
 //! lossless snapshot). Real nested `cargo` invocations, same rationale and
 //! pattern as `compiles.rs`: generated-source correctness isn't provable by
@@ -163,7 +163,7 @@ fn import_cargo_project_emits_task_queues_under_the_application_layer() {
 
     mxrs_exporter::import_cargo_project(&original, &generated, Some(&workspace_root())).unwrap();
 
-    let task_queues_path = generated.join("src/application/task_queues/mod.rs");
+    let task_queues_path = generated.join("src/application/task_queues.rs");
     assert!(
         task_queues_path.is_file(),
         "expected {} to exist",
