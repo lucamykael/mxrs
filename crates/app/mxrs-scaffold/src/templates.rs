@@ -428,18 +428,27 @@ pub(crate) fn demo_user(name: &str, entity: &str, roles: &[String], password_env
     )
 }
 
-pub(crate) fn modules_index() -> String {
-    "//! One folder per Mendix module: its domain model, services, ports,\n\
-     //! presentation and markers together, the way the module reads in Studio\n\
-     //! Pro.\n\n\
-     pub fn apply(_project: &mut ::mxrs::ProjectDecl) {}\n"
-        .to_string()
+/// One layer or concept index — `domain`, `entities`, `presentation`,
+/// `pages` — in the same shape the importer writes: a header, `pub mod`
+/// declarations, and one `apply`. A concept holds one folder per Mendix
+/// module, because entity names are unique per module and not across a
+/// project.
+pub(crate) fn concept_index(concept: &str) -> String {
+    format!(
+        "//! Every module's `{concept}`, one folder per Mendix module.\n\n\
+         pub fn apply(_project: &mut ::mxrs::ProjectDecl) {{}}\n"
+    )
 }
 
-pub(crate) fn module_index(module_name: &str) -> String {
+/// The declaration `mxrs module new` writes into the module registry: a
+/// Mendix module exists as a named thing before it holds anything.
+pub(crate) fn module_declaration(module_name: &str) -> String {
     format!(
         "//! The {module_name} Mendix module.\n\n\
-         pub fn apply(_project: &mut ::mxrs::ProjectDecl) {{}}\n"
+         use mxrs::prelude::*;\n\n\
+         pub fn declaration() -> ModuleDecl {{\n\
+         \x20   ModuleBuilder::new({module_name:?}).into_decl()\n\
+         }}\n"
     )
 }
 
@@ -586,8 +595,8 @@ mod tests {
         // Every index the scaffold creates has the shape the importer
         // writes: a header and one `apply`, empty until something registers.
         for index in [
-            modules_index(),
-            module_index("Sales"),
+            concept_index("domain"),
+            concept_index("entities"),
             folder_index("Sales", "entities"),
         ] {
             assert!(
@@ -596,6 +605,14 @@ mod tests {
             );
             assert!(index.starts_with("//!"), "{index}");
         }
+        // A module is declared by a file of its own, so it carries a
+        // `declaration` rather than an `apply`.
+        let module = module_declaration("Sales");
+        assert!(
+            module.contains("pub fn declaration() -> ModuleDecl"),
+            "{module}"
+        );
+        assert!(module.contains("ModuleBuilder::new(\"Sales\")"), "{module}");
     }
 }
 
@@ -695,7 +712,7 @@ pub(crate) fn page_chain_entity(module_name: &str, name: &str) -> String {
 /// the record uncommitted with the same seed values.
 pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> String {
     let entity_path = format!(
-        "crate::modules::{}::domain::entities::{}::markers",
+        "crate::domain::entities::{}::{}::markers",
         snake_case(module_name),
         snake_case(feature)
     );
@@ -763,7 +780,7 @@ pub(crate) fn page_chain_nanoflow(
     let markers = flow_marker(module_name, &name, "NanoflowMarker");
     let (note, body) = if calls_microflow {
         let action_path = format!(
-            "crate::modules::{}::services::act_refresh_{}::markers::ACT_Refresh{feature}",
+            "crate::domain::services::{}::act_refresh_{}::markers::ACT_Refresh{feature}",
             snake_case(module_name),
             snake_case(feature)
         );
@@ -873,7 +890,7 @@ pub(crate) fn page_from_template(
     let imports = if template == DATA_BACKED_TEMPLATE {
         format!(
             "use mxrs::prelude::*;\n\n\
-             use crate::modules::{}::domain::entities::{}::markers::{{\n    \
+             use crate::domain::entities::{}::{}::markers::{{\n    \
              {name}_Active, {name}_Reference, {name}_Total,\n\
              }};\n\n",
             snake_case(module_name),
@@ -938,7 +955,7 @@ fn form_vertical_body(
     refresh: Option<RefreshAction>,
 ) -> String {
     let loader = format!(
-        "crate::modules::{}::services::act_load_{}::markers::ACT_Load{name}",
+        "crate::domain::services::{}::act_load_{}::markers::ACT_Load{name}",
         snake_case(module_name),
         snake_case(name)
     );
@@ -986,14 +1003,14 @@ fn refresh_button(
     let call = match refresh {
         RefreshAction::Microflow => format!(
             "b.call_microflow(::mxrs::MicroflowRef::<\
-             crate::modules::{}::services::act_refresh_{}::markers::ACT_Refresh{name}\
+             crate::domain::services::{}::act_refresh_{}::markers::ACT_Refresh{name}\
              >::new());",
             snake_case(module_name),
             snake_case(name)
         ),
         RefreshAction::Nanoflow => format!(
             "b.call_nanoflow(::mxrs::NanoflowRef::<\
-             crate::modules::{}::presentation::nanoflows::nan_refresh_{}::markers::NAN_Refresh{name}\
+             crate::presentation::nanoflows::{}::nan_refresh_{}::markers::NAN_Refresh{name}\
              >::new());",
             snake_case(module_name),
             snake_case(name)

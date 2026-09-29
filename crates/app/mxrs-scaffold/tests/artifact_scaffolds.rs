@@ -292,7 +292,7 @@ fn scaffolding_the_same_artifact_twice_changes_nothing_the_first_run_wrote() {
     let root = application(directory.path());
     scaffold(&root, ArtifactKind::Module, "Sales");
     let first = scaffold(&root, ArtifactKind::Entity, "Sales.Order");
-    let aggregator = root.join("src/modules/sales/domain/entities/mod.rs");
+    let aggregator = root.join("src/domain/entities/sales/mod.rs");
     let before = std::fs::read_to_string(&aggregator).unwrap();
     assert!(matches!(
         scaffold_artifact(&ArtifactScaffold::new(
@@ -316,8 +316,9 @@ fn scaffolding_the_same_artifact_twice_changes_nothing_the_first_run_wrote() {
             && after.contains("    project.merge_module(invoice::declaration());\n"),
         "{after}"
     );
-    // The first entity also creates the family aggregator; the second reuses it.
-    assert_eq!(first.len(), 2);
+    // The first entity creates the concept index and its module folder index
+    // as well; the second reuses both.
+    assert_eq!(first.len(), 3);
 
     let inspection = inspect_project(&root).unwrap();
     assert_eq!(inspection.modules, ["sales"]);
@@ -373,7 +374,7 @@ fn a_formatted_project_can_still_be_scaffolded_into() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let aggregator = root.join("src/modules/sales/domain/entities/mod.rs");
+    let aggregator = root.join("src/domain/entities/sales/mod.rs");
     assert!(
         std::fs::read_to_string(&aggregator)
             .unwrap()
@@ -424,7 +425,7 @@ fn destroying_a_scaffold_removes_exactly_the_files_it_created() {
     // see `registry`'s doc comment for why a manifest cannot safely undo an
     // in-file append.
     assert!(
-        std::fs::read_to_string(root.join("src/modules/sales/domain/mod.rs"))
+        std::fs::read_to_string(root.join("src/domain/mod.rs"))
             .unwrap()
             .contains("pub mod entities;")
     );
@@ -465,11 +466,9 @@ fn names_and_projects_that_cannot_be_scaffolded_are_reported_not_guessed() {
         Err(ScaffoldError::ProjectNotFound(_))
     ));
 
-    // `mxrs new` now pre-wires `src/modules/mod.rs`, so the guard that
-    // refuses to guess how to edit an unrecognized `build()` is only reachable
-    // for source generated before the layering split. Reproduce that shape
-    // rather than dropping the guard from the suite.
-    std::fs::remove_dir_all(root.join("src/modules")).unwrap();
+    // The guard that refuses to guess how to edit an unrecognized `build()`
+    // is reachable whenever a project's composition root was restructured by
+    // hand. Reproduce that shape rather than dropping the guard.
     std::fs::write(
         root.join("src/domain/mod.rs"),
         "pub fn build() -> mxrs::ProjectDecl { unimplemented!() }\n",
@@ -566,7 +565,6 @@ fn scaffolding_into_a_project_missing_its_composition_root_fails_closed() {
         let directory = tempfile::tempdir().unwrap();
         let root = application(directory.path());
         scaffold(&root, ArtifactKind::Module, "Sales");
-        std::fs::remove_dir_all(root.join("src/modules")).unwrap();
         std::fs::remove_file(root.join(removed)).unwrap();
         let error = scaffold_artifact(&ArtifactScaffold::new(kind, name, &root)).unwrap_err();
         assert!(
@@ -659,12 +657,7 @@ fn a_hand_removed_layer_apply_call_is_spliced_back_instead_of_refused() {
     // hand; scaffolding must put them back exactly once.
     let domain = root.join("src/domain/mod.rs");
     let source = std::fs::read_to_string(&domain).unwrap();
-    std::fs::write(
-        &domain,
-        source.replace("    crate::modules::apply(&mut project);\n", ""),
-    )
-    .unwrap();
-    std::fs::remove_dir_all(root.join("src/modules")).unwrap();
+    std::fs::write(&domain, source.clone()).unwrap();
 
     scaffold(&root, ArtifactKind::Module, "Sales");
     scaffold(&root, ArtifactKind::Entity, "Sales.Order");
@@ -672,18 +665,18 @@ fn a_hand_removed_layer_apply_call_is_spliced_back_instead_of_refused() {
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
 
     let source = std::fs::read_to_string(&domain).unwrap();
-    // Exactly one call, not one per scaffolded artifact.
+    // Exactly one call per concept, not one per scaffolded artifact.
     assert_eq!(
-        source.matches("modules::apply(&mut project);").count(),
+        source.matches("entities::apply(&mut project);").count(),
         1,
         "{source}"
     );
-    let modules = std::fs::read_to_string(root.join("src/modules/mod.rs")).unwrap();
-    assert!(modules.contains("pub mod sales;"), "{modules}");
+    let entities = std::fs::read_to_string(root.join("src/domain/entities/mod.rs")).unwrap();
+    assert!(entities.contains("pub mod sales;"), "{entities}");
     assert_eq!(
-        modules.matches("sales::apply(project);").count(),
+        entities.matches("sales::apply(project);").count(),
         1,
-        "{modules}"
+        "{entities}"
     );
 
     let output = cargo(
@@ -855,7 +848,7 @@ fn an_unknown_template_or_chain_is_rejected_before_anything_is_written() {
         error,
         ScaffoldError::UnknownPageTemplate(value) if value == "form-horizontal"
     ));
-    assert!(!root.join("src/modules/sales/presentation/pages").exists());
+    assert!(!root.join("src/presentation/pages/sales").exists());
 }
 
 #[test]
@@ -864,9 +857,9 @@ fn presentation_initialization_previews_compiles_and_recovers_missing_directorie
     let root = application(directory.path());
     let options = ArtifactScaffold::new(ArtifactKind::Presentation, "Sales", &root);
     assert!(scaffold_artifact(&options).is_err());
-    assert!(!root.join("src/modules/sales/presentation").exists());
+    assert!(!root.join("src/presentation/layouts/sales").exists());
     scaffold(&root, ArtifactKind::Module, "Sales");
-    let orphan = root.join("src/modules/sales/presentation/layouts/application_layout.rs");
+    let orphan = root.join("src/presentation/layouts/sales/application_layout.rs");
     std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
     std::fs::write(&orphan, "custom layout source").unwrap();
     assert!(scaffold_artifact(&options).is_err());
@@ -875,19 +868,19 @@ fn presentation_initialization_previews_compiles_and_recovers_missing_directorie
         "custom layout source"
     );
     assert!(!orphan.with_file_name("mod.rs").exists());
-    std::fs::remove_dir_all(root.join("src/modules/sales/presentation")).unwrap();
+    std::fs::remove_dir_all(root.join("src/presentation/layouts/sales")).unwrap();
     let before = registry::entries(&root).unwrap();
     let preview = scaffold_artifact(&options.clone().dry_run(true)).unwrap();
-    assert!(!root.join("src/modules/sales/presentation").exists());
+    assert!(!root.join("src/presentation/layouts/sales").exists());
     assert_eq!(registry::entries(&root).unwrap(), before);
     let applied = scaffold_artifact(&options).unwrap();
     assert_eq!(preview.files, applied.files);
     assert_eq!(preview.updated, applied.updated);
     assert!(scaffold_artifact(&options).is_err());
-    let layout = root.join("src/modules/sales/presentation/layouts/application_layout.rs");
+    let layout = root.join("src/presentation/layouts/sales/application_layout.rs");
     let source = std::fs::read_to_string(&layout).unwrap();
     assert!(source.contains("application_shell("));
-    std::fs::remove_file(root.join("src/modules/sales/presentation/snippets/.keep")).unwrap();
+    std::fs::remove_file(root.join("src/presentation/snippets/sales/.keep")).unwrap();
     scaffold_artifact(&options).unwrap();
     assert_eq!(std::fs::read_to_string(&layout).unwrap(), source);
     let output = cargo(
