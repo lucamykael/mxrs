@@ -593,6 +593,23 @@ impl SecurityPolicy {
         }
     }
 
+    /// Whether `context` holds any of `module_roles` — the question a
+    /// published REST service's `AllowedRoles` asks of its caller.
+    ///
+    /// The caller's user roles are expanded into module roles first, so a
+    /// context that names only user roles still answers. An empty
+    /// `module_roles` grants nobody: a service that allows no role is a
+    /// service no caller may reach, not one everybody may.
+    pub fn holds_any_module_role(&self, context: &SecurityContext, module_roles: &[&str]) -> bool {
+        if self.administrator(context) {
+            return true;
+        }
+        let context = self.expand_context(context.clone());
+        module_roles
+            .iter()
+            .any(|role| context.module_roles.contains(*role))
+    }
+
     fn administrator(&self, context: &SecurityContext) -> bool {
         !self.administrator_roles.is_disjoint(&context.user_roles)
     }
@@ -840,6 +857,41 @@ mod tests {
             .unwrap();
         assert!(result["id"].is_string());
         assert_eq!(runtime.store().retrieve("Sales.Order").unwrap().len(), 1);
+    }
+    /// `AllowedRoles` on a published service is a list of *module* roles, and
+    /// a caller usually names only user roles — so the question has to expand
+    /// the context first. An empty list allows nobody.
+    #[test]
+    fn holds_any_module_role_expands_user_roles_and_never_allows_an_empty_list() {
+        let policy = SecurityPolicy {
+            enabled: true,
+            administrator_roles: BTreeSet::from(["Administrator".to_string()]),
+            user_role_modules: BTreeMap::from([(
+                "User".to_string(),
+                BTreeSet::from(["Sales.User".to_string()]),
+            )]),
+            ..SecurityPolicy::default()
+        };
+        let user = SecurityContext {
+            user_roles: BTreeSet::from(["User".to_string()]),
+            ..SecurityContext::default()
+        };
+
+        assert!(policy.holds_any_module_role(&user, &["Sales.User"]));
+        assert!(policy.holds_any_module_role(&user, &["Sales.Admin", "Sales.User"]));
+        assert!(!policy.holds_any_module_role(&user, &["Sales.Admin"]));
+        assert!(!policy.holds_any_module_role(&user, &[]));
+        // Anonymous holds nothing, including on an empty list.
+        assert!(!policy.holds_any_module_role(&SecurityContext::default(), &["Sales.User"]));
+        assert!(!policy.holds_any_module_role(&SecurityContext::default(), &[]));
+        // An administrator reaches every service, the same way it reaches
+        // every entity.
+        let administrator = SecurityContext {
+            user_roles: BTreeSet::from(["Administrator".to_string()]),
+            ..SecurityContext::default()
+        };
+        assert!(policy.holds_any_module_role(&administrator, &["Sales.Admin"]));
+        assert!(policy.holds_any_module_role(&administrator, &[]));
     }
 }
 

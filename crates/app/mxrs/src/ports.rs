@@ -50,11 +50,13 @@ use mxrs_expr::{
     MxString,
 };
 use mxrs_ir::EntityMarker;
-pub use mxrs_runtime_boot::{Boot, BootError, boot};
+pub use mxrs_runtime::{SecurityContext, SecurityPolicy};
+pub use mxrs_runtime_boot::{Boot, BootError, LocalAccounts, boot};
 pub use mxrs_runtime_flows::{
     Adapter, AdapterKind, Execution, FlowEngine, FlowError, FlowValue, JavaAction, ObjectRef,
     Variables, member_to_json,
 };
+pub use mxrs_runtime_http::basic_credentials;
 
 /// A generated service port failed: either the flow itself, or a value at
 /// the port boundary.

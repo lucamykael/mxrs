@@ -20,8 +20,100 @@ use std::path::Path;
 
 use mxrs_bson::{Bson, Document, parse_array};
 use mxrs_model::{Attribute, AttributeType, Module, Project};
-use mxrs_runtime::{EntityRule, MemberRight, SecurityPolicy, StoreSchema};
+use mxrs_runtime::{EntityRule, MemberRight, SecurityContext, SecurityPolicy, StoreSchema};
 use serde_json::Value;
+
+/// One account `Security$ProjectSecurity` declares, with the password the
+/// model itself holds.
+///
+/// Mendix keeps these passwords in the model in the clear, so they are read
+/// from the built `.mpr` at boot and never leave this type: nothing writes
+/// them to generated source, to a log, or to an error. [`LocalAccounts`] is
+/// the only way to ask about them, and it only ever answers "yes, and these
+/// are the caller's roles" or "no".
+#[derive(Debug, Clone)]
+struct Account {
+    name: String,
+    password: String,
+    user_roles: BTreeSet<String>,
+}
+
+/// How a request signs in to this project: the accounts the model declares,
+/// and who a caller with no credentials is.
+#[derive(Debug, Clone, Default)]
+pub struct LocalAccounts {
+    /// `AdminUserName` / `AdminPassword` / `AdminUserRole`.
+    administrator: Option<Account>,
+    /// `DemoUsers`, carried only when `EnableDemoUsers` is set — Studio Pro's
+    /// own switch for whether they may sign in at all.
+    demo: Vec<Account>,
+    /// `GuestUserRole`, carried only when `EnableGuestAccess` is set.
+    guest_user_role: Option<String>,
+}
+
+impl LocalAccounts {
+    /// The caller a `name`/`password` pair signs in as, or `None` when no
+    /// declared account matches.
+    ///
+    /// The password comparison is constant-time, so a wrong password cannot
+    /// be told from a wrong user name by how long the answer took. The
+    /// returned context names the account's *user* roles; the policy expands
+    /// them into module roles when it is asked a question.
+    pub fn sign_in(&self, name: &str, password: &str) -> Option<SecurityContext> {
+        let account = self
+            .administrator
+            .iter()
+            .chain(&self.demo)
+            .find(|account| account.name == name)?;
+        constant_time_eq(account.password.as_bytes(), password.as_bytes()).then(|| {
+            SecurityContext {
+                user: Some(account.name.clone()),
+                user_roles: account.user_roles.clone(),
+                ..SecurityContext::default()
+            }
+        })
+    }
+
+    /// Who a caller with no credentials is: the guest user role the project
+    /// declares, or a context holding no role at all when it declares none.
+    ///
+    /// The role-less context is deliberate. It is not "no caller, so no
+    /// rules" — entity access judges it and, on a project with security on,
+    /// denies it. A model that publishes an anonymous surface without
+    /// granting anonymous callers anything has said nothing may be read
+    /// through it, and that is what the caller gets.
+    pub fn anonymous(&self) -> SecurityContext {
+        SecurityContext {
+            user_roles: self.guest_user_role.iter().cloned().collect(),
+            ..SecurityContext::default()
+        }
+    }
+
+    /// The `GuestUserRole` an anonymous caller runs as, when the project
+    /// enables guest access.
+    pub fn guest_user_role(&self) -> Option<&str> {
+        self.guest_user_role.as_deref()
+    }
+
+    /// Whether any account can sign in at all. A project with none cannot
+    /// authenticate a request, however it is addressed.
+    pub fn can_sign_anyone_in(&self) -> bool {
+        self.administrator.is_some() || !self.demo.is_empty()
+    }
+}
+
+/// Compares two byte strings without an early exit, so the time taken does
+/// not reveal how much of a password was right. Lengths are compared first
+/// and deliberately leak: a password's length is not its content.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BootError {
@@ -42,6 +134,9 @@ pub enum BootError {
 pub struct Boot {
     pub schema: StoreSchema,
     pub security: SecurityPolicy,
+    /// How a request signs in: the accounts `Security$ProjectSecurity`
+    /// declares, kept out of generated source by being read here instead.
+    pub accounts: LocalAccounts,
     /// The decoded modules the schema and policy were derived from, kept so
     /// callers (the flow engine, `mxrs run`) never re-open the project.
     pub modules: Vec<Module>,
@@ -170,17 +265,95 @@ pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, 
     };
     let document_count = documents.len();
     policy.documents = documents;
+    let mut accounts = LocalAccounts::default();
     if let Some(security) = security {
         apply_project_security(&mut policy, security);
+        accounts = local_accounts(security);
     }
     Ok(Boot {
         schema,
         security: policy,
+        accounts,
         modules,
         entities,
         documents: document_count,
         skipped_xpath_rules,
     })
+}
+
+/// Reads `Security$ProjectSecurity`'s sign-in material. An account with no
+/// name or no password cannot be signed in to and is left out rather than
+/// carried as an account that matches an empty credential.
+fn local_accounts(security: &Document) -> LocalAccounts {
+    let account = |name: &str, password: &str, user_roles: BTreeSet<String>| {
+        (!name.is_empty() && !password.is_empty()).then(|| Account {
+            name: name.to_string(),
+            password: password.to_string(),
+            user_roles,
+        })
+    };
+    let administrator_role = security.get_str("AdminUserRole").unwrap_or_default();
+    let administrator = account(
+        security.get_str("AdminUserName").unwrap_or_default(),
+        security.get_str("AdminPassword").unwrap_or_default(),
+        BTreeSet::from([administrator_role.to_string()]),
+    );
+    // Studio Pro's own switch: demo users exist in the model whether or not
+    // they may sign in, so an unchecked box means no demo account at all.
+    let demo = if security.get_bool("EnableDemoUsers").unwrap_or(false) {
+        documents_in(security, "DemoUsers")
+            .into_iter()
+            .filter_map(|user| {
+                account(
+                    user.get_str("UserName").unwrap_or_default(),
+                    user.get_str("Password").unwrap_or_default(),
+                    string_set(&user, "UserRoles"),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let guest_user_role = security
+        .get_bool("EnableGuestAccess")
+        .unwrap_or(false)
+        .then(|| security.get_str("GuestUserRole").unwrap_or_default())
+        .filter(|role| !role.is_empty())
+        .map(str::to_string);
+    LocalAccounts {
+        administrator,
+        demo,
+        guest_user_role,
+    }
+}
+
+/// The documents inside a BSON array field, in declaration order.
+fn documents_in(document: &Document, field: &str) -> Vec<Document> {
+    match document.get(field) {
+        Some(Bson::Array(items)) => parse_array(Some(items))
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                Bson::Document(document) => Some(document),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn string_set(document: &Document, field: &str) -> BTreeSet<String> {
+    match document.get(field) {
+        Some(Bson::Array(items)) => parse_array(Some(items))
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                Bson::String(value) => Some(value),
+                _ => None,
+            })
+            .collect(),
+        _ => BTreeSet::new(),
+    }
 }
 
 fn apply_project_security(policy: &mut SecurityPolicy, security: &Document) {
@@ -606,5 +779,88 @@ mod tests {
             assert_eq!(boot.security.enabled, enabled, "{level}");
         }
         assert!(!build(Vec::new(), None).unwrap().security.enabled);
+    }
+    /// The accounts a request can sign in as come from the model, and only the
+    /// ones the project actually enables: Studio Pro's `EnableDemoUsers` box
+    /// decides whether demo users may sign in at all, and `EnableGuestAccess`
+    /// decides whether an anonymous caller has a role.
+    #[test]
+    fn local_accounts_follow_the_switches_the_project_declares() {
+        let security = |enable_demo: bool, enable_guest: bool| {
+            doc! {
+                "$Type": "Security$ProjectSecurity",
+                "SecurityLevel": "CheckEverything",
+                "AdminUserRole": "Administrator",
+                "AdminUserName": "MxAdmin",
+                "AdminPassword": "let-me-in",
+                "EnableDemoUsers": enable_demo,
+                "EnableGuestAccess": enable_guest,
+                "GuestUserRole": "Anonymous",
+                "DemoUsers": mxrs_bson::build_array(
+                    vec![
+                        Bson::Document(doc! {
+                            "$Type": "Security$DemoUserImpl",
+                            "UserName": "demo_user",
+                            "Password": "demo-secret",
+                            "UserRoles": mxrs_bson::build_array(
+                                vec![Bson::String("User".to_string())],
+                                1,
+                            ),
+                        }),
+                        // No password: nothing can be signed in to, so it is
+                        // left out rather than matching an empty credential.
+                        Bson::Document(doc! {
+                            "$Type": "Security$DemoUserImpl",
+                            "UserName": "demo_locked",
+                            "Password": "",
+                            "UserRoles": mxrs_bson::build_array(vec![], 1),
+                        }),
+                    ],
+                    3,
+                ),
+            }
+        };
+
+        let accounts = build(Vec::new(), Some(&security(true, true)))
+            .unwrap()
+            .accounts;
+        let administrator = accounts.sign_in("MxAdmin", "let-me-in").expect("admin");
+        assert_eq!(administrator.user.as_deref(), Some("MxAdmin"));
+        assert!(administrator.user_roles.contains("Administrator"));
+        let demo = accounts.sign_in("demo_user", "demo-secret").expect("demo");
+        assert!(demo.user_roles.contains("User"));
+        assert!(accounts.sign_in("demo_locked", "").is_none());
+        assert!(accounts.sign_in("MxAdmin", "wrong").is_none());
+        assert!(accounts.sign_in("nobody", "let-me-in").is_none());
+        assert!(accounts.can_sign_anyone_in());
+        assert_eq!(accounts.guest_user_role(), Some("Anonymous"));
+        assert!(accounts.anonymous().user_roles.contains("Anonymous"));
+        // An anonymous caller is still a caller: no user, so nothing about the
+        // request can claim to be one.
+        assert!(accounts.anonymous().user.is_none());
+
+        // Demo users switched off cannot sign in, however right the password.
+        let restricted = build(Vec::new(), Some(&security(false, false)))
+            .unwrap()
+            .accounts;
+        assert!(restricted.sign_in("demo_user", "demo-secret").is_none());
+        assert!(restricted.sign_in("MxAdmin", "let-me-in").is_some());
+        // Guest access off leaves an anonymous caller with no role, which
+        // entity access then denies rather than waives.
+        assert_eq!(restricted.guest_user_role(), None);
+        assert!(restricted.anonymous().user_roles.is_empty());
+
+        // A project with no security unit can sign nobody in.
+        let none = build(Vec::new(), None).unwrap().accounts;
+        assert!(!none.can_sign_anyone_in());
+        assert!(none.sign_in("MxAdmin", "let-me-in").is_none());
+    }
+
+    #[test]
+    fn a_password_is_compared_without_an_early_exit() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        assert!(constant_time_eq(b"", b""));
     }
 }

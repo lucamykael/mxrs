@@ -35,6 +35,29 @@ use tokio::sync::Semaphore;
 
 const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
 
+/// The user name and password an `Authorization: Basic` header carries, or
+/// `None` when the header is not a well-formed Basic credential.
+///
+/// RFC 7617: the scheme name is case-insensitive, the payload is base64 of
+/// `user-id:password`, and the *first* colon separates them — a password may
+/// contain colons, a user name may not. A credential that is not valid base64,
+/// not valid UTF-8, has no colon, or names an empty user is refused here
+/// rather than turned into a lookup for an account nobody can hold.
+pub fn basic_credentials(header: &str) -> Option<(String, String)> {
+    use base64::Engine;
+
+    let (scheme, payload) = header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (user, password) = decoded.split_once(':')?;
+    (!user.is_empty()).then(|| (user.to_string(), password.to_string()))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
     #[error("web root is not a directory: {0}")]
@@ -372,5 +395,37 @@ mod tests {
             .router()
             .unwrap_err();
         assert!(matches!(error, HttpError::MissingWebRoot(_)));
+    }
+    /// RFC 7617: a case-insensitive scheme, base64 of `user:password`, and the
+    /// *first* colon separating them. Anything that is not that is refused
+    /// here rather than turned into a lookup nobody can satisfy.
+    #[test]
+    fn basic_credentials_reads_only_a_well_formed_credential() {
+        assert_eq!(
+            basic_credentials("Basic YWxpY2U6c2VjcmV0"),
+            Some(("alice".to_string(), "secret".to_string()))
+        );
+        assert_eq!(
+            basic_credentials("basic YWxpY2U6c2VjcmV0"),
+            Some(("alice".to_string(), "secret".to_string()))
+        );
+        // A password may contain colons; a user name may not.
+        assert_eq!(
+            basic_credentials("Basic YWxpY2U6YTpiOmM="),
+            Some(("alice".to_string(), "a:b:c".to_string()))
+        );
+        // An empty password is a password the model may actually hold.
+        assert_eq!(
+            basic_credentials("Basic YWxpY2U6"),
+            Some(("alice".to_string(), String::new()))
+        );
+        assert_eq!(basic_credentials("Bearer YWxpY2U6c2VjcmV0"), None);
+        assert_eq!(basic_credentials("Basic !!!not-base64!!!"), None);
+        // No colon at all: nothing separates a user from a password.
+        assert_eq!(basic_credentials("Basic YWxpY2U="), None);
+        // An empty user name is a user nobody can hold.
+        assert_eq!(basic_credentials("Basic OnNlY3JldA=="), None);
+        assert_eq!(basic_credentials("Basic"), None);
+        assert_eq!(basic_credentials(""), None);
     }
 }

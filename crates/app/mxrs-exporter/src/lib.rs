@@ -519,6 +519,10 @@ fn import_cargo_project_inner(
     // The axum state boots through the flow runtime, so the adapter exists
     // for every axum project, with or without typed service ports.
     let needs_flow_runtime = !service_ports.is_empty() || matches!(api_mode, ApiMode::Axum);
+    // Only the axum boundary signs a request in; the other presets serve a
+    // stub, so an authentication adapter there would be a promise nothing
+    // keeps.
+    let needs_authentication = matches!(api_mode, ApiMode::Axum);
     let mut adapters_index =
         String::from("//! External services and Mendix-specific adapters belong here.\n");
     if needs_flow_runtime || !action_ports.is_empty() {
@@ -526,6 +530,9 @@ fn import_cargo_project_inner(
     }
     for module in &action_ports {
         let _ = writeln!(adapters_index, "pub mod {}_actions;", module.module_stem);
+    }
+    if needs_authentication {
+        adapters_index.push_str("pub mod authentication;\n");
     }
     if needs_flow_runtime {
         adapters_index.push_str("pub mod flow_runtime;\n");
@@ -537,6 +544,12 @@ fn import_cargo_project_inner(
         &destination.join("src/infrastructure/adapters/mod.rs"),
         &adapters_index,
     )?;
+    if needs_authentication {
+        write_text(
+            &destination.join("src/infrastructure/adapters/authentication.rs"),
+            &render_authentication(),
+        )?;
+    }
     if needs_flow_runtime {
         write_text(
             &destination.join("src/infrastructure/adapters/flow_runtime.rs"),
@@ -4349,56 +4362,51 @@ fn render_flow_runtime() -> String {
     "//! The embedded flow runtime every adapter drives the model through.\n\n\
      use mxrs::mapping::ExportMapping;\n\
      use mxrs::ports::{\n\
-     \x20   BootError, FlowEngine, FlowValue, ObjectRef, ServiceError, Variables, boot, member_to_json,\n\
+     \x20   Boot, BootError, FlowEngine, FlowValue, ObjectRef, SecurityContext, ServiceError,\n\
+     \x20   Variables, boot, member_to_json,\n\
      };\n\
-     use mxrs::{SecurityContext, Store};\n\
+     use mxrs::Store;\n\
      use serde_json::{Map, Value};\n\n\
      /// Owns the booted engine and store, and runs one microflow at a time.\n\
      pub struct FlowRuntime {\n\
      \x20   engine: FlowEngine,\n\
      \x20   store: Store,\n\
-     \x20   caller: Option<SecurityContext>,\n\
      }\n\n\
      impl FlowRuntime {\n\
      \x20   /// Boots from a built `.mpr` — the output of `cargo run` or\n\
      \x20   /// `cargo mxrs build`.\n\
      \x20   pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {\n\
-     \x20       let booted = boot(path)?;\n\
-     \x20       Ok(Self::new(\n\
-     \x20           FlowEngine::from_modules(&booted.modules).with_policy(booted.security),\n\
-     \x20           Store::new(booted.schema),\n\
-     \x20       ))\n\
+     \x20       Ok(Self::from_boot(&boot(path)?))\n\
+     \x20   }\n\n\
+     \x20   /// Assembles the engine and store a booted model describes. Take the\n\
+     \x20   /// [`Boot`] by reference so the same one can also build the\n\
+     \x20   /// authentication adapter.\n\
+     \x20   pub fn from_boot(booted: &Boot) -> Self {\n\
+     \x20       Self::new(\n\
+     \x20           FlowEngine::from_modules(&booted.modules)\n\
+     \x20               .with_policy(booted.security.clone()),\n\
+     \x20           Store::new(booted.schema.clone()),\n\
+     \x20       )\n\
      \x20   }\n\n\
      \x20   /// Wraps an engine and store the caller assembled.\n\
      \x20   pub fn new(engine: FlowEngine, store: Store) -> Self {\n\
-     \x20       Self {\n\
-     \x20           engine,\n\
-     \x20           store,\n\
-     \x20           caller: None,\n\
-     \x20       }\n\
+     \x20       Self { engine, store }\n\
      \x20   }\n\n\
-     \x20   /// Runs every later call on behalf of `caller`, so the project's\n\
-     \x20   /// entity access rules decide what its flows may touch and what a\n\
-     \x20   /// mapped response may carry. Authenticate the request and set this;\n\
-     \x20   /// without it there is no caller to judge, and entity access does\n\
-     \x20   /// not apply.\n\
-     \x20   pub fn with_caller(mut self, caller: SecurityContext) -> Self {\n\
-     \x20       self.caller = Some(caller);\n\
-     \x20       self\n\
-     \x20   }\n\n\
-     \x20   /// Who later calls run as, if anyone.\n\
-     \x20   pub fn caller(&self) -> Option<&SecurityContext> {\n\
-     \x20       self.caller.as_ref()\n\
-     \x20   }\n\n\
-     \x20   /// Runs one microflow as a unit of work, as [`Self::caller`].\n\
+     \x20   /// Runs one microflow as a unit of work, on behalf of `caller`.\n\
+     \x20   ///\n\
+     \x20   /// `caller` is who the project's entity access rules are judged\n\
+     \x20   /// against. `None` is not \"anonymous\" — it is \"nobody to judge\", and\n\
+     \x20   /// the rules then do not apply at all. A request boundary always has\n\
+     \x20   /// a caller, even an anonymous one.\n\
      \x20   pub fn call(\n\
      \x20       &mut self,\n\
      \x20       flow: &str,\n\
      \x20       arguments: Variables,\n\
+     \x20       caller: Option<&SecurityContext>,\n\
      \x20   ) -> Result<FlowValue, ServiceError> {\n\
      \x20       let (result, _) =\n\
      \x20           self.engine\n\
-     \x20               .call(&mut self.store, flow, arguments, self.caller.clone())?;\n\
+     \x20               .call(&mut self.store, flow, arguments, caller.cloned())?;\n\
      \x20       Ok(result)\n\
      \x20   }\n\n\
      \x20   /// The backing store, for reading committed state.\n\
@@ -4410,33 +4418,49 @@ fn render_flow_runtime() -> String {
      \x20       &mut self.store\n\
      \x20   }\n\n\
      \x20   /// Shapes a flow result with the export mapping its operation\n\
-     \x20   /// declares. The document carries only objects [`Self::caller`] may\n\
-     \x20   /// read — including the ones the mapping reaches by association,\n\
-     \x20   /// which are retrieves it performs itself.\n\
-     \x20   pub fn mapped(&self, mapping: &ExportMapping, value: &FlowValue) -> Value {\n\
+     \x20   /// declares. The document carries only objects `caller` may read —\n\
+     \x20   /// including the ones the mapping reaches by association, which are\n\
+     \x20   /// retrieves it performs itself.\n\
+     \x20   pub fn mapped(\n\
+     \x20       &self,\n\
+     \x20       mapping: &ExportMapping,\n\
+     \x20       value: &FlowValue,\n\
+     \x20       caller: Option<&SecurityContext>,\n\
+     \x20   ) -> Value {\n\
      \x20       self.engine\n\
-     \x20           .apply_export_mapping(&self.store, self.caller(), mapping, value)\n\
+     \x20           .apply_export_mapping(&self.store, caller, mapping, value)\n\
      \x20   }\n\n\
-     \x20   /// Serializes a flow result as JSON, reading object members from\n\
-     \x20   /// the store. This is the entity's own shape, which is what a call\n\
-     \x20   /// without an export mapping answers; an operation that declares\n\
-     \x20   /// one goes through [`Self::mapped`] instead.\n\
-     \x20   pub fn json(&self, value: &FlowValue) -> Value {\n\
+     \x20   /// Serializes a flow result as JSON, reading object members from the\n\
+     \x20   /// store. This is the entity's own shape, which is what an operation\n\
+     \x20   /// without an export mapping answers; one that declares a mapping\n\
+     \x20   /// goes through [`Self::mapped`] instead.\n\
+     \x20   ///\n\
+     \x20   /// An object `caller` may not read is not serialized: it answers\n\
+     \x20   /// `null` on its own and is left out of a list, so the unmapped shape\n\
+     \x20   /// carries no more than the mapped one would.\n\
+     \x20   pub fn json(&self, value: &FlowValue, caller: Option<&SecurityContext>) -> Value {\n\
      \x20       match value {\n\
-     \x20           FlowValue::Object(reference) => self.object_json(reference),\n\
-     \x20           FlowValue::List(values) => {\n\
-     \x20               Value::Array(values.iter().map(|value| self.json(value)).collect())\n\
-     \x20           }\n\
+     \x20           FlowValue::Object(reference) => self.object_json(reference, caller),\n\
+     \x20           FlowValue::List(values) => Value::Array(\n\
+     \x20               values\n\
+     \x20                   .iter()\n\
+     \x20                   .map(|value| self.json(value, caller))\n\
+     \x20                   .filter(|value| !value.is_null())\n\
+     \x20                   .collect(),\n\
+     \x20           ),\n\
      \x20           other => other.to_json_shallow(),\n\
      \x20       }\n\
      \x20   }\n\n\
-     \x20   fn object_json(&self, reference: &ObjectRef) -> Value {\n\
+     \x20   fn object_json(&self, reference: &ObjectRef, caller: Option<&SecurityContext>) -> Value {\n\
      \x20       let Ok(objects) = self.store.retrieve(&reference.entity) else {\n\
      \x20           return Value::Null;\n\
      \x20       };\n\
      \x20       let Some(object) = objects.iter().find(|object| object.id == reference.id) else {\n\
      \x20           return Value::Null;\n\
      \x20       };\n\
+     \x20       if !self.engine.readable(caller, object) {\n\
+     \x20           return Value::Null;\n\
+     \x20       }\n\
      \x20       let mut fields = Map::new();\n\
      \x20       fields.insert(\"id\".to_string(), Value::String(object.id.clone()));\n\
      \x20       for (name, member) in &object.members {\n\
@@ -4467,9 +4491,9 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
     if marshals {
         imports.push("PortValue");
     }
-    imports.extend(["ServiceError", "Variables"]);
+    imports.extend(["SecurityContext", "ServiceError", "Variables"]);
     let mut out = format!(
-        "//! Runtime-backed implementations of the domain service ports.\n\nuse mxrs::ports::{{{}}};\n\nuse super::flow_runtime::FlowRuntime;\n\n/// Drives the model's microflows on the embedded flow runtime.\npub struct RuntimeServices {{\n    runtime: FlowRuntime,\n}}\n\nimpl RuntimeServices {{\n    /// Boots the flow runtime from a built `.mpr` — for example the\n    /// output of `cargo run` or `cargo mxrs build`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{ runtime }}\n    }}\n\n    /// The backing runtime, for store reads and untyped calls.\n    pub fn runtime(&self) -> &FlowRuntime {{\n        &self.runtime\n    }}\n\n    /// Mutable access to the backing runtime.\n    pub fn runtime_mut(&mut self) -> &mut FlowRuntime {{\n        &mut self.runtime\n    }}\n}}\n",
+        "//! Runtime-backed implementations of the domain service ports.\n\nuse mxrs::ports::{{{}}};\n\nuse super::flow_runtime::FlowRuntime;\n\n/// Drives the model's microflows on the embedded flow runtime.\npub struct RuntimeServices {{\n    runtime: FlowRuntime,\n    caller: Option<SecurityContext>,\n}}\n\nimpl RuntimeServices {{\n    /// Boots the flow runtime from a built `.mpr` — for example the\n    /// output of `cargo run` or `cargo mxrs build`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled. Every port call then runs with\n    /// no caller: these are in-process domain calls from code that is already\n    /// inside the trust boundary, so the project's entity access rules do not\n    /// apply until [`Self::as_caller`] names someone for them to apply to.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{\n            runtime,\n            caller: None,\n        }}\n    }}\n\n    /// Runs every port call on behalf of `caller`, so the project's entity\n    /// access rules decide what its flows may touch.\n    pub fn as_caller(mut self, caller: SecurityContext) -> Self {{\n        self.caller = Some(caller);\n        self\n    }}\n\n    /// Who port calls run as, if anyone.\n    pub fn caller(&self) -> Option<&SecurityContext> {{\n        self.caller.as_ref()\n    }}\n\n    /// The backing runtime, for store reads and untyped calls.\n    pub fn runtime(&self) -> &FlowRuntime {{\n        &self.runtime\n    }}\n\n    /// Mutable access to the backing runtime.\n    pub fn runtime_mut(&mut self) -> &mut FlowRuntime {{\n        &mut self.runtime\n    }}\n}}\n",
         imports.join(", "),
     );
     for port in ports {
@@ -4509,7 +4533,7 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
                 );
             }
             let call = format!(
-                "        {}self.runtime.call({:?}, arguments)?;",
+                "        {}self.runtime.call({:?}, arguments, self.caller.as_ref())?;",
                 if method.result.is_some() {
                     "let result = "
                 } else {
@@ -4537,37 +4561,142 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
 /// `presentation/http/state.rs` — the axum state every handler extracts.
 fn render_http_state(project_name: &str) -> String {
     format!(
-        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{BootError, FlowValue, ServiceError, Variables}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n        }}\n    }}\n\n    /// Runs one microflow and serializes its result. A poisoned mutex is\n    /// recovered rather than propagated: a handler that panicked left the\n    /// store as it found it, because every call is its own unit of work.\n    pub fn call(&self, flow: &str, arguments: Variables) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(runtime.json(&result))\n    }}\n\n    /// Runs one microflow and shapes its result with the export mapping its\n    /// operation declares, so the response is the JSON document the model\n    /// publishes instead of the entity's stored attributes. The document\n    /// carries only what the runtime's caller may read.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(runtime.mapped(mapping, &result))\n    }}\n}}\n",
+        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store, plus the model's own answer to who\n//! is calling.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse axum::http::HeaderMap;\nuse axum::http::header::AUTHORIZATION;\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{\n    BootError, FlowValue, SecurityContext, ServiceError, Variables, basic_credentials, boot,\n}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::authentication::Authentication;\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\nuse crate::presentation::http::ApiError;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n    authentication: Arc<Authentication>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`, reading the model once for both\n    /// the engine and the accounts a request signs in against.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        let booted = boot(path)?;\n        Ok(Self::new(\n            FlowRuntime::from_boot(&booted),\n            Authentication::from_boot(&booted),\n        ))\n    }}\n\n    /// Wraps a runtime and an authentication adapter the caller assembled.\n    pub fn new(runtime: FlowRuntime, authentication: Authentication) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n            authentication: Arc::new(authentication),\n        }}\n    }}\n\n    /// Who a request with no credentials is, for a service the model\n    /// published to anyone.\n    pub fn anonymous(&self) -> SecurityContext {{\n        self.authentication.anonymous()\n    }}\n\n    /// The caller behind an `Authorization: Basic` header, refused with `401`\n    /// when it is missing or signs nobody in, and with `403` when it signs in\n    /// a caller holding none of `allowed_roles`.\n    ///\n    /// Missing and wrong credentials are one answer on purpose: telling them\n    /// apart tells a caller which user names exist.\n    pub fn basic_caller(\n        &self,\n        headers: &HeaderMap,\n        realm: &'static str,\n        allowed_roles: &[&str],\n    ) -> Result<SecurityContext, ApiError> {{\n        let caller = headers\n            .get(AUTHORIZATION)\n            .and_then(|header| header.to_str().ok())\n            .and_then(basic_credentials)\n            .and_then(|(user, password)| self.authentication.sign_in(&user, &password))\n            .ok_or(ApiError::unauthenticated(realm))?;\n        if !self.authentication.allows(&caller, allowed_roles) {{\n            return Err(ApiError::Forbidden);\n        }}\n        Ok(caller)\n    }}\n\n    /// Runs one microflow as `caller` and serializes its result. A poisoned\n    /// mutex is recovered rather than propagated: a handler that panicked\n    /// left the store as it found it, because every call is its own unit of\n    /// work.\n    pub fn call(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.json(&result, Some(caller)))\n    }}\n\n    /// Runs one microflow as `caller` and shapes its result with the export\n    /// mapping its operation declares, so the response is the JSON document\n    /// the model publishes instead of the entity's stored attributes. Either\n    /// way the response carries only what `caller` may read.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.mapped(mapping, &result, Some(caller)))\n    }}\n}}\n",
         rust_string(&format!("build/{project_name}.mpr")),
     )
 }
 
+/// `infrastructure/adapters/authentication.rs` — turning a request's
+/// credentials into the caller the model's rules are judged against.
+fn render_authentication() -> String {
+    "//! Signing a request in against the accounts the model declares.\n\
+     //!\n\
+     //! Mendix keeps the administrator and demo-user passwords in the model in\n\
+     //! the clear. `boot` reads them from the built `.mpr` at run time, so they\n\
+     //! never appear in this source tree, in a log, or in a response: this\n\
+     //! adapter can answer who a credential pair is and which roles they hold,\n\
+     //! and nothing else about them.\n\n\
+     use mxrs::ports::{Boot, LocalAccounts, SecurityContext, SecurityPolicy};\n\n\
+     /// The project's own sign-in material and role map.\n\
+     pub struct Authentication {\n\
+     \x20   accounts: LocalAccounts,\n\
+     \x20   policy: SecurityPolicy,\n\
+     }\n\n\
+     impl Authentication {\n\
+     \x20   /// Everything a booted model says about signing in.\n\
+     \x20   pub fn from_boot(booted: &Boot) -> Self {\n\
+     \x20       Self {\n\
+     \x20           accounts: booted.accounts.clone(),\n\
+     \x20           policy: booted.security.clone(),\n\
+     \x20       }\n\
+     \x20   }\n\n\
+     \x20   /// The caller a user name and password sign in as, or `None` when\n\
+     \x20   /// the project declares no account that matches.\n\
+     \x20   pub fn sign_in(&self, user: &str, password: &str) -> Option<SecurityContext> {\n\
+     \x20       self.accounts.sign_in(user, password)\n\
+     \x20   }\n\n\
+     \x20   /// Who a request with no credentials is: the project's guest user\n\
+     \x20   /// role, or a caller holding no role at all when it declares none.\n\
+     \x20   /// The role-less caller is still a caller — entity access judges it\n\
+     \x20   /// and, with security on, denies it.\n\
+     \x20   pub fn anonymous(&self) -> SecurityContext {\n\
+     \x20       self.accounts.anonymous()\n\
+     \x20   }\n\n\
+     \x20   /// Whether `caller` holds any of the module roles a published\n\
+     \x20   /// service allows.\n\
+     \x20   pub fn allows(&self, caller: &SecurityContext, roles: &[&str]) -> bool {\n\
+     \x20       self.policy.holds_any_module_role(caller, roles)\n\
+     \x20   }\n\
+     }\n"
+    .to_string()
+}
+
 /// `presentation/http/error.rs` — how a flow failure becomes a response.
 fn render_http_error() -> String {
-    "//! The HTTP shape of a failed model call.\n\n\
+    "//! Why a request did not get its answer: the model call failed, or the\n\
+     //! boundary refused the request before making it.\n\n\
      use axum::Json;\n\
-     use axum::http::StatusCode;\n\
+     use axum::http::header::WWW_AUTHENTICATE;\n\
+     use axum::http::{HeaderValue, StatusCode};\n\
      use axum::response::{IntoResponse, Response};\n\
      use mxrs::ports::ServiceError;\n\
      use serde_json::json;\n\n\
-     /// Wraps a [`ServiceError`] so handlers can use `?`.\n\
      #[derive(Debug)]\n\
-     pub struct ApiError(ServiceError);\n\n\
+     pub enum ApiError {\n\
+     \x20   /// The model call itself failed.\n\
+     \x20   Service(ServiceError),\n\
+     \x20   /// The request carried no credentials, or none that sign anyone in.\n\
+     \x20   /// The two are one answer on purpose: telling them apart tells an\n\
+     \x20   /// attacker which user names exist.\n\
+     \x20   Unauthenticated { realm: &'static str },\n\
+     \x20   /// The caller signed in but holds none of the roles the service\n\
+     \x20   /// allows.\n\
+     \x20   Forbidden,\n\
+     \x20   /// The service declares authentication this layer does not offer, so\n\
+     \x20   /// it cannot be served at all — not even unauthenticated.\n\
+     \x20   UnsupportedAuthentication { declared: &'static str },\n\
+     }\n\n\
+     impl ApiError {\n\
+     \x20   pub fn unauthenticated(realm: &'static str) -> Self {\n\
+     \x20       Self::Unauthenticated { realm }\n\
+     \x20   }\n\n\
+     \x20   pub fn unsupported_authentication(declared: &'static str) -> Self {\n\
+     \x20       Self::UnsupportedAuthentication { declared }\n\
+     \x20   }\n\
+     }\n\n\
      impl From<ServiceError> for ApiError {\n\
      \x20   fn from(error: ServiceError) -> Self {\n\
-     \x20       Self(error)\n\
+     \x20       Self::Service(error)\n\
      \x20   }\n\
      }\n\n\
      impl IntoResponse for ApiError {\n\
      \x20   fn into_response(self) -> Response {\n\
-     \x20       // A boundary value the model rejected is the caller's input;\n\
-     \x20       // anything the flow itself raised is the application's.\n\
-     \x20       let status = match &self.0 {\n\
-     \x20           ServiceError::Value(_) => StatusCode::BAD_REQUEST,\n\
-     \x20           ServiceError::Flow(_) => StatusCode::INTERNAL_SERVER_ERROR,\n\
-     \x20       };\n\
-     \x20       (status, Json(json!({ \"error\": self.0.to_string() }))).into_response()\n\
+     \x20       match self {\n\
+     \x20           // A boundary value the model rejected is the caller's\n\
+     \x20           // input; anything the flow itself raised is the\n\
+     \x20           // application's.\n\
+     \x20           ApiError::Service(error) => {\n\
+     \x20               let status = match &error {\n\
+     \x20                   ServiceError::Value(_) => StatusCode::BAD_REQUEST,\n\
+     \x20                   ServiceError::Flow(_) => StatusCode::INTERNAL_SERVER_ERROR,\n\
+     \x20               };\n\
+     \x20               (status, message(error.to_string())).into_response()\n\
+     \x20           }\n\
+     \x20           ApiError::Unauthenticated { realm } => {\n\
+     \x20               // The challenge is what makes a 401 actionable; a realm\n\
+     \x20               // that cannot be a header value is left off rather than\n\
+     \x20               // guessed at.\n\
+     \x20               let challenge = HeaderValue::from_str(&format!(\n\
+     \x20                   \"Basic realm=\\\"{realm}\\\", charset=\\\"UTF-8\\\"\"\n\
+     \x20               ));\n\
+     \x20               let body = message(\"authentication required\");\n\
+     \x20               match challenge {\n\
+     \x20                   Ok(challenge) => (\n\
+     \x20                       StatusCode::UNAUTHORIZED,\n\
+     \x20                       [(WWW_AUTHENTICATE, challenge)],\n\
+     \x20                       body,\n\
+     \x20                   )\n\
+     \x20                       .into_response(),\n\
+     \x20                   Err(_) => (StatusCode::UNAUTHORIZED, body).into_response(),\n\
+     \x20               }\n\
+     \x20           }\n\
+     \x20           ApiError::Forbidden => (\n\
+     \x20               StatusCode::FORBIDDEN,\n\
+     \x20               message(\"the caller holds none of the roles this service allows\"),\n\
+     \x20           )\n\
+     \x20               .into_response(),\n\
+     \x20           ApiError::UnsupportedAuthentication { declared } => (\n\
+     \x20               StatusCode::NOT_IMPLEMENTED,\n\
+     \x20               message(format!(\n\
+     \x20                   \"this service requires {declared}, which the generated HTTP layer does not offer yet\"\n\
+     \x20               )),\n\
+     \x20           )\n\
+     \x20               .into_response(),\n\
+     \x20       }\n\
      \x20   }\n\
+     }\n\n\
+     fn message(error: impl Into<String>) -> Json<serde_json::Value> {\n\
+     \x20   Json(json!({ \"error\": error.into() }))\n\
      }\n"
     .to_string()
 }
@@ -4728,29 +4857,31 @@ fn render_published_service(
     service: &PublishedService,
     mappings: &HashMap<String, MappingTarget>,
 ) -> String {
-    let uses_path = service
-        .routes
-        .iter()
-        .flat_map(|route| &route.operations)
-        .any(|operation| {
-            operation
-                .parameters
+    // An unsupported authentication scheme routes only refusals, so the
+    // service binds no parameter, applies no mapping, and must not import for
+    // either.
+    let serves = service.authentication.serves_operations();
+    let binds = |source: ParameterSource| {
+        serves
+            && service
+                .routes
                 .iter()
-                .any(|parameter| parameter.source == ParameterSource::Path)
-        });
-    let uses_query = service
-        .routes
-        .iter()
-        .flat_map(|route| &route.operations)
-        .any(|operation| {
-            operation
-                .parameters
-                .iter()
-                .any(|parameter| parameter.source == ParameterSource::Query)
-        });
-    let mut extractors = vec!["State"];
+                .flat_map(|route| &route.operations)
+                .any(|operation| {
+                    operation
+                        .parameters
+                        .iter()
+                        .any(|parameter| parameter.source == source)
+                })
+    };
+    let uses_path = binds(ParameterSource::Path);
+    let uses_query = binds(ParameterSource::Query);
+    let mut extractors = Vec::new();
+    if serves {
+        extractors.push("State");
+    }
     if uses_path {
-        extractors.insert(0, "Path");
+        extractors.push("Path");
     }
     if uses_query {
         extractors.push("Query");
@@ -4777,6 +4908,27 @@ fn render_published_service(
     {
         let _ = writeln!(out, "//!\n//! {line}");
     }
+    match &service.authentication {
+        ServiceAuthentication::Public => out.push_str(
+            "//!\n//! The model publishes this service to anyone: it declares no\n//! authentication type and no allowed role. Its operations therefore run as\n//! the project's guest user role, or as a caller holding no role at all when\n//! the project declares none — which entity access then denies.\n",
+        ),
+        ServiceAuthentication::Basic { allowed_roles } => {
+            let _ = write!(
+                out,
+                "//!\n//! The model requires HTTP Basic authentication. Every operation signs the\n//! request in before calling the model and runs as whoever signed in, and\n//! only these module roles may reach it:\n//!\n{}",
+                allowed_roles
+                    .iter()
+                    .map(|role| format!("//! - `{role}`\n"))
+                    .collect::<String>(),
+            );
+        }
+        ServiceAuthentication::Unsupported { declared } => {
+            let _ = write!(
+                out,
+                "//!\n//! Every operation here refuses with `501`. The model requires {declared},\n//! which the generated HTTP layer does not offer yet, and serving the\n//! surface without the authentication the model asks for would hand it to\n//! anyone. The routes stay in the table so the published surface stays\n//! visible, and answer the gap instead of the model.\n",
+            );
+        }
+    }
     if uses_path || uses_query {
         out.push_str("\nuse std::collections::HashMap;\n");
     }
@@ -4784,41 +4936,80 @@ fn render_published_service(
     // the module that owns the mapping: its own, or a sibling's.
     let own_stem = module_stem(&service.module_name);
     let mut mapping_imports = String::new();
-    for stem in service
-        .routes
-        .iter()
-        .flat_map(|route| &route.operations)
-        .filter_map(|operation| mappings.get(&operation.export_mapping))
-        .map(|target| target.module_stem.as_str())
-        .collect::<std::collections::BTreeSet<_>>()
-    {
-        if stem == own_stem {
-            mapping_imports.push_str("use super::mappings;\n");
-        } else {
-            let _ = writeln!(
-                mapping_imports,
-                "use crate::modules::{stem}::presentation::http::mappings as {stem}_mappings;"
-            );
+    if serves {
+        for stem in service
+            .routes
+            .iter()
+            .flat_map(|route| &route.operations)
+            .filter_map(|operation| mappings.get(&operation.export_mapping))
+            .map(|target| target.module_stem.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if stem == own_stem {
+                mapping_imports.push_str("use super::mappings;\n");
+            } else {
+                let _ = writeln!(
+                    mapping_imports,
+                    "use crate::modules::{stem}::presentation::http::mappings as {stem}_mappings;"
+                );
+            }
         }
     }
-    // Only a bound parameter names a `FlowValue`; a service whose operations
-    // take none would carry an unused import.
-    let ports = if service
-        .routes
-        .iter()
-        .flat_map(|route| &route.operations)
-        .any(|operation| !operation.parameters.is_empty())
-    {
-        "FlowValue, Variables"
+    out.push('\n');
+    if !extractors.is_empty() {
+        let _ = writeln!(out, "use axum::extract::{{{}}};", extractors.join(", "));
+    }
+    if matches!(service.authentication, ServiceAuthentication::Basic { .. }) {
+        out.push_str("use axum::http::HeaderMap;\n");
+    }
+    let _ = writeln!(out, "use axum::routing::{{{}}};", methods.join(", "));
+    if serves {
+        // Only a bound parameter names a `FlowValue`; a service whose
+        // operations take none would carry an unused import.
+        let ports = if service
+            .routes
+            .iter()
+            .flat_map(|route| &route.operations)
+            .any(|operation| !operation.parameters.is_empty())
+        {
+            "FlowValue, Variables"
+        } else {
+            "Variables"
+        };
+        let _ = write!(
+            out,
+            "use axum::{{Json, Router}};\nuse mxrs::ports::{{{ports}}};\nuse serde_json::Value;\n",
+        );
     } else {
-        "Variables"
-    };
+        out.push_str("use axum::Router;\n");
+    }
     let _ = write!(
         out,
-        "\nuse axum::extract::{{{}}};\nuse axum::routing::{{{}}};\nuse axum::{{Json, Router}};\nuse mxrs::ports::{{{ports}}};\nuse serde_json::Value;\n\nuse crate::presentation::http::{{ApiError, AppState}};\n{mapping_imports}\npub fn router() -> Router<AppState> {{\n    Router::new()\n",
-        extractors.join(", "),
-        methods.join(", "),
+        "\nuse crate::presentation::http::{{ApiError, AppState}};\n{mapping_imports}\n",
     );
+    match &service.authentication {
+        ServiceAuthentication::Basic { allowed_roles } => {
+            let _ = write!(
+                out,
+                "/// The module roles this service allows, exactly as the model lists\n/// them. An empty list would allow nobody, not everybody.\nconst ALLOWED_ROLES: &[&str] = &[{}];\n\n/// The realm a `401` challenges with, so a client knows which credentials\n/// it is being asked for.\nconst REALM: &str = {};\n\n",
+                allowed_roles
+                    .iter()
+                    .map(|role| rust_string(role))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                rust_string(&service.name),
+            );
+        }
+        ServiceAuthentication::Unsupported { declared } => {
+            let _ = write!(
+                out,
+                "/// What the model requires of a caller, named in every refusal.\nconst AUTHENTICATION: &str = {};\n\n",
+                rust_string(declared),
+            );
+        }
+        ServiceAuthentication::Public => {}
+    }
+    out.push_str("pub fn router() -> Router<AppState> {\n    Router::new()\n");
     for route in &service.routes {
         let handlers = route
             .operations
@@ -4844,6 +5035,14 @@ fn render_published_service(
         }
         if !operation.summary.is_empty() || !operation.documentation.is_empty() {
             out.push_str("///\n");
+        }
+        if !serves {
+            let _ = writeln!(
+                out,
+                "/// Would call `{}`; refuses instead, because the model's\n/// authentication is not available here.\nasync fn {}() -> ApiError {{\n    ApiError::unsupported_authentication(AUTHENTICATION)\n}}",
+                operation.microflow, operation.handler,
+            );
+            continue;
         }
         let applied = mappings.get(&operation.export_mapping).map(|target| {
             let scope = if target.module_stem == own_stem {
@@ -4895,11 +5094,23 @@ fn render_published_service(
             "\n    Query(query): Query<HashMap<String, String>>,",
         );
         let body = extracts(ParameterSource::Body, "\n    Json(body): Json<Value>,");
+        // `Json` consumes the body, so it has to come last; every other
+        // extractor reads only the request parts and may precede it.
+        let headers = match service.authentication {
+            ServiceAuthentication::Basic { .. } => "\n    headers: HeaderMap,",
+            _ => "",
+        };
         let _ = writeln!(
             out,
-            "async fn {}(\n    State(state): State<AppState>,{path}{query}{body}\n) -> Result<Json<Value>, ApiError> {{",
+            "async fn {}(\n    State(state): State<AppState>,{headers}{path}{query}{body}\n) -> Result<Json<Value>, ApiError> {{",
             operation.handler,
         );
+        match service.authentication {
+            ServiceAuthentication::Basic { .. } => out.push_str(
+                "    let caller = state.basic_caller(&headers, REALM, ALLOWED_ROLES)?;\n",
+            ),
+            _ => out.push_str("    let caller = state.anonymous();\n"),
+        }
         let binding = if operation.parameters.is_empty() {
             "let arguments"
         } else {
@@ -4931,14 +5142,14 @@ fn render_published_service(
             Some(mapping) => {
                 let _ = writeln!(
                     out,
-                    "    Ok(Json(state.call_mapped({:?}, arguments, &{mapping})?))\n}}",
+                    "    Ok(Json(state.call_mapped(\n        {:?},\n        arguments,\n        &{mapping},\n        &caller,\n    )?))\n}}",
                     operation.microflow,
                 );
             }
             None => {
                 let _ = writeln!(
                     out,
-                    "    Ok(Json(state.call({:?}, arguments)?))\n}}",
+                    "    Ok(Json(state.call({:?}, arguments, &caller)?))\n}}",
                     operation.microflow,
                 );
             }
@@ -5056,6 +5267,63 @@ struct PublishedService {
     /// Operations grouped by route path, in declaration order — axum wants
     /// one `route` call per path with the methods chained onto it.
     routes: Vec<ServiceRoute>,
+    authentication: ServiceAuthentication,
+}
+
+/// How a published service authenticates its callers, as the model declares
+/// it in `AuthenticationTypes`, `AuthenticationMicroflow` and `AllowedRoles`.
+enum ServiceAuthentication {
+    /// No authentication type and no allowed role: the model published this
+    /// surface to anyone, so its operations run as the project's guest.
+    Public,
+    /// `AuthenticationTypes: ['basic']` — HTTP Basic, and the caller must hold
+    /// one of these module roles.
+    Basic { allowed_roles: Vec<String> },
+    /// The model asks for authentication this layer does not offer. Routing is
+    /// still generated, so the published surface stays visible and stays in
+    /// the route table, but every operation refuses: serving it without the
+    /// authentication the model requires would be a silent downgrade.
+    Unsupported {
+        /// What the model declared, for the doc comment and the refusal body.
+        declared: String,
+    },
+}
+
+impl ServiceAuthentication {
+    /// Whether operations are actually served. An unsupported scheme routes
+    /// only refusals, so the service binds no parameters and applies no
+    /// mapping — and must not import for either.
+    fn serves_operations(&self) -> bool {
+        !matches!(self, ServiceAuthentication::Unsupported { .. })
+    }
+}
+
+fn service_authentication(document: &mxrs_bson::Document) -> ServiceAuthentication {
+    let microflow = document
+        .get_str("AuthenticationMicroflow")
+        .unwrap_or_default();
+    if !microflow.is_empty() {
+        return ServiceAuthentication::Unsupported {
+            declared: format!("the custom authentication microflow {microflow}"),
+        };
+    }
+    let allowed_roles = strings_in(document, "AllowedRoles");
+    let types = strings_in(document, "AuthenticationTypes");
+    match types.as_slice() {
+        [] if allowed_roles.is_empty() => ServiceAuthentication::Public,
+        // Roles to honour, and no way to learn who the caller is. Serving the
+        // service publicly would ignore the restriction the model states.
+        [] => ServiceAuthentication::Unsupported {
+            declared: format!(
+                "the roles {} without an authentication type to identify a caller by",
+                allowed_roles.join(", ")
+            ),
+        },
+        [only] if only == "basic" => ServiceAuthentication::Basic { allowed_roles },
+        declared => ServiceAuthentication::Unsupported {
+            declared: format!("the authentication type(s) {}", declared.join(", ")),
+        },
+    }
 }
 
 struct ServiceRoute {
@@ -5293,6 +5561,7 @@ fn published_service(
             .unwrap_or_default()
             .to_string(),
         routes,
+        authentication: service_authentication(document),
     })
 }
 
@@ -5550,6 +5819,18 @@ fn object_json_key(path: &str) -> Option<Option<String>> {
         Some(segment) => Some(Some(segment.to_string())),
         None => Some(None),
     }
+}
+
+/// The strings inside a BSON array field, in declaration order.
+fn strings_in(document: &mxrs_bson::Document, field: &str) -> Vec<String> {
+    mxrs_bson::parse_array(document.get_array(field).ok().map(Vec::as_slice))
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            mxrs_bson::Bson::String(value) if !value.is_empty() => Some(value),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The documents inside a BSON array field, in declaration order.
@@ -7138,9 +7419,9 @@ pub fn declaration() -> ModuleDecl {
         );
         assert!(rendered.contains("use super::mappings;"), "{rendered}");
         assert!(
-            rendered.contains(
-                "state.call_mapped(\"Sales.ACT_GetOrder\", arguments, &mappings::em_order::mapping())"
-            ),
+            rendered.contains("state.call_mapped(")
+                && rendered.contains("&mappings::em_order::mapping(),")
+                && rendered.contains("&caller,"),
             "{rendered}"
         );
         assert!(
@@ -7148,9 +7429,17 @@ pub fn declaration() -> ModuleDecl {
             "{rendered}"
         );
         assert!(
-            rendered.contains("state.call(\"Sales.ACT_PutOrder\", arguments)"),
+            rendered.contains("state.call(\"Sales.ACT_PutOrder\", arguments, &caller)"),
             "{rendered}"
         );
+        // This fixture declares no authentication type and no allowed role, so
+        // the model published it to anyone: every operation runs as the
+        // project's guest, never as nobody.
+        assert!(
+            rendered.contains("let caller = state.anonymous();"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("HeaderMap"), "{rendered}");
         assert!(
             rendered.contains(
                 "arguments.insert(\n        \"orderId\".to_string(),\n        FlowValue::String(path.get(\"id\").cloned().unwrap_or_default()),\n    );"
@@ -7164,6 +7453,108 @@ pub fn declaration() -> ModuleDecl {
             "{rendered}"
         );
         assert!(!rendered.contains("ACT_Options"), "{rendered}");
+    }
+
+    /// A published service is routed the way the model says it is reached:
+    /// Basic authentication becomes a guard that signs the request in and
+    /// checks the model's own allowed roles; an authentication scheme this
+    /// layer cannot offer becomes a refusal rather than an open route.
+    #[test]
+    fn published_rest_authentication_follows_what_the_model_declares() {
+        let service = |authentication: mxrs_bson::Document| {
+            let mut document = mxrs_bson::doc! {
+                "$Type": "Rest$PublishedRestService",
+                "Name": "API_Service",
+                "Path": "api/v1",
+                "Documentation": "",
+                "Resources": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                    "$Type": "Rest$PublishedRestServiceResource",
+                    "Name": "orders",
+                    "Operations": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$Type": "Rest$PublishedRestServiceOperation",
+                        "HttpMethod": "Get",
+                        "Path": "",
+                        "Summary": "",
+                        "Documentation": "",
+                        "Microflow": "Sales.ACT_GetOrder",
+                        "Parameters": mxrs_bson::build_array(vec![], 3),
+                    })], 3),
+                })], 3),
+            };
+            for (key, value) in authentication {
+                document.insert(key, value);
+            }
+            render_published_service(
+                &published_service(&document, "Sales").expect("routable service"),
+                &HashMap::new(),
+            )
+        };
+        let roles = |names: Vec<&str>| {
+            mxrs_bson::build_array(
+                names
+                    .into_iter()
+                    .map(|name| mxrs_bson::Bson::String(name.to_string()))
+                    .collect(),
+                1,
+            )
+        };
+
+        let basic = service(mxrs_bson::doc! {
+            "AuthenticationTypes": roles(vec!["basic"]),
+            "AllowedRoles": roles(vec!["Sales.Admin", "Sales.User"]),
+        });
+        assert!(
+            basic.contains("const ALLOWED_ROLES: &[&str] = &[\"Sales.Admin\", \"Sales.User\"];"),
+            "{basic}"
+        );
+        assert!(
+            basic.contains("const REALM: &str = \"API_Service\";"),
+            "{basic}"
+        );
+        assert!(basic.contains("use axum::http::HeaderMap;"), "{basic}");
+        assert!(basic.contains("\n    headers: HeaderMap,"), "{basic}");
+        assert!(
+            basic.contains("let caller = state.basic_caller(&headers, REALM, ALLOWED_ROLES)?;"),
+            "{basic}"
+        );
+
+        // Roles to honour and no authentication type to identify a caller by:
+        // serving it publicly would ignore the restriction the model states.
+        let roleful = service(mxrs_bson::doc! {
+            "AllowedRoles": roles(vec!["Sales.Admin"]),
+        });
+        assert!(
+            roleful.contains("ApiError::unsupported_authentication(AUTHENTICATION)"),
+            "{roleful}"
+        );
+        assert!(
+            roleful.contains("without an authentication type to identify a caller by"),
+            "{roleful}"
+        );
+        // A refusing service routes nothing, so it imports for nothing either.
+        assert!(!roleful.contains("use mxrs::ports::"), "{roleful}");
+        assert!(!roleful.contains("use axum::extract::"), "{roleful}");
+        assert!(!roleful.contains("state."), "{roleful}");
+        // The route table still names the surface the model publishes.
+        assert!(
+            roleful.contains(".route(\"/api/v1/orders\", get(get_orders_act_get_order))"),
+            "{roleful}"
+        );
+
+        let custom = service(mxrs_bson::doc! {
+            "AuthenticationMicroflow": "Sales.ACT_Authenticate",
+        });
+        assert!(
+            custom.contains("the custom authentication microflow Sales.ACT_Authenticate"),
+            "{custom}"
+        );
+        let unknown = service(mxrs_bson::doc! {
+            "AuthenticationTypes": roles(vec!["mxid"]),
+        });
+        assert!(
+            unknown.contains("the authentication type(s) mxid"),
+            "{unknown}"
+        );
     }
 
     fn value_element(attribute: &str, json_path: &str) -> mxrs_bson::Bson {
@@ -8332,6 +8723,16 @@ pub fn declaration() -> ModuleDecl {
                     "Documentation": "",
                     "Excluded": false,
                     "ExportLevel": "Hidden",
+                    // The model's own answer to who may call: HTTP Basic, and
+                    // only a caller holding this module role.
+                    "AuthenticationTypes": mxrs_bson::build_array(
+                        vec![mxrs_bson::Bson::String("basic".to_string())],
+                        1,
+                    ),
+                    "AllowedRoles": mxrs_bson::build_array(
+                        vec![mxrs_bson::Bson::String("Sales.User".to_string())],
+                        1,
+                    ),
                     "Resources": mxrs_bson::build_array(vec![
                         mxrs_bson::Bson::Document(mxrs_bson::doc! {
                             "$ID": uuid::Uuid::new_v4().to_string(),
@@ -8799,32 +9200,63 @@ pub fn declaration() -> ModuleDecl {
             "{http}"
         );
         assert!(generated.join("src/presentation/http/error.rs").is_file());
+        // The model requires Basic authentication and names an allowed role,
+        // so the guard signs the request in before the model is called and
+        // every operation runs as whoever signed in.
+        assert!(
+            service_router.contains("const ALLOWED_ROLES: &[&str] = &[\"Sales.User\"];"),
+            "{service_router}"
+        );
+        assert!(
+            service_router
+                .contains("let caller = state.basic_caller(&headers, REALM, ALLOWED_ROLES)?;"),
+            "{service_router}"
+        );
         // A mapped response goes through the runtime, which asks the engine
         // the caller's read rules — never straight at `ExportMapping::apply`,
-        // which asks none.
+        // which asks none. The unmapped path asks the same question.
         let state =
             std::fs::read_to_string(generated.join("src/presentation/http/state.rs")).unwrap();
         assert!(
-            state.contains("runtime.mapped(mapping, &result)"),
+            state.contains("runtime.mapped(mapping, &result, Some(caller))"),
+            "{state}"
+        );
+        assert!(
+            state.contains("runtime.json(&result, Some(caller))"),
             "{state}"
         );
         assert!(!state.contains("mapping.apply("), "{state}");
+        let authentication = std::fs::read_to_string(
+            generated.join("src/infrastructure/adapters/authentication.rs"),
+        )
+        .unwrap();
+        assert!(
+            authentication.contains("self.policy.holds_any_module_role(caller, roles)"),
+            "{authentication}"
+        );
+        // The model's passwords stay in the model: this adapter only forwards
+        // a credential pair to the accounts `boot` read, and carries no string
+        // literal at all — so no credential can be sitting in it.
+        assert!(
+            authentication.contains("self.accounts.sign_in(user, password)"),
+            "{authentication}"
+        );
+        assert!(!authentication.contains('"'), "{authentication}");
         let flow_runtime =
             std::fs::read_to_string(generated.join("src/infrastructure/adapters/flow_runtime.rs"))
                 .unwrap();
         assert!(
-            flow_runtime.contains("caller: Option<SecurityContext>"),
+            flow_runtime.contains(".apply_export_mapping(&self.store, caller, mapping, value)"),
+            "{flow_runtime}"
+        );
+        // The flow call, the mapping and the unmapped serialization all take
+        // the same caller, so they narrow together.
+        assert!(
+            flow_runtime.contains("arguments, caller.cloned()"),
             "{flow_runtime}"
         );
         assert!(
-            flow_runtime
-                .contains(".apply_export_mapping(&self.store, self.caller(), mapping, value)"),
-            "{flow_runtime}"
-        );
-        // The flow call and the mapping run as the same caller, so they narrow
-        // together the moment one is set.
-        assert!(
-            flow_runtime.contains("arguments, self.caller.clone()"),
+            flow_runtime.contains("if !self.engine.readable(caller, object) {"),
             "{flow_runtime}"
         );
         let security = std::fs::read_to_string(generated.join("src/domain/security.rs")).unwrap();

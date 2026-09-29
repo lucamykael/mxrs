@@ -1928,20 +1928,32 @@ impl FlowEngine {
         mapping: &ExportMapping,
         value: &FlowValue,
     ) -> Value {
-        match (&self.policy, caller) {
-            (Some(policy), Some(context)) => {
-                mapping.apply_readable(store, value, &|object: &ObjectValue| {
-                    policy.entity_allowed(
-                        &object.entity,
-                        EntityAction::Read,
-                        None,
-                        Some(&object.members),
-                        context,
-                    )
-                })
+        match caller {
+            Some(_) if self.policy.is_some() => {
+                mapping.apply_readable(store, value, &|object| self.readable(caller, object))
             }
             _ => mapping.apply(store, value),
         }
+    }
+
+    /// Whether `caller` may read `object` — the question `filter_readable`
+    /// asks of a retrieved row, with the row's members in hand so a
+    /// constrained rule can decide.
+    ///
+    /// With no caller, or with no policy, every object is readable: there is
+    /// nobody to judge. A boundary that serves a caller should therefore
+    /// always have one, even an anonymous one.
+    pub fn readable(&self, caller: Option<&SecurityContext>, object: &ObjectValue) -> bool {
+        let (Some(policy), Some(context)) = (&self.policy, caller) else {
+            return true;
+        };
+        policy.entity_allowed(
+            &object.entity,
+            EntityAction::Read,
+            None,
+            Some(&object.members),
+            context,
+        )
     }
 
     fn enforce_entity_access(&self, execution: &Execution) -> bool {
