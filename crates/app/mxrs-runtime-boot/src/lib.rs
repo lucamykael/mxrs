@@ -177,8 +177,65 @@ fn project_security(project: &Project) -> Result<Option<Document>, BootError> {
     Ok(None)
 }
 
+/// The `System` module entities MXRS' own HTTP boundary instantiates, with the
+/// attribute names, types and defaults of the audited 11.12.1 System seed
+/// (`mxrs_schema::system_model_documents`). All four are non-persistable, so
+/// they are transient in the store.
+///
+/// A Mendix `.mpr` does not contain the System module — the Runtime owns it —
+/// so a published REST operation whose microflow declares a
+/// `System.HttpRequest` or `System.HttpResponse` parameter would have no entity
+/// to create. These are registered for every project because it is the
+/// *boundary* that creates them, not the model: the object MXRS hands the flow
+/// is MXRS' own, so its shape is part of MXRS' HTTP contract rather than of the
+/// project's version band.
+///
+/// The store has no generalization, so `System.HttpMessage`'s members are
+/// flattened into the request and response that inherit them.
+///
+/// Deliberately narrow: the rest of the System module is still absent, so a
+/// flow touching `System.User` or `System.FileDocument` fails on an unknown
+/// entity rather than being silently handed one. `System.HttpHeader` is
+/// registered because the model can name it, but no header objects are created
+/// or associated — a flow that retrieves `System.HttpHeaders` finds none.
+fn http_message_schema(schema: StoreSchema) -> StoreSchema {
+    let message = || {
+        [
+            ("HttpVersion".to_string(), Value::String("HTTP/1.1".into())),
+            ("Content".to_string(), Value::String(String::new())),
+        ]
+    };
+    schema
+        .entity("System.HttpMessage", BTreeMap::from(message()), true)
+        .entity(
+            "System.HttpRequest",
+            BTreeMap::from_iter(
+                message()
+                    .into_iter()
+                    .chain([("Uri".to_string(), Value::String(String::new()))]),
+            ),
+            true,
+        )
+        .entity(
+            "System.HttpResponse",
+            BTreeMap::from_iter(message().into_iter().chain([
+                ("StatusCode".to_string(), Value::Number(200.into())),
+                ("ReasonPhrase".to_string(), Value::String("OK".into())),
+            ])),
+            true,
+        )
+        .entity(
+            "System.HttpHeader",
+            BTreeMap::from([
+                ("Key".to_string(), Value::String(String::new())),
+                ("Value".to_string(), Value::String(String::new())),
+            ]),
+            true,
+        )
+}
+
 pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, BootError> {
-    let mut schema = StoreSchema::default();
+    let mut schema = http_message_schema(StoreSchema::default());
     let mut entities = 0;
     let mut documents = BTreeMap::new();
     let mut entity_rules: BTreeMap<String, Vec<EntityRule>> = BTreeMap::new();

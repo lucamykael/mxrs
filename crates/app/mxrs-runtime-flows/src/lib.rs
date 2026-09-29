@@ -24,6 +24,7 @@ mod datetime;
 mod engine;
 mod export_mapping;
 mod expression;
+mod http_objects;
 mod value;
 
 pub use engine::{
@@ -32,6 +33,7 @@ pub use engine::{
 };
 pub use export_mapping::{ExportMapping, NullValues, ObjectMapping, ValueMapping};
 pub use expression::{Expression, MemberSource, NoObjects};
+pub use http_objects::{HttpAnswer, HttpBinding, HttpObjects};
 pub use value::{FlowValue, ObjectRef, Variables, member_to_json};
 
 #[derive(Debug, thiserror::Error, PartialEq)]

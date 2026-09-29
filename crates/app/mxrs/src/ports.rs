@@ -53,8 +53,8 @@ use mxrs_ir::EntityMarker;
 pub use mxrs_runtime::{SecurityContext, SecurityPolicy};
 pub use mxrs_runtime_boot::{Boot, BootError, LocalAccounts, boot};
 pub use mxrs_runtime_flows::{
-    Adapter, AdapterKind, Execution, FlowEngine, FlowError, FlowValue, JavaAction, ObjectRef,
-    Variables, member_to_json,
+    Adapter, AdapterKind, Execution, FlowEngine, FlowError, FlowValue, HttpAnswer, HttpBinding,
+    HttpObjects, JavaAction, ObjectRef, Variables, member_to_json,
 };
 pub use mxrs_runtime_http::basic_credentials;
 
