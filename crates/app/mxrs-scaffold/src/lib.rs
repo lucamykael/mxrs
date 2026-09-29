@@ -88,7 +88,7 @@ pub enum ScaffoldError {
     )]
     UnknownDemoUserRole(String),
     #[error(
-        "demo user entity {0:?} was not found in this project's domain layer (expected `Module.Entity` with src/modules/<module>/domain/entities/<entity>.rs, or `System.User`)"
+        "demo user entity {0:?} was not found in this project's domain layer (expected `Module.Entity` with src/domain/entities/<module>/<entity>.rs, or `System.User`)"
     )]
     UnknownDemoUserEntity(String),
 }
@@ -226,16 +226,15 @@ fn project_files(
         (
             "src/lib.rs",
             format!(
-                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod modules;\npub mod presentation;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut project = application::build();\n    presentation::apply(&mut project);\n    project\n}}\n\n#[mxrs::application(version = {version}, project = crate::build)]\npub struct Application;\n"
+                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut project = application::build();\n    presentation::apply(&mut project);\n    project\n}}\n\n#[mxrs::application(version = {version}, project = crate::build)]\npub struct Application;\n"
             ),
         ),
         (
             "src/domain/mod.rs",
             format!(
-                "pub fn build() -> mxrs::ProjectDecl {{\n    let mut builder = mxrs::ProjectBuilder::new({version});\n    builder.module(\"Main\", |_module| {{}});\n    let mut project = builder.build();\n    crate::modules::apply(&mut project);\n    project\n}}\n"
+                "pub fn build() -> mxrs::ProjectDecl {{\n    let mut builder = mxrs::ProjectBuilder::new({version});\n    builder.module(\"Main\", |_module| {{}});\n    #[allow(unused_mut)]\n    let mut project = builder.build();\n    project\n}}\n"
             ),
         ),
-        ("src/modules/mod.rs", templates::modules_index()),
         ("src/application/mod.rs", templates::application_layer()),
         (
             "src/presentation/mod.rs",
@@ -584,14 +583,11 @@ mod tests {
         assert!(!presentation.contains("pub fn build()"));
         assert!(!presentation.contains("crate::application"));
 
-        // One index for every Mendix module, the same one the importer
-        // writes, instead of an aggregator per architectural layer.
-        let modules = std::fs::read_to_string(destination.join("src/modules/mod.rs")).unwrap();
-        assert!(
-            modules.contains("pub fn apply(_project: &mut ::mxrs::ProjectDecl) {}"),
-            "{modules}"
-        );
-        assert!(crate_root.contains("pub mod modules;"), "{crate_root}");
+        // There is no module tree at all: the authored tree is layer-first,
+        // and a concept grows a folder for a module when the first artifact
+        // of that concept is scaffolded into it.
+        assert!(!destination.join("src/modules").exists());
+        assert!(!crate_root.contains("pub mod modules;"), "{crate_root}");
         for layer in ["domain", "application", "presentation"] {
             let source =
                 std::fs::read_to_string(destination.join(format!("src/{layer}/mod.rs"))).unwrap();
@@ -622,7 +618,6 @@ mod tests {
             "src/infrastructure/mod.rs",
             "src/lib.rs",
             "src/main.rs",
-            "src/modules/mod.rs",
             "src/presentation/mod.rs",
         ];
         for relative in expected {

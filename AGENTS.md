@@ -19,14 +19,26 @@ read-only behavioral oracle; never edit it.
   completion standard. Preserve unsupported native data losslessly outside the
   editable Rust tree only as a temporary compatibility boundary, then add a
   typed DSL/IR/writer/exporter surface for it.
-- Generated projects are module-first (user directive, 2026-09-28): each
-  Mendix module owns a folder under `src/modules/<module>/` carrying its
-  domain model (entities, enumerations, documents, module security), DTOs
-  (everything non-persistent), services (microflows), ports, presentation
-  (pages and nanoflows) and markers — Clean Architecture folders inside
-  each module, mirroring how the module reads in Studio Pro. Project-level
-  layers keep only cross-cutting concerns (project security, navigation,
-  routes, shared infrastructure, composition). Dependencies point inward.
+- Generated projects are layer-first for the modules the project created
+  (user directive, 2026-09-29, superseding the module-first directive of
+  2026-09-28): one `src/domain/` and one `src/presentation/` for the whole
+  project, each concept — entities, DTOs, enumerations, documents, module
+  security, ports, markers, microflow services; pages, nanoflows, published
+  routes — holding a folder per Mendix module. The module folder inside a
+  concept is not a repetition of the layers: Mendix entity names are unique
+  per module and not across a project, so it is what keeps them apart.
+  Project-level layers keep cross-cutting concerns (project security,
+  navigation, shared infrastructure, composition). Dependencies point inward.
+- Modules the project *installed* are module-first, under
+  `src/packages/<module>/` (user directive, 2026-09-29):
+  `Projects$Module`'s `FromAppStore` decides which, and a package carries only
+  its types and contracts plus any REST surface the application serves. It
+  declares nothing — no `apply` anywhere in that tree — because an edit there
+  is lost the next time the module is upgraded, and `model/imported` stays its
+  only source of truth.
+- The scaffold and the importer write the same folders. A scaffolded concept
+  and an imported one are the same file in the same place; a divergence
+  between them is a defect, not a difference in taste.
 - Scaffolds must compile immediately, be transactional, refuse overwrites, and
   be configurable through explicit command options and project defaults.
 - Never commit private acceptance projects, their names, paths, metrics, or

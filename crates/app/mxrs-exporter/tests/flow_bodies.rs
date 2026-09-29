@@ -9,14 +9,20 @@ use std::process::Command;
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
 
+/// Every module's microflow services. The authored tree is layer-first, so
+/// `domain/services/` holds one folder per Mendix module.
 fn service_files(generated: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for module in std::fs::read_dir(generated.join("src/modules")).unwrap() {
-        let services = module.unwrap().path().join("services");
-        if !services.is_dir() {
+    let services = generated.join("src/domain/services");
+    if !services.is_dir() {
+        return paths;
+    }
+    for module in std::fs::read_dir(services).unwrap() {
+        let module = module.unwrap().path();
+        if !module.is_dir() {
             continue;
         }
-        for entry in std::fs::read_dir(services).unwrap() {
+        for entry in std::fs::read_dir(module).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|extension| extension == "rs") {
                 paths.push(path);
@@ -877,7 +883,7 @@ fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_nat
             "{needle}\n{source}"
         );
     }
-    let markers = std::fs::read_to_string(generated.join("src/modules/calls/markers.rs")).unwrap();
+    let markers = std::fs::read_to_string(generated.join("src/domain/markers/calls.rs")).unwrap();
     for name in [
         "Name", "Count", "Serial", "Weight", "Amount", "Active", "When", "Data",
     ] {

@@ -8,6 +8,11 @@ use crate::{Result, ScaffoldError, io_error};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectLayout {
     PreLayered,
+    /// The layered tree that put every Mendix module in a folder of its own
+    /// under `src/modules/`. Recognized so a command can say so instead of
+    /// reporting the project as unrecognizable, but nothing writes it any
+    /// more: re-import to get the layer-first tree.
+    ModuleFirst,
     Layered,
     Incomplete,
 }
@@ -16,6 +21,7 @@ impl ProjectLayout {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PreLayered => "pre-layered",
+            Self::ModuleFirst => "module-first",
             Self::Layered => "layered",
             Self::Incomplete => "incomplete",
         }
@@ -143,7 +149,11 @@ fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<b
     match layout_from(root, &source) {
         ProjectLayout::Layered => return Ok(false),
         ProjectLayout::PreLayered => {}
-        ProjectLayout::Incomplete => {
+        // Moving a module-first tree means moving the user's own source
+        // between folders, and guessing which of it was hand-edited. The
+        // importer already produces the layer-first tree from the model, so
+        // re-importing is the honest path and this refuses instead.
+        ProjectLayout::ModuleFirst | ProjectLayout::Incomplete => {
             return Err(ScaffoldError::UnsupportedLayerMigration(
                 root.display().to_string(),
             ));
@@ -154,12 +164,6 @@ fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<b
     let application = root.join("src/application/mod.rs");
     let presentation = root.join("src/presentation/mod.rs");
     transaction.create(&application, crate::templates::application_layer())?;
-    // A project that already carries the module index keeps it; migration
-    // adds what is missing rather than replacing what is there.
-    let modules = root.join("src/modules/mod.rs");
-    if transaction.content(&modules)?.is_none() {
-        transaction.create(modules, crate::templates::modules_index())?;
-    }
     transaction.create(&presentation, crate::templates::empty_presentation_layer())?;
 
     let infrastructure = root.join("src/infrastructure/mod.rs");
@@ -193,20 +197,28 @@ fn layout_from(root: &Path, library: &str) -> ProjectLayout {
         {
             ProjectLayout::PreLayered
         }
-        (true, true) if complete_layered_layout(root, library) => ProjectLayout::Layered,
+        (true, true) if complete_layered_layout(root, library) => {
+            // A `src/modules/` tree is the earlier layered shape. Naming it is
+            // what keeps the diagnostic honest: the module is there, the
+            // layout moved.
+            if root.join("src/modules/mod.rs").is_file() {
+                ProjectLayout::ModuleFirst
+            } else {
+                ProjectLayout::Layered
+            }
+        }
         _ => ProjectLayout::Incomplete,
     }
 }
 
 fn complete_layered_layout(root: &Path, library: &str) -> bool {
-    ["src/modules/mod.rs", "src/infrastructure/mod.rs"]
+    ["src/domain/mod.rs", "src/infrastructure/mod.rs"]
         .iter()
         .all(|relative| root.join(relative).is_file())
         && [
             "pub mod application;",
             "pub mod domain;",
             "pub mod infrastructure;",
-            "pub mod modules;",
             "pub mod presentation;",
         ]
         .iter()
@@ -244,7 +256,6 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
                         "pub mod application;",
                         "pub mod domain;",
                         "pub mod infrastructure;",
-                        "pub mod modules;",
                         "pub mod presentation;",
                     ]
                     .map(str::to_string),
@@ -405,7 +416,6 @@ mod tests {
                     "pub mod application;\n",
                     "pub mod domain;\n",
                     "pub mod infrastructure;\n",
-                    "pub mod modules;\n",
                     "pub mod presentation;\n\n",
                     "pub fn build() {}\n\n",
                     "#[mxrs::application(version = \"11.12.1\", ",
@@ -414,7 +424,6 @@ mod tests {
             ),
             ("src/domain/mod.rs", "pub fn build() {}\n"),
             ("src/application/mod.rs", ""),
-            ("src/modules/mod.rs", ""),
             ("src/infrastructure/mod.rs", ""),
             ("src/presentation/mod.rs", ""),
         ] {
@@ -651,13 +660,13 @@ mod tests {
             assert!(applied.applied);
             for relative in [
                 "src/application/mod.rs",
-                "src/modules/mod.rs",
                 "src/presentation/mod.rs",
-                "src/modules/mod.rs",
                 "src/infrastructure/mod.rs",
             ] {
                 assert!(root.join(relative).is_file(), "missing {relative}");
             }
+            // Migration creates the layers, never a module tree.
+            assert!(!root.join("src/modules").exists());
             assert_eq!(
                 std::fs::read_to_string(root.join("src/domain/mod.rs")).unwrap(),
                 domain

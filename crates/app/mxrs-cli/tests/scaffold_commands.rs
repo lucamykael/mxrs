@@ -82,11 +82,22 @@ fn generating_an_artifact_reports_created_files_and_the_build_command() {
     let rendered = text(&output);
     assert!(rendered.contains(&format!(
         "  create  {}",
-        root.join("src/modules/sales/domain/entities/order.rs").display()
+        root.join("src/domain/entities/sales/order.rs").display()
     )));
+    // The first entity creates the concept index and its module folder index,
+    // and updates the layer index that already existed.
+    for created in [
+        "src/domain/entities/mod.rs",
+        "src/domain/entities/sales/mod.rs",
+    ] {
+        assert!(
+            rendered.contains(&format!("  create  {}", root.join(created).display())),
+            "{created}: {rendered}"
+        );
+    }
     assert!(rendered.contains(&format!(
         "  update  {}",
-        root.join("src/modules/sales/domain/mod.rs").display()
+        root.join("src/domain/mod.rs").display()
     )));
     assert!(rendered.ends_with("\nDone. Run:\n  cargo mxrs build\n"));
 }
@@ -148,14 +159,14 @@ fn quality_integration_and_ci_scaffolds_emit_consumable_files() {
     // Validations and integrations are server-side use cases, so they land in
     // the application layer rather than next to the model declarations.
     assert!(
-        root.join("src/modules/sales/services/validate_order.rs")
+        root.join("src/domain/services/sales/validate_order.rs")
             .is_file()
     );
     assert!(
-        root.join("src/modules/sales/integrations/sync_orders.rs")
+        root.join("src/domain/integrations/sales/sync_orders.rs")
             .is_file()
     );
-    assert!(!root.join("src/modules/sales/domain/validations").exists());
+    assert!(!root.join("src/domain/validations/sales").exists());
 
     assert!(
         scaffold(&root, &["evaluation", "new", "Architecture"])
@@ -267,11 +278,9 @@ fn a_dry_run_renders_the_json_document_without_touching_the_project() {
     let written: Value = serde_json::from_slice(&written.stdout).unwrap();
     assert_eq!(written["files"], document["files"]);
     assert!(
-        std::fs::read_to_string(
-            root.join("src/modules/sales/presentation/pages/order_overview.rs")
-        )
-        .unwrap()
-        .contains("page.allow_role(\"Sales.User\");")
+        std::fs::read_to_string(root.join("src/presentation/pages/sales/order_overview.rs"))
+            .unwrap()
+            .contains("page.allow_role(\"Sales.User\");")
     );
 }
 
@@ -296,21 +305,17 @@ fn listing_advertises_only_catalogued_generators_and_destroying_removes_their_fi
     for command in SCAFFOLD_COMMANDS {
         assert!(rows.contains(&format!("{}\t{}", command.name, command.destination).as_str()));
     }
-    assert!(registered.contains("enumeration:Sales.Status\t2"));
+    assert!(registered.contains("enumeration:Sales.Status\t3"));
 
     let destroyed = scaffold(&root, &["scaffold", "destroy", "enumeration:Sales.Status"]);
     assert!(destroyed.status.success());
     assert!(text(&destroyed).contains("  remove  "));
     // Only files are removed, as in mxrb: an emptied directory is left in
     // place rather than pruned, so nothing outside the manifest is touched.
+    assert!(!root.join("src/domain/enumerations/sales/mod.rs").exists());
     assert!(
         !root
-            .join("src/modules/sales/domain/enumerations/mod.rs")
-            .exists()
-    );
-    assert!(
-        !root
-            .join("src/modules/sales/domain/enumerations/status.rs")
+            .join("src/domain/enumerations/sales/status.rs")
             .exists()
     );
     assert!(
@@ -475,14 +480,14 @@ fn the_constant_and_scheduled_event_generators_write_their_families_and_registry
 
     let constant = scaffold(&root, &["constant", "new", "Sales.ApiEndpoint"]);
     assert!(constant.status.success(), "{:?}", constant.stderr);
-    let path = root.join("src/modules/sales/domain/documents/api_endpoint.rs");
+    let path = root.join("src/domain/documents/sales/api_endpoint.rs");
     assert!(text(&constant).contains(&format!("  create  {}", path.display())));
     let source = std::fs::read_to_string(&path).unwrap();
     assert!(source.contains("module.constant(\"ApiEndpoint\""));
 
     let event = scaffold(&root, &["scheduled-event", "new", "Sales.SE_ExpireCarts"]);
     assert!(event.status.success(), "{:?}", event.stderr);
-    let path = root.join("src/modules/sales/domain/documents/se_expire_carts.rs");
+    let path = root.join("src/domain/documents/sales/se_expire_carts.rs");
     assert!(text(&event).contains(&format!("  create  {}", path.display())));
     // Event and handler land in one file under one name, as in mxrb's
     // "scheduled event and handler" template.
@@ -539,7 +544,7 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     );
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown page chain"));
-    assert!(!root.join("src/modules/sales/presentation/pages").exists());
+    assert!(!root.join("src/presentation/pages/sales").exists());
 
     let output = scaffold(
         &root,
@@ -557,16 +562,19 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     // its loader, both refresh flows and the page — and the slice now spans
     // three layers instead of landing entirely under `src/domain/`.
     for (layer, relative) in [
-        ("domain", "domain/entities/order_overview.rs"),
-        ("services", "services/act_load_order_overview.rs"),
-        ("services", "services/act_refresh_order_overview.rs"),
+        ("domain", "domain/entities/sales/order_overview.rs"),
+        ("domain", "domain/services/sales/act_load_order_overview.rs"),
+        (
+            "domain",
+            "domain/services/sales/act_refresh_order_overview.rs",
+        ),
         (
             "presentation",
-            "presentation/nanoflows/nan_refresh_order_overview.rs",
+            "presentation/nanoflows/sales/nan_refresh_order_overview.rs",
         ),
-        ("presentation", "presentation/pages/order_overview.rs"),
+        ("presentation", "presentation/pages/sales/order_overview.rs"),
     ] {
-        let path = root.join("src/modules/sales").join(relative);
+        let path = root.join("src").join(relative);
         assert!(
             rendered.contains(&format!("  create  {}", path.display())),
             "{layer}/{relative}: {rendered}"
