@@ -281,6 +281,16 @@ fn import_cargo_project_inner(
         ApiMode::Axum => collect_published_services(&project)?,
         _ => Vec::new(),
     };
+    let export_mappings = collect_export_mappings(
+        &project,
+        &published_services
+            .iter()
+            .flat_map(|service| &service.routes)
+            .flat_map(|route| &route.operations)
+            .filter(|operation| !operation.export_mapping.is_empty())
+            .map(|operation| operation.export_mapping.clone())
+            .collect(),
+    )?;
     drop(project);
 
     let imported = destination.join("model/imported");
@@ -365,22 +375,61 @@ fn import_cargo_project_inner(
         generated_module(&mut generated_modules, &module.module_name).ports_actions =
             Some(render_action_port_file(module));
     }
+    let mapping_targets: HashMap<String, MappingTarget> = export_mappings
+        .iter()
+        .map(|mapping| {
+            (
+                mapping.qualified_name.clone(),
+                MappingTarget {
+                    module_stem: module_stem(&mapping.module_name),
+                    file_stem: mapping.file_stem.clone(),
+                },
+            )
+        })
+        .collect();
+    // A module joins the HTTP layer either by publishing a service or by
+    // owning an export mapping a published operation applies.
     for stem in published_services
         .iter()
         .map(|service| module_stem(&service.module_name))
+        .chain(
+            export_mappings
+                .iter()
+                .map(|mapping| module_stem(&mapping.module_name)),
+        )
         .collect::<std::collections::BTreeSet<_>>()
     {
-        let owned: Vec<&PublishedService> = published_services
+        let services: Vec<&PublishedService> = published_services
             .iter()
             .filter(|service| module_stem(&service.module_name) == stem)
             .collect();
-        let module_name = owned[0].module_name.clone();
-        let files = owned
+        let mappings: Vec<&ExportMappingDocument> = export_mappings
             .iter()
-            .map(|service| (service.file_stem.clone(), render_published_service(service)))
+            .filter(|mapping| module_stem(&mapping.module_name) == stem)
             .collect();
-        generated_module(&mut generated_modules, &module_name).http =
-            Some((render_module_http_index(&module_name, &owned), files));
+        let Some(module_name) = services
+            .first()
+            .map(|service| service.module_name.clone())
+            .or_else(|| mappings.first().map(|mapping| mapping.module_name.clone()))
+        else {
+            continue;
+        };
+        generated_module(&mut generated_modules, &module_name).http = Some(GeneratedHttp {
+            index: render_module_http_index(&module_name, &services, !mappings.is_empty()),
+            services: services
+                .iter()
+                .map(|service| {
+                    (
+                        service.file_stem.clone(),
+                        render_published_service(service, &mapping_targets),
+                    )
+                })
+                .collect(),
+            mappings: mappings
+                .iter()
+                .map(|mapping| (mapping.file_stem.clone(), render_export_mapping(mapping)))
+                .collect(),
+        });
     }
     collect_marker_sources(
         &marker_manifest,
@@ -2828,7 +2877,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source is organized module-first, the way the project reads in Studio Pro: each Mendix module owns a folder under `src/modules/<module>/` carrying its domain model (`domain/entities/` with one `#[derive(MxEntity)]` struct per persisted entity, `domain/enumerations/` with one `#[derive(MxEnumeration)]` enum per enumeration, `domain/documents.rs` for constants/regular expressions/scheduled events/menus, `domain/security.rs` for module roles), its non-persistent entities under `dto/`, each supported server microflow as an individual service declaration under `services/`, client-side pages and nanoflows under `presentation/`, generated port contracts under `ports/`, and its compile-time model markers in `markers.rs`. Entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place. Published REST services become real axum routers: each module's `presentation/http/` carries one file per service with a handler per operation, calling the microflow the model bound to it. Project-level concerns stay in the crate-wide layers: the shared axum state and error type under `src/presentation/http/`, controllers and navigation beside them; repositories, database adapters, the markers facade, and imported-model persistence under `src/infrastructure/`; project security under `src/domain/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nSupported server-side microflows are reconstructed as typed service declarations; each module's `presentation/nanoflows/` is the client-side counterpart. `cargo run -- serve [model.mpr]` boots the built model and serves the published routes; a REST operation answers with the entity's stored attributes, because the model's export mappings are preserved in `model/imported` and are not applied yet. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source is organized module-first, the way the project reads in Studio Pro: each Mendix module owns a folder under `src/modules/<module>/` carrying its domain model (`domain/entities/` with one `#[derive(MxEntity)]` struct per persisted entity, `domain/enumerations/` with one `#[derive(MxEnumeration)]` enum per enumeration, `domain/documents.rs` for constants/regular expressions/scheduled events/menus, `domain/security.rs` for module roles), its non-persistent entities under `dto/`, each supported server microflow as an individual service declaration under `services/`, client-side pages and nanoflows under `presentation/`, generated port contracts under `ports/`, and its compile-time model markers in `markers.rs`. Entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place. Published REST services become real axum routers: each module's `presentation/http/` carries one file per service with a handler per operation, calling the microflow the model bound to it, and one file per export mapping under `presentation/http/mappings/`. Project-level concerns stay in the crate-wide layers: the shared axum state and error type under `src/presentation/http/`, controllers and navigation beside them; repositories, database adapters, the markers facade, and imported-model persistence under `src/infrastructure/`; project security under `src/domain/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nSupported server-side microflows are reconstructed as typed service declarations; each module's `presentation/nanoflows/` is the client-side counterpart. `cargo run -- serve [model.mpr]` boots the built model and serves the published routes; an operation that declares an export mapping answers the JSON document that mapping describes, applied from its declaration in the owning module's `presentation/http/mappings/`, and an operation without one answers the entity's stored attributes. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -4340,10 +4389,9 @@ fn render_flow_runtime() -> String {
      \x20       &mut self.store\n\
      \x20   }\n\n\
      \x20   /// Serializes a flow result as JSON, reading object members from\n\
-     \x20   /// the store. This is the entity's own shape — the model's REST\n\
-     \x20   /// export mappings are preserved in `model/imported` and are not\n\
-     \x20   /// applied here yet, so a published operation answers with the\n\
-     \x20   /// stored attributes rather than the mapped document.\n\
+     \x20   /// the store. This is the entity's own shape, which is what a call\n\
+     \x20   /// without an export mapping answers; an operation that declares\n\
+     \x20   /// one is shaped by `ExportMapping::apply` instead.\n\
      \x20   pub fn json(&self, value: &FlowValue) -> Value {\n\
      \x20       match value {\n\
      \x20           FlowValue::Object(reference) => self.object_json(reference),\n\
@@ -4460,7 +4508,7 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
 /// `presentation/http/state.rs` — the axum state every handler extracts.
 fn render_http_state(project_name: &str) -> String {
     format!(
-        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse mxrs::ports::{{BootError, FlowValue, ServiceError, Variables}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n        }}\n    }}\n\n    /// Runs one microflow and serializes its result. A poisoned mutex is\n    /// recovered rather than propagated: a handler that panicked left the\n    /// store as it found it, because every call is its own unit of work.\n    pub fn call(&self, flow: &str, arguments: Variables) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(runtime.json(&result))\n    }}\n}}\n",
+        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{BootError, FlowValue, ServiceError, Variables}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n        }}\n    }}\n\n    /// Runs one microflow and serializes its result. A poisoned mutex is\n    /// recovered rather than propagated: a handler that panicked left the\n    /// store as it found it, because every call is its own unit of work.\n    pub fn call(&self, flow: &str, arguments: Variables) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(runtime.json(&result))\n    }}\n\n    /// Runs one microflow and shapes its result with the export mapping its\n    /// operation declares, so the response is the JSON document the model\n    /// publishes instead of the entity's stored attributes.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(mapping.apply(runtime.store(), &result))\n    }}\n}}\n",
         rust_string(&format!("build/{project_name}.mpr")),
     )
 }
@@ -4539,11 +4587,28 @@ fn render_http_module(services: &[PublishedService]) -> String {
     out
 }
 
-/// One module's `presentation/http/mod.rs`.
-fn render_module_http_index(module_name: &str, services: &[&PublishedService]) -> String {
-    let mut out = format!("//! The {module_name} module's published REST services.\n\n");
+/// One module's `presentation/http/mod.rs`. A module that owns only export
+/// mappings — because a sibling module's service applies them — declares them
+/// and no router.
+fn render_module_http_index(
+    module_name: &str,
+    services: &[&PublishedService],
+    has_mappings: bool,
+) -> String {
+    let subject = if services.is_empty() {
+        "export mappings its published REST operations answer through"
+    } else {
+        "published REST services"
+    };
+    let mut out = format!("//! The {module_name} module's {subject}.\n\n");
+    if has_mappings {
+        out.push_str("pub mod mappings;\n");
+    }
     for service in services {
         let _ = writeln!(out, "pub mod {};", service.file_stem);
+    }
+    if services.is_empty() {
+        return out;
     }
     out.push_str(
         "\nuse axum::Router;\n\nuse crate::presentation::http::AppState;\n\npub fn router() -> Router<AppState> {\n    Router::new()\n",
@@ -4555,9 +4620,85 @@ fn render_module_http_index(module_name: &str, services: &[&PublishedService]) -
     out
 }
 
+/// One export mapping as an editable declaration: the element tree the model
+/// declares, ready for [`mxrs::mapping::ExportMapping::apply`] at the HTTP
+/// boundary.
+fn render_export_mapping(mapping: &ExportMappingDocument) -> String {
+    let shape = if mapping.root.multiple {
+        "an array of"
+    } else {
+        "one"
+    };
+    let mut out = format!(
+        "//! `{}` — the JSON document the operations\n//! declaring it answer with: {shape} `{}`.\n",
+        mapping.qualified_name, mapping.root.entity,
+    );
+    for line in mapping
+        .documentation
+        .lines()
+        .filter(|line| !line.is_empty())
+    {
+        let _ = writeln!(out, "//!\n//! {line}");
+    }
+    out.push_str(
+        "\nuse mxrs::mapping::{ExportMapping, ObjectMapping};\n\n\
+         /// The mapping, exactly as the model's element tree declares it.\n\
+         pub fn mapping() -> ExportMapping {\n\
+         \x20   ExportMapping::new(\n",
+    );
+    let mut root = String::new();
+    render_mapped_object(&mut root, &mapping.root, 2);
+    let _ = writeln!(out, "{},", root.trim_end());
+    out.push_str("    )\n");
+    if mapping.send_nils {
+        // `NullValueOption: SendAsNil` — the document keeps the key.
+        out.push_str("    .sending_nils()\n");
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// One level of the element tree as a builder chain. `depth` counts four-space
+/// indents; `cargo fmt` normalizes the wrapping afterwards.
+fn render_mapped_object(out: &mut String, object: &MappedObject, depth: usize) {
+    let indent = "    ".repeat(depth);
+    let constructor = if object.multiple { "array" } else { "object" };
+    let _ = writeln!(
+        out,
+        "{indent}ObjectMapping::{constructor}({})",
+        rust_string(&object.entity)
+    );
+    for value in &object.values {
+        if value.key == value.attribute {
+            let _ = writeln!(out, "{indent}    .attribute({})", rust_string(&value.key));
+        } else {
+            let _ = writeln!(
+                out,
+                "{indent}    .value({}, {})",
+                rust_string(&value.key),
+                rust_string(&value.attribute)
+            );
+        }
+    }
+    for child in &object.children {
+        let mut nested = String::new();
+        render_mapped_object(&mut nested, child, depth + 2);
+        let _ = writeln!(
+            out,
+            "{indent}    .child(\n{indent}        {},\n{indent}        {},\n{},\n{indent}    )",
+            rust_string(&child.key),
+            rust_string(&child.association),
+            nested.trim_end(),
+        );
+    }
+}
+
 /// One published REST service: its axum router and one handler per
 /// operation, each calling the microflow the model bound to it.
-fn render_published_service(service: &PublishedService) -> String {
+fn render_published_service(
+    service: &PublishedService,
+    mappings: &HashMap<String, MappingTarget>,
+) -> String {
     let uses_path = service
         .routes
         .iter()
@@ -4610,9 +4751,42 @@ fn render_published_service(service: &PublishedService) -> String {
     if uses_path || uses_query {
         out.push_str("\nuse std::collections::HashMap;\n");
     }
+    // A handler that applies an export mapping names the declaration through
+    // the module that owns the mapping: its own, or a sibling's.
+    let own_stem = module_stem(&service.module_name);
+    let mut mapping_imports = String::new();
+    for stem in service
+        .routes
+        .iter()
+        .flat_map(|route| &route.operations)
+        .filter_map(|operation| mappings.get(&operation.export_mapping))
+        .map(|target| target.module_stem.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        if stem == own_stem {
+            mapping_imports.push_str("use super::mappings;\n");
+        } else {
+            let _ = writeln!(
+                mapping_imports,
+                "use crate::modules::{stem}::presentation::http::mappings as {stem}_mappings;"
+            );
+        }
+    }
+    // Only a bound parameter names a `FlowValue`; a service whose operations
+    // take none would carry an unused import.
+    let ports = if service
+        .routes
+        .iter()
+        .flat_map(|route| &route.operations)
+        .any(|operation| !operation.parameters.is_empty())
+    {
+        "FlowValue, Variables"
+    } else {
+        "Variables"
+    };
     let _ = write!(
         out,
-        "\nuse axum::extract::{{{}}};\nuse axum::routing::{{{}}};\nuse axum::{{Json, Router}};\nuse mxrs::ports::{{FlowValue, Variables}};\nuse serde_json::Value;\n\nuse crate::presentation::http::{{ApiError, AppState}};\n\npub fn router() -> Router<AppState> {{\n    Router::new()\n",
+        "\nuse axum::extract::{{{}}};\nuse axum::routing::{{{}}};\nuse axum::{{Json, Router}};\nuse mxrs::ports::{{{ports}}};\nuse serde_json::Value;\n\nuse crate::presentation::http::{{ApiError, AppState}};\n{mapping_imports}\npub fn router() -> Router<AppState> {{\n    Router::new()\n",
         extractors.join(", "),
         methods.join(", "),
     );
@@ -4642,7 +4816,34 @@ fn render_published_service(service: &PublishedService) -> String {
         if !operation.summary.is_empty() || !operation.documentation.is_empty() {
             out.push_str("///\n");
         }
-        let _ = writeln!(out, "/// Calls `{}`.", operation.microflow);
+        let applied = mappings.get(&operation.export_mapping).map(|target| {
+            let scope = if target.module_stem == own_stem {
+                "mappings".to_string()
+            } else {
+                format!("{}_mappings", target.module_stem)
+            };
+            format!("{scope}::{}::mapping()", target.file_stem)
+        });
+        match &applied {
+            Some(_) => {
+                let _ = writeln!(
+                    out,
+                    "/// Calls `{}`, answering through the\n/// `{}` export mapping.",
+                    operation.microflow, operation.export_mapping,
+                );
+            }
+            None if !operation.export_mapping.is_empty() => {
+                let _ = writeln!(
+                    out,
+                    "/// Calls `{}`. The model's\n/// `{}` export mapping stays preserved in `model/imported`: this\n/// operation answers the entity's stored attributes until the mapping\n/// declaration covers its element tree.",
+                    operation.microflow, operation.export_mapping,
+                );
+            }
+            // No mapping declared: Mendix answers the stored attributes too.
+            None => {
+                let _ = writeln!(out, "/// Calls `{}`.", operation.microflow);
+            }
+        }
         // axum resolves extractors in argument order, so a handler only
         // declares the ones its operation actually binds.
         let extracts = |source: ParameterSource, extractor: &'static str| {
@@ -4697,11 +4898,22 @@ fn render_published_service(service: &PublishedService) -> String {
                 parameter.microflow_parameter,
             );
         }
-        let _ = writeln!(
-            out,
-            "    Ok(Json(state.call({:?}, arguments)?))\n}}",
-            operation.microflow,
-        );
+        match &applied {
+            Some(mapping) => {
+                let _ = writeln!(
+                    out,
+                    "    Ok(Json(state.call_mapped({:?}, arguments, &{mapping})?))\n}}",
+                    operation.microflow,
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "    Ok(Json(state.call({:?}, arguments)?))\n}}",
+                    operation.microflow,
+                );
+            }
+        }
     }
     out
 }
@@ -4833,6 +5045,9 @@ struct ServiceOperation {
     summary: String,
     documentation: String,
     parameters: Vec<OperationParameter>,
+    /// Qualified export mapping the operation answers through, empty when the
+    /// model declares none.
+    export_mapping: String,
 }
 
 struct OperationParameter {
@@ -5012,6 +5227,10 @@ fn published_service(
                     .unwrap_or_default()
                     .to_string(),
                 parameters,
+                export_mapping: operation
+                    .get_str("ExportMapping")
+                    .unwrap_or_default()
+                    .to_string(),
             };
             match routes.iter_mut().find(|route| route.path == path) {
                 Some(route)
@@ -5046,6 +5265,262 @@ fn published_service(
             .to_string(),
         routes,
     })
+}
+
+/// One `ExportMappings$ExportMapping` the model declares, lowered into the
+/// declaration its module will expose.
+struct ExportMappingDocument {
+    module_name: String,
+    /// Qualified mapping name, e.g. `API_Rest.EM_Order_List`, as a published
+    /// operation names it.
+    qualified_name: String,
+    /// The file the module's HTTP folder writes this mapping to.
+    file_stem: String,
+    documentation: String,
+    /// `NullValueOption: SendAsNil` — an empty member answers `null` instead
+    /// of being left out.
+    send_nils: bool,
+    root: MappedObject,
+}
+
+/// One `ExportMappings$ObjectMappingElement`.
+struct MappedObject {
+    entity: String,
+    /// The association traversed from the parent; empty at the root.
+    association: String,
+    /// The JSON key this level nests under; empty at the root.
+    key: String,
+    /// `true` when the level is a JSON array — `(Array)|(Object)`.
+    multiple: bool,
+    values: Vec<MappedValue>,
+    children: Vec<MappedObject>,
+}
+
+/// One `ExportMappings$ValueMappingElement`.
+struct MappedValue {
+    /// The JSON key, which the model may have renamed away from the
+    /// attribute's own name.
+    key: String,
+    /// The attribute's own name, which is also its store member name.
+    attribute: String,
+}
+
+/// Where a generated export mapping declaration lives, so a service file can
+/// name it.
+struct MappingTarget {
+    module_stem: String,
+    file_stem: String,
+}
+
+/// Reads the export mappings `referenced` names, while the project is still
+/// open. A mapping the declaration surface cannot express — an XML-only
+/// element tree, a custom Java handler, a value converter, an element with no
+/// JSON key — is left out entirely, so the operations that declare it keep
+/// answering the entity's stored attributes rather than a half-applied
+/// document.
+fn collect_export_mappings(
+    project: &Project,
+    referenced: &std::collections::BTreeSet<String>,
+) -> Result<Vec<ExportMappingDocument>> {
+    if referenced.is_empty() {
+        return Ok(Vec::new());
+    }
+    let units = project.all_units()?;
+    let module_by_id = project
+        .modules()?
+        .into_iter()
+        .filter_map(|module| Some((module.id, module.name?)))
+        .collect::<HashMap<_, _>>();
+    let parent_by_id = units
+        .iter()
+        .map(|unit| (unit.unit_id.clone(), unit.container_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut mappings = Vec::new();
+    for unit in &units {
+        let document = project
+            .mpr()
+            .parse_contents(unit)
+            .map_err(mxrs_model::ModelError::from)?;
+        if document.get_str("$Type").ok() != Some("ExportMappings$ExportMapping") {
+            continue;
+        }
+        let Some(module_name) = owning_module(&unit.container_id, &parent_by_id, &module_by_id)
+        else {
+            continue;
+        };
+        let Some(mapping) = export_mapping(&document, &module_name) else {
+            continue;
+        };
+        if !referenced.contains(&mapping.qualified_name) {
+            continue;
+        }
+        mappings.push(mapping);
+    }
+    mappings.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
+    Ok(mappings)
+}
+
+fn export_mapping(
+    document: &mxrs_bson::Document,
+    module_name: &str,
+) -> Option<ExportMappingDocument> {
+    if document.get_bool("Excluded").unwrap_or(false) {
+        return None;
+    }
+    let name = document
+        .get_str("Name")
+        .ok()
+        .filter(|name| !name.is_empty())?;
+    // Mendix allows exactly one root element per mapping; more than one is
+    // not a document this declaration can describe.
+    let elements = documents_in(document, "Elements");
+    let [root] = elements.as_slice() else {
+        return None;
+    };
+    let root = mapped_object(root)?;
+    if !root.key.is_empty() || !root.association.is_empty() {
+        return None;
+    }
+    Some(ExportMappingDocument {
+        module_name: module_name.to_string(),
+        qualified_name: format!("{module_name}.{name}"),
+        file_stem: inner_file_stem(name),
+        documentation: document
+            .get_str("Documentation")
+            .unwrap_or_default()
+            .to_string(),
+        send_nils: document.get_str("NullValueOption").unwrap_or_default() == "SendAsNil",
+        root,
+    })
+}
+
+fn mapped_object(element: &mxrs_bson::Document) -> Option<MappedObject> {
+    if element.get_str("$Type").ok()? != "ExportMappings$ObjectMappingElement"
+        || !element
+            .get_str("CustomHandlerCall")
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return None;
+    }
+    let children = documents_in(element, "Children");
+    let entity = element.get_str("Entity").unwrap_or_default();
+    // Mendix wraps a *repeated* nested object in an element of its own: the
+    // wrapper carries the JSON key and no entity, its single object child
+    // carries the entity, the association and `MaxOccurs: -1`. The wrapper
+    // adds no level to the document — its child's own path already names the
+    // same key — so it collapses into that child.
+    if entity.is_empty() {
+        let [wrapped] = children.as_slice() else {
+            return None;
+        };
+        return mapped_object(wrapped);
+    }
+    // Multiplicity decides whether the key answers an array, and getting it
+    // wrong changes the document's shape, so an element that does not state
+    // it is not an element this declaration can describe.
+    // Studio Pro writes the bound as a 32-bit integer; read the 64-bit
+    // spelling too so a model that widened it still states its shape.
+    let occurs = element
+        .get_i32("MaxOccurs")
+        .map(i64::from)
+        .or_else(|_| element.get_i64("MaxOccurs"))
+        .ok()?;
+    let path = element.get_str("JsonPath").unwrap_or_default();
+    let key = object_json_key(path)?;
+    let association = element.get_str("Association").unwrap_or_default();
+    // A nested level is reached by association; the root is supplied by the
+    // flow result itself. Anything else is a level we cannot walk to.
+    if key.is_some() == association.is_empty() {
+        return None;
+    }
+    // At the root the path states the shape too, as `(Array)|(Object)`. The
+    // two must agree; if they do not, the element is not read the way this
+    // declaration would read it.
+    if key.is_none() && json_path_segments(path).contains(&"(Array)") != (occurs != 1) {
+        return None;
+    }
+    let mut values = Vec::new();
+    let mut nested = Vec::new();
+    for child in children {
+        match child.get_str("$Type").ok()? {
+            "ExportMappings$ValueMappingElement" => values.push(mapped_value(&child)?),
+            "ExportMappings$ObjectMappingElement" => nested.push(mapped_object(&child)?),
+            _ => return None,
+        }
+    }
+    if values.is_empty() && nested.is_empty() {
+        return None;
+    }
+    Some(MappedObject {
+        entity: entity.to_string(),
+        association: association.to_string(),
+        key: key.unwrap_or_default(),
+        multiple: occurs != 1,
+        values,
+        children: nested,
+    })
+}
+
+fn mapped_value(element: &mxrs_bson::Document) -> Option<MappedValue> {
+    // A converter rewrites the value on its way out; the declaration has no
+    // surface for one yet, so the whole mapping steps aside.
+    if !element.get_str("Converter").unwrap_or_default().is_empty() {
+        return None;
+    }
+    let attribute = element
+        .get_str("Attribute")
+        .ok()
+        .filter(|attribute| !attribute.is_empty())?
+        .rsplit('.')
+        .next()
+        .filter(|attribute| !attribute.is_empty())?
+        .to_string();
+    let key = value_json_key(element.get_str("JsonPath").unwrap_or_default())?;
+    Some(MappedValue { key, attribute })
+}
+
+/// `(Object)` and `(Array)` mark structure in a mapping element's `JsonPath`;
+/// every other segment names a key. The model's `ExposedName` is the Studio
+/// Pro caption, which can differ in case from the key the document carries —
+/// so the path, not the caption, is the key.
+fn json_path_segments(path: &str) -> Vec<&str> {
+    path.split('|')
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn json_path_marker(segment: &str) -> bool {
+    matches!(segment, "(Object)" | "(Array)")
+}
+
+/// The JSON key a value element answers under, e.g. `lane` from
+/// `(Object)|lane`.
+fn value_json_key(path: &str) -> Option<String> {
+    let segments = json_path_segments(path);
+    let last = segments.last()?;
+    (!json_path_marker(last)).then(|| (*last).to_string())
+}
+
+/// The JSON key an object element nests under, or `None` at the root, which
+/// *is* the document: `(Object)` and `(Array)|(Object)` are the root shapes,
+/// `(Object)|metadata` a single object under `metadata`, and
+/// `(Object)|data|(Object)` the repeated object under `data`. Whether a key
+/// answers an array comes from `MaxOccurs`, not from the path — Mendix writes
+/// the `(Array)` marker only at the root.
+fn object_json_key(path: &str) -> Option<Option<String>> {
+    let mut segments = json_path_segments(path);
+    if segments.last() == Some(&"(Object)") {
+        segments.pop();
+    }
+    if segments.last() == Some(&"(Array)") {
+        segments.pop();
+    }
+    match segments.pop() {
+        Some(segment) if json_path_marker(segment) => None,
+        Some(segment) => Some(Some(segment.to_string())),
+        None => Some(None),
+    }
 }
 
 /// The documents inside a BSON array field, in declaration order.
@@ -5739,9 +6214,20 @@ struct GeneratedModule {
     ports_actions: Option<String>,
     /// `markers.rs` — the module's compile-time model markers.
     markers: Option<String>,
-    /// `presentation/http/` — the module's published REST services: the
-    /// folder index plus one file per service.
-    http: Option<(String, Vec<(String, String)>)>,
+    /// `presentation/http/` — the module's published REST services and the
+    /// export mappings their operations apply.
+    http: Option<GeneratedHttp>,
+}
+
+/// One module's `presentation/http/` folder: its index, one file per published
+/// REST service, and one file per export mapping a published operation
+/// applies. A module can own mappings without publishing a service of its own.
+struct GeneratedHttp {
+    index: String,
+    /// `(file stem, source)` per published REST service.
+    services: Vec<(String, String)>,
+    /// `(file stem, source)` per export mapping declaration.
+    mappings: Vec<(String, String)>,
 }
 
 fn generated_module<'a>(
@@ -5875,13 +6361,34 @@ fn write_modules_layer(
                     &module.nanoflows,
                 )?;
             }
-            if let Some((index, files)) = &module.http {
+            if let Some(GeneratedHttp {
+                index,
+                services,
+                mappings,
+            }) = &module.http
+            {
                 presentation_index.push_str("pub mod http;\n");
                 let http = presentation.join("http");
                 std::fs::create_dir_all(&http).map_err(|source| io_error(&http, source))?;
                 write_text(&http.join("mod.rs"), index)?;
-                for (stem, source) in files {
+                for (stem, source) in services {
                     write_text(&http.join(format!("{stem}.rs")), source)?;
+                }
+                if !mappings.is_empty() {
+                    let directory = http.join("mappings");
+                    std::fs::create_dir_all(&directory)
+                        .map_err(|source| io_error(&directory, source))?;
+                    let mut index = format!(
+                        "//! The {} module's export mappings: the JSON documents its\n//! published REST operations answer with.\n\n",
+                        module.name
+                    );
+                    for (stem, _) in mappings {
+                        let _ = writeln!(index, "pub mod {stem};");
+                    }
+                    write_text(&directory.join("mod.rs"), &index)?;
+                    for (stem, source) in mappings {
+                        write_text(&directory.join(format!("{stem}.rs")), source)?;
+                    }
                 }
             }
             if !module.pages.is_empty() {
@@ -6534,6 +7041,7 @@ pub fn declaration() -> ModuleDecl {
                         "Summary": "Get one order",
                         "Documentation": "",
                         "Microflow": "Sales.ACT_GetOrder",
+                        "ExportMapping": "Sales.EM_Order",
                         "Parameters": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
                             "$Type": "Rest$RestOperationParameter",
                             "Name": "id",
@@ -6571,7 +7079,14 @@ pub fn declaration() -> ModuleDecl {
         assert_eq!(service.routes[0].path, "/api/v1/orders/{id}");
         assert_eq!(service.routes[0].operations.len(), 2);
 
-        let rendered = render_published_service(&service);
+        let targets = HashMap::from([(
+            "Sales.EM_Order".to_string(),
+            MappingTarget {
+                module_stem: "sales".to_string(),
+                file_stem: "em_order".to_string(),
+            },
+        )]);
+        let rendered = render_published_service(&service, &targets);
         assert!(
             rendered.contains(
                 ".route(\n            \"/api/v1/orders/{id}\",\n            get(get_orders_act_get_order).post(post_orders_act_put_order),\n        )"
@@ -6583,8 +7098,28 @@ pub fn declaration() -> ModuleDecl {
         // Only the method that opens the chain is imported as a function.
         assert!(rendered.contains("use axum::routing::{get};"), "{rendered}");
         assert!(rendered.contains("/// Get one order"), "{rendered}");
+        // The operation that declares an export mapping applies it, naming
+        // the declaration through its own module's folder; the one that
+        // declares none keeps answering the entity's stored attributes.
         assert!(
-            rendered.contains("/// Calls `Sales.ACT_GetOrder`."),
+            rendered.contains(
+                "/// Calls `Sales.ACT_GetOrder`, answering through the\n/// `Sales.EM_Order` export mapping."
+            ),
+            "{rendered}"
+        );
+        assert!(rendered.contains("use super::mappings;"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "state.call_mapped(\"Sales.ACT_GetOrder\", arguments, &mappings::em_order::mapping())"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("/// Calls `Sales.ACT_PutOrder`."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("state.call(\"Sales.ACT_PutOrder\", arguments)"),
             "{rendered}"
         );
         assert!(
@@ -6600,6 +7135,208 @@ pub fn declaration() -> ModuleDecl {
             "{rendered}"
         );
         assert!(!rendered.contains("ACT_Options"), "{rendered}");
+    }
+
+    fn value_element(attribute: &str, json_path: &str) -> mxrs_bson::Bson {
+        mxrs_bson::Bson::Document(mxrs_bson::doc! {
+            "$Type": "ExportMappings$ValueMappingElement",
+            "ElementType": "Value",
+            "Attribute": attribute,
+            "Converter": "",
+            "JsonPath": json_path,
+            // Studio Pro's caption, which can differ in case from the key the
+            // document carries — the JSON path is the key.
+            "ExposedName": "ignored",
+        })
+    }
+
+    fn object_element(
+        entity: &str,
+        association: &str,
+        json_path: &str,
+        occurs: i32,
+        children: Vec<mxrs_bson::Bson>,
+    ) -> mxrs_bson::Bson {
+        mxrs_bson::Bson::Document(mxrs_bson::doc! {
+            "$Type": "ExportMappings$ObjectMappingElement",
+            "ElementType": "Object",
+            "Entity": entity,
+            "Association": association,
+            "CustomHandlerCall": "",
+            "JsonPath": json_path,
+            "MinOccurs": 0i32,
+            "MaxOccurs": occurs,
+            "ObjectHandling": "Find",
+            "Children": mxrs_bson::build_array(children, 3),
+        })
+    }
+
+    /// An export mapping lowers into the element tree the model declares. The
+    /// JSON path names each key; `MaxOccurs` — not the path — decides whether
+    /// a key answers an array, because Mendix writes the `(Array)` marker only
+    /// at the root and wraps a repeated nested object in an entity-less
+    /// element that adds no level to the document.
+    #[test]
+    fn export_mappings_lower_into_a_declaration_the_boundary_can_apply() {
+        let mapping = mxrs_bson::doc! {
+            "$Type": "ExportMappings$ExportMapping",
+            "Name": "EM_Order_List",
+            "Documentation": "The order feed.",
+            "NullValueOption": "SendAsNil",
+            "Elements": mxrs_bson::build_array(vec![object_element(
+                "Sales.Order",
+                "",
+                "(Array)|(Object)",
+                -1,
+                vec![
+                    value_element("Sales.Order.OrderNumber", "(Array)|(Object)|OrderNumber"),
+                    value_element("Sales.Order.OrderDate", "(Array)|(Object)|placed_at"),
+                    // One customer per order: a single element carrying the
+                    // entity, the association and `MaxOccurs: 1`.
+                    object_element(
+                        "Sales.Customer",
+                        "Sales.Order_Customer",
+                        "(Array)|(Object)|customer",
+                        1,
+                        vec![value_element(
+                            "Sales.Customer.Name",
+                            "(Array)|(Object)|customer|Name",
+                        )],
+                    ),
+                    // Many tickets per order: the entity-less wrapper naming
+                    // the key, around the element that does the work.
+                    object_element(
+                        "",
+                        "",
+                        "(Array)|(Object)|tickets",
+                        1,
+                        vec![object_element(
+                            "Sales.Ticket",
+                            "Sales.Ticket_Customer",
+                            "(Array)|(Object)|tickets|(Object)",
+                            -1,
+                            vec![value_element(
+                                "Sales.Ticket.Priority",
+                                "(Array)|(Object)|tickets|(Object)|priority",
+                            )],
+                        )],
+                    ),
+                ],
+            )], 3),
+        };
+
+        let lowered = export_mapping(&mapping, "Sales").expect("expressible mapping");
+        assert_eq!(lowered.qualified_name, "Sales.EM_Order_List");
+        assert_eq!(lowered.file_stem, "em_order_list");
+        assert!(lowered.send_nils);
+        assert!(lowered.root.multiple);
+        assert!(lowered.root.association.is_empty() && lowered.root.key.is_empty());
+        assert_eq!(lowered.root.values[1].key, "placed_at");
+        assert_eq!(lowered.root.values[1].attribute, "OrderDate");
+        assert_eq!(lowered.root.children[0].key, "customer");
+        assert_eq!(lowered.root.children[0].association, "Sales.Order_Customer");
+        assert!(!lowered.root.children[0].multiple);
+        // The wrapper collapsed: one level, under the key it named.
+        assert_eq!(lowered.root.children[1].key, "tickets");
+        assert_eq!(lowered.root.children[1].entity, "Sales.Ticket");
+        assert_eq!(
+            lowered.root.children[1].association,
+            "Sales.Ticket_Customer"
+        );
+        assert!(lowered.root.children[1].multiple);
+
+        let rendered = render_export_mapping(&lowered);
+        assert!(
+            rendered.contains(
+                "//! `Sales.EM_Order_List` — the JSON document the operations\n//! declaring it answer with: an array of `Sales.Order`."
+            ),
+            "{rendered}"
+        );
+        assert!(rendered.contains("//! The order feed."), "{rendered}");
+        assert!(
+            rendered.contains("ObjectMapping::array(\"Sales.Order\")"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(".attribute(\"OrderNumber\")"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(".value(\"placed_at\", \"OrderDate\")"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                ".child(\n                \"customer\",\n                \"Sales.Order_Customer\",\n                ObjectMapping::object(\"Sales.Customer\")\n                    .attribute(\"Name\"),\n            )"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                ".child(\n                \"tickets\",\n                \"Sales.Ticket_Customer\",\n                ObjectMapping::array(\"Sales.Ticket\")"
+            ),
+            "{rendered}"
+        );
+        assert!(rendered.contains(".sending_nils()"), "{rendered}");
+    }
+
+    /// A mapping the declaration cannot express steps aside whole, so the
+    /// operations that declare it keep answering the stored attributes rather
+    /// than a half-applied document.
+    #[test]
+    fn inexpressible_export_mappings_are_left_out_entirely() {
+        let mapping = |element: mxrs_bson::Document| {
+            mxrs_bson::doc! {
+                "$Type": "ExportMappings$ExportMapping",
+                "Name": "EM_Order",
+                "Documentation": "",
+                "NullValueOption": "LeaveOutElement",
+                "Elements": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(element)], 3),
+            }
+        };
+        let root = |children: Vec<mxrs_bson::Bson>| {
+            let mxrs_bson::Bson::Document(element) =
+                object_element("Sales.Order", "", "(Object)", 1, children)
+            else {
+                unreachable!("object_element always builds a document")
+            };
+            element
+        };
+        let number = || value_element("Sales.Order.OrderNumber", "(Object)|OrderNumber");
+
+        assert!(export_mapping(&mapping(root(vec![number()])), "Sales").is_some());
+        // An XML-only element tree has no JSON keys to answer under.
+        assert!(
+            export_mapping(
+                &mapping(root(vec![value_element("Sales.Order.OrderNumber", "")])),
+                "Sales"
+            )
+            .is_none()
+        );
+        // A converter rewrites the value on its way out.
+        let converted = mxrs_bson::Bson::Document(mxrs_bson::doc! {
+            "$Type": "ExportMappings$ValueMappingElement",
+            "ElementType": "Value",
+            "Attribute": "Sales.Order.OrderNumber",
+            "Converter": "Sales.PadNumber",
+            "JsonPath": "(Object)|OrderNumber",
+        });
+        assert!(export_mapping(&mapping(root(vec![converted])), "Sales").is_none());
+        // A custom Java handler shapes the element itself.
+        let mut handled = root(vec![number()]);
+        handled.insert("CustomHandlerCall", "Sales.ShapeOrder");
+        assert!(export_mapping(&mapping(handled), "Sales").is_none());
+        // An element with neither attributes nor children describes nothing.
+        assert!(export_mapping(&mapping(root(Vec::new())), "Sales").is_none());
+        // Multiplicity the element does not state is multiplicity we would
+        // have to guess, and it decides the document's shape.
+        let mut unstated = root(vec![number()]);
+        unstated.remove("MaxOccurs");
+        assert!(export_mapping(&mapping(unstated), "Sales").is_none());
+        // The root path and `MaxOccurs` disagree about the shape.
+        let mut disagreeing = root(vec![number()]);
+        disagreeing.insert("MaxOccurs", -1i32);
+        assert!(export_mapping(&mapping(disagreeing), "Sales").is_none());
     }
 
     /// A declared Java action with a fully port-typed signature becomes an
@@ -7566,21 +8303,111 @@ pub fn declaration() -> ModuleDecl {
                     "Documentation": "",
                     "Excluded": false,
                     "ExportLevel": "Hidden",
-                    "Resources": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
-                        "$ID": uuid::Uuid::new_v4().to_string(),
-                        "$Type": "Rest$PublishedRestServiceResource",
-                        "Name": "orders",
-                        "Documentation": "",
-                        "Operations": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                    "Resources": mxrs_bson::build_array(vec![
+                        mxrs_bson::Bson::Document(mxrs_bson::doc! {
                             "$ID": uuid::Uuid::new_v4().to_string(),
-                            "$Type": "Rest$PublishedRestServiceOperation",
-                            "HttpMethod": "Get",
-                            "Path": "",
-                            "Summary": "Ping the order module",
+                            "$Type": "Rest$PublishedRestServiceResource",
+                            "Name": "orders",
                             "Documentation": "",
-                            "Microflow": "Sales.ACT_Ping",
-                            "Parameters": mxrs_bson::build_array(vec![], 3),
-                        })], 3),
+                            "Operations": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                                "$ID": uuid::Uuid::new_v4().to_string(),
+                                "$Type": "Rest$PublishedRestServiceOperation",
+                                "HttpMethod": "Get",
+                                "Path": "",
+                                "Summary": "Ping the order module",
+                                "Documentation": "",
+                                "Microflow": "Sales.ACT_Ping",
+                                "Parameters": mxrs_bson::build_array(vec![], 3),
+                            })], 3),
+                        }),
+                        // An operation that declares an export mapping, so the
+                        // generated handler applies the model's document shape
+                        // instead of the entity's stored attributes.
+                        mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                            "$ID": uuid::Uuid::new_v4().to_string(),
+                            "$Type": "Rest$PublishedRestServiceResource",
+                            "Name": "order",
+                            "Documentation": "",
+                            "Operations": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                                "$ID": uuid::Uuid::new_v4().to_string(),
+                                "$Type": "Rest$PublishedRestServiceOperation",
+                                "HttpMethod": "Get",
+                                "Path": "",
+                                "Summary": "Read one order",
+                                "Documentation": "",
+                                "Microflow": "Sales.ACT_GetOrder",
+                                "ExportMapping": "Sales.EM_Order",
+                                "Parameters": mxrs_bson::build_array(vec![], 3),
+                            })], 3),
+                        }),
+                    ], 3),
+                },
+                None,
+            )
+            .unwrap();
+            // The export mapping the operation above answers through. The DSL
+            // has no mapping authoring surface yet, so it arrives the way the
+            // model carries it.
+            mpr.insert_unit(
+                &sales_id,
+                "Documents",
+                mxrs_bson::doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": "ExportMappings$ExportMapping",
+                    "Name": "EM_Order",
+                    "Documentation": "The order document.",
+                    "Excluded": false,
+                    "ExportLevel": "Hidden",
+                    "NullValueOption": "LeaveOutElement",
+                    "Elements": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$ID": uuid::Uuid::new_v4().to_string(),
+                        "$Type": "ExportMappings$ObjectMappingElement",
+                        "ElementType": "Object",
+                        "Entity": "Sales.Order",
+                        "Association": "",
+                        "CustomHandlerCall": "",
+                        "JsonPath": "(Object)",
+                        "MinOccurs": 1i32,
+                        "MaxOccurs": 1i32,
+                        "ObjectHandling": "Parameter",
+                        "Children": mxrs_bson::build_array(vec![
+                            mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                                "$ID": uuid::Uuid::new_v4().to_string(),
+                                "$Type": "ExportMappings$ValueMappingElement",
+                                "ElementType": "Value",
+                                "Attribute": "Sales.Order.Number",
+                                "Converter": "",
+                                "JsonPath": "(Object)|Number",
+                            }),
+                            mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                                "$ID": uuid::Uuid::new_v4().to_string(),
+                                "$Type": "ExportMappings$ValueMappingElement",
+                                "ElementType": "Value",
+                                "Attribute": "Sales.Order.SubmittedAt",
+                                "Converter": "",
+                                "JsonPath": "(Object)|submitted_at",
+                            }),
+                            mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                                "$ID": uuid::Uuid::new_v4().to_string(),
+                                "$Type": "ExportMappings$ObjectMappingElement",
+                                "ElementType": "Object",
+                                "Entity": "Sales.Customer",
+                                "Association": "Sales.Order_Customer",
+                                "CustomHandlerCall": "",
+                                "JsonPath": "(Object)|customer",
+                                "MinOccurs": 0i32,
+                                "MaxOccurs": 1i32,
+                                "ObjectHandling": "Find",
+                                "Children": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                                    "$ID": uuid::Uuid::new_v4().to_string(),
+                                    "$Type": "ExportMappings$ValueMappingElement",
+                                    "ElementType": "Value",
+                                    "Attribute": "Sales.Customer.Name",
+                                    "Converter": "",
+                                    "JsonPath": "(Object)|customer|Name",
+                                })], 3),
+                            }),
+                        ], 3),
                     })], 3),
                 },
                 None,
@@ -7911,6 +8738,32 @@ pub fn declaration() -> ModuleDecl {
             service_router.contains("/// Calls `Sales.ACT_Ping`."),
             "{service_router}"
         );
+        // The operation that declares an export mapping answers through it,
+        // from a declaration the module owns beside the service.
+        assert!(
+            service_router.contains("use super::mappings;"),
+            "{service_router}"
+        );
+        assert!(
+            service_router.contains("state.call_mapped(")
+                && service_router.contains("&mappings::em_order::mapping()"),
+            "{service_router}"
+        );
+        let mapping = std::fs::read_to_string(
+            generated.join("src/modules/sales/presentation/http/mappings/em_order.rs"),
+        )
+        .unwrap();
+        assert!(
+            mapping.contains("ObjectMapping::object(\"Sales.Order\")"),
+            "{mapping}"
+        );
+        assert!(mapping.contains(".attribute(\"Number\")"), "{mapping}");
+        assert!(
+            mapping.contains(".value(\"submitted_at\", \"SubmittedAt\")"),
+            "{mapping}"
+        );
+        assert!(mapping.contains("\"Sales.Order_Customer\""), "{mapping}");
+        assert!(!mapping.contains(".sending_nils()"), "{mapping}");
         let http = std::fs::read_to_string(generated.join("src/presentation/http/mod.rs")).unwrap();
         assert!(
             http.contains("crate::modules::sales::presentation::http::router()"),

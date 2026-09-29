@@ -22,6 +22,7 @@
 
 mod datetime;
 mod engine;
+mod export_mapping;
 mod expression;
 mod value;
 
@@ -29,6 +30,7 @@ pub use engine::{
     Adapter, AdapterKind, Effect, Execution, FlowEngine, HttpCall, HttpResponse, JavaAction,
     StoreMembers,
 };
+pub use export_mapping::{ExportMapping, NullValues, ObjectMapping, ValueMapping};
 pub use expression::{Expression, MemberSource, NoObjects};
 pub use value::{FlowValue, ObjectRef, Variables, member_to_json};
 
