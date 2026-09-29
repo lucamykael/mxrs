@@ -114,7 +114,11 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
             .entry(page.source_type().to_string())
             .or_default() += 1;
     }
-    let editable_documents = super::render_documents_module(&project)?.counts;
+    // Only the counts are read here, and a module's provenance does not change
+    // them; the inventory is about what the export covers, not about where it
+    // lands.
+    let editable_documents =
+        super::render_documents_module(&project, &super::package_stems(&modules))?.counts;
     let converted_flows = super::flow_export::collect(&project, &modules)?;
 
     let mut families = Vec::with_capacity(counts.len());

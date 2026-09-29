@@ -101,6 +101,23 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             })
         })
         .collect();
+    // An association may point at an entity this build does not declare: a
+    // module the project only edits in Studio Pro, or one it installed and
+    // therefore declares nothing of. Synchronizing writes *into* this model,
+    // so what the model already holds is known too. `write_project` starts
+    // from nothing and keeps asking the declaration alone.
+    let existing_entities: HashSet<String> = existing_modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_else(|| "Unnamed".to_string());
+            module
+                .entities()
+                .iter()
+                .filter_map(|entity| entity.name.clone())
+                .map(move |name| format!("{module_name}.{name}"))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     crate::flow_contract::validate_project(project, &existing_modules)?;
     drop(existing_project);
     validate_lifecycle_handlers(project, &existing_microflows)?;
@@ -113,7 +130,8 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
     let identity = ProjectIdentity::from_project_root(&root_id)?;
 
     let existing_modules_by_name = existing_module_ids_by_name(&mpr, &root_id)?;
-    let known_entities = known_entities(project);
+    let mut known_entities = known_entities(project);
+    known_entities.extend(existing_entities);
 
     for decl in &project.modules {
         let module_id = match existing_modules_by_name.get(&decl.name) {
