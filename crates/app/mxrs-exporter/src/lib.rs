@@ -4347,15 +4347,17 @@ fn render_service_port(port: &ServicePort) -> String {
 /// definition of "turn its result into JSON".
 fn render_flow_runtime() -> String {
     "//! The embedded flow runtime every adapter drives the model through.\n\n\
-     use mxrs::Store;\n\
+     use mxrs::mapping::ExportMapping;\n\
      use mxrs::ports::{\n\
      \x20   BootError, FlowEngine, FlowValue, ObjectRef, ServiceError, Variables, boot, member_to_json,\n\
      };\n\
+     use mxrs::{SecurityContext, Store};\n\
      use serde_json::{Map, Value};\n\n\
      /// Owns the booted engine and store, and runs one microflow at a time.\n\
      pub struct FlowRuntime {\n\
      \x20   engine: FlowEngine,\n\
      \x20   store: Store,\n\
+     \x20   caller: Option<SecurityContext>,\n\
      }\n\n\
      impl FlowRuntime {\n\
      \x20   /// Boots from a built `.mpr` — the output of `cargo run` or\n\
@@ -4369,15 +4371,34 @@ fn render_flow_runtime() -> String {
      \x20   }\n\n\
      \x20   /// Wraps an engine and store the caller assembled.\n\
      \x20   pub fn new(engine: FlowEngine, store: Store) -> Self {\n\
-     \x20       Self { engine, store }\n\
+     \x20       Self {\n\
+     \x20           engine,\n\
+     \x20           store,\n\
+     \x20           caller: None,\n\
+     \x20       }\n\
      \x20   }\n\n\
-     \x20   /// Runs one microflow as a unit of work.\n\
+     \x20   /// Runs every later call on behalf of `caller`, so the project's\n\
+     \x20   /// entity access rules decide what its flows may touch and what a\n\
+     \x20   /// mapped response may carry. Authenticate the request and set this;\n\
+     \x20   /// without it there is no caller to judge, and entity access does\n\
+     \x20   /// not apply.\n\
+     \x20   pub fn with_caller(mut self, caller: SecurityContext) -> Self {\n\
+     \x20       self.caller = Some(caller);\n\
+     \x20       self\n\
+     \x20   }\n\n\
+     \x20   /// Who later calls run as, if anyone.\n\
+     \x20   pub fn caller(&self) -> Option<&SecurityContext> {\n\
+     \x20       self.caller.as_ref()\n\
+     \x20   }\n\n\
+     \x20   /// Runs one microflow as a unit of work, as [`Self::caller`].\n\
      \x20   pub fn call(\n\
      \x20       &mut self,\n\
      \x20       flow: &str,\n\
      \x20       arguments: Variables,\n\
      \x20   ) -> Result<FlowValue, ServiceError> {\n\
-     \x20       let (result, _) = self.engine.call(&mut self.store, flow, arguments, None)?;\n\
+     \x20       let (result, _) =\n\
+     \x20           self.engine\n\
+     \x20               .call(&mut self.store, flow, arguments, self.caller.clone())?;\n\
      \x20       Ok(result)\n\
      \x20   }\n\n\
      \x20   /// The backing store, for reading committed state.\n\
@@ -4388,10 +4409,18 @@ fn render_flow_runtime() -> String {
      \x20   pub fn store_mut(&mut self) -> &mut Store {\n\
      \x20       &mut self.store\n\
      \x20   }\n\n\
+     \x20   /// Shapes a flow result with the export mapping its operation\n\
+     \x20   /// declares. The document carries only objects [`Self::caller`] may\n\
+     \x20   /// read — including the ones the mapping reaches by association,\n\
+     \x20   /// which are retrieves it performs itself.\n\
+     \x20   pub fn mapped(&self, mapping: &ExportMapping, value: &FlowValue) -> Value {\n\
+     \x20       self.engine\n\
+     \x20           .apply_export_mapping(&self.store, self.caller(), mapping, value)\n\
+     \x20   }\n\n\
      \x20   /// Serializes a flow result as JSON, reading object members from\n\
      \x20   /// the store. This is the entity's own shape, which is what a call\n\
      \x20   /// without an export mapping answers; an operation that declares\n\
-     \x20   /// one is shaped by `ExportMapping::apply` instead.\n\
+     \x20   /// one goes through [`Self::mapped`] instead.\n\
      \x20   pub fn json(&self, value: &FlowValue) -> Value {\n\
      \x20       match value {\n\
      \x20           FlowValue::Object(reference) => self.object_json(reference),\n\
@@ -4508,7 +4537,7 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
 /// `presentation/http/state.rs` — the axum state every handler extracts.
 fn render_http_state(project_name: &str) -> String {
     format!(
-        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{BootError, FlowValue, ServiceError, Variables}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n        }}\n    }}\n\n    /// Runs one microflow and serializes its result. A poisoned mutex is\n    /// recovered rather than propagated: a handler that panicked left the\n    /// store as it found it, because every call is its own unit of work.\n    pub fn call(&self, flow: &str, arguments: Variables) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(runtime.json(&result))\n    }}\n\n    /// Runs one microflow and shapes its result with the export mapping its\n    /// operation declares, so the response is the JSON document the model\n    /// publishes instead of the entity's stored attributes.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(mapping.apply(runtime.store(), &result))\n    }}\n}}\n",
+        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{BootError, FlowValue, ServiceError, Variables}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        Ok(Self::new(FlowRuntime::from_mpr(path)?))\n    }}\n\n    /// Wraps a runtime the caller assembled.\n    pub fn new(runtime: FlowRuntime) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n        }}\n    }}\n\n    /// Runs one microflow and serializes its result. A poisoned mutex is\n    /// recovered rather than propagated: a handler that panicked left the\n    /// store as it found it, because every call is its own unit of work.\n    pub fn call(&self, flow: &str, arguments: Variables) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(runtime.json(&result))\n    }}\n\n    /// Runs one microflow and shapes its result with the export mapping its\n    /// operation declares, so the response is the JSON document the model\n    /// publishes instead of the entity's stored attributes. The document\n    /// carries only what the runtime's caller may read.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments)?;\n        Ok(runtime.mapped(mapping, &result))\n    }}\n}}\n",
         rust_string(&format!("build/{project_name}.mpr")),
     )
 }
@@ -8769,12 +8798,34 @@ pub fn declaration() -> ModuleDecl {
             http.contains("crate::modules::sales::presentation::http::router()"),
             "{http}"
         );
-        assert!(generated.join("src/presentation/http/state.rs").is_file());
         assert!(generated.join("src/presentation/http/error.rs").is_file());
+        // A mapped response goes through the runtime, which asks the engine
+        // the caller's read rules — never straight at `ExportMapping::apply`,
+        // which asks none.
+        let state =
+            std::fs::read_to_string(generated.join("src/presentation/http/state.rs")).unwrap();
         assert!(
-            generated
-                .join("src/infrastructure/adapters/flow_runtime.rs")
-                .is_file()
+            state.contains("runtime.mapped(mapping, &result)"),
+            "{state}"
+        );
+        assert!(!state.contains("mapping.apply("), "{state}");
+        let flow_runtime =
+            std::fs::read_to_string(generated.join("src/infrastructure/adapters/flow_runtime.rs"))
+                .unwrap();
+        assert!(
+            flow_runtime.contains("caller: Option<SecurityContext>"),
+            "{flow_runtime}"
+        );
+        assert!(
+            flow_runtime
+                .contains(".apply_export_mapping(&self.store, self.caller(), mapping, value)"),
+            "{flow_runtime}"
+        );
+        // The flow call and the mapping run as the same caller, so they narrow
+        // together the moment one is set.
+        assert!(
+            flow_runtime.contains("arguments, self.caller.clone()"),
+            "{flow_runtime}"
         );
         let security = std::fs::read_to_string(generated.join("src/domain/security.rs")).unwrap();
         assert!(security.contains("ProjectSecurityDecl {"));

@@ -9,7 +9,15 @@
 //! flow returned — no XSD, no JSON-structure file, no custom Java handler
 //! takes part.
 //!
-//! Two deliberate choices:
+//! Reaching an associated object is a *retrieve the mapping performs on its
+//! own initiative*, so it answers the same readability question the engine
+//! asks of a retrieve inside a flow. [`ExportMapping::apply_readable`] takes
+//! that question as a predicate; [`crate::FlowEngine::apply_export_mapping`]
+//! is what supplies it from the caller and the project's policy, and is what
+//! a boundary should call. [`ExportMapping::apply`] carries everything the
+//! flow reached and is named for the absence of a caller to restrict to.
+//!
+//! Two further deliberate choices:
 //!
 //! - **Objects are not filtered by entity.** Mendix generalization means a
 //!   flow may legitimately answer with a specialization of the mapping's
@@ -25,6 +33,10 @@ use serde_json::{Map, Value};
 use mxrs_runtime::{ObjectValue, Store};
 
 use crate::value::{FlowValue, ObjectRef, member_to_json};
+
+/// Whether a mapped document may carry one store object. `None` is the
+/// absence of a caller to restrict to, not a granted read.
+type Readable<'a> = Option<&'a dyn Fn(&ObjectValue) -> bool>;
 
 /// What the mapping does with a member the object left empty —
 /// `ExportMappings$ExportMapping`'s `NullValueOption`.
@@ -69,29 +81,61 @@ impl ExportMapping {
         self.nulls
     }
 
-    /// Shapes a flow result into the mapped document, reading members and
-    /// associated objects from `store`.
+    /// Shapes a flow result into the mapped document, carrying every object
+    /// the flow reached.
+    ///
+    /// This asks no read rules, because it is the shape for a boundary with no
+    /// caller to ask them about. Whenever there *is* a caller, go through
+    /// [`crate::FlowEngine::apply_export_mapping`], which picks between this
+    /// and [`ExportMapping::apply_readable`] from the project's policy.
     ///
     /// A root array always answers an array, even for a single object; a root
     /// object answers the first object the flow returned, or `null` when it
     /// returned none.
     pub fn apply(&self, store: &Store, value: &FlowValue) -> Value {
-        let sources = sources(store, value);
+        self.shape(store, value, None)
+    }
+
+    /// Shapes a flow result into the mapped document, leaving out every object
+    /// `readable` rejects — the mapping's counterpart to the `filter_readable`
+    /// the engine applies to a retrieve.
+    ///
+    /// The objects the flow returned are asked the same question as the ones
+    /// the mapping reaches by association: a document answered to a caller
+    /// carries nothing that caller may not read.
+    pub fn apply_readable(
+        &self,
+        store: &Store,
+        value: &FlowValue,
+        readable: &dyn Fn(&ObjectValue) -> bool,
+    ) -> Value {
+        self.shape(store, value, Some(readable))
+    }
+
+    fn shape(&self, store: &Store, value: &FlowValue, readable: Readable<'_>) -> Value {
+        let mut sources = sources(store, value);
+        sources.retain(|source| visible(readable, source));
         if self.root.multiple {
             Value::Array(
                 sources
                     .iter()
-                    .map(|source| self.document(store, &self.root, source))
+                    .map(|source| self.document(store, &self.root, source, readable))
                     .collect(),
             )
         } else {
             sources.first().map_or(Value::Null, |source| {
-                self.document(store, &self.root, source)
+                self.document(store, &self.root, source, readable)
             })
         }
     }
 
-    fn document(&self, store: &Store, mapping: &ObjectMapping, object: &ObjectValue) -> Value {
+    fn document(
+        &self,
+        store: &Store,
+        mapping: &ObjectMapping,
+        object: &ObjectValue,
+        readable: Readable<'_>,
+    ) -> Value {
         let mut fields = Map::new();
         for value in &mapping.values {
             match object.members.get(&value.attribute) {
@@ -106,17 +150,18 @@ impl ExportMapping {
             }
         }
         for child in &mapping.children {
-            let related = store.retrieve_association(&child.association, object);
+            let mut related = store.retrieve_association(&child.association, object);
+            related.retain(|source| visible(readable, source));
             let nested = if child.multiple {
                 Value::Array(
                     related
                         .iter()
-                        .map(|source| self.document(store, child, source))
+                        .map(|source| self.document(store, child, source, readable))
                         .collect(),
                 )
             } else {
                 match related.first() {
-                    Some(source) => self.document(store, child, source),
+                    Some(source) => self.document(store, child, source, readable),
                     None if self.nulls == NullValues::SendAsNil => Value::Null,
                     None => continue,
                 }
@@ -125,6 +170,10 @@ impl ExportMapping {
         }
         Value::Object(fields)
     }
+}
+
+fn visible(readable: Readable<'_>, object: &ObjectValue) -> bool {
+    readable.is_none_or(|readable| readable(object))
 }
 
 /// One `ExportMappings$ObjectMappingElement`: the entity at this level of the
@@ -260,12 +309,13 @@ fn object_value(store: &Store, reference: &ObjectRef) -> Option<ObjectValue> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use serde_json::json;
 
     use super::*;
-    use mxrs_runtime::StoreSchema;
+    use crate::FlowEngine;
+    use mxrs_runtime::{EntityRule, MemberRight, SecurityContext, SecurityPolicy, StoreSchema};
 
     fn store() -> Store {
         let schema = StoreSchema::default()
@@ -489,6 +539,178 @@ mod tests {
         assert_eq!(
             mapping.apply(&store, &value),
             json!({ "Note": "1970-01-01 00:00:00 UTC" })
+        );
+    }
+
+    /// A store holding one readable item with a readable detail, one readable
+    /// item with an unreadable detail, and one unreadable item — plus a policy
+    /// that grants `Reader` every `Api.Item` and only the details whose
+    /// component is public.
+    fn secured() -> (Store, SecurityPolicy, SecurityContext, Vec<ObjectValue>) {
+        let mut store = store();
+        let mut items = Vec::new();
+        for (name, component) in [("open", "public"), ("shut", "secret")] {
+            let item = store.create("Api.Item").unwrap();
+            store
+                .set_member("Api.Item", &item.id, "Name", json!(name))
+                .unwrap();
+            let detail = store.create("Api.Detail").unwrap();
+            store
+                .set_member("Api.Detail", &detail.id, "Component", json!(component))
+                .unwrap();
+            store
+                .set_member(
+                    "Api.Item",
+                    &item.id,
+                    "Api.Detail_Item",
+                    json!(detail.id.clone()),
+                )
+                .unwrap();
+            items.push(store.find("Api.Item", &item.id).unwrap().unwrap());
+        }
+        let readable = |xpath: &str| EntityRule {
+            module_roles: BTreeSet::from(["Reader".to_string()]),
+            default_member_right: Some(MemberRight::Read),
+            xpath: xpath.to_string(),
+            ..EntityRule::default()
+        };
+        let policy = SecurityPolicy {
+            enabled: true,
+            entities: BTreeMap::from([
+                ("Api.Item".to_string(), vec![readable("")]),
+                (
+                    "Api.Detail".to_string(),
+                    vec![readable("[Component = 'public']")],
+                ),
+            ]),
+            ..SecurityPolicy::default()
+        };
+        let caller = SecurityContext {
+            module_roles: BTreeSet::from(["Reader".to_string()]),
+            ..SecurityContext::default()
+        };
+        (store, policy, caller, items)
+    }
+
+    fn list_of(items: &[ObjectValue]) -> FlowValue {
+        FlowValue::List(
+            items
+                .iter()
+                .map(|item| {
+                    FlowValue::Object(ObjectRef {
+                        entity: item.entity.clone(),
+                        id: item.id.clone(),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn detailed() -> ExportMapping {
+        ExportMapping::new(
+            ObjectMapping::array("Api.Item")
+                .value("name", "Name")
+                .child(
+                    "detail",
+                    "Api.Detail_Item",
+                    ObjectMapping::object("Api.Detail").value("component", "Component"),
+                ),
+        )
+    }
+
+    /// An object the mapping reaches by association is a retrieve the mapping
+    /// performs itself, so it answers the caller's entity-read rules — a
+    /// constrained rule that does not cover the row leaves it out of the
+    /// document instead of exposing it.
+    #[test]
+    fn an_associated_object_the_caller_cannot_read_stays_out_of_the_document() {
+        let (store, policy, caller, items) = secured();
+        let engine = FlowEngine::default().with_policy(policy);
+
+        assert_eq!(
+            engine.apply_export_mapping(&store, Some(&caller), &detailed(), &list_of(&items)),
+            json!([
+                { "name": "open", "detail": { "component": "public" } },
+                // The row exists and the item is readable; its detail is not.
+                { "name": "shut" },
+            ])
+        );
+    }
+
+    /// Objects the flow returned are asked the same question, so a row the
+    /// caller may not read never reaches the response through the mapping.
+    #[test]
+    fn a_returned_object_the_caller_cannot_read_stays_out_of_the_document() {
+        let (store, mut policy, caller, items) = secured();
+        // Narrow the item rule the same way, so only one of the two rows is
+        // readable at all.
+        policy.entities.insert(
+            "Api.Item".to_string(),
+            vec![EntityRule {
+                module_roles: BTreeSet::from(["Reader".to_string()]),
+                default_member_right: Some(MemberRight::Read),
+                xpath: "[Name = 'open']".to_string(),
+                ..EntityRule::default()
+            }],
+        );
+        let engine = FlowEngine::default().with_policy(policy);
+        let mapping = ExportMapping::new(ObjectMapping::array("Api.Item").value("name", "Name"));
+
+        assert_eq!(
+            engine.apply_export_mapping(&store, Some(&caller), &mapping, &list_of(&items)),
+            json!([{ "name": "open" }])
+        );
+    }
+
+    /// A root-object mapping whose only object the caller cannot read answers
+    /// nothing, the same way it answers nothing for a flow that returned
+    /// nothing — it does not fall back to the unfiltered row.
+    #[test]
+    fn a_root_object_the_caller_cannot_read_answers_null() {
+        let (store, policy, caller, items) = secured();
+        let engine = FlowEngine::default().with_policy(policy);
+        let mapping =
+            ExportMapping::new(ObjectMapping::object("Api.Detail").value("component", "Component"));
+        let secret = store.retrieve_association("Api.Detail_Item", &items[1]);
+        let value = list_of(&secret);
+
+        assert_eq!(
+            engine.apply_export_mapping(&store, Some(&caller), &mapping, &value),
+            Value::Null
+        );
+    }
+
+    /// Without a caller there is no one to judge, so the document carries
+    /// everything the flow reached — the same rows entity access lets through
+    /// when a flow runs with no caller either.
+    #[test]
+    fn with_no_caller_the_document_carries_everything_the_flow_reached() {
+        let (store, policy, _, items) = secured();
+        let engine = FlowEngine::default().with_policy(policy);
+
+        assert_eq!(
+            engine.apply_export_mapping(&store, None, &detailed(), &list_of(&items)),
+            json!([
+                { "name": "open", "detail": { "component": "public" } },
+                { "name": "shut", "detail": { "component": "secret" } },
+            ])
+        );
+    }
+
+    /// A project with security switched off answers the same document for a
+    /// caller as for none: the policy itself says no rule applies.
+    #[test]
+    fn security_disabled_carries_everything_for_a_caller_too() {
+        let (store, mut policy, caller, items) = secured();
+        policy.enabled = false;
+        let engine = FlowEngine::default().with_policy(policy);
+
+        assert_eq!(
+            engine.apply_export_mapping(&store, Some(&caller), &detailed(), &list_of(&items)),
+            json!([
+                { "name": "open", "detail": { "component": "public" } },
+                { "name": "shut", "detail": { "component": "secret" } },
+            ])
         );
     }
 }

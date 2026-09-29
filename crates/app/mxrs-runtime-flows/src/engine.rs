@@ -14,6 +14,7 @@ use mxrs_runtime::{EntityAction, ObjectValue, SecurityContext, SecurityPolicy, S
 use serde_json::{Value, json};
 
 use crate::FlowError;
+use crate::export_mapping::ExportMapping;
 use crate::expression::{Expression, MemberSource};
 use crate::value::{FlowValue, ObjectRef, Variables};
 
@@ -1903,6 +1904,44 @@ impl FlowEngine {
                     reference.entity, reference.id
                 ))
             })
+    }
+
+    /// Shapes a flow result into the JSON document an export mapping declares,
+    /// carrying only objects `caller` may read — both the ones the flow
+    /// returned and the ones the mapping reaches by association, since the
+    /// latter are retrieves the mapping performs itself. This is the entry
+    /// point a boundary should use; [`ExportMapping::apply`] asks no read
+    /// rules at all.
+    ///
+    /// With no caller, or with security disabled in the policy, the document
+    /// carries everything the flow reached.
+    ///
+    /// Unlike a retrieve *inside* a flow, this does not consult that flow's
+    /// "apply entity access" setting. The setting scopes what the flow's own
+    /// activities may do; the mapping runs after the flow has returned, as the
+    /// boundary's own read on the caller's behalf, so the caller's rules apply
+    /// whether or not the flow chose to waive them for itself.
+    pub fn apply_export_mapping(
+        &self,
+        store: &Store,
+        caller: Option<&SecurityContext>,
+        mapping: &ExportMapping,
+        value: &FlowValue,
+    ) -> Value {
+        match (&self.policy, caller) {
+            (Some(policy), Some(context)) => {
+                mapping.apply_readable(store, value, &|object: &ObjectValue| {
+                    policy.entity_allowed(
+                        &object.entity,
+                        EntityAction::Read,
+                        None,
+                        Some(&object.members),
+                        context,
+                    )
+                })
+            }
+            _ => mapping.apply(store, value),
+        }
     }
 
     fn enforce_entity_access(&self, execution: &Execution) -> bool {

@@ -6,7 +6,16 @@
 //! objects nest beneath them. A published REST operation that declares one
 //! answers with that document instead of the entity's stored attributes, so
 //! the generated project keeps a mapping declaration per mapping the model
-//! publishes and hands it to [`ExportMapping::apply`] at the boundary.
+//! publishes and applies it at the boundary.
+//!
+//! Applying it reads the store, including retrieves the mapping performs
+//! itself to reach associated objects — so apply it through
+//! [`mxrs::ports::FlowEngine::apply_export_mapping`][engine], which asks the
+//! caller's entity-read rules about every object the document would carry.
+//! [`ExportMapping::apply`] asks no rules and is named for the absence of a
+//! caller to ask about.
+//!
+//! [engine]: crate::ports::FlowEngine::apply_export_mapping
 //!
 //! ```
 //! use mxrs::mapping::{ExportMapping, ObjectMapping};
