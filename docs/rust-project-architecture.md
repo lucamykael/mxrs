@@ -133,6 +133,34 @@ The JSON document an operation answers with is an export mapping, and a
 mapping describes the domain's data, not the transport: it lives in
 `src/domain/mappings/<module>/` and the controller imports it.
 
+## Frontend
+
+`frontend/` is a React + TypeScript + Vite project, laid out the way one
+is, so the person opening it finds things where a React project keeps them:
+
+```text
+frontend/
+├── index.html
+├── package.json, tsconfig.json, vite.config.ts
+├── scripts/sync-assets.mjs
+└── src/
+    ├── main.tsx                 the entry point
+    ├── App.tsx                  the shell: header, navigation, current page
+    ├── api/                     calls to the Rust runtime (model, actions)
+    ├── components/
+    │   ├── layout/              header and navigation
+    │   └── widgets/             one renderer per widget of the model
+    ├── hooks/                   the loaded model, the hash route
+    ├── pages/                   what a route shows
+    ├── types/                   the model as the runtime publishes it
+    ├── utils/                   pure helpers
+    └── styles/                  base, layout and widget CSS
+```
+
+Imports name `src/` as `@/` (`tsconfig.json` declares it and Vite reads it
+from there). The production bundle `mxrs` ships is built from exactly these
+files, and its hash is pinned against them.
+
 ## Declaring the model
 
 A declaration is one annotated item in its own file. It registers itself with

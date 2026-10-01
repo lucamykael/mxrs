@@ -8,6 +8,8 @@ export default defineConfig(({ mode }) => {
   return {
     base: './',
     plugins: [react()],
+    // `@/` is `src/`, read from tsconfig.json so the two never disagree.
+    resolve: { tsconfigPaths: true },
     server: {
       // Development stays same-origin from the browser's point of view while
       // the Rust runtime remains a separately supervised process.

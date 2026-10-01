@@ -19,27 +19,27 @@ use sha2::{Digest, Sha256};
 const INDEX: EmbeddedAsset = EmbeddedAsset::new(
     "index.html",
     include_bytes!("../assets/index.html"),
-    "851856e6e79f477997ef9c8ca99d295392944597e974fb5599c16459a96c3db1",
+    "ba59b4a7aefbe342b7385318421fe540e5c2e88812a31a06dbff9a9497e389ad",
 );
 const SCRIPT: EmbeddedAsset = EmbeddedAsset::new(
-    "app-C3Of9HqT.js",
-    include_bytes!("../assets/app-C3Of9HqT.js"),
-    "e972f793e3a56409bac200a5475077dfc6f0f29f20bfd52009a79c37d6dbdf8a",
+    "app-E33XIZf5.js",
+    include_bytes!("../assets/app-E33XIZf5.js"),
+    "82453ca9bd2b37d845bde5147127a1caaba71b4c11acbf571aacf86788703487",
 );
 const STYLES: EmbeddedAsset = EmbeddedAsset::new(
-    "app-BbpcvhG2.css",
-    include_bytes!("../assets/app-BbpcvhG2.css"),
-    "4588a89594a270c8b670605195129d72de79a2a1887be046584b76f8a93c6139",
+    "app-DtkE4lbI.css",
+    include_bytes!("../assets/app-DtkE4lbI.css"),
+    "59bab36d238c0ad66c08e482bf5a1bb82b80e890929248b1a32dd3073a813ac4",
 );
 const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     ".vite/manifest.json",
     include_bytes!("../assets/.vite/manifest.json"),
-    "f0be01d66cce18a5eae18f55e61f83274a189f72592cdfac4a7d25a512770f63",
+    "341b83c0fc3b20d4bb85c0882bfd6c975ca5124f18b1de54a8172caa83cf1ced",
 );
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "e2c3c2478e65cc4c3d90ca7483395ded75d367bb905cfd526c0e51baffeb29ac",
+    "86cbbe7beab65a4c11d2070af81a726e2a4eb97abaae6ba253c62f3c39aeddbf",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -55,6 +55,13 @@ const ASSETS: &[EmbeddedAsset] = &[
     LICENSES,
 ];
 
+/// The frontend project, file for file, in the order its hash is taken.
+///
+/// A real React + TypeScript + Vite layout: `api/` talks to the runtime,
+/// `components/` render, `hooks/` hold state, `pages/` are what a route
+/// shows, `types/` describe the model, `utils/` are pure helpers and
+/// `styles/` is the CSS — so someone opening it finds things where a React
+/// project keeps them.
 const SOURCE_FILES: &[(&str, &[u8])] = &[
     (".gitignore", include_bytes!("../frontend/.gitignore")),
     ("package.json", include_bytes!("../frontend/package.json")),
@@ -69,10 +76,74 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     ),
     ("index.html", include_bytes!("../frontend/index.html")),
     ("src/main.tsx", include_bytes!("../frontend/src/main.tsx")),
-    ("src/style.css", include_bytes!("../frontend/src/style.css")),
+    ("src/App.tsx", include_bytes!("../frontend/src/App.tsx")),
     (
         "src/vite-env.d.ts",
         include_bytes!("../frontend/src/vite-env.d.ts"),
+    ),
+    (
+        "src/api/actions.ts",
+        include_bytes!("../frontend/src/api/actions.ts"),
+    ),
+    (
+        "src/api/model.ts",
+        include_bytes!("../frontend/src/api/model.ts"),
+    ),
+    (
+        "src/components/layout/AppHeader.tsx",
+        include_bytes!("../frontend/src/components/layout/AppHeader.tsx"),
+    ),
+    (
+        "src/components/layout/Navigation.tsx",
+        include_bytes!("../frontend/src/components/layout/Navigation.tsx"),
+    ),
+    (
+        "src/components/widgets/BoundInput.tsx",
+        include_bytes!("../frontend/src/components/widgets/BoundInput.tsx"),
+    ),
+    (
+        "src/components/widgets/WidgetView.tsx",
+        include_bytes!("../frontend/src/components/widgets/WidgetView.tsx"),
+    ),
+    (
+        "src/hooks/useHashRoute.ts",
+        include_bytes!("../frontend/src/hooks/useHashRoute.ts"),
+    ),
+    (
+        "src/hooks/useManifest.ts",
+        include_bytes!("../frontend/src/hooks/useManifest.ts"),
+    ),
+    (
+        "src/pages/ModelPage.tsx",
+        include_bytes!("../frontend/src/pages/ModelPage.tsx"),
+    ),
+    (
+        "src/pages/PageNotFound.tsx",
+        include_bytes!("../frontend/src/pages/PageNotFound.tsx"),
+    ),
+    (
+        "src/styles/index.css",
+        include_bytes!("../frontend/src/styles/index.css"),
+    ),
+    (
+        "src/styles/base.css",
+        include_bytes!("../frontend/src/styles/base.css"),
+    ),
+    (
+        "src/styles/layout.css",
+        include_bytes!("../frontend/src/styles/layout.css"),
+    ),
+    (
+        "src/styles/widgets.css",
+        include_bytes!("../frontend/src/styles/widgets.css"),
+    ),
+    (
+        "src/types/model.ts",
+        include_bytes!("../frontend/src/types/model.ts"),
+    ),
+    (
+        "src/utils/widgets.ts",
+        include_bytes!("../frontend/src/utils/widgets.ts"),
     ),
     (
         "scripts/sync-assets.mjs",
@@ -526,6 +597,6 @@ mod tests {
             "text"
         );
         assert!(web.join("index.html").is_file());
-        assert!(web.join("app-C3Of9HqT.js").is_file());
+        assert!(web.join(SCRIPT.path).is_file());
     }
 }
