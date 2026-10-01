@@ -159,7 +159,7 @@ fn quality_integration_and_ci_scaffolds_emit_consumable_files() {
     // Validations and integrations are server-side use cases, so they land in
     // the application layer rather than next to the model declarations.
     assert!(
-        root.join("src/domain/services/sales/validate_order.rs")
+        root.join("src/application/use_cases/sales/validate_order.rs")
             .is_file()
     );
     assert!(
@@ -563,10 +563,13 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     // three layers instead of landing entirely under `src/domain/`.
     for (layer, relative) in [
         ("domain", "domain/entities/sales/order_overview.rs"),
-        ("domain", "domain/services/sales/act_load_order_overview.rs"),
+        (
+            "application",
+            "application/use_cases/sales/act_load_order_overview.rs",
+        ),
         (
             "domain",
-            "domain/services/sales/act_refresh_order_overview.rs",
+            "application/use_cases/sales/act_refresh_order_overview.rs",
         ),
         (
             "presentation",

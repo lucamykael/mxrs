@@ -127,6 +127,9 @@ pub enum ExportError {
     #[error(transparent)]
     Typegen(#[from] mxrs_typegen::TypegenError),
 
+    #[error(transparent)]
+    Materializer(#[from] mxrs_materializers::MaterializeError),
+
     #[error("cannot write {path}: {source}")]
     Io {
         path: String,
@@ -155,6 +158,7 @@ impl ExportError {
             | ExportError::Project(_)
             | ExportError::Writer(_)
             | ExportError::Typegen(_)
+            | ExportError::Materializer(_)
             | ExportError::Io { .. }
             | ExportError::Formatting { .. }
             | ExportError::MarkerLayout(_)
@@ -254,7 +258,6 @@ fn import_cargo_project_inner(
         &mut converted_pages,
         &mut page_export,
     )?;
-    let application_source = render_application_module();
     let composition_source = render_composition_module(&mendix_version);
     let infrastructure_source = render_infrastructure_module();
     let persistence_source = render_persistence_module(&modules, &mendix_version);
@@ -267,7 +270,7 @@ fn import_cargo_project_inner(
     });
     let security_source = render_project_security_module(security_document.as_ref());
     let navigation_source = render_navigation_module(&project.navigation()?);
-    let packages = package_stems(&modules);
+    let packages = package_stems_for_import(&modules, mpr_path);
     let documents_export = render_documents_module(&project, &packages)?;
     let task_queues_source = render_task_queues_module(&project, &mendix_version)?;
     let marker_manifest = marker_manifest(&modules);
@@ -298,6 +301,7 @@ fn import_cargo_project_inner(
     let manifest = mxrs_project::capture_imported_project(mpr_path, &imported)?;
     let imported_assets =
         mxrs_project::capture_project_assets(mpr_path, destination.join("assets"))?;
+    mxrs_materializers::materialize_frontend_sources(destination.join("frontend"))?;
     let package_name = cargo_package_name(&manifest.project_name);
     let crate_name = package_name.replace('-', "_");
     let infrastructure_directory = destination.join("src/infrastructure");
@@ -309,6 +313,7 @@ fn import_cargo_project_inner(
         destination.join("src/application"),
         presentation_directory.join("http"),
         infrastructure_directory.join("adapters"),
+        infrastructure_directory.join("generated"),
     ] {
         std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
     }
@@ -321,7 +326,7 @@ fn import_cargo_project_inner(
         &documents_export.derived_enumerations,
         &mut generated_modules,
     )?;
-    let service_ports = collect_service_ports(&modules, &typed_entities);
+    let service_ports = collect_service_ports(&modules, &packages, &typed_entities);
     let action_ports = assemble_action_ports(&action_documents, &packages, &typed_entities);
     for (module_name, stem, source) in &documents_export.enumeration_files {
         generated_module(&mut generated_modules, module_name)
@@ -440,8 +445,8 @@ fn import_cargo_project_inner(
         &typed_markers_source,
         &mut generated_modules,
     )?;
-    // Which tree each folder belongs to comes from the model's own
-    // `FromAppStore`, and only for folders that actually received content.
+    // Ownership combines the model's `FromAppStore` flag with any adjacent
+    // MXRB authoring manifest discovered above.
     for module in &modules {
         let Some(module_name) = module.name.as_deref() else {
             continue;
@@ -449,7 +454,7 @@ fn import_cargo_project_inner(
         let Some(entry) = generated_modules.get_mut(&module_stem(module_name)) else {
             continue;
         };
-        if module.from_app_store {
+        if packages.contains(&module_stem(module_name)) {
             entry.root = ModuleRoot::Package;
             entry.version = module.app_store_version.clone().unwrap_or_default();
         }
@@ -459,6 +464,7 @@ fn import_cargo_project_inner(
         .any(|module| module.root == ModuleRoot::Package);
     let authored_layers = write_modules_layer(destination, &generated_modules)?;
     let domain_source = render_domain_module(&authored_layers);
+    let application_source = render_application_module(&authored_layers);
     let presentation_source = render_presentation_module(api_mode, &authored_layers);
     write_text(
         &destination.join("src/infrastructure/markers.rs"),
@@ -551,55 +557,80 @@ fn import_cargo_project_inner(
     // keeps.
     let needs_authentication = matches!(api_mode, ApiMode::Axum);
     let mut adapters_index =
-        String::from("//! External services and Mendix-specific adapters belong here.\n");
-    if needs_flow_runtime || !action_ports.is_empty() {
-        adapters_index.push('\n');
-    }
-    for module in &action_ports {
-        let _ = writeln!(adapters_index, "pub mod {}_actions;", module.module_stem);
+        String::from("//! Application-owned implementations of outbound ports belong here.\n");
+    if needs_authentication || needs_flow_runtime {
+        adapters_index.push_str("\n// Compatibility exports for generated presentation wiring.\n");
     }
     if needs_authentication {
-        adapters_index.push_str("pub mod authentication;\n");
+        adapters_index.push_str("pub use crate::infrastructure::generated::authentication;\n");
     }
     if needs_flow_runtime {
-        adapters_index.push_str("pub mod flow_runtime;\n");
-    }
-    if !service_ports.is_empty() {
-        adapters_index.push_str("pub mod runtime_services;\n");
+        adapters_index.push_str("pub use crate::infrastructure::generated::flow_runtime;\n");
     }
     write_text(
         &destination.join("src/infrastructure/adapters/mod.rs"),
         &adapters_index,
     )?;
+    let mut generated_index = String::from(
+        "//! MXRS-generated runtime integration. Regeneration may replace these files.\n\n",
+    );
+    for module in &action_ports {
+        let _ = writeln!(generated_index, "pub mod {}_actions;", module.module_stem);
+    }
+    if needs_authentication {
+        generated_index.push_str("pub mod authentication;\n");
+    }
+    if needs_flow_runtime {
+        generated_index.push_str("pub mod flow_runtime;\n");
+    }
+    if !service_ports.is_empty() {
+        generated_index.push_str("pub mod runtime_services;\n");
+    }
+    write_text(
+        &destination.join("src/infrastructure/generated/mod.rs"),
+        &generated_index,
+    )?;
     if needs_authentication {
         write_text(
-            &destination.join("src/infrastructure/adapters/authentication.rs"),
+            &destination.join("src/infrastructure/generated/authentication.rs"),
             &render_authentication(),
         )?;
     }
     if needs_flow_runtime {
         write_text(
-            &destination.join("src/infrastructure/adapters/flow_runtime.rs"),
+            &destination.join("src/infrastructure/generated/flow_runtime.rs"),
             &render_flow_runtime(),
         )?;
     }
     if !service_ports.is_empty() {
         write_text(
-            &destination.join("src/infrastructure/adapters/runtime_services.rs"),
+            &destination.join("src/infrastructure/generated/runtime_services.rs"),
             &render_runtime_services(&service_ports),
         )?;
     }
     for module in &action_ports {
         write_text(
             &destination.join(format!(
-                "src/infrastructure/adapters/{}_actions.rs",
+                "src/infrastructure/generated/{}_actions.rs",
                 module.module_stem
             )),
             &render_action_registry_file(module),
         )?;
     }
     format_generated_cargo_project(destination)?;
-    write_text(&destination.join(".gitignore"), "/build\n/target\n")?;
+    write_text(
+        &destination.join(".gitignore"),
+        "/build\n/target\n/frontend/node_modules\n/frontend/dist\n",
+    )?;
+    write_text(
+        &destination.join("Dockerfile"),
+        &dockerfile(&package_name, &manifest.project_name),
+    )?;
+    write_text(&destination.join("compose.yaml"), &compose_file())?;
+    write_text(
+        &destination.join(".dockerignore"),
+        "target\nbuild\n.mxrs\nfrontend/node_modules\nfrontend/dist\n.git\n",
+    )?;
     write_text(
         &destination.join("README.md"),
         &generated_readme(&manifest.project_name, gaps.len(), &page_export),
@@ -624,7 +655,7 @@ fn import_cargo_project_inner(
 /// application, infrastructure or UI.
 fn render_domain_module(layers: &AuthoredLayers) -> String {
     render_layer_module(
-        "//! The project's domain: every module's entities, DTOs, enumerations,\n//! documents, ports, markers and microflow services, one folder per Mendix\n//! module inside each concept, plus the project's own security.\n\n",
+        "//! Business data and rules that do not depend on delivery or infrastructure.\n//! Persisted entities, value-like DTOs, enumerations and model security stay here;\n//! server-side workflows are application use cases, not domain services.\n\n",
         "domain",
         layers,
         &["security"],
@@ -666,15 +697,14 @@ fn render_layer_module(
     out
 }
 
-fn render_application_module() -> String {
-    "//! Project-level task queues, plus the aggregator `mxrs add` wires\n\
-     //! scaffolded modules into. Each Mendix module's services and DTOs\n\
-     //! live in `crate::modules`.\n\n\
-     pub mod task_queues;\n\n\
-     pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
-     \x20   task_queues::apply(project);\n\
-     }\n"
-    .to_string()
+fn render_application_module(layers: &AuthoredLayers) -> String {
+    render_layer_module(
+        "//! Application orchestration: server-side use cases, boundary ports and\n//! project-level task queues. This layer coordinates the domain but knows no\n//! HTTP framework, database driver or other delivery mechanism.\n\n",
+        "application",
+        layers,
+        &["task_queues"],
+        &["task_queues"],
+    )
 }
 
 fn render_presentation_module(api_mode: ApiMode, layers: &AuthoredLayers) -> String {
@@ -705,6 +735,7 @@ fn render_infrastructure_module() -> String {
      //! persistence. Hand-written repositories and database plumbing\n\
      //! belong here too.\n\n\
      pub mod adapters;\n\
+     pub mod generated;\n\
      pub mod markers;\n\
      pub mod persistence;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
@@ -909,6 +940,43 @@ fn package_stems(modules: &[Module]) -> std::collections::BTreeSet<String> {
         .filter_map(|module| module.name.as_deref())
         .map(module_stem)
         .collect()
+}
+
+/// Resolves package ownership with the model flag first and an optional MXRB
+/// authoring manifest second. MXRB projects keep one
+/// `modules/<Name>/module.rb` only for modules the application owns; imported
+/// Marketplace modules are present in the MPR but intentionally absent there.
+/// When that manifest exists it is stronger evidence than old MPRs whose
+/// `FromAppStore` flag was lost during generation.
+fn package_stems_for_import(
+    modules: &[Module],
+    mpr_path: &Path,
+) -> std::collections::BTreeSet<String> {
+    let mut packages = package_stems(modules);
+    let modules_directory = mpr_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("modules");
+    let Ok(entries) = std::fs::read_dir(&modules_directory) else {
+        return packages;
+    };
+    let authored = entries
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().join("module.rb").is_file())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .map(|name| module_stem(&name))
+        .collect::<std::collections::BTreeSet<_>>();
+    if authored.is_empty() {
+        return packages;
+    }
+    packages.extend(
+        modules
+            .iter()
+            .filter_map(|module| module.name.as_deref())
+            .map(module_stem)
+            .filter(|stem| !authored.contains(stem)),
+    );
+    packages
 }
 
 fn module_root(stem: &str, packages: &std::collections::BTreeSet<String>) -> ModuleRoot {
@@ -3000,8 +3068,19 @@ fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>, api_mode: A
         ApiMode::Rocket => "rocket = \"0.5\"\n",
     };
     format!(
-        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nmxrs = {dependency}\n{api_dependencies}",
+        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.85\"\npublish = false\n\n[lints.rust]\nunsafe_code = \"forbid\"\n\n[lints.clippy]\nall = \"warn\"\n\n[dependencies]\nmxrs = {dependency}\n{api_dependencies}",
     )
+}
+
+fn dockerfile(package_name: &str, project_name: &str) -> String {
+    format!(
+        "FROM rust:1.85-bookworm AS builder\nWORKDIR /workspace\nCOPY . .\nRUN cargo build --release\nRUN ./target/release/{package_name} build/{project_name}.mpr\n\nFROM debian:bookworm-slim AS runtime\nRUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*\nWORKDIR /app\nCOPY --from=builder /workspace/target/release/{package_name} /usr/local/bin/application\nCOPY --from=builder /workspace/build ./build\nEXPOSE 3000\nCMD [\"application\", \"serve\", \"/app/build/{project_name}.mpr\"]\n"
+    )
+}
+
+fn compose_file() -> String {
+    "services:\n  api:\n    build:\n      context: .\n    ports:\n      - \"3000:3000\"\n  frontend:\n    image: node:24-alpine\n    working_dir: /workspace/frontend\n    command: sh -c \"npm ci && npm run dev -- --host 0.0.0.0 --port 5173 --strictPort\"\n    environment:\n      MXRS_API_ORIGIN: http://api:3000\n    volumes:\n      - .:/workspace\n      - frontend_node_modules:/workspace/frontend/node_modules\n    ports:\n      - \"5173:5173\"\n    depends_on:\n      - api\n\nvolumes:\n  frontend_node_modules:\n"
+        .to_string()
 }
 
 fn build_binary_source(crate_name: &str, project_name: &str, api_mode: ApiMode) -> String {
@@ -3043,7 +3122,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source is organized module-first, the way the project reads in Studio Pro: each Mendix module owns a folder under `src/modules/<module>/` carrying its domain model (`domain/entities/` with one `#[derive(MxEntity)]` struct per persisted entity, `domain/enumerations/` with one `#[derive(MxEnumeration)]` enum per enumeration, `domain/documents.rs` for constants/regular expressions/scheduled events/menus, `domain/security.rs` for module roles), its non-persistent entities under `dto/`, each supported server microflow as an individual service declaration under `services/`, client-side pages and nanoflows under `presentation/`, generated port contracts under `ports/`, and its compile-time model markers in `markers.rs`. Entities whose features typed authoring does not cover yet fall back to an IR declaration in the same place. Published REST services become real axum routers: each module's `presentation/http/` carries one file per service with a handler per operation, calling the microflow the model bound to it, and one file per export mapping under `presentation/http/mappings/`. Project-level concerns stay in the crate-wide layers: the shared axum state and error type under `src/presentation/http/`, controllers and navigation beside them; repositories, database adapters, the markers facade, and imported-model persistence under `src/infrastructure/`; project security under `src/domain/`. Lossless model data and stable identities stay outside the Rust source tree under `model/imported/`.\n\nSupported server-side microflows are reconstructed as typed service declarations; each module's `presentation/nanoflows/` is the client-side counterpart. `cargo run -- serve [model.mpr]` boots the built model and serves the published routes; an operation that declares an export mapping answers the JSON document that mapping describes, applied from its declaration in the owning module's `presentation/http/mappings/`, and an operation without one answers the entity's stored attributes. Other graphs remain exact in the imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust was performed with:\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo check\ncargo test\n\n# Rust → Mendix, then boot it on MXRS' native runtime:\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\nmxrs run . --no-frontend\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import to generate that framework's dependencies and route server. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, model documents and security. It has no HTTP or database dependency.\n- `src/application/use_cases/`: one editable Rust file per supported server microflow.\n- `src/application/ports/`: framework-independent contracts implemented by infrastructure adapters.\n- `src/presentation/`: HTTP delivery, pages, nanoflows and navigation. Axum-specific types stay under `presentation/http`.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`.\n- `src/composition.rs`: the only place that assembles all architectural layers.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code. Entities whose features typed authoring does not cover yet fall back to an IR declaration in the same conceptual location.\n\nSupported server-side microflows are reconstructed as application use cases; client-side nanoflows stay in presentation. `mxrs run --frontend` supervises the Rust API and Vite client together. Other graphs remain exact in imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -4093,6 +4172,17 @@ fn render_entity_file(
 ) -> String {
     let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
     let mut out = String::from("//! Editable Mendix entity declaration.\n\n");
+    let artifact_kind = if entity.oql_view() {
+        "VIEW"
+    } else if entity.persistable {
+        "ENTITY"
+    } else {
+        "DTO"
+    };
+    let _ = writeln!(
+        out,
+        "#[mxrs::entity(module = {module_name:?}, name = {entity_name:?}, kind = {artifact_kind:?})]"
+    );
     let _ = writeln!(out, "pub fn declaration() -> ::mxrs_ir::ModuleDecl {{");
     let _ = writeln!(
         out,
@@ -4310,7 +4400,7 @@ fn render_entity_file(
     out
 }
 
-/// One generated service port: the `domain/ports` trait for one Mendix
+/// One generated service port: the `application/ports` trait for one Mendix
 /// module's runnable microflows, plus everything the runtime adapter impl
 /// needs to drive them through `FlowEngine::call`.
 struct ServicePort {
@@ -4383,6 +4473,7 @@ fn port_type(
 /// stays callable through the engine's string-keyed surface.
 fn collect_service_ports(
     modules: &[Module],
+    packages: &std::collections::BTreeSet<String>,
     typed_entities: &HashMap<String, TypedEntityTarget>,
 ) -> Vec<ServicePort> {
     let mut ports = Vec::new();
@@ -4461,11 +4552,7 @@ fn collect_service_ports(
         }
         ports.push(ServicePort {
             module_name: module_name.to_string(),
-            root: if module.from_app_store {
-                ModuleRoot::Package
-            } else {
-                ModuleRoot::Authored
-            },
+            root: module_root(&module_stem(module_name), packages),
             module_stem: module_stem(module_name),
             trait_name: format!("{trait_base}Services"),
             methods,
@@ -4657,7 +4744,8 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
         let _ = writeln!(
             out,
             "\nimpl {}::services::{} for RuntimeServices {{",
-            port.root.path(&port.module_stem, "domain::ports", "ports"),
+            port.root
+                .path(&port.module_stem, "application::ports", "ports"),
             port.trait_name
         );
         for (index, method) in port.methods.iter().enumerate() {
@@ -5237,6 +5325,16 @@ fn render_published_service(
 
     for operation in service.routes.iter().flat_map(|route| &route.operations) {
         out.push('\n');
+        let route_path = service
+            .routes
+            .iter()
+            .find(|route| {
+                route
+                    .operations
+                    .iter()
+                    .any(|candidate| candidate.handler == operation.handler)
+            })
+            .map_or("/", |route| route.path.as_str());
         if !operation.summary.is_empty() {
             let _ = writeln!(out, "/// {}", operation.summary);
         }
@@ -5250,6 +5348,13 @@ fn render_published_service(
         if !operation.summary.is_empty() || !operation.documentation.is_empty() {
             out.push_str("///\n");
         }
+        let _ = writeln!(
+            out,
+            "#[mxrs::route(method = {:?}, path = {route_path:?}, service = {:?}, operation = {:?})]",
+            operation.method.to_ascii_uppercase(),
+            service.name,
+            operation.handler,
+        );
         if !serves {
             let _ = writeln!(
                 out,
@@ -6221,6 +6326,11 @@ fn assemble_action_ports(
             if stem.is_empty() || stem.starts_with(|c: char| c.is_ascii_digit()) {
                 return None;
             }
+            // Marketplace actions remain preserved with their package model,
+            // but they are not application-owned adapter extension points.
+            if module_root(&stem, packages) == ModuleRoot::Package {
+                return None;
+            }
             actions.sort_by(|left, right| left.action_name.cmp(&right.action_name));
             let mut seen = std::collections::HashSet::new();
             actions.retain(|action| seen.insert(action.trait_name.clone()));
@@ -6354,7 +6464,7 @@ fn render_action_registry_file(module: &ActionPortModule) -> String {
         name = module.module_name,
         ports = module
             .root
-            .path(&module.module_stem, "domain::ports", "ports"),
+            .path(&module.module_stem, "application::ports", "ports"),
         port_value = if uses_port_value { ", PortValue" } else { "" },
     );
     for action in &module.actions {
@@ -6661,6 +6771,11 @@ fn render_typed_entity_file(
         }
     }
     out.push('\n');
+    let artifact_kind = if entity.persistable { "ENTITY" } else { "DTO" };
+    let _ = writeln!(
+        out,
+        "#[mxrs::entity(module = {module_name:?}, name = {entity_name:?}, kind = {artifact_kind:?})]"
+    );
     out.push_str("#[derive(MxEntity)]\n");
     let mut entity_options = vec![format!("module = {module_name:?}")];
     if type_name != entity_name {
@@ -7005,8 +7120,8 @@ fn write_authored_layers(
             apply: Some("project.merge_module({stem}::declaration());"),
         },
         AuthoredConcept {
-            folder: "domain/services",
-            subject: "microflows as editable service declarations",
+            folder: "application/use_cases",
+            subject: "server-side microflows as application use cases",
             modules: files(|module| &module.services),
             apply: Some("project.merge_module({stem}::declaration());"),
         },
@@ -7212,7 +7327,7 @@ fn write_authored_ports(
     if owned.is_empty() {
         return Ok(());
     }
-    let directory = destination.join("src/domain/ports");
+    let directory = destination.join("src/application/ports");
     std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
     let mut index = String::from(
         "//! Contracts each Mendix module exposes to hand-written code, one\n//! folder per module.\n\n",
@@ -7238,7 +7353,7 @@ fn write_authored_ports(
         }
         write_text(&folder.join("mod.rs"), &module_index)?;
     }
-    record_concept(declared, "domain", "ports", false);
+    record_concept(declared, "application", "ports", false);
     Ok(())
 }
 
@@ -7765,14 +7880,12 @@ mod tests {
             "entities",
             "enumerations",
             "module_security",
-            "services",
         ] {
             record_concept(&mut full, "domain", concept, true);
         }
-        // Type surface: declared, never applied.
-        for concept in ["markers", "ports"] {
-            record_concept(&mut full, "domain", concept, false);
-        }
+        record_concept(&mut full, "domain", "markers", false);
+        record_concept(&mut full, "application", "use_cases", true);
+        record_concept(&mut full, "application", "ports", false);
         for concept in ["nanoflows", "pages"] {
             record_concept(&mut full, "presentation", concept, true);
         }
@@ -7782,12 +7895,9 @@ mod tests {
         assert!(!domain.contains("crate::presentation"));
         // Type surface the layer declares but never applies.
         assert!(domain.contains("pub mod markers;"), "{domain}");
-        assert!(domain.contains("pub mod ports;"), "{domain}");
         assert!(!domain.contains("    markers::apply"), "{domain}");
-        assert!(!domain.contains("    ports::apply"), "{domain}");
-        // Microflows are the backend's services, so they are a domain concept.
-        assert!(domain.contains("pub mod services;"), "{domain}");
-        assert!(domain.contains("    services::apply(project);"), "{domain}");
+        assert!(!domain.contains("pub mod ports;"), "{domain}");
+        assert!(!domain.contains("pub mod services;"), "{domain}");
         for outer in [
             "pub mod microflows;",
             "pub mod nanoflows;",
@@ -7807,11 +7917,13 @@ mod tests {
         // application layer keeps only cross-cutting concerns. The
         // composition root is the sole place that can depend on every
         // architectural layer.
-        let application = render_application_module();
+        let application = render_application_module(&full);
         assert!(application.contains("pub mod task_queues;"));
         assert!(application.contains("task_queues::apply(project);"));
-        assert!(!application.contains("pub mod dto;"));
-        assert!(!application.contains("pub mod services;"));
+        assert!(application.contains("pub mod use_cases;"));
+        assert!(application.contains("use_cases::apply(project);"));
+        assert!(application.contains("pub mod ports;"));
+        assert!(!application.contains("ports::apply(project);"));
         assert!(!application.contains("crate::domain"));
         assert!(!application.contains("crate::presentation"));
         assert!(!application.contains("pub mod nanoflows;"));
@@ -7992,6 +8104,7 @@ mod tests {
 
 use mxrs::prelude::*;
 
+#[mxrs::entity(module = "Catalogs", name = "Parameter", kind = "ENTITY")]
 #[derive(MxEntity)]
 #[mxrs(module = "Catalogs", documentation = "Catalog parameter.")]
 pub struct Parameter {
@@ -8556,7 +8669,7 @@ pub fn declaration() -> ModuleDecl {
         }
         // The authored module keeps all of it, applies included.
         assert!(
-            read("src/domain/services/mod.rs").contains("    sales::apply(project);"),
+            read("src/application/use_cases/mod.rs").contains("    sales::apply(project);"),
             "an authored module still declares its microflows",
         );
         assert!(
@@ -8917,6 +9030,7 @@ use mxrs::prelude::*;
 
 use crate::domain::enumerations::catalogs::enum_limit::ENUMLimit;
 
+#[mxrs::entity(module = "Catalogs", name = "Parameter", kind = "ENTITY")]
 #[derive(MxEntity)]
 #[mxrs(module = "Catalogs")]
 pub struct Parameter {
@@ -9908,7 +10022,11 @@ pub fn declaration() -> ModuleDecl {
         assert!(generated.join("src/domain/security.rs").is_file());
         assert!(generated.join("src/application/mod.rs").is_file());
         assert!(generated.join("src/domain/dtos/sales/mod.rs").is_file());
-        assert!(generated.join("src/domain/services/sales/mod.rs").is_file());
+        assert!(
+            generated
+                .join("src/application/use_cases/sales/mod.rs")
+                .is_file()
+        );
         assert!(generated.join("src/presentation/mod.rs").is_file());
         assert!(
             generated
@@ -10077,7 +10195,8 @@ pub fn declaration() -> ModuleDecl {
         assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_GetOrder"));
         assert!(markers.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
         let microflows =
-            std::fs::read_to_string(generated.join("src/domain/services/sales/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/application/use_cases/sales/mod.rs"))
+                .unwrap();
         assert!(!microflows.contains("snapshot-backed"));
         assert!(microflows.contains("pub mod act_ping;"));
         assert!(microflows.contains("project.merge_module(act_ping::declaration());"));
@@ -10092,10 +10211,11 @@ pub fn declaration() -> ModuleDecl {
         // runtime adapter that implements it. ACT_GetOrder returns the
         // IR-form Order entity, so it stays off the typed surface.
         let ports_index =
-            std::fs::read_to_string(generated.join("src/domain/ports/sales/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/application/ports/sales/mod.rs")).unwrap();
         assert!(ports_index.contains("pub mod services;"), "{ports_index}");
         let sales_port =
-            std::fs::read_to_string(generated.join("src/domain/ports/sales/services.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/application/ports/sales/services.rs"))
+                .unwrap();
         assert!(
             sales_port.contains("pub trait SalesServices"),
             "{sales_port}"
@@ -10106,13 +10226,13 @@ pub fn declaration() -> ModuleDecl {
         );
         assert!(!sales_port.contains("act_get_order"), "{sales_port}");
         let adapter = std::fs::read_to_string(
-            generated.join("src/infrastructure/adapters/runtime_services.rs"),
+            generated.join("src/infrastructure/generated/runtime_services.rs"),
         )
         .unwrap();
         assert!(adapter.contains("pub struct RuntimeServices"), "{adapter}");
         assert!(
             adapter.contains(
-                "impl crate::domain::ports::sales::services::SalesServices for RuntimeServices"
+                "impl crate::application::ports::sales::services::SalesServices for RuntimeServices"
             ),
             "{adapter}"
         );
@@ -10121,7 +10241,8 @@ pub fn declaration() -> ModuleDecl {
         // registration glue.
         assert!(ports_index.contains("pub mod actions;"), "{ports_index}");
         let sales_actions =
-            std::fs::read_to_string(generated.join("src/domain/ports/sales/actions.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/application/ports/sales/actions.rs"))
+                .unwrap();
         assert!(
             sales_actions.contains("pub trait ReverseText"),
             "{sales_actions}"
@@ -10132,9 +10253,10 @@ pub fn declaration() -> ModuleDecl {
             ),
             "{sales_actions}"
         );
-        let action_registry =
-            std::fs::read_to_string(generated.join("src/infrastructure/adapters/sales_actions.rs"))
-                .unwrap();
+        let action_registry = std::fs::read_to_string(
+            generated.join("src/infrastructure/generated/sales_actions.rs"),
+        )
+        .unwrap();
         assert!(
             action_registry.contains("pub fn register_reverse_text"),
             "{action_registry}"
@@ -10220,7 +10342,7 @@ pub fn declaration() -> ModuleDecl {
         );
         assert!(!state.contains("mapping.apply("), "{state}");
         let authentication = std::fs::read_to_string(
-            generated.join("src/infrastructure/adapters/authentication.rs"),
+            generated.join("src/infrastructure/generated/authentication.rs"),
         )
         .unwrap();
         assert!(
@@ -10236,7 +10358,7 @@ pub fn declaration() -> ModuleDecl {
         );
         assert!(!authentication.contains('"'), "{authentication}");
         let flow_runtime =
-            std::fs::read_to_string(generated.join("src/infrastructure/adapters/flow_runtime.rs"))
+            std::fs::read_to_string(generated.join("src/infrastructure/generated/flow_runtime.rs"))
                 .unwrap();
         assert!(
             flow_runtime.contains(".apply_export_mapping(&self.store, caller, mapping, value)"),
@@ -10273,8 +10395,8 @@ pub fn declaration() -> ModuleDecl {
         assert!(crate_root.contains("composition::build()"));
         assert!(crate_root.contains("project = crate::build"));
         // Empty placeholder folders are noise; only what receives generated
-        // content exists. `src/domain/ports` and `src/domain/services` are
-        // real concepts of the layer-first tree now, so they are expected —
+        // content exists. `src/application/ports` and `src/application/use_cases`
+        // are real concepts of the layer-first tree now, so they are expected —
         // the module-first tree they used to live in is what must be gone.
         for absent in [
             "src/modules",

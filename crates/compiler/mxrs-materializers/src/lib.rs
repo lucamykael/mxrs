@@ -39,7 +39,7 @@ const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "c0b95edfb77c8e33b0a7c666aad06d61b2a9612952ff258a0bce7d3e2b1ce41d",
+    "e2c3c2478e65cc4c3d90ca7483395ded75d367bb905cfd526c0e51baffeb29ac",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",

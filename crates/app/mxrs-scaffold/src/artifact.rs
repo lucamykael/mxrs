@@ -239,7 +239,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application validation microflow",
-        destination: "src/domain/services/<module>",
+        destination: "src/application/use_cases/<module>",
         kind: ArtifactKind::Validation,
     },
     ScaffoldCommand {
@@ -247,7 +247,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application use-case microflow",
-        destination: "src/domain/services/<module>",
+        destination: "src/application/use_cases/<module>",
         kind: ArtifactKind::UseCase,
     },
 ];
@@ -1185,7 +1185,7 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Entity => "domain/entities",
         ArtifactKind::Enumeration => "domain/enumerations",
         ArtifactKind::Constant | ArtifactKind::ScheduledEvent => "domain/documents",
-        ArtifactKind::UseCase | ArtifactKind::Validation => "domain/services",
+        ArtifactKind::UseCase | ArtifactKind::Validation => "application/use_cases",
         ArtifactKind::Page => "presentation/pages",
         ArtifactKind::Nanoflow => "presentation/nanoflows",
         ArtifactKind::PublishedRest => "presentation/http",
@@ -1301,7 +1301,45 @@ fn connect_child_apply(
     {
         return connect_apply_call(transaction, parent, &format!("{path}::apply(project);"));
     }
+    if parent.ends_with("src/application/mod.rs") {
+        return connect_application_build(
+            transaction,
+            parent,
+            &format!("{path}::apply(&mut project);"),
+        );
+    }
     connect_build(transaction, root, &format!("{path}::apply(&mut project);"))
+}
+
+/// Adds an application concept to the compact `mxrs new` application root.
+/// Imported projects already expose `application::apply`; this compatibility
+/// path keeps fresh projects pointing inward to the domain while avoiding a
+/// domain-to-application dependency.
+fn connect_application_build(transaction: &mut Transaction, path: &Path, call: &str) -> Result<()> {
+    let source = transaction
+        .content(path)?
+        .ok_or_else(|| ScaffoldError::AggregatorNotFound(path.display().to_string()))?;
+    if source.contains(&format!("\n    {call}\n")) {
+        return Ok(());
+    }
+    let compact = "pub fn build() -> mxrs::ProjectDecl {\n    crate::domain::build()\n}\n";
+    if source.contains(compact) {
+        return transaction.write(
+            path,
+            source.replace(
+                compact,
+                &format!(
+                    "pub fn build() -> mxrs::ProjectDecl {{\n    let mut project = crate::domain::build();\n    {call}\n    project\n}}\n"
+                ),
+            ),
+        );
+    }
+    let Some(head) = source.strip_suffix("\n    project\n}\n") else {
+        return Err(ScaffoldError::UnrecognizedProjectBuild(
+            path.display().to_string(),
+        ));
+    };
+    transaction.write(path, format!("{head}\n    {call}\n    project\n}}\n"))
 }
 
 /// Inserts `call` as the last statement of the file's `apply` function.
@@ -1494,7 +1532,7 @@ fn require_module(root: &Path, module_name: &str) -> Result<()> {
         "src/domain/dtos",
         "src/domain/enumerations",
         "src/domain/documents",
-        "src/domain/services",
+        "src/application/use_cases",
         "src/presentation/pages",
         "src/presentation/nanoflows",
     ]

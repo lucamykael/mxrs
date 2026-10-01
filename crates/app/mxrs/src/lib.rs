@@ -17,7 +17,7 @@ pub use mxrs_expr::*;
 pub use mxrs_ir::*;
 #[doc(hidden)]
 pub use mxrs_macros::project_facade as __project;
-pub use mxrs_macros::{MxEntity, MxEnumeration, application};
+pub use mxrs_macros::{MxEntity, MxEnumeration, application, entity, microflow, route};
 
 /// Declares a project using the public `mxrs` authoring surface.
 #[macro_export]

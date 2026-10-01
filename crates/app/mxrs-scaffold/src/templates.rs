@@ -780,7 +780,7 @@ pub(crate) fn page_chain_nanoflow(
     let markers = flow_marker(module_name, &name, "NanoflowMarker");
     let (note, body) = if calls_microflow {
         let action_path = format!(
-            "crate::domain::services::{}::act_refresh_{}::markers::ACT_Refresh{feature}",
+            "crate::application::use_cases::{}::act_refresh_{}::markers::ACT_Refresh{feature}",
             snake_case(module_name),
             snake_case(feature)
         );
@@ -955,7 +955,7 @@ fn form_vertical_body(
     refresh: Option<RefreshAction>,
 ) -> String {
     let loader = format!(
-        "crate::domain::services::{}::act_load_{}::markers::ACT_Load{name}",
+        "crate::application::use_cases::{}::act_load_{}::markers::ACT_Load{name}",
         snake_case(module_name),
         snake_case(name)
     );
@@ -1003,7 +1003,7 @@ fn refresh_button(
     let call = match refresh {
         RefreshAction::Microflow => format!(
             "b.call_microflow(::mxrs::MicroflowRef::<\
-             crate::domain::services::{}::act_refresh_{}::markers::ACT_Refresh{name}\
+             crate::application::use_cases::{}::act_refresh_{}::markers::ACT_Refresh{name}\
              >::new());",
             snake_case(module_name),
             snake_case(name)

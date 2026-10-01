@@ -870,6 +870,7 @@ dependencies = [
  "mxrs-forms",
  "mxrs-ir",
  "mxrs-macros",
+ "mxrs-materializers",
  "mxrs-model",
  "mxrs-mpr",
  "mxrs-project",

@@ -14,6 +14,7 @@ workspace = true
 mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
 mxrs-forms = { path = "../../model/mxrs-forms" }
 mxrs-project = { path = "../mxrs-project" }
 mxrs-typegen = { path = "../../authoring/mxrs-typegen" }

@@ -1032,6 +1032,7 @@ pub(crate) fn render_files(flows: &[ConvertedFlow], nanoflow: bool) -> Vec<Rende
     selected
         .into_iter()
         .map(|flow| {
+            let artifact_kind = flow_kind(&flow.declaration.name, nanoflow);
             let imports = if flow.source.iter().any(|line| line.contains("model::")) {
                 "use crate::infrastructure::markers as model;\n\n"
             } else {
@@ -1054,7 +1055,9 @@ pub(crate) fn render_files(flows: &[ConvertedFlow], nanoflow: bool) -> Vec<Rende
                 ""
             };
             let mut source = format!(
-                "//! Editable {noun} declaration.\n\nuse mxrs::prelude::*;\n\n{imports}{allow}pub fn declaration() -> ModuleDecl {{\n    let mut module = {builder}::new({});\n    module.{kind}({}, |{parameter}| {{\n",
+                "//! Editable {noun} declaration.\n\nuse mxrs::prelude::*;\n\n{imports}#[mxrs::microflow(module = {}, name = {}, kind = {artifact_kind:?})]\n{allow}pub fn declaration() -> ModuleDecl {{\n    let mut module = {builder}::new({});\n    module.{kind}({}, |{parameter}| {{\n",
+                rust_string(&flow.module),
+                rust_string(&flow.declaration.name),
                 rust_string(&flow.module),
                 rust_string(&flow.declaration.name),
             );
@@ -1069,6 +1072,19 @@ pub(crate) fn render_files(flows: &[ConvertedFlow], nanoflow: bool) -> Vec<Rende
             }
         })
         .collect()
+}
+
+fn flow_kind(name: &str, nanoflow: bool) -> &'static str {
+    if nanoflow {
+        return "NAN";
+    }
+    match name.split_once('_').map_or(name, |(prefix, _)| prefix) {
+        "ACT" => "ACT",
+        "SUB" => "SUB",
+        "VAL" => "VAL",
+        "QRY" => "QRY",
+        _ => "OTHER",
+    }
 }
 
 fn flow_file_name(name: &str) -> String {

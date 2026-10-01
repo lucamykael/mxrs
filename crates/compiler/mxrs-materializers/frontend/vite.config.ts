@@ -1,14 +1,27 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
-export default defineConfig({
-  base: './',
-  plugins: [react()],
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-    sourcemap: false,
-    manifest: true,
-    rollupOptions: { output: { entryFileNames: 'app-[hash].js', assetFileNames: 'app-[hash][extname]' } },
-  },
+export default defineConfig(({ mode }) => {
+  const environment = loadEnv(mode, '.', '');
+  const runtime = environment.MXRS_API_ORIGIN
+    || `http://127.0.0.1:${environment.MXRS_API_PORT || '8080'}`;
+  return {
+    base: './',
+    plugins: [react()],
+    server: {
+      // Development stays same-origin from the browser's point of view while
+      // the Rust runtime remains a separately supervised process.
+      proxy: {
+        '/api': runtime,
+        '/model.json': runtime,
+      },
+    },
+    build: {
+      outDir: 'dist',
+      emptyOutDir: true,
+      sourcemap: false,
+      manifest: true,
+      rollupOptions: { output: { entryFileNames: 'app-[hash].js', assetFileNames: 'app-[hash][extname]' } },
+    },
+  };
 });

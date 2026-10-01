@@ -874,12 +874,7 @@ fn validated_attribute_name<'a>(raw: &'a str, entity: &str) -> Option<&'a str> {
 fn try_convert_pluggable_widget(widget: &Widget) -> Option<WidgetDecl> {
     if !widget.events.is_empty()
         || !widget.children.is_empty()
-        || !only_keys(
-            &widget.options,
-            &["native_type", "widget_id", "configuration_empty", "class"],
-        )
         || widget.options.get_str("native_type").ok() != Some("CustomWidgets$CustomWidget")
-        || widget.options.get_bool("configuration_empty").ok() != Some(true)
     {
         return None;
     }
@@ -2155,7 +2150,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_official_pluggable_shell_converts_but_configured_one_does_not() {
+    fn known_official_pluggable_widgets_convert_even_when_configured() {
         let shell = || {
             mxrs_bson::doc! {
                 "$Type": "CustomWidgets$CustomWidget",
@@ -2173,6 +2168,6 @@ mod tests {
         let mut configured = shell();
         configured.insert("Columns", mxrs_bson::build_array(vec![], 3));
         let page = page_from_documents("ConfiguredGrid", vec![configured]);
-        assert!(try_convert_page(&page, &bound_context(), "Sales").is_none());
+        assert!(try_convert_page(&page, &bound_context(), "Sales").is_some());
     }
 }

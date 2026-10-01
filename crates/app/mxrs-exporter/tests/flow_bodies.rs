@@ -9,11 +9,11 @@ use std::process::Command;
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
 
-/// Every module's microflow services. The authored tree is layer-first, so
-/// `domain/services/` holds one folder per Mendix module.
+/// Every module's server-side use cases. The authored tree is layer-first, so
+/// `application/use_cases/` holds one folder per Mendix module.
 fn service_files(generated: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let services = generated.join("src/domain/services");
+    let services = generated.join("src/application/use_cases");
     if !services.is_dir() {
         return paths;
     }
