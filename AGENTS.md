@@ -21,15 +21,26 @@ read-only behavioral oracle; never edit it.
   typed DSL/IR/writer/exporter surface for it.
 - Generated projects are layer-first for the modules the project created
   (user directive, 2026-09-29, superseding the module-first directive of
-  2026-09-28): one `src/domain/`, one `src/application/` and one
-  `src/presentation/` for the whole project, each concept — entities, DTOs,
-  enumerations, documents, module security; microflow services and ports;
-  pages, nanoflows, published routes — holding a folder per Mendix module.
-  The module folder inside a concept is not a repetition of the layers:
-  Mendix entity names are unique per module and not across a project, so it
-  is what keeps them apart. Project-level layers keep cross-cutting concerns
-  (project security, navigation, shared infrastructure).
-  Dependencies point inward.
+  2026-09-28): one `src/domain/`, one `src/application/`, one
+  `src/controllers/` and one `src/ui/` for the whole project, each concept —
+  entities, DTOs, enumerations, export mappings, documents, module security;
+  microflow services and ports; controllers; pages, layouts, nanoflows —
+  holding a folder per Mendix module. The module folder inside a concept is
+  not a repetition of the layers: Mendix entity names are unique per module
+  and not across a project, so it is what keeps them apart. Project-level
+  layers keep cross-cutting concerns (project security, navigation, shared
+  infrastructure). Dependencies point inward.
+- There is no `presentation` layer (user directive, 2026-10-01): what the
+  application serves over HTTP and the user interface it declares are
+  different things. `src/controllers/<module>/` holds, per published REST
+  service, one file that is only its route table (`api_service.rs`: the
+  axum `Router`, each path and method bound to a controller function) and
+  one `<resource>_controller.rs` per resource with a function per
+  operation, named by what it does to the resource (`index`, `show`,
+  `create`, `update`, `destroy`) when that tells the operations apart and
+  after the microflow each calls when it does not. `src/ui/` holds pages,
+  layouts, nanoflows and navigation. Export mappings are part of the
+  domain: `src/domain/mappings/<module>/`.
 - A declaration is one annotated item in its own file, and it registers
   itself (user directive, 2026-10-01). `#[entity]`/`#[dto]`/`#[view]` on a
   struct, `#[enumeration]`/`#[module_roles]` on an enum, and `#[microflow]`/

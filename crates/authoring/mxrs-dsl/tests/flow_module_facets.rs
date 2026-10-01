@@ -1,6 +1,6 @@
 //! `ProjectBuilder::module` can declare both flow families, which is right for
 //! a file that owns a whole module but wrong for the generated
-//! `src/application/microflows/mod.rs` and `src/presentation/nanoflows/mod.rs`,
+//! `src/application/services/` and `src/ui/nanoflows/`,
 //! where a flow declared on the wrong side is a layering mistake nothing else
 //! would catch. The typed facets exist to make that mistake fail to compile, so
 //! what is asserted here is as much what the facets *cannot* reach as what they

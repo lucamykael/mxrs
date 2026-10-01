@@ -49,9 +49,10 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
 ```
 
 An import writes model declarations under `src/domain/`, each module's
-microflows as services under `src/application/`, pages, navigation, and
-client-side nanoflows under `src/presentation/`, and outbound/generated adapters
-under `src/infrastructure/`. Every declaration is one annotated item in its own
+microflows as services under `src/application/`, published REST services as
+route tables and controllers under `src/controllers/`, pages, navigation, and
+client-side nanoflows under `src/ui/`, and outbound/generated adapters under
+`src/infrastructure/`. Every declaration is one annotated item in its own
 file — `#[entity]` on a struct, `#[microflow]` on the function that builds it —
 and registers itself, so adding one is the file plus its `pub mod` line; see
 [`docs/rust-project-architecture.md`](docs/rust-project-architecture.md). A
@@ -115,10 +116,10 @@ not yet decompiled remain complete
 in the snapshot, and are named in their module's `imported.rs` so the rest of
 the project can still call and bind them; server flows live in
 `src/application/services/<module>/`, while client flows live in
-`src/presentation/nanoflows/<module>/`. Project security is imported into
+`src/ui/nanoflows/<module>/`. Project security is imported into
 `src/domain/security.rs`, each module's roles into
 `src/domain/module_security/<module>.rs`, and modern navigation into
-`src/presentation/navigation.rs`. Their writers validate role and target
+`src/ui/navigation.rs`. Their writers validate role and target
 invariants, preserve native fields outside the typed surface, and keep
 existing identities. Unknown documents remain complete in the snapshot.
 Task queues import as editable declarations in
@@ -212,7 +213,7 @@ DatePicker/DropDown widgets, and name/class authoring for Data Grid 2,
 Gallery, and ComboBox through `mxrs-pluggable`. All compile through
 `mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms codec.
 `mxrs import` detects the lossless structural subset and renders each page as
-a `#[page]` function in `src/presentation/pages/<module>/`, which registers
+a `#[page]` function in `src/ui/pages/<module>/`, which registers
 itself.
 Data-bound widgets, flow-calling buttons, empty official pluggable shells,
 page metadata, object page parameters, and context-inherited DataViews import

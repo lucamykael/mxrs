@@ -79,7 +79,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "init",
         argument: "<Module>",
         summary: "Initialize presentation and the application layout",
-        destination: "src/presentation/layouts/<module>",
+        destination: "src/ui/layouts/<module>",
         kind: ArtifactKind::Presentation,
     },
     ScaffoldCommand {
@@ -167,7 +167,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create a client nanoflow declaration",
-        destination: "src/presentation/nanoflows/<module>",
+        destination: "src/ui/nanoflows/<module>",
         kind: ArtifactKind::Nanoflow,
     },
     ScaffoldCommand {
@@ -175,7 +175,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Page>",
         summary: "Create a page declaration and its module layout",
-        destination: "src/presentation/pages/<module>",
+        destination: "src/ui/pages/<module>",
         kind: ArtifactKind::Page,
     },
     ScaffoldCommand {
@@ -183,7 +183,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Handler>",
         summary: "Create a published REST handler microflow",
-        destination: "src/presentation/http/<module>",
+        destination: "src/application/services/<module>",
         kind: ArtifactKind::PublishedRest,
     },
     ScaffoldCommand {
@@ -1046,7 +1046,9 @@ fn create_artifact(
     // A service is named by what it does, so its file is the declaring
     // function's — the same file the importer would have written.
     let stem = match options.kind {
-        ArtifactKind::UseCase | ArtifactKind::Validation => templates::service_stem(artifact_name),
+        ArtifactKind::UseCase | ArtifactKind::Validation | ArtifactKind::PublishedRest => {
+            templates::service_stem(artifact_name)
+        }
         ArtifactKind::Nanoflow => templates::nanoflow_stem(artifact_name),
         _ => snake_case(artifact_name),
     };
@@ -1130,10 +1132,7 @@ fn ensure_module_layout(
     root: &Path,
     module_name: &str,
 ) -> Result<()> {
-    let family = root.join(format!(
-        "src/presentation/layouts/{}/mod.rs",
-        snake_case(module_name)
-    ));
+    let family = root.join(format!("src/ui/layouts/{}/mod.rs", snake_case(module_name)));
     if transaction.content(&family)?.is_some() {
         return Ok(());
     }
@@ -1141,7 +1140,7 @@ fn ensure_module_layout(
         transaction,
         root,
         module_name,
-        "presentation/layouts",
+        "ui/layouts",
         "application_layout",
         templates::layouts(module_name, LAYOUT_PARAMETER),
     )
@@ -1156,14 +1155,18 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Entity => "domain/entities",
         ArtifactKind::Enumeration => "domain/enumerations",
         ArtifactKind::Constant | ArtifactKind::ScheduledEvent => "domain/documents",
-        ArtifactKind::UseCase | ArtifactKind::Validation => "application/services",
-        ArtifactKind::Page => "presentation/pages",
-        ArtifactKind::Nanoflow => "presentation/nanoflows",
-        ArtifactKind::PublishedRest => "presentation/http",
+        // The microflow a published operation calls is a service like any
+        // other; `controllers/` is the route tables and handlers an import
+        // generates from the published service itself.
+        ArtifactKind::UseCase | ArtifactKind::Validation | ArtifactKind::PublishedRest => {
+            "application/services"
+        }
+        ArtifactKind::Page => "ui/pages",
+        ArtifactKind::Nanoflow => "ui/nanoflows",
         ArtifactKind::ConsumedRest | ArtifactKind::Integration => "domain/integrations",
         ArtifactKind::JavaAction => "domain/actions",
         ArtifactKind::Security => "domain/module_security",
-        ArtifactKind::Presentation => "presentation/layouts",
+        ArtifactKind::Presentation => "ui/layouts",
         // A module is declared by a file of its own in the registry, not by a
         // folder: under a layer-first tree there is no single module home.
         ArtifactKind::Module => "domain/modules",
@@ -1384,8 +1387,8 @@ fn require_module(root: &Path, module_name: &str) -> Result<()> {
         "src/domain/enumerations",
         "src/domain/documents",
         "src/application/services",
-        "src/presentation/pages",
-        "src/presentation/nanoflows",
+        "src/ui/pages",
+        "src/ui/nanoflows",
     ]
     .iter()
     .any(|concept| root.join(concept).join(&stem).is_dir());
@@ -1448,10 +1451,10 @@ fn initialize_presentation(
     root: &Path,
     module_name: &str,
 ) -> Result<()> {
-    // Layer-first: the module gets its folder inside each presentation
-    // concept, not a presentation folder of its own.
+    // Layer-first: the module gets its folder inside each user-interface
+    // concept, not a folder of its own.
     let directory = snake_case(module_name);
-    let base = root.join("src/presentation");
+    let base = root.join("src/ui");
     let aggregator = base.join("layouts").join(&directory).join("mod.rs");
     let keeps = ["pages", "snippets", "nanoflows"]
         .map(|family| base.join(family).join(&directory).join(".keep"));
@@ -1480,18 +1483,13 @@ fn initialize_presentation(
             transaction,
             root,
             module_name,
-            "presentation/layouts",
+            "ui/layouts",
             "application_layout",
             templates::presentation_layout(module_name),
         )?;
     }
     for (family, keep) in ["pages", "snippets", "nanoflows"].iter().zip(keeps) {
-        connect_concept_folder(
-            transaction,
-            root,
-            module_name,
-            &format!("presentation/{family}"),
-        )?;
+        connect_concept_folder(transaction, root, module_name, &format!("ui/{family}"))?;
         if transaction.content(&keep)?.is_none() {
             transaction.create(keep, String::new())?;
         }

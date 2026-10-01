@@ -210,7 +210,7 @@ fn a_wrong_action_word_or_missing_project_fails_without_writing_anything() {
     }
     // `mxrs new` ships an empty `modules` aggregator in every layer, so the
     // evidence that nothing was written is the absence of the module itself.
-    for layer in ["domain", "application", "presentation"] {
+    for layer in ["domain", "application", "ui"] {
         assert!(!root.join(format!("src/{layer}/modules/sales")).exists());
     }
     let outside = cli(&[
@@ -279,7 +279,7 @@ fn a_dry_run_renders_the_json_document_without_touching_the_project() {
     let written: Value = serde_json::from_slice(&written.stdout).unwrap();
     assert_eq!(written["files"], document["files"]);
     assert!(
-        std::fs::read_to_string(root.join("src/presentation/pages/sales/order_overview.rs"))
+        std::fs::read_to_string(root.join("src/ui/pages/sales/order_overview.rs"))
             .unwrap()
             .contains("page.allow_role(\"Sales.User\");")
     );
@@ -413,7 +413,7 @@ fn upgrade_without_a_version_migrates_a_pre_layered_project_and_reports_every_ch
     let directory = tempfile::tempdir().unwrap();
     let root = project(directory.path());
     std::fs::remove_dir_all(root.join("src/application")).unwrap();
-    std::fs::remove_dir_all(root.join("src/presentation")).unwrap();
+    std::fs::remove_dir_all(root.join("src/ui")).unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
         concat!(
@@ -564,7 +564,7 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     );
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown page chain"));
-    assert!(!root.join("src/presentation/pages/sales").exists());
+    assert!(!root.join("src/ui/pages/sales").exists());
 
     let output = scaffold(
         &root,
@@ -591,11 +591,8 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
             "application",
             "application/services/sales/refresh_order_overview_service.rs",
         ),
-        (
-            "presentation",
-            "presentation/nanoflows/sales/refresh_order_overview.rs",
-        ),
-        ("presentation", "presentation/pages/sales/order_overview.rs"),
+        ("ui", "ui/nanoflows/sales/refresh_order_overview.rs"),
+        ("ui", "ui/pages/sales/order_overview.rs"),
     ] {
         let path = root.join("src").join(relative);
         assert!(
@@ -606,9 +603,8 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     // The page adds itself to the navigation from its own file, so the
     // item is created and destroyed with the page and there is no separate
     // navigation module to collide with the project's `navigation.rs`.
-    assert!(!root.join("src/presentation/navigation").exists());
-    let page = std::fs::read_to_string(root.join("src/presentation/pages/sales/order_overview.rs"))
-        .unwrap();
+    assert!(!root.join("src/ui/navigation").exists());
+    let page = std::fs::read_to_string(root.join("src/ui/pages/sales/order_overview.rs")).unwrap();
     assert!(
         page.contains("#[navigation_item(profile = \"Responsive\", caption = \"Order Overview\")]"),
         "{page}"

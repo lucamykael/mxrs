@@ -11,7 +11,7 @@ use mxrs_ir::ProjectDecl;
 /// Where a declaration takes its place when the model is assembled.
 ///
 /// The order is the order the layers used to be composed in — domain first,
-/// then application, infrastructure and presentation — so a project reads
+/// then application, infrastructure and the user interface — so a project reads
 /// the same to the writer whether it lists its declarations or registers
 /// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

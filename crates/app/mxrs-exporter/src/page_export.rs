@@ -2,7 +2,7 @@
 //! `mxrs-dsl`/`mxrs-writer` can author (see `mxrs_ir::page`'s doc comment)
 //! and renders them as real, compiled `mxrs-dsl` source: a standalone
 //! `pub fn <page>() -> ::mxrs_ir::page::PageDecl` per detected page, plus
-//! the `src/presentation/mod.rs` wiring (see `lib.rs::render`) that pushes each
+//! the `src/ui/pages/` files (see `lib.rs::render`) that declare each
 //! one into its module and returns it from `build()`.
 //!
 //! **Now wired into the live `build()`/`.mpr` output**, same as domain
@@ -63,7 +63,7 @@ use mxrs_model::page::{Page, Widget};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PageExportReport {
     /// Pages built entirely from the detected widget vocabulary — wired
-    /// directly into `build()` via `src/presentation/pages/mod.rs`.
+    /// as `#[page]` functions under `src/ui/pages/`.
     pub typed_candidates: usize,
     /// Every other page (pluggable widgets, data binding, conditional
     /// visibility, security roles, unresolvable layout, ...) — stays
@@ -469,7 +469,7 @@ fn preserves_value(original: &Bson, compiled: &Bson, identities: &IdentityMap) -
     }
 }
 
-/// Renders every converted page into one `src/presentation/pages/mod.rs` source file
+/// Renders every converted page into its own `src/ui/pages/<module>/` source file
 /// of real, compiled `pub fn` page-builders. Returns `None` when there is
 /// nothing to show (no point writing an empty file).
 /// One page per file, each exposing `declaration()` like every other
@@ -1367,7 +1367,7 @@ mod tests {
                 flow("ACT_GetOrder", "application::services"),
                 flow("ACT_Validate", "application::services"),
             ]),
-            nanoflows: HashMap::from([flow("NF_Validate", "presentation::nanoflows")]),
+            nanoflows: HashMap::from([flow("NF_Validate", "ui::nanoflows")]),
         }
     }
     use mxrs_bson::Bson;

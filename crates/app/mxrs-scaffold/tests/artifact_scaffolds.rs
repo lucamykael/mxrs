@@ -620,7 +620,7 @@ fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
     .unwrap();
     let domain = std::fs::read(root.join("src/domain/mod.rs")).unwrap();
     std::fs::remove_dir_all(root.join("src/application")).unwrap();
-    std::fs::remove_dir_all(root.join("src/presentation")).unwrap();
+    std::fs::remove_dir_all(root.join("src/ui")).unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
         concat!(
@@ -876,7 +876,7 @@ fn an_unknown_template_or_chain_is_rejected_before_anything_is_written() {
         error,
         ScaffoldError::UnknownPageTemplate(value) if value == "form-horizontal"
     ));
-    assert!(!root.join("src/presentation/pages/sales").exists());
+    assert!(!root.join("src/ui/pages/sales").exists());
 }
 
 #[test]
@@ -885,9 +885,9 @@ fn presentation_initialization_previews_compiles_and_recovers_missing_directorie
     let root = application(directory.path());
     let options = ArtifactScaffold::new(ArtifactKind::Presentation, "Sales", &root);
     assert!(scaffold_artifact(&options).is_err());
-    assert!(!root.join("src/presentation/layouts/sales").exists());
+    assert!(!root.join("src/ui/layouts/sales").exists());
     scaffold(&root, ArtifactKind::Module, "Sales");
-    let orphan = root.join("src/presentation/layouts/sales/application_layout.rs");
+    let orphan = root.join("src/ui/layouts/sales/application_layout.rs");
     std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
     std::fs::write(&orphan, "custom layout source").unwrap();
     assert!(scaffold_artifact(&options).is_err());
@@ -896,19 +896,19 @@ fn presentation_initialization_previews_compiles_and_recovers_missing_directorie
         "custom layout source"
     );
     assert!(!orphan.with_file_name("mod.rs").exists());
-    std::fs::remove_dir_all(root.join("src/presentation/layouts/sales")).unwrap();
+    std::fs::remove_dir_all(root.join("src/ui/layouts/sales")).unwrap();
     let before = registry::entries(&root).unwrap();
     let preview = scaffold_artifact(&options.clone().dry_run(true)).unwrap();
-    assert!(!root.join("src/presentation/layouts/sales").exists());
+    assert!(!root.join("src/ui/layouts/sales").exists());
     assert_eq!(registry::entries(&root).unwrap(), before);
     let applied = scaffold_artifact(&options).unwrap();
     assert_eq!(preview.files, applied.files);
     assert_eq!(preview.updated, applied.updated);
     assert!(scaffold_artifact(&options).is_err());
-    let layout = root.join("src/presentation/layouts/sales/application_layout.rs");
+    let layout = root.join("src/ui/layouts/sales/application_layout.rs");
     let source = std::fs::read_to_string(&layout).unwrap();
     assert!(source.contains("application_shell("));
-    std::fs::remove_file(root.join("src/presentation/snippets/sales/.keep")).unwrap();
+    std::fs::remove_file(root.join("src/ui/snippets/sales/.keep")).unwrap();
     scaffold_artifact(&options).unwrap();
     assert_eq!(std::fs::read_to_string(&layout).unwrap(), source);
     let output = cargo(

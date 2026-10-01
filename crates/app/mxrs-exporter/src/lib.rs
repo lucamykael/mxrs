@@ -50,8 +50,8 @@
 //!
 //! `import_cargo_project` also detects pages built entirely from
 //! `mxrs-dsl`'s native/structural widget vocabulary, emits them as real
-//! `pub fn` builders in `src/presentation/pages/mod.rs`, and wires each one into
-//! `build()` — see `page_export`'s doc comment for the widget vocabulary
+//! `#[page]` functions under `src/ui/pages/<module>/`, which register
+//! themselves — see `page_export`'s doc comment for the widget vocabulary
 //! detected and what remains snapshot-preserved.
 
 use std::collections::HashMap;
@@ -181,8 +181,8 @@ pub struct CargoProjectImport {
     pub imported_assets: usize,
     pub typed_round_trip_gaps: Vec<RoundTripGap>,
     /// Pages detected as buildable from `mxrs-dsl`'s native/structural
-    /// widget vocabulary, emitted into `src/presentation/pages/mod.rs` and wired into
-    /// `build()` — see `page_export`'s doc comment for what still stays
+    /// widget vocabulary, emitted as `#[page]` functions under
+    /// `src/ui/pages/<module>/` — see `page_export`'s doc comment for what still stays
     /// opaque.
     pub page_export: PageExportReport,
 }
@@ -303,13 +303,14 @@ fn import_cargo_project_inner(
     let package_name = cargo_package_name(&manifest.project_name);
     let crate_name = package_name.replace('-', "_");
     let infrastructure_directory = destination.join("src/infrastructure");
-    let presentation_directory = destination.join("src/presentation");
+    let controllers_directory = destination.join("src/controllers");
     // Only folders that receive generated content exist: an empty
     // placeholder folder is noise the reader has to rule out.
     for directory in [
         destination.join("src/domain"),
         destination.join("src/application"),
-        presentation_directory.join("http"),
+        controllers_directory.clone(),
+        destination.join("src/ui"),
         infrastructure_directory.join("adapters"),
         infrastructure_directory.join("generated"),
     ] {
@@ -408,8 +409,9 @@ fn import_cargo_project_inner(
             )
         })
         .collect();
-    // A module joins the HTTP layer either by publishing a service or by
-    // owning an export mapping a published operation applies.
+    // A module's published services become its controllers; the export
+    // mappings their operations apply are part of its domain, whether or not
+    // the module publishes a service of its own.
     for stem in published_services
         .iter()
         .map(|service| module_stem(&service.module_name))
@@ -435,22 +437,22 @@ fn import_cargo_project_inner(
         else {
             continue;
         };
-        generated_module(&mut generated_modules, &module_name).http = Some(GeneratedHttp {
-            index: render_module_http_index(&module_name, &services, !mappings.is_empty()),
-            services: services
+        let module = generated_module(&mut generated_modules, &module_name);
+        module.mappings = mappings
+            .iter()
+            .map(|mapping| (mapping.file_stem.clone(), render_export_mapping(mapping)))
+            .collect();
+        if !services.is_empty() {
+            let mut files: Vec<(String, String)> = services
                 .iter()
-                .map(|service| {
-                    (
-                        service.file_stem.clone(),
-                        render_published_service(service, &mapping_targets),
-                    )
-                })
-                .collect(),
-            mappings: mappings
-                .iter()
-                .map(|mapping| (mapping.file_stem.clone(), render_export_mapping(mapping)))
-                .collect(),
-        });
+                .flat_map(|service| render_published_service(service, &mapping_targets))
+                .collect();
+            files.sort_by(|left, right| left.0.cmp(&right.0));
+            module.http = Some(GeneratedHttp {
+                index: render_module_http_index(&module_name, &files),
+                files,
+            });
+        }
     }
     // Ownership combines the model's `FromAppStore` flag with any adjacent
     // MXRB authoring manifest discovered above.
@@ -473,7 +475,7 @@ fn import_cargo_project_inner(
     let domain_source = render_domain_module(&authored_layers, security_source.is_some());
     let application_source =
         render_application_module(&authored_layers, task_queues_source.is_some());
-    let presentation_source = render_presentation_module(api_mode, &authored_layers);
+    let ui_source = render_ui_module(&authored_layers);
     write_text(
         &destination.join("Cargo.toml"),
         &cargo_manifest(&package_name, mxrs_workspace, api_mode),
@@ -491,7 +493,7 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "pub mod application;\npub mod domain;\npub mod infrastructure;\n{}pub mod presentation;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
+            "pub mod application;\npub mod controllers;\npub mod domain;\npub mod infrastructure;\n{}pub mod ui;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
             if has_packages {
                 "pub mod packages;\n"
             } else {
@@ -505,10 +507,7 @@ fn import_cargo_project_inner(
         &destination.join("src/application/mod.rs"),
         &application_source,
     )?;
-    write_text(
-        &destination.join("src/presentation/mod.rs"),
-        &presentation_source,
-    )?;
+    write_text(&destination.join("src/ui/mod.rs"), &ui_source)?;
     if let Some(task_queues) = &task_queues_source {
         write_text(
             &destination.join("src/application/task_queues.rs"),
@@ -519,26 +518,26 @@ fn import_cargo_project_inner(
         write_text(&destination.join("src/domain/security.rs"), security)?;
     }
     write_text(
-        &destination.join("src/presentation/navigation.rs"),
+        &destination.join("src/ui/navigation.rs"),
         &navigation_source,
     )?;
     match api_mode {
         ApiMode::Axum => {
             write_text(
-                &destination.join("src/presentation/http/mod.rs"),
+                &controllers_directory.join("mod.rs"),
                 &render_http_module(&published_services),
             )?;
             write_text(
-                &destination.join("src/presentation/http/state.rs"),
+                &controllers_directory.join("state.rs"),
                 &render_http_state(&manifest.project_name),
             )?;
             write_text(
-                &destination.join("src/presentation/http/error.rs"),
+                &controllers_directory.join("error.rs"),
                 &render_http_error(),
             )?;
         }
         _ => write_text(
-            &destination.join("src/presentation/http/mod.rs"),
+            &controllers_directory.join("mod.rs"),
             &render_server_stub(api_mode),
         )?,
     }
@@ -566,7 +565,8 @@ fn import_cargo_project_inner(
     let mut adapters_index =
         String::from("//! Application-owned implementations of outbound ports belong here.\n");
     if needs_authentication || needs_flow_runtime {
-        adapters_index.push_str("\n// Compatibility exports for generated presentation wiring.\n");
+        adapters_index
+            .push_str("\n// What the generated controllers and runtime wiring reach for.\n");
     }
     if needs_authentication {
         adapters_index.push_str("pub use crate::infrastructure::generated::authentication;\n");
@@ -698,19 +698,16 @@ fn render_application_module(layers: &AuthoredLayers, task_queues: bool) -> Stri
     )
 }
 
-fn render_presentation_module(api_mode: ApiMode, layers: &AuthoredLayers) -> String {
-    let mut source = render_layer_module(
-        "//! The project's presentation: the HTTP surface, navigation, and every\n//! module's pages and nanoflows, one folder per Mendix module inside each\n//! concept.\n\n",
-        "presentation",
+/// The user interface the model declares: navigation, and every module's
+/// pages, layouts and nanoflows. What the application serves over HTTP is
+/// not here — that is `controllers`.
+fn render_ui_module(layers: &AuthoredLayers) -> String {
+    render_layer_module(
+        "//! The project's user interface: navigation, and every module's pages,\n//! layouts and nanoflows, one folder per Mendix module inside each concept.\n\n",
+        "ui",
         layers,
-        &["http", "navigation"],
-    );
-    let _ = writeln!(
-        source,
-        "\n// HTTP adapter selected during import: `{}`.",
-        api_mode.name()
-    );
-    source
+        &["navigation"],
+    )
 }
 
 fn render_infrastructure_module(persistence: bool) -> String {
@@ -889,12 +886,12 @@ impl ModuleRoot {
     /// The `crate::` path one of a module's generated concepts is importable
     /// from.
     ///
-    /// The authored tree is layer-first: one `domain/`, one `presentation/`
-    /// for the whole project, with the Mendix module a folder *inside* each
-    /// concept. The module folder is not decoration — Mendix entity names are
-    /// unique per module and not across a project, and this one declares
-    /// `SPCProgram`, `CRD`, `Metadata` and `Payload` twice each, so a flat
-    /// `domain/entities/` could not even compile.
+    /// The authored tree is layer-first: one `domain/`, one `controllers/`,
+    /// one `ui/` for the whole project, with the Mendix module a folder
+    /// *inside* each concept. The module folder is not decoration — Mendix
+    /// entity names are unique per module and not across a project, so a
+    /// flat `domain/entities/` would not compile for a model that declares
+    /// one name in two modules.
     ///
     /// A package keeps its own module shape, so its concepts are addressed
     /// through it.
@@ -903,12 +900,6 @@ impl ModuleRoot {
             ModuleRoot::Authored => format!("crate::{authored}::{module_stem}"),
             ModuleRoot::Package => format!("crate::packages::{module_stem}::{package}"),
         }
-    }
-
-    /// Whether the module's declarations are applied onto the project. Only an
-    /// authored module's are; a package's stay as the snapshot imported them.
-    fn applies(self) -> bool {
-        matches!(self, ModuleRoot::Authored)
     }
 }
 
@@ -3144,13 +3135,13 @@ fn build_binary_source(crate_name: &str, project_name: &str, api_mode: ApiMode) 
     let default_output = format!("build/{project_name}.mpr");
     let serve = match api_mode {
         ApiMode::Axum => format!(
-            "#[tokio::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        return {crate_name}::presentation::http::serve(\n            std::env::args().nth(2).unwrap_or_else(|| {crate_name}::presentation::http::DEFAULT_MODEL.to_string()),\n            \"0.0.0.0:3000\",\n        )\n        .await;\n    }}\n    build()\n}}\n"
+            "#[tokio::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        return {crate_name}::controllers::serve(\n            std::env::args().nth(2).unwrap_or_else(|| {crate_name}::controllers::DEFAULT_MODEL.to_string()),\n            \"0.0.0.0:3000\",\n        )\n        .await;\n    }}\n    build()\n}}\n"
         ),
         ApiMode::ActixWeb => format!(
-            "#[actix_web::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::presentation::http::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
+            "#[actix_web::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::controllers::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
         ),
         ApiMode::Rocket => format!(
-            "#[rocket::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::presentation::http::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
+            "#[rocket::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    if std::env::args().nth(1).as_deref() == Some(\"serve\") {{\n        {crate_name}::controllers::server::serve().await?;\n        return Ok(());\n    }}\n    build()\n}}\n"
         ),
     };
     format!(
@@ -3171,7 +3162,7 @@ fn indent(source: &str, spaces: usize) -> String {
 fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportReport) -> String {
     let pages_note = if page_export.typed_candidates > 0 {
         format!(
-            "\n`src/presentation/pages/mod.rs` defines {} page(s) this import detected as buildable from\nmxrs-dsl's native/structural widget vocabulary (out of {} page(s) total) — wired into\n`build()` automatically by `src/presentation/mod.rs`.\n",
+            "\n`src/ui/pages/` holds {} page(s) this import detected as buildable from\nmxrs-dsl's native/structural widget vocabulary (out of {} page(s) total), each a\n`#[page]` function in its module's folder.\n",
             page_export.typed_candidates,
             page_export.typed_candidates + page_export.opaque,
         )
@@ -3179,7 +3170,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, model documents and security. It has no HTTP or database dependency.\n- `src/application/services/`: one editable Rust file per supported server microflow, plus `imported.rs` naming the ones that stay in the imported model.\n- `src/application/ports/`: framework-independent contracts implemented by infrastructure adapters.\n- `src/presentation/`: HTTP delivery, pages, nanoflows and navigation. Axum-specific types stay under `presentation/http`.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nSupported server-side microflows are reconstructed as application services; client-side nanoflows stay in presentation. `mxrs run --frontend` supervises the Rust API and Vite client together. Other graphs remain exact in imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/application/services/`: one editable Rust file per supported server microflow, plus `imported.rs` naming the ones that stay in the imported model.\n- `src/application/ports/`: framework-independent contracts implemented by infrastructure adapters.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the user interface the model declares — pages, layouts, nanoflows and navigation.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nSupported server-side microflows are reconstructed as application services; client-side nanoflows stay in `ui`. `mxrs run --frontend` supervises the Rust API and Vite client together. Other graphs remain exact in imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -3273,7 +3264,7 @@ fn model_names<'a>(
             (true, &module.nanoflows, &mut nanoflows),
         ] {
             let (keyword, authored) = if nanoflow {
-                ("nanoflow", "presentation::nanoflows")
+                ("nanoflow", "ui::nanoflows")
             } else {
                 ("microflow", "application::services")
             };
@@ -3753,10 +3744,7 @@ fn render(
     let _ = writeln!(out, "//! in scope — see `mxrs-macros`' crate doc).");
     if !pages.is_empty() {
         let _ = writeln!(out, "//!");
-        let _ = writeln!(
-            out,
-            "//! Also wires every page `src/presentation/pages/mod.rs` defines into its"
-        );
+        let _ = writeln!(out, "//! Also wires every page `pages` defines into its");
         let _ = writeln!(out, "//! module — see `pages`' own header comment and");
         let _ = writeln!(out, "//! `mxrs-exporter::page_export`'s crate doc.");
     }
@@ -4655,10 +4643,10 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
     out
 }
 
-/// `presentation/http/state.rs` — the axum state every handler extracts.
+/// `controllers/state.rs` — the axum state every handler extracts.
 fn render_http_state(project_name: &str) -> String {
     format!(
-        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store, plus the model's own answer to who\n//! is calling.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse axum::Json;\nuse axum::http::header::AUTHORIZATION;\nuse axum::http::{{HeaderMap, StatusCode}};\nuse axum::response::{{IntoResponse, Response}};\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{\n    BootError, FlowError, FlowValue, HttpObjects, SecurityContext, ServiceError, Variables,\n    basic_credentials, boot,\n}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::authentication::Authentication;\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\nuse crate::presentation::http::ApiError;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n    authentication: Arc<Authentication>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`, reading the model once for both\n    /// the engine and the accounts a request signs in against.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        let booted = boot(path)?;\n        Ok(Self::new(\n            FlowRuntime::from_boot(&booted),\n            Authentication::from_boot(&booted),\n        ))\n    }}\n\n    /// Wraps a runtime and an authentication adapter the caller assembled.\n    pub fn new(runtime: FlowRuntime, authentication: Authentication) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n            authentication: Arc::new(authentication),\n        }}\n    }}\n\n    /// Who a request with no credentials is, for a service the model\n    /// published to anyone.\n    pub fn anonymous(&self) -> SecurityContext {{\n        self.authentication.anonymous()\n    }}\n\n    /// The caller behind an `Authorization: Basic` header, refused with `401`\n    /// when it is missing or signs nobody in, and with `403` when it signs in\n    /// a caller holding none of `allowed_roles`.\n    ///\n    /// Missing and wrong credentials are one answer on purpose: telling them\n    /// apart tells a caller which user names exist.\n    pub fn basic_caller(\n        &self,\n        headers: &HeaderMap,\n        realm: &'static str,\n        allowed_roles: &[&str],\n    ) -> Result<SecurityContext, ApiError> {{\n        let caller = headers\n            .get(AUTHORIZATION)\n            .and_then(|header| header.to_str().ok())\n            .and_then(basic_credentials)\n            .and_then(|(user, password)| self.authentication.sign_in(&user, &password))\n            .ok_or(ApiError::unauthenticated(realm))?;\n        if !self.authentication.allows(&caller, allowed_roles) {{\n            return Err(ApiError::Forbidden);\n        }}\n        Ok(caller)\n    }}\n\n    /// Runs one microflow as `caller` and serializes its result. A poisoned\n    /// mutex is recovered rather than propagated: a handler that panicked\n    /// left the store as it found it, because every call is its own unit of\n    /// work.\n    pub fn call(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.json(&result, Some(caller)))\n    }}\n\n    /// Runs one microflow as `caller` and shapes its result with the export\n    /// mapping its operation declares, so the response is the JSON document\n    /// the model publishes instead of the entity's stored attributes. Either\n    /// way the response carries only what `caller` may read.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.mapped(mapping, &result, Some(caller)))\n    }}\n\n    /// Runs an operation whose microflow declares the implicit\n    /// `System.HttpRequest` / `System.HttpResponse` parameters Mendix supplies\n    /// itself, and answers what the flow built.\n    ///\n    /// The objects are created and bound before the call, because a microflow\n    /// missing one of its arguments never starts. Afterwards the response\n    /// object is read back: a flow that wrote content answers that content with\n    /// the status it chose — which is how an operation documented as answering\n    /// `404` answers `404` — and a flow that wrote none answers the operation's\n    /// own document under that status. A status the flow left unusable is a\n    /// fault in the application, not in the request.\n    pub fn call_operation(\n        &self,\n        flow: &str,\n        mut arguments: Variables,\n        mapping: Option<&ExportMapping>,\n        caller: &SecurityContext,\n        objects: HttpObjects,\n    ) -> Result<Response, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let binding = objects\n            .bind(runtime.store_mut(), &mut arguments)\n            .map_err(|error| ServiceError::Flow(FlowError::Runtime(error)))?;\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        let document = match mapping {{\n            Some(mapping) => runtime.mapped(mapping, &result, Some(caller)),\n            None => runtime.json(&result, Some(caller)),\n        }};\n        let Some(answer) = binding.answer(runtime.store()) else {{\n            return Ok(Json(document).into_response());\n        }};\n        let status = StatusCode::from_u16(answer.status)\n            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);\n        if answer.content.is_empty() {{\n            return Ok((status, Json(document)).into_response());\n        }}\n        // The flow wrote the body itself. Its content type would come from a\n        // header the flow set, and headers are not carried yet, so the content\n        // goes out as text.\n        Ok((status, answer.content).into_response())\n    }}\n}}\n",
+        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store, plus the model's own answer to who\n//! is calling.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse axum::Json;\nuse axum::http::header::AUTHORIZATION;\nuse axum::http::{{HeaderMap, StatusCode}};\nuse axum::response::{{IntoResponse, Response}};\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{\n    BootError, FlowError, FlowValue, HttpObjects, SecurityContext, ServiceError, Variables,\n    basic_credentials, boot,\n}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::authentication::Authentication;\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\nuse crate::controllers::ApiError;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n    authentication: Arc<Authentication>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`, reading the model once for both\n    /// the engine and the accounts a request signs in against.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        let booted = boot(path)?;\n        Ok(Self::new(\n            FlowRuntime::from_boot(&booted),\n            Authentication::from_boot(&booted),\n        ))\n    }}\n\n    /// Wraps a runtime and an authentication adapter the caller assembled.\n    pub fn new(runtime: FlowRuntime, authentication: Authentication) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n            authentication: Arc::new(authentication),\n        }}\n    }}\n\n    /// Who a request with no credentials is, for a service the model\n    /// published to anyone.\n    pub fn anonymous(&self) -> SecurityContext {{\n        self.authentication.anonymous()\n    }}\n\n    /// The caller behind an `Authorization: Basic` header, refused with `401`\n    /// when it is missing or signs nobody in, and with `403` when it signs in\n    /// a caller holding none of `allowed_roles`.\n    ///\n    /// Missing and wrong credentials are one answer on purpose: telling them\n    /// apart tells a caller which user names exist.\n    pub fn basic_caller(\n        &self,\n        headers: &HeaderMap,\n        realm: &'static str,\n        allowed_roles: &[&str],\n    ) -> Result<SecurityContext, ApiError> {{\n        let caller = headers\n            .get(AUTHORIZATION)\n            .and_then(|header| header.to_str().ok())\n            .and_then(basic_credentials)\n            .and_then(|(user, password)| self.authentication.sign_in(&user, &password))\n            .ok_or(ApiError::unauthenticated(realm))?;\n        if !self.authentication.allows(&caller, allowed_roles) {{\n            return Err(ApiError::Forbidden);\n        }}\n        Ok(caller)\n    }}\n\n    /// Runs one microflow as `caller` and serializes its result. A poisoned\n    /// mutex is recovered rather than propagated: a handler that panicked\n    /// left the store as it found it, because every call is its own unit of\n    /// work.\n    pub fn call(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.json(&result, Some(caller)))\n    }}\n\n    /// Runs one microflow as `caller` and shapes its result with the export\n    /// mapping its operation declares, so the response is the JSON document\n    /// the model publishes instead of the entity's stored attributes. Either\n    /// way the response carries only what `caller` may read.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.mapped(mapping, &result, Some(caller)))\n    }}\n\n    /// Runs an operation whose microflow declares the implicit\n    /// `System.HttpRequest` / `System.HttpResponse` parameters Mendix supplies\n    /// itself, and answers what the flow built.\n    ///\n    /// The objects are created and bound before the call, because a microflow\n    /// missing one of its arguments never starts. Afterwards the response\n    /// object is read back: a flow that wrote content answers that content with\n    /// the status it chose — which is how an operation documented as answering\n    /// `404` answers `404` — and a flow that wrote none answers the operation's\n    /// own document under that status. A status the flow left unusable is a\n    /// fault in the application, not in the request.\n    pub fn call_operation(\n        &self,\n        flow: &str,\n        mut arguments: Variables,\n        mapping: Option<&ExportMapping>,\n        caller: &SecurityContext,\n        objects: HttpObjects,\n    ) -> Result<Response, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let binding = objects\n            .bind(runtime.store_mut(), &mut arguments)\n            .map_err(|error| ServiceError::Flow(FlowError::Runtime(error)))?;\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        let document = match mapping {{\n            Some(mapping) => runtime.mapped(mapping, &result, Some(caller)),\n            None => runtime.json(&result, Some(caller)),\n        }};\n        let Some(answer) = binding.answer(runtime.store()) else {{\n            return Ok(Json(document).into_response());\n        }};\n        let status = StatusCode::from_u16(answer.status)\n            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);\n        if answer.content.is_empty() {{\n            return Ok((status, Json(document)).into_response());\n        }}\n        // The flow wrote the body itself. Its content type would come from a\n        // header the flow set, and headers are not carried yet, so the content\n        // goes out as text.\n        Ok((status, answer.content).into_response())\n    }}\n}}\n",
         rust_string(&format!("build/{project_name}.mpr")),
     )
 }
@@ -4708,7 +4696,7 @@ fn render_authentication() -> String {
     .to_string()
 }
 
-/// `presentation/http/error.rs` — how a flow failure becomes a response.
+/// `controllers/error.rs` — how a flow failure becomes a response.
 fn render_http_error() -> String {
     "//! Why a request did not get its answer: the model call failed, or the\n\
      //! boundary refused the request before making it.\n\n\
@@ -4798,18 +4786,19 @@ fn render_http_error() -> String {
     .to_string()
 }
 
-/// `presentation/http/mod.rs` — the router every published service merges
-/// into, plus the server that binds it.
+/// `controllers/mod.rs` — the router every published service's route table
+/// merges into, plus the server that binds it.
 fn render_http_module(services: &[PublishedService]) -> String {
     let mut out = String::from(
-        "//! The application's axum surface: one router per Mendix module\n\
-         //! with published REST services, merged here behind the shared\n\
-         //! [`AppState`].\n\n\
+        "//! The application's HTTP surface: every published REST service's route\n\
+         //! table, merged here behind the shared [`AppState`]. Controllers live\n\
+         //! one folder per Mendix module.\n\n\
          pub mod error;\n\
          pub mod state;\n",
     );
-    // An authored module's routes live in a folder of this one; an installed
-    // module's live in its own package, which the package tree declares.
+    // An authored module's controllers live in a folder of this one; an
+    // installed module's live in its own package, which the package tree
+    // declares.
     let mut owned: Vec<String> = services
         .iter()
         .filter(|service| service.root == ModuleRoot::Authored)
@@ -4827,19 +4816,22 @@ fn render_http_module(services: &[PublishedService]) -> String {
          pub use error::ApiError;\n\
          pub use state::{AppState, DEFAULT_MODEL};\n\n",
     );
-    let mut modules: Vec<String> = services
+    let route_tables: Vec<String> = services
         .iter()
         .map(|service| {
-            service.root.path(
-                &module_stem(&service.module_name),
-                "presentation::http",
-                "presentation::http",
+            format!(
+                "{}::{}",
+                service.root.path(
+                    &module_stem(&service.module_name),
+                    "controllers",
+                    "controllers",
+                ),
+                service.file_stem,
             )
         })
         .collect();
-    modules.dedup();
     out.push_str("/// Every route the model publishes, plus a liveness probe.\npub fn router(state: AppState) -> Router {\n    Router::new()\n        .route(\"/health\", get(health))\n");
-    for path in &modules {
+    for path in &route_tables {
         let _ = writeln!(out, "        .merge({path}::router())");
     }
     out.push_str("        .with_state(state)\n}\n\n");
@@ -4859,36 +4851,16 @@ fn render_http_module(services: &[PublishedService]) -> String {
     out
 }
 
-/// One module's `presentation/http/mod.rs`. A module that owns only export
-/// mappings — because a sibling module's service applies them — declares them
-/// and no router.
-fn render_module_http_index(
-    module_name: &str,
-    services: &[&PublishedService],
-    has_mappings: bool,
-) -> String {
-    let subject = if services.is_empty() {
-        "export mappings its published REST operations answer through"
-    } else {
-        "published REST services"
-    };
-    let mut out = format!("//! The {module_name} module's {subject}.\n\n");
-    if has_mappings {
-        out.push_str("pub mod mappings;\n");
-    }
-    for service in services {
-        let _ = writeln!(out, "pub mod {};", service.file_stem);
-    }
-    if services.is_empty() {
-        return out;
-    }
-    out.push_str(
-        "\nuse axum::Router;\n\nuse crate::presentation::http::AppState;\n\npub fn router() -> Router<AppState> {\n    Router::new()\n",
+/// One module's `controllers/<module>/mod.rs`: its services' route tables and
+/// their controllers. The project's own router merges each route table, so
+/// this index lists files and composes nothing.
+fn render_module_http_index(module_name: &str, files: &[(String, String)]) -> String {
+    let mut out = format!(
+        "//! The {module_name} module's published REST services: one route table per\n//! service, one controller per resource.\n\n"
     );
-    for service in services {
-        let _ = writeln!(out, "        .merge({}::router())", service.file_stem);
+    for (file, _) in files {
+        let _ = writeln!(out, "pub mod {file};");
     }
-    out.push_str("}\n");
     out
 }
 
@@ -4965,42 +4937,37 @@ fn render_mapped_object(out: &mut String, object: &MappedObject, depth: usize) {
     }
 }
 
-/// One published REST service: its axum router and one handler per
-/// operation, each calling the microflow the model bound to it.
+/// One published REST service as the files its module's controllers folder
+/// holds: the service's route table first, then one controller per resource.
 fn render_published_service(
     service: &PublishedService,
     mappings: &HashMap<String, MappingTarget>,
-) -> String {
-    // An unsupported authentication scheme routes only refusals, so the
-    // service binds no parameter, applies no mapping, and must not import for
-    // either.
-    let serves = service.authentication.serves_operations();
-    let binds = |source: ParameterSource| {
-        serves
-            && service
-                .routes
-                .iter()
-                .flat_map(|route| &route.operations)
-                .any(|operation| {
-                    operation
-                        .parameters
-                        .iter()
-                        .any(|parameter| parameter.source == source)
-                })
-    };
-    let uses_path = binds(ParameterSource::Path);
-    let uses_query = binds(ParameterSource::Query);
-    let mut extractors = Vec::new();
-    if serves {
-        extractors.push("State");
+) -> Vec<(String, String)> {
+    let mut controllers: Vec<&str> = service
+        .routes
+        .iter()
+        .flat_map(|route| &route.operations)
+        .map(|operation| operation.controller.as_str())
+        .collect();
+    controllers.sort_unstable();
+    controllers.dedup();
+    let mut files = vec![(
+        service.file_stem.clone(),
+        render_service_routes(service, &controllers),
+    )];
+    for controller in controllers {
+        files.push((
+            controller.to_string(),
+            render_controller(service, controller, mappings),
+        ));
     }
-    if uses_path {
-        extractors.push("Path");
-    }
-    if uses_query {
-        extractors.push("Query");
-    }
-    extractors.sort_unstable();
+    files
+}
+
+/// A service's route table: every path it publishes, each method bound to
+/// the controller function that handles it. The service also states who may
+/// call it, which its controllers enforce on every operation.
+fn render_service_routes(service: &PublishedService, controllers: &[&str]) -> String {
     // Only the method opening each route chain is called as a free
     // function; the rest are chained onto the `MethodRouter` it returns.
     let mut methods: Vec<&str> = service
@@ -5043,27 +5010,205 @@ fn render_published_service(
             );
         }
     }
+    out.push_str(
+        "//!\n//! This is the route table. Each resource's operations are handled by its\n//! controller, beside this file.\n",
+    );
+    let _ = write!(
+        out,
+        "\nuse axum::Router;\nuse axum::routing::{{{}}};\n\n",
+        methods.join(", ")
+    );
+    match controllers {
+        [controller] => {
+            let _ = writeln!(out, "use super::{controller};");
+        }
+        controllers => {
+            let _ = writeln!(out, "use super::{{{}}};", controllers.join(", "));
+        }
+    }
+    out.push_str("use crate::controllers::AppState;\n\n");
+    match &service.authentication {
+        ServiceAuthentication::Basic { allowed_roles } => {
+            let _ = write!(
+                out,
+                "/// The module roles this service allows, exactly as the model lists\n/// them. An empty list would allow nobody, not everybody.\npub(super) const ALLOWED_ROLES: &[&str] = &[{}];\n\n/// The realm a `401` challenges with, so a client knows which credentials\n/// it is being asked for.\npub(super) const REALM: &str = {};\n\n",
+                allowed_roles
+                    .iter()
+                    .map(|role| rust_string(role))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                rust_string(&service.name),
+            );
+        }
+        ServiceAuthentication::Unsupported { declared } => {
+            let _ = write!(
+                out,
+                "/// What the model requires of a caller, named in every refusal.\npub(super) const AUTHENTICATION: &str = {};\n\n",
+                rust_string(declared),
+            );
+        }
+        ServiceAuthentication::Public => {}
+    }
+    out.push_str("pub fn router() -> Router<AppState> {\n    Router::new()\n");
+    for route in &service.routes {
+        let handlers = route
+            .operations
+            .iter()
+            .map(|operation| {
+                format!(
+                    "{}({}::{})",
+                    operation.method, operation.controller, operation.handler
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(".");
+        let _ = writeln!(out, "        .route({:?}, {handlers})", route.path);
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// One controller: the operations of one resource, a function each, calling
+/// the microflow the model bound to it.
+fn render_controller(
+    service: &PublishedService,
+    controller: &str,
+    mappings: &HashMap<String, MappingTarget>,
+) -> String {
+    // An unsupported authentication scheme routes only refusals, so the
+    // controller binds no parameter, applies no mapping, and must not import
+    // for either.
+    let serves = service.authentication.serves_operations();
+    let operations: Vec<(&str, &ServiceOperation)> = service
+        .routes
+        .iter()
+        .flat_map(|route| {
+            route
+                .operations
+                .iter()
+                .map(move |operation| (route.path.as_str(), operation))
+        })
+        .filter(|(_, operation)| operation.controller == controller)
+        .collect();
+    let binds = |source: ParameterSource| {
+        serves
+            && operations.iter().any(|(_, operation)| {
+                operation
+                    .parameters
+                    .iter()
+                    .any(|parameter| parameter.source == source)
+            })
+    };
+    let uses_path = binds(ParameterSource::Path);
+    let uses_query = binds(ParameterSource::Query);
+    let mut extractors = Vec::new();
+    if serves {
+        extractors.push("State");
+    }
+    if uses_path {
+        extractors.push("Path");
+    }
+    if uses_query {
+        extractors.push("Query");
+    }
+    extractors.sort_unstable();
+
+    let mut resources: Vec<&str> = operations
+        .iter()
+        .map(|(_, operation)| operation.resource.as_str())
+        .collect();
+    resources.sort_unstable();
+    resources.dedup();
+    let served_at = |resource: &str| {
+        [service.base_path.as_str(), resource.trim_matches('/')]
+            .into_iter()
+            .filter(|segment| !segment.is_empty())
+            .fold(String::new(), |mut path, segment| {
+                path.push('/');
+                path.push_str(segment);
+                path
+            })
+    };
+    let mut out = match resources.as_slice() {
+        [""] => format!(
+            "//! The operations `{}` serves at its own path, `/{}`.\n",
+            service.name, service.base_path,
+        ),
+        [resource] => format!(
+            "//! The `{resource}` resource of `{}`, served under\n//! `{}`.\n",
+            service.name,
+            served_at(resource),
+        ),
+        resources => format!(
+            "//! The {} resources of `{}`.\n",
+            resources
+                .iter()
+                .map(|resource| format!("`{resource}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            service.name,
+        ),
+    };
+    let _ = writeln!(
+        out,
+        "//!\n//! One function per operation, each calling the microflow the model bound\n//! to it. The paths they answer are in `{}`, the service's route table.",
+        service.file_stem,
+    );
     if uses_path || uses_query {
         out.push_str("\nuse std::collections::HashMap;\n");
     }
-    // A handler that applies an export mapping names the declaration through
-    // the module that owns the mapping: its own, or a sibling's.
-    let own_stem = module_stem(&service.module_name);
-    let mut mapping_imports = String::new();
+    // An operation that applies an export mapping names the declaration by
+    // its file, in the domain of the module that owns it. Two modules can
+    // each own a mapping of one name; those are told apart by their module.
+    let mut applied_mappings = std::collections::BTreeSet::new();
     if serves {
-        for (stem, root) in service
-            .routes
+        for (_, operation) in &operations {
+            if let Some(target) = mappings.get(&operation.export_mapping) {
+                applied_mappings.insert((
+                    target.file_stem.clone(),
+                    target.module_stem.clone(),
+                    target.root,
+                ));
+            }
+        }
+    }
+    let mapping_alias = |target: &MappingTarget| {
+        let shared = applied_mappings
             .iter()
-            .flat_map(|route| &route.operations)
-            .filter_map(|operation| mappings.get(&operation.export_mapping))
-            .map(|target| (target.module_stem.clone(), target.root))
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            if stem == own_stem {
-                mapping_imports.push_str("use super::mappings;\n");
+            .filter(|(file, _, _)| *file == target.file_stem)
+            .count()
+            > 1;
+        if shared {
+            format!("{}_{}", target.module_stem, target.file_stem)
+        } else {
+            target.file_stem.clone()
+        }
+    };
+    // One `use` per owning module, the way a person would have written it.
+    let mut imported: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (file, module, root) in &applied_mappings {
+        let alias = mapping_alias(&MappingTarget {
+            root: *root,
+            module_stem: module.clone(),
+            file_stem: file.clone(),
+        });
+        imported
+            .entry(root.path(module, "domain::mappings", "domain::mappings"))
+            .or_default()
+            .push(if alias == *file {
+                file.clone()
             } else {
-                let path = root.path(&stem, "presentation::http", "presentation::http");
-                let _ = writeln!(mapping_imports, "use {path}::mappings as {stem}_mappings;");
+                format!("{file} as {alias}")
+            });
+    }
+    let mut mapping_imports = String::new();
+    for (path, names) in &imported {
+        match names.as_slice() {
+            [name] => {
+                let _ = writeln!(mapping_imports, "use {path}::{name};");
+            }
+            names => {
+                let _ = writeln!(mapping_imports, "use {path}::{{{}}};", names.join(", "));
             }
         }
     }
@@ -5071,11 +5216,9 @@ fn render_published_service(
     // decides both what the handlers extract and what they return.
     let http = |pick: fn(&HttpParameters) -> bool| {
         serves
-            && service
-                .routes
+            && operations
                 .iter()
-                .flat_map(|route| &route.operations)
-                .any(|operation| pick(&operation.http_parameters))
+                .any(|(_, operation)| pick(&operation.http_parameters))
     };
     let binds_http_objects = http(|parameters| !parameters.is_empty());
     let binds_http_request = http(|parameters| parameters.request.is_some());
@@ -5096,96 +5239,58 @@ fn render_published_service(
     if binds_http_objects {
         out.push_str("use axum::response::Response;\n");
     }
-    let _ = writeln!(out, "use axum::routing::{{{}}};", methods.join(", "));
     if serves {
-        // Only a bound parameter names a `FlowValue`; a service whose
+        // Only a bound parameter names a `FlowValue`; a controller whose
         // operations take none would carry an unused import.
-        let ports = if service
-            .routes
+        let mut ports = vec!["Variables"];
+        if operations
             .iter()
-            .flat_map(|route| &route.operations)
-            .any(|operation| !operation.parameters.is_empty())
+            .any(|(_, operation)| !operation.parameters.is_empty())
         {
-            "FlowValue, Variables"
-        } else {
-            "Variables"
-        };
-        let ports = if binds_http_objects {
-            format!("{ports}, HttpObjects")
-        } else {
-            ports.to_string()
-        };
-        let mut names: Vec<&str> = ports.split(", ").collect();
-        names.sort_unstable();
+            ports.push("FlowValue");
+        }
+        if binds_http_objects {
+            ports.push("HttpObjects");
+        }
+        ports.sort_unstable();
         // `Json<Value>` appears in a handler's answer and in a body extractor.
-        // A service whose every operation answers through its response object
-        // and binds no body needs neither.
-        let json = service
-            .routes
+        // A controller whose every operation answers through its response
+        // object and binds no body needs neither.
+        let json = operations
             .iter()
-            .flat_map(|route| &route.operations)
-            .any(|operation| operation.http_parameters.is_empty())
+            .any(|(_, operation)| operation.http_parameters.is_empty())
             || binds(ParameterSource::Body);
-        let _ = write!(
-            out,
-            "use axum::{{{}}};\nuse mxrs::ports::{{{}}};\n{}",
-            if json { "Json, Router" } else { "Router" },
-            names.join(", "),
-            if json { "use serde_json::Value;\n" } else { "" },
-        );
-    } else {
-        out.push_str("use axum::Router;\n");
+        if json {
+            out.push_str("use axum::Json;\n");
+        }
+        let _ = writeln!(out, "use mxrs::ports::{{{}}};", ports.join(", "));
+        if json {
+            out.push_str("use serde_json::Value;\n");
+        }
     }
-    let _ = write!(
-        out,
-        "\nuse crate::presentation::http::{{ApiError, AppState}};\n{mapping_imports}\n",
-    );
+    out.push('\n');
     match &service.authentication {
-        ServiceAuthentication::Basic { allowed_roles } => {
-            let _ = write!(
+        ServiceAuthentication::Basic { .. } => {
+            let _ = writeln!(
                 out,
-                "/// The module roles this service allows, exactly as the model lists\n/// them. An empty list would allow nobody, not everybody.\nconst ALLOWED_ROLES: &[&str] = &[{}];\n\n/// The realm a `401` challenges with, so a client knows which credentials\n/// it is being asked for.\nconst REALM: &str = {};\n\n",
-                allowed_roles
-                    .iter()
-                    .map(|role| rust_string(role))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                rust_string(&service.name),
+                "use super::{}::{{ALLOWED_ROLES, REALM}};",
+                service.file_stem
             );
         }
-        ServiceAuthentication::Unsupported { declared } => {
-            let _ = write!(
-                out,
-                "/// What the model requires of a caller, named in every refusal.\nconst AUTHENTICATION: &str = {};\n\n",
-                rust_string(declared),
-            );
+        ServiceAuthentication::Unsupported { .. } => {
+            let _ = writeln!(out, "use super::{}::AUTHENTICATION;", service.file_stem);
         }
         ServiceAuthentication::Public => {}
     }
-    out.push_str("pub fn router() -> Router<AppState> {\n    Router::new()\n");
-    for route in &service.routes {
-        let handlers = route
-            .operations
-            .iter()
-            .map(|operation| format!("{}({})", operation.method, operation.handler))
-            .collect::<Vec<_>>()
-            .join(".");
-        let _ = writeln!(out, "        .route({:?}, {handlers})", route.path);
-    }
-    out.push_str("}\n");
+    out.push_str(if serves {
+        "use crate::controllers::{ApiError, AppState};\n"
+    } else {
+        "use crate::controllers::ApiError;\n"
+    });
+    out.push_str(&mapping_imports);
 
-    for operation in service.routes.iter().flat_map(|route| &route.operations) {
+    for (route_path, operation) in &operations {
         out.push('\n');
-        let route_path = service
-            .routes
-            .iter()
-            .find(|route| {
-                route
-                    .operations
-                    .iter()
-                    .any(|candidate| candidate.handler == operation.handler)
-            })
-            .map_or("/", |route| route.path.as_str());
         if !operation.summary.is_empty() {
             let _ = writeln!(out, "/// {}", operation.summary);
         }
@@ -5201,27 +5306,21 @@ fn render_published_service(
         }
         let _ = writeln!(
             out,
-            "#[mxrs::route(method = {:?}, path = {route_path:?}, service = {:?}, operation = {:?})]",
+            "#[mxrs::route(method = {:?}, path = {route_path:?}, service = {:?})]",
             operation.method.to_ascii_uppercase(),
             service.name,
-            operation.handler,
         );
         if !serves {
             let _ = writeln!(
                 out,
-                "/// Would call `{}`; refuses instead, because the model's\n/// authentication is not available here.\nasync fn {}() -> ApiError {{\n    ApiError::unsupported_authentication(AUTHENTICATION)\n}}",
+                "/// Would call `{}`; refuses instead, because the model's\n/// authentication is not available here.\npub async fn {}() -> ApiError {{\n    ApiError::unsupported_authentication(AUTHENTICATION)\n}}",
                 operation.microflow, operation.handler,
             );
             continue;
         }
-        let applied = mappings.get(&operation.export_mapping).map(|target| {
-            let scope = if target.module_stem == own_stem {
-                "mappings".to_string()
-            } else {
-                format!("{}_mappings", target.module_stem)
-            };
-            format!("{scope}::{}::mapping()", target.file_stem)
-        });
+        let applied = mappings
+            .get(&operation.export_mapping)
+            .map(|target| format!("{}::mapping()", mapping_alias(target)));
         match &applied {
             Some(_) => {
                 let _ = writeln!(
@@ -5283,7 +5382,7 @@ fn render_published_service(
         };
         let _ = writeln!(
             out,
-            "async fn {}(\n    State(state): State<AppState>,{headers}{uri}{path}{query}{body}\n) -> Result<{answer}, ApiError> {{",
+            "pub async fn {}(\n    State(state): State<AppState>,{headers}{uri}{path}{query}{body}\n) -> Result<{answer}, ApiError> {{",
             operation.handler,
         );
         match service.authentication {
@@ -5353,6 +5452,123 @@ fn render_published_service(
         }
     }
     out
+}
+
+/// Decides, for every operation of every service, which controller file
+/// handles it and what its function is called there.
+///
+/// A controller is a resource: `orders_controller` holds the operations of the
+/// `orders` resource. Two services of one module that each publish a resource of
+/// that name keep them apart by service (`api_service_orders_controller`), and a
+/// service's operations outside any resource live in the service's own
+/// controller.
+///
+/// A function is named by what the operation does to the resource — `index`,
+/// `show`, `create`, `update`, `destroy` — when that says which operation it
+/// is. Operations that would share one of those names are named after the
+/// microflow each calls instead, which is what tells them apart in the model.
+fn assign_controllers(services: &mut [PublishedService]) {
+    let preferred = |service_stem: &str, resource: &str| {
+        let resource = inner_file_stem(resource);
+        if resource.is_empty() {
+            format!("{service_stem}_controller")
+        } else {
+            format!("{resource}_controller")
+        }
+    };
+    let mut claimed: HashMap<(String, String), std::collections::BTreeSet<usize>> = HashMap::new();
+    let mut service_files = std::collections::HashSet::new();
+    for (index, service) in services.iter().enumerate() {
+        let module = module_stem(&service.module_name);
+        service_files.insert((module.clone(), service.file_stem.clone()));
+        for operation in service.routes.iter().flat_map(|route| &route.operations) {
+            claimed
+                .entry((
+                    module.clone(),
+                    preferred(&service.file_stem, &operation.resource),
+                ))
+                .or_default()
+                .insert(index);
+        }
+    }
+    let mut owner: HashMap<(String, String), usize> = HashMap::new();
+    for (index, service) in services.iter_mut().enumerate() {
+        let module = module_stem(&service.module_name);
+        let service_stem = service.file_stem.clone();
+        for operation in service
+            .routes
+            .iter_mut()
+            .flat_map(|route| &mut route.operations)
+        {
+            let mut controller = preferred(&service_stem, &operation.resource);
+            if claimed[&(module.clone(), controller.clone())].len() > 1 {
+                controller = format!("{service_stem}_{controller}");
+            }
+            let base = controller.clone();
+            let mut suffix = 2;
+            // A file another service already owns, or a service's own route
+            // table, is not this controller's to write.
+            while service_files.contains(&(module.clone(), controller.clone()))
+                || owner
+                    .get(&(module.clone(), controller.clone()))
+                    .is_some_and(|other| *other != index)
+            {
+                controller = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            owner.insert((module.clone(), controller.clone()), index);
+            operation.controller = controller;
+        }
+    }
+
+    for service in services.iter_mut() {
+        let conventional = |operation: &ServiceOperation| match operation.method {
+            "get" if operation.addresses_one => "show",
+            "get" => "index",
+            "post" => "create",
+            "put" | "patch" => "update",
+            "delete" => "destroy",
+            _ => "",
+        };
+        let mut wanted: HashMap<(String, &'static str), usize> = HashMap::new();
+        for operation in service.routes.iter().flat_map(|route| &route.operations) {
+            *wanted
+                .entry((operation.controller.clone(), conventional(operation)))
+                .or_default() += 1;
+        }
+        let mut used: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for operation in service
+            .routes
+            .iter_mut()
+            .flat_map(|route| &mut route.operations)
+        {
+            let name = conventional(operation);
+            if !name.is_empty() && wanted[&(operation.controller.clone(), name)] == 1 {
+                operation.handler = name.to_string();
+                used.insert((operation.controller.clone(), name.to_string()));
+            }
+        }
+        for operation in service
+            .routes
+            .iter_mut()
+            .flat_map(|route| &mut route.operations)
+            .filter(|operation| operation.handler.is_empty())
+        {
+            let microflow = operation.microflow.rsplit('.').next().unwrap_or_default();
+            let mut base = inner_file_stem(flow_export::split_prefix(microflow).1);
+            if base.is_empty() {
+                base = format!("{}_operation", operation.method);
+            }
+            let mut handler = base.clone();
+            let mut suffix = 2;
+            while !used.insert((operation.controller.clone(), handler.clone())) {
+                handler = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            operation.handler = handler;
+        }
+    }
 }
 
 /// One module's action ports: the Rust contracts its model-declared Java
@@ -5520,7 +5736,7 @@ fn service_authentication(document: &mxrs_bson::Document) -> ServiceAuthenticati
 }
 
 struct ServiceRoute {
-    /// Full axum path, e.g. `/api/v1/spc/{buildingID}`.
+    /// Full axum path, e.g. `/api/v1/orders/{id}`.
     path: String,
     operations: Vec<ServiceOperation>,
 }
@@ -5528,7 +5744,16 @@ struct ServiceRoute {
 struct ServiceOperation {
     /// axum routing method: `get`, `post`, …
     method: &'static str,
-    /// Generated handler function name.
+    /// The Mendix resource the operation belongs to; empty for one the
+    /// service publishes at its own path.
+    resource: String,
+    /// Whether the operation's own path ends in a parameter: it addresses
+    /// one object of the resource, where another addresses the collection.
+    addresses_one: bool,
+    /// The controller file that handles it, e.g. `orders_controller`. Decided
+    /// by [`assign_controllers`], across every service of the module.
+    controller: String,
+    /// The handler function's name within that controller.
     handler: String,
     /// Qualified microflow the operation calls.
     microflow: String,
@@ -5685,6 +5910,7 @@ fn collect_published_services(
     services.sort_by(|left, right| {
         (&left.module_name, &left.file_stem).cmp(&(&right.module_name, &right.file_stem))
     });
+    assign_controllers(&mut services);
     Ok(services)
 }
 
@@ -5706,7 +5932,6 @@ fn published_service(
         .unwrap_or_default()
         .trim_matches('/');
     let mut routes: Vec<ServiceRoute> = Vec::new();
-    let mut handlers = std::collections::HashSet::new();
     for resource in documents_in(document, "Resources") {
         let resource_name = resource.get_str("Name").unwrap_or_default().to_string();
         for operation in documents_in(&resource, "Operations") {
@@ -5777,24 +6002,15 @@ fn published_service(
             if malformed {
                 continue;
             }
-            let mut handler = snake_ident(&format!(
-                "{method}_{}_{}",
-                if resource_name.is_empty() {
-                    "root"
-                } else {
-                    &resource_name
-                },
-                microflow.rsplit('.').next().unwrap_or_default()
-            ));
-            if handler.is_empty() || rust_keyword(&handler) {
-                continue;
-            }
-            while !handlers.insert(handler.clone()) {
-                handler.push('_');
-            }
             let operation = ServiceOperation {
                 method,
-                handler,
+                resource: resource_name.trim_matches('/').to_string(),
+                addresses_one: suffix
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|segment| segment.starts_with('{') && segment.ends_with('}')),
+                controller: String::new(),
+                handler: String::new(),
                 microflow: microflow.to_string(),
                 summary: operation.get_str("Summary").unwrap_or_default().to_string(),
                 documentation: operation
@@ -6491,11 +6707,10 @@ fn derive_pascal_case(field_name: &str) -> String {
         .collect()
 }
 
-/// Everything one Mendix module contributes to the generated crate. Each
-/// module gets its own folder under `src/modules/<stem>/` carrying its
-/// domain model, DTOs, services, ports, presentation and markers — the
-/// same shape the module has inside Studio Pro, expressed as the crate's
-/// Clean Architecture folders.
+/// Everything one Mendix module contributes to the generated crate: its
+/// domain model, DTOs, services, ports, controllers, user interface and
+/// markers. Where each lands depends on the module's root — a folder per
+/// concept in the project's layers, or the module's own package folder.
 #[derive(Default)]
 struct GeneratedModule {
     /// Mendix module name, exactly as declared.
@@ -6530,20 +6745,20 @@ struct GeneratedModule {
     ports_actions: Option<String>,
     /// `markers.rs` — the module's compile-time model markers.
     markers: Option<String>,
-    /// `presentation/http/` — the module's published REST services and the
-    /// export mappings their operations apply.
+    /// `(file stem, source)` per export mapping a published REST operation
+    /// answers through. A module can own mappings without publishing a
+    /// service of its own.
+    mappings: Vec<(String, String)>,
+    /// The module's controllers: its published REST services.
     http: Option<GeneratedHttp>,
 }
 
-/// One module's `presentation/http/` folder: its index, one file per published
-/// REST service, and one file per export mapping a published operation
-/// applies. A module can own mappings without publishing a service of its own.
+/// One module's controllers folder: its index, and for each published REST
+/// service a route table and one controller per resource.
 struct GeneratedHttp {
     index: String,
-    /// `(file stem, source)` per published REST service.
-    services: Vec<(String, String)>,
-    /// `(file stem, source)` per export mapping declaration.
-    mappings: Vec<(String, String)>,
+    /// `(file stem, source)` per route table and controller, in file order.
+    files: Vec<(String, String)>,
 }
 
 fn generated_module<'a>(
@@ -6560,8 +6775,8 @@ fn generated_module<'a>(
 /// Writes the two trees the generated crate keeps.
 ///
 /// The authored tree is **layer-first**: one `src/domain/`, one
-/// `src/presentation/` for the whole project, each concept holding a folder
-/// per Mendix module. The module folder is not a repetition of the layers —
+/// `src/controllers/`, one `src/ui/` for the whole project, each concept
+/// holding a folder per Mendix module. The module folder is not a repetition of the layers —
 /// it is what keeps the names apart, because Mendix entity names are unique
 /// per module and not across a project.
 ///
@@ -6620,7 +6835,7 @@ struct AuthoredConcept<'a> {
 }
 
 /// The concept folders each authored layer holds, keyed by layer folder
-/// (`domain`, `presentation`). A concept is listed only when the writer
+/// (`domain`, `ui`). A concept is listed only when the writer
 /// created its folder: declaring one that was not written is what makes the
 /// generated crate fail to resolve its own modules.
 type AuthoredLayers = std::collections::BTreeMap<String, Vec<String>>;
@@ -6633,8 +6848,8 @@ fn record_concept(layers: &mut AuthoredLayers, layer: &str, concept: &str) {
         .push(concept.to_string());
 }
 
-/// Writes `src/domain/`, `src/application/` and `src/presentation/` for the
-/// modules this project created, one folder per concept with a module folder
+/// Writes `src/domain/`, `src/application/`, `src/controllers/` and `src/ui/`
+/// for the modules this project created, one folder per concept with a module folder
 /// inside each.
 fn write_authored_layers(
     destination: &Path,
@@ -6669,17 +6884,22 @@ fn write_authored_layers(
             modules: files(|module| &module.documents),
         },
         AuthoredConcept {
+            folder: "domain/mappings",
+            subject: "export mappings: the JSON documents published REST\n//! operations answer with",
+            modules: files(|module| &module.mappings),
+        },
+        AuthoredConcept {
             folder: "application/services",
             subject: "server-side microflows as application services",
             modules: files(|module| &module.services),
         },
         AuthoredConcept {
-            folder: "presentation/nanoflows",
+            folder: "ui/nanoflows",
             subject: "nanoflows",
             modules: files(|module| &module.nanoflows),
         },
         AuthoredConcept {
-            folder: "presentation/pages",
+            folder: "ui/pages",
             subject: "editable pages",
             modules: files(|module| &module.pages),
         },
@@ -6806,118 +7026,75 @@ fn write_authored_ports(
     Ok(())
 }
 
-/// The published REST surface, one folder per module under
-/// `presentation/http/`. The project-level `presentation/http/mod.rs` merges
-/// each module's router and owns the shared state and error type.
+/// The published REST surface, one folder per module under `controllers/`.
+/// The project-level `controllers/mod.rs` merges every service's route table
+/// and owns the shared state and error type.
 fn write_authored_http(destination: &Path, modules: &[(&String, &GeneratedModule)]) -> Result<()> {
     for (stem, module) in modules {
-        let Some(GeneratedHttp {
-            index,
-            services,
-            mappings,
-        }) = &module.http
-        else {
+        let Some(http) = &module.http else {
             continue;
         };
-        let directory = destination
-            .join("src/presentation/http")
-            .join(stem.as_str());
-        std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
-        write_text(&directory.join("mod.rs"), index)?;
-        for (file, source) in services {
-            write_text(&directory.join(format!("{file}.rs")), source)?;
-        }
-        if mappings.is_empty() {
-            continue;
-        }
-        let folder = directory.join("mappings");
-        std::fs::create_dir_all(&folder).map_err(|source| io_error(&folder, source))?;
-        let mut mapping_index = format!(
-            "//! The {} module's export mappings: the JSON documents its\n//! published REST operations answer with.\n\n",
-            module.name
-        );
-        for (file, _) in mappings {
-            let _ = writeln!(mapping_index, "pub mod {file};");
-        }
-        write_text(&folder.join("mod.rs"), &mapping_index)?;
-        for (file, source) in mappings {
-            write_text(&folder.join(format!("{file}.rs")), source)?;
-        }
+        write_controllers(
+            &destination.join("src/controllers").join(stem.as_str()),
+            http,
+        )?;
     }
     Ok(())
 }
 
-/// One module's folder. A package contributes only what the project *uses* —
-/// types, contracts and served routes — so its declarations (constants, module
-/// security, microflows, nanoflows, pages) are not written and nothing here
-/// gets an `apply`.
+/// One module's controllers folder: its index, each service's route table,
+/// and their controllers.
+fn write_controllers(directory: &Path, http: &GeneratedHttp) -> Result<()> {
+    std::fs::create_dir_all(directory).map_err(|source| io_error(directory, source))?;
+    write_text(&directory.join("mod.rs"), &http.index)?;
+    for (file, source) in &http.files {
+        write_text(&directory.join(format!("{file}.rs")), source)?;
+    }
+    Ok(())
+}
+
+/// One installed module's folder. A package contributes only what the project
+/// *uses* — types, contracts and served routes — so what it declares
+/// (constants, module security, microflows, nanoflows, pages) is not written:
+/// the imported model stays the only record of it.
 fn write_module_folder(directory: &Path, module: &GeneratedModule) -> Result<()> {
     std::fs::create_dir_all(directory).map_err(|source| io_error(directory, source))?;
-    let applies = module.root.applies();
-    let declared = |files: &Vec<(String, String)>| {
-        if applies { files.len() } else { 0 }
-    };
 
-    let has_domain = !module.entities.is_empty()
-        || !module.enumerations.is_empty()
-        || declared(&module.documents) > 0
-        || (applies && module.security.is_some());
+    let domain_concepts = [
+        (
+            "entities",
+            format!("//! The {} module's persisted entities.\n\n", module.name),
+            &module.entities,
+        ),
+        (
+            "enumerations",
+            format!("//! The {} module's enumerations.\n\n", module.name),
+            &module.enumerations,
+        ),
+        (
+            "mappings",
+            format!(
+                "//! The {} module's export mappings: the JSON documents its\n//! published REST operations answer with.\n\n",
+                module.name
+            ),
+            &module.mappings,
+        ),
+    ];
+    let has_domain = domain_concepts
+        .iter()
+        .any(|(_, _, files)| !files.is_empty());
     if has_domain {
         let domain = directory.join("domain");
         std::fs::create_dir_all(&domain).map_err(|source| io_error(&domain, source))?;
         let mut domain_index = format!("//! The {} module's domain model.\n\n", module.name);
-        let mut domain_apply = String::new();
-        if declared(&module.documents) > 0 {
-            domain_index.push_str("pub mod documents;\n");
-            domain_apply.push_str("    documents::apply(project);\n");
-            write_concept_files(
-                &domain.join("documents"),
-                &format!(
-                    "//! The {} module's constants, regular expressions,\n//! scheduled events and standalone menus.\n\n",
-                    module.name
-                ),
-                &module.documents,
-                applies,
-            )?;
-        }
-        if !module.entities.is_empty() {
-            domain_index.push_str("pub mod entities;\n");
-            if applies {
-                domain_apply.push_str("    entities::apply(project);\n");
+        for (concept, header, files) in &domain_concepts {
+            if files.is_empty() {
+                continue;
             }
-            write_concept_files(
-                &domain.join("entities"),
-                &format!("//! The {} module's persisted entities.\n\n", module.name),
-                &module.entities,
-                applies,
-            )?;
-        }
-        if !module.enumerations.is_empty() {
-            domain_index.push_str("pub mod enumerations;\n");
-            if applies {
-                domain_apply.push_str("    enumerations::apply(project);\n");
-            }
-            write_concept_files(
-                &domain.join("enumerations"),
-                &format!("//! The {} module's enumerations.\n\n", module.name),
-                &module.enumerations,
-                applies,
-            )?;
-        }
-        if applies && module.security.is_some() {
-            domain_index.push_str("pub mod security;\n");
-            domain_apply.push_str("    security::apply(project);\n");
-        }
-        if applies {
-            let _ = write!(
-                domain_index,
-                "\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {{\n{domain_apply}}}\n"
-            );
+            let _ = writeln!(domain_index, "pub mod {concept};");
+            write_concept_files(&domain.join(concept), header, files)?;
         }
         write_text(&domain.join("mod.rs"), &domain_index)?;
-        if let Some(security) = &module.security.as_ref().filter(|_| applies) {
-            write_text(&domain.join("security.rs"), security)?;
-        }
     }
 
     if !module.dtos.is_empty() {
@@ -6928,109 +7105,15 @@ fn write_module_folder(directory: &Path, module: &GeneratedModule) -> Result<()>
                 module.name
             ),
             &module.dtos,
-            applies,
-        )?;
-    }
-    if declared(&module.services) > 0 {
-        write_concept_files(
-            &directory.join("services"),
-            &format!(
-                "//! The {} module's microflows as editable service declarations.\n\n",
-                module.name
-            ),
-            &module.services,
-            applies,
         )?;
     }
 
-    let has_presentation =
-        declared(&module.nanoflows) > 0 || declared(&module.pages) > 0 || module.http.is_some();
-    if has_presentation {
-        let presentation = directory.join("presentation");
-        std::fs::create_dir_all(&presentation).map_err(|source| io_error(&presentation, source))?;
-        let mut presentation_index = format!(
-            "//! The {} module's client-side pages and nanoflows.\n\n",
-            module.name
-        );
-        let mut presentation_apply = String::new();
-        if declared(&module.nanoflows) > 0 {
-            presentation_index.push_str("pub mod nanoflows;\n");
-            presentation_apply.push_str("    nanoflows::apply(project);\n");
-            write_concept_files(
-                &presentation.join("nanoflows"),
-                &format!("//! The {} module's nanoflows.\n\n", module.name),
-                &module.nanoflows,
-                applies,
-            )?;
-        }
-        if let Some(GeneratedHttp {
-            index,
-            services,
-            mappings,
-        }) = &module.http
-        {
-            presentation_index.push_str("pub mod http;\n");
-            let http = presentation.join("http");
-            std::fs::create_dir_all(&http).map_err(|source| io_error(&http, source))?;
-            write_text(&http.join("mod.rs"), index)?;
-            for (stem, source) in services {
-                write_text(&http.join(format!("{stem}.rs")), source)?;
-            }
-            if !mappings.is_empty() {
-                let directory = http.join("mappings");
-                std::fs::create_dir_all(&directory)
-                    .map_err(|source| io_error(&directory, source))?;
-                let mut index = format!(
-                    "//! The {} module's export mappings: the JSON documents its\n//! published REST operations answer with.\n\n",
-                    module.name
-                );
-                for (stem, _) in mappings {
-                    let _ = writeln!(index, "pub mod {stem};");
-                }
-                write_text(&directory.join("mod.rs"), &index)?;
-                for (stem, source) in mappings {
-                    write_text(&directory.join(format!("{stem}.rs")), source)?;
-                }
-            }
-        }
-        if declared(&module.pages) > 0 {
-            presentation_index.push_str("pub mod pages;\n");
-            let pages = presentation.join("pages");
-            std::fs::create_dir_all(&pages).map_err(|source| io_error(&pages, source))?;
-            let mut pages_index = format!("//! The {} module's editable pages.\n\n", module.name);
-            for (stem, _) in &module.pages {
-                let _ = writeln!(pages_index, "pub mod {stem};");
-            }
-            pages_index.push_str("\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n");
-            for (stem, _) in &module.pages {
-                let _ = writeln!(
-                    pages_index,
-                    "    project.module_mut({:?}).pages.push({stem}::declaration());",
-                    module.name,
-                );
-            }
-            pages_index.push_str("}\n");
-            write_text(&pages.join("mod.rs"), &pages_index)?;
-            for (stem, source) in &module.pages {
-                write_text(&pages.join(format!("{stem}.rs")), source)?;
-            }
-            presentation_apply.push_str("    pages::apply(project);\n");
-        }
-        if applies {
-            let parameter = if presentation_apply.is_empty() {
-                "_project"
-            } else {
-                "project"
-            };
-            let _ = write!(
-                presentation_index,
-                "\npub fn apply({parameter}: &mut ::mxrs_ir::ProjectDecl) {{\n{presentation_apply}}}\n"
-            );
-        }
-        write_text(&presentation.join("mod.rs"), &presentation_index)?;
+    if let Some(http) = &module.http {
+        write_controllers(&directory.join("controllers"), http)?;
     }
 
-    if module.ports_services.is_some() || module.ports_actions.is_some() {
+    let has_ports = module.ports_services.is_some() || module.ports_actions.is_some();
+    if has_ports {
         let ports = directory.join("ports");
         std::fs::create_dir_all(&ports).map_err(|source| io_error(&ports, source))?;
         let mut ports_index = format!(
@@ -7052,81 +7135,36 @@ fn write_module_folder(directory: &Path, module: &GeneratedModule) -> Result<()>
         write_text(&directory.join("markers.rs"), markers)?;
     }
 
-    let mut module_index = match module.root {
-        ModuleRoot::Authored => format!("//! The {} Mendix module.\n\n", module.name),
-        ModuleRoot::Package => format!(
-            "//! The {} Mendix module, installed from the Marketplace{}.\n//!\n//! Its types and contracts, so this project can name them. Editing them\n//! changes nothing: a package declares nothing, and the next upgrade of the\n//! module replaces it. `model/imported` holds what it actually declares.\n\n",
-            module.name,
-            if module.version.is_empty() {
-                String::new()
-            } else {
-                format!(" at {}", module.version)
-            },
-        ),
-    };
-    let mut module_apply = String::new();
-    if has_domain {
-        module_index.push_str("pub mod domain;\n");
-        if applies {
-            module_apply.push_str("    domain::apply(project);\n");
-        }
-    }
-    if !module.dtos.is_empty() {
-        module_index.push_str("pub mod dto;\n");
-        if applies {
-            module_apply.push_str("    dto::apply(project);\n");
-        }
-    }
-    if module.markers.is_some() {
-        module_index.push_str("pub mod markers;\n");
-    }
-    if module.ports_services.is_some() || module.ports_actions.is_some() {
-        module_index.push_str("pub mod ports;\n");
-    }
-    if has_presentation {
-        module_index.push_str("pub mod presentation;\n");
-    }
-    if declared(&module.services) > 0 {
-        module_index.push_str("pub mod services;\n");
-        module_apply.push_str("    services::apply(project);\n");
-    }
-    if has_presentation && applies {
-        module_apply.push_str("    presentation::apply(project);\n");
-    }
-    if applies {
-        let parameter = if module_apply.is_empty() {
-            "_project"
+    let mut module_index = format!(
+        "//! The {} Mendix module, installed from the Marketplace{}.\n//!\n//! Its types and contracts, so this project can name them. Editing them\n//! changes nothing: a package declares nothing, and the next upgrade of the\n//! module replaces it. `model/imported` holds what it actually declares.\n\n",
+        module.name,
+        if module.version.is_empty() {
+            String::new()
         } else {
-            "project"
-        };
-        let _ = write!(
-            module_index,
-            "\npub fn apply({parameter}: &mut ::mxrs_ir::ProjectDecl) {{\n{module_apply}}}\n"
-        );
+            format!(" at {}", module.version)
+        },
+    );
+    for (name, present) in [
+        ("controllers", module.http.is_some()),
+        ("domain", has_domain),
+        ("dto", !module.dtos.is_empty()),
+        ("markers", module.markers.is_some()),
+        ("ports", has_ports),
+    ] {
+        if present {
+            let _ = writeln!(module_index, "pub mod {name};");
+        }
     }
     write_text(&directory.join("mod.rs"), &module_index)?;
     Ok(())
 }
 
-/// Writes one concept folder — a file per declaration plus the index that
-/// merges each `declaration()` into the project.
-fn write_concept_files(
-    directory: &Path,
-    header: &str,
-    files: &[(String, String)],
-    applies: bool,
-) -> Result<()> {
+/// Writes one concept folder: a file per item and the index that lists them.
+fn write_concept_files(directory: &Path, header: &str, files: &[(String, String)]) -> Result<()> {
     std::fs::create_dir_all(directory).map_err(|source| io_error(directory, source))?;
     let mut index = String::from(header);
     for (stem, _) in files {
         let _ = writeln!(index, "pub mod {stem};");
-    }
-    if applies {
-        index.push_str("\npub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n");
-        for (stem, _) in files {
-            let _ = writeln!(index, "    project.merge_module({stem}::declaration());");
-        }
-        index.push_str("}\n");
     }
     write_text(&directory.join("mod.rs"), &index)?;
     for (stem, source) in files {
@@ -7220,7 +7258,7 @@ mod tests {
         record_concept(&mut full, "application", "services");
         record_concept(&mut full, "application", "ports");
         for concept in ["nanoflows", "pages"] {
-            record_concept(&mut full, "presentation", concept);
+            record_concept(&mut full, "ui", concept);
         }
 
         assert_eq!(
@@ -7255,28 +7293,25 @@ mod tests {
         );
         assert!(!render_application_module(&full, false).contains("task_queues"));
 
-        let presentation = render_presentation_module(ApiMode::Axum, &full);
-        // Nanoflows are the frontend's services, so they are a presentation
+        let ui = render_ui_module(&full);
+        // Nanoflows are the frontend's services, so they are a user-interface
         // concept — declared when the import produced any.
         for held in [
-            "pub mod http;",
             "pub mod nanoflows;",
             "pub mod navigation;",
             "pub mod pages;",
         ] {
-            assert!(presentation.contains(held), "{held}\n{presentation}");
+            assert!(ui.contains(held), "{held}\n{ui}");
         }
+        // What the application serves over HTTP is not user interface: it
+        // has a layer of its own.
+        assert!(!ui.contains("pub mod http;"), "{ui}");
+        assert!(!ui.contains("controllers"), "{ui}");
         // No page module is written when the import found nothing buildable,
         // so the layer must not declare one either.
-        let bare_presentation = render_presentation_module(ApiMode::Axum, &empty);
-        assert!(
-            !bare_presentation.contains("pub mod pages;"),
-            "{bare_presentation}"
-        );
-        assert!(
-            !bare_presentation.contains("pub mod nanoflows;"),
-            "{bare_presentation}"
-        );
+        let bare_ui = render_ui_module(&empty);
+        assert!(!bare_ui.contains("pub mod pages;"), "{bare_ui}");
+        assert!(!bare_ui.contains("pub mod nanoflows;"), "{bare_ui}");
 
         assert!(render_infrastructure_module(true).contains("pub mod persistence;"));
         assert!(!render_infrastructure_module(false).contains("persistence"));
@@ -7286,7 +7321,7 @@ mod tests {
         for layer in [
             render_domain_module(&full, true),
             render_application_module(&full, true),
-            presentation,
+            ui,
             render_infrastructure_module(true),
         ] {
             for composing in [
@@ -7316,7 +7351,7 @@ mod tests {
             assert!(manifest.contains(dependency), "{}", mode.name());
             assert!(stub.contains(server_marker), "{}", mode.name());
             assert!(stub.contains("axum\n//! preset only"), "{}", mode.name());
-            assert!(binary.contains("presentation::http::server::serve"));
+            assert!(binary.contains("controllers::server::serve"));
         }
 
         let manifest = cargo_manifest("sample", None, ApiMode::Axum);
@@ -7326,8 +7361,8 @@ mod tests {
         assert!(http.contains("pub fn router(state: AppState) -> Router"));
         assert!(http.contains("axum::serve(listener, router(state))"));
         let binary = build_binary_source("sample", "Sample", ApiMode::Axum);
-        assert!(binary.contains("presentation::http::serve("));
-        assert!(binary.contains("presentation::http::DEFAULT_MODEL"));
+        assert!(binary.contains("controllers::serve("));
+        assert!(binary.contains("controllers::DEFAULT_MODEL"));
     }
 
     #[test]
@@ -7352,11 +7387,26 @@ mod tests {
         assert_eq!(sanitize_ident("Order"), "Order");
     }
 
-    /// A published REST service becomes an axum router: the model's own
-    /// paths and methods, one handler per operation binding the declared
-    /// parameters onto the microflow it calls.
+    /// A service lowered the way an import lowers it, with every file it
+    /// becomes read as one text: the route table first, then its controllers.
+    fn rendered_service(
+        mut service: PublishedService,
+        targets: &HashMap<String, MappingTarget>,
+    ) -> String {
+        assign_controllers(std::slice::from_mut(&mut service));
+        render_published_service(&service, targets)
+            .into_iter()
+            .map(|(file, source)| format!("// {file}.rs\n{source}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A published REST service becomes a route table — the model's own
+    /// paths and methods — and a controller per resource, with one function
+    /// per operation binding the declared parameters onto the microflow it
+    /// calls.
     #[test]
-    fn published_rest_services_become_axum_routers() {
+    fn published_rest_services_become_a_route_table_and_controllers() {
         let service = mxrs_bson::doc! {
             "$Type": "Rest$PublishedRestService",
             "Name": "API_Service",
@@ -7421,15 +7471,32 @@ mod tests {
                 file_stem: "em_order".to_string(),
             },
         )]);
-        let rendered = render_published_service(&service, &targets);
+        let rendered = rendered_service(service, &targets);
+        // The service file is the route table and nothing else: the paths,
+        // each method bound to its controller's function.
+        assert!(
+            rendered.starts_with("// api_service.rs\n")
+                && rendered.contains("\n// orders_controller.rs\n"),
+            "{rendered}"
+        );
         assert!(
             rendered.contains(
-                ".route(\n            \"/api/v1/orders/{id}\",\n            get(get_orders_act_get_order).post(post_orders_act_put_order),\n        )"
-            ) || rendered.contains(
-                ".route(\"/api/v1/orders/{id}\", get(get_orders_act_get_order).post(post_orders_act_put_order))"
+                ".route(\"/api/v1/orders/{id}\", get(orders_controller::show).post(orders_controller::create))"
             ),
             "{rendered}"
         );
+        assert!(
+            rendered.contains("use super::orders_controller;"),
+            "{rendered}"
+        );
+        // The controller holds the operations of the `orders` resource,
+        // named by what each does to it.
+        assert!(
+            rendered.contains("#[mxrs::route(method = \"GET\", path = \"/api/v1/orders/{id}\", service = \"API_Service\")]"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("pub async fn show("), "{rendered}");
+        assert!(rendered.contains("pub async fn create("), "{rendered}");
         // Only the method that opens the chain is imported as a function.
         assert!(rendered.contains("use axum::routing::{get};"), "{rendered}");
         assert!(rendered.contains("/// Get one order"), "{rendered}");
@@ -7442,10 +7509,13 @@ mod tests {
             ),
             "{rendered}"
         );
-        assert!(rendered.contains("use super::mappings;"), "{rendered}");
+        assert!(
+            rendered.contains("use crate::domain::mappings::sales::em_order;"),
+            "{rendered}"
+        );
         assert!(
             rendered.contains("state.call_mapped(")
-                && rendered.contains("&mappings::em_order::mapping(),")
+                && rendered.contains("&em_order::mapping(),")
                 && rendered.contains("&caller,"),
             "{rendered}"
         );
@@ -7480,6 +7550,131 @@ mod tests {
         assert!(!rendered.contains("ACT_Options"), "{rendered}");
     }
 
+    /// `(resource, method, path, microflow)` rows as one published service.
+    fn service_of(name: &str, operations: &[(&str, &str, &str, &str)]) -> PublishedService {
+        let mut resources: Vec<(&str, Vec<mxrs_bson::Bson>)> = Vec::new();
+        for (resource, method, path, microflow) in operations {
+            let operation = mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$PublishedRestServiceOperation",
+                "HttpMethod": *method,
+                "Path": *path,
+                "Summary": "",
+                "Documentation": "",
+                "Microflow": *microflow,
+                "Parameters": mxrs_bson::build_array(vec![], 3),
+            });
+            match resources.iter_mut().find(|(known, _)| known == resource) {
+                Some((_, operations)) => operations.push(operation),
+                None => resources.push((resource, vec![operation])),
+            }
+        }
+        let document = mxrs_bson::doc! {
+            "$Type": "Rest$PublishedRestService",
+            "Name": name,
+            "Path": "api",
+            "Documentation": "",
+            "Resources": mxrs_bson::build_array(
+                resources
+                    .into_iter()
+                    .map(|(resource, operations)| {
+                        mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                            "$Type": "Rest$PublishedRestServiceResource",
+                            "Name": resource,
+                            "Operations": mxrs_bson::build_array(operations, 3),
+                        })
+                    })
+                    .collect(),
+                3,
+            ),
+        };
+        published_service(
+            &document,
+            "Sales",
+            |_| ModuleRoot::Authored,
+            &HashMap::new(),
+        )
+        .expect("routable service")
+    }
+
+    fn handlers(service: &PublishedService) -> Vec<String> {
+        service
+            .routes
+            .iter()
+            .flat_map(|route| &route.operations)
+            .map(|operation| format!("{}::{}", operation.controller, operation.handler))
+            .collect()
+    }
+
+    /// A controller is a resource and a function is what its operation does
+    /// to that resource — as long as that says which operation it is.
+    #[test]
+    fn operations_are_named_by_what_they_do_to_their_resource() {
+        let mut services = [service_of(
+            "OrderService",
+            &[
+                ("orders", "Get", "", "Sales.ACT_Order_List"),
+                ("orders", "Post", "", "Sales.ACT_Order_Create"),
+                ("orders", "Get", "{id}", "Sales.ACT_Order_Get"),
+                ("orders", "Put", "{id}", "Sales.ACT_Order_Update"),
+                ("orders", "Delete", "{id}", "Sales.ACT_Order_Delete"),
+                // Two more reads of the collection: `index` no longer says
+                // which, so each is what its microflow is.
+                ("reports", "Get", "daily", "Sales.DS_Report_Daily"),
+                ("reports", "Get", "monthly", "Sales.DS_Report_Monthly"),
+                ("reports", "Post", "", "Sales.ACT_Report_Request"),
+                // An operation the service publishes at its own path.
+                ("", "Get", "", "Sales.ACT_Ping"),
+            ],
+        )];
+        assign_controllers(&mut services);
+        assert_eq!(
+            handlers(&services[0]),
+            [
+                "orders_controller::index",
+                "orders_controller::create",
+                "orders_controller::show",
+                "orders_controller::update",
+                "orders_controller::destroy",
+                "reports_controller::report_daily",
+                "reports_controller::report_monthly",
+                "reports_controller::create",
+                "order_service_controller::index",
+            ]
+        );
+    }
+
+    /// Two services of one module that each publish a resource of the same
+    /// name keep their controllers — and their callers' rules — apart.
+    #[test]
+    fn services_sharing_a_resource_name_get_a_controller_each() {
+        let mut services = [
+            service_of(
+                "AdminApi",
+                &[("orders", "Get", "", "Sales.ACT_Admin_Orders")],
+            ),
+            service_of(
+                "PublicApi",
+                &[
+                    ("orders", "Get", "", "Sales.ACT_Public_Orders"),
+                    ("status", "Get", "", "Sales.ACT_Status"),
+                ],
+            ),
+        ];
+        assign_controllers(&mut services);
+        assert_eq!(
+            handlers(&services[0]),
+            ["admin_api_orders_controller::index"]
+        );
+        assert_eq!(
+            handlers(&services[1]),
+            [
+                "public_api_orders_controller::index",
+                // A resource only one of them publishes needs no telling apart.
+                "status_controller::index",
+            ]
+        );
+    }
+
     /// A published service is routed the way the model says it is reached:
     /// Basic authentication becomes a guard that signs the request in and
     /// checks the model's own allowed roles; an authentication scheme this
@@ -7509,8 +7704,8 @@ mod tests {
             for (key, value) in authentication {
                 document.insert(key, value);
             }
-            render_published_service(
-                &published_service(
+            rendered_service(
+                published_service(
                     &document,
                     "Sales",
                     |_| ModuleRoot::Authored,
@@ -7548,6 +7743,16 @@ mod tests {
             basic.contains("let caller = state.basic_caller(&headers, REALM, ALLOWED_ROLES)?;"),
             "{basic}"
         );
+        // Who may call is the service's to state and its controllers' to
+        // enforce: the controller takes both from the route table's file.
+        assert!(
+            basic.contains("pub(super) const REALM: &str = \"API_Service\";"),
+            "{basic}"
+        );
+        assert!(
+            basic.contains("use super::api_service::{ALLOWED_ROLES, REALM};"),
+            "{basic}"
+        );
 
         // Roles to honour and no authentication type to identify a caller by:
         // serving it publicly would ignore the restriction the model states.
@@ -7568,7 +7773,7 @@ mod tests {
         assert!(!roleful.contains("state."), "{roleful}");
         // The route table still names the surface the model publishes.
         assert!(
-            roleful.contains(".route(\"/api/v1/orders\", get(get_orders_act_get_order))"),
+            roleful.contains(".route(\"/api/v1/orders\", get(orders_controller::index))"),
             "{roleful}"
         );
 
@@ -7635,7 +7840,7 @@ mod tests {
 
         let service = published_service(&document, "Sales", |_| ModuleRoot::Authored, &http)
             .expect("routable service");
-        let rendered = render_published_service(&service, &HashMap::new());
+        let rendered = rendered_service(service, &HashMap::new());
 
         assert!(rendered.contains("use axum::http::{Uri};"), "{rendered}");
         assert!(
@@ -7645,7 +7850,7 @@ mod tests {
         assert!(rendered.contains("HttpObjects"), "{rendered}");
         assert!(
             rendered.contains(
-                "async fn get_orders_act_get_order(\n    State(state): State<AppState>,\n    uri: Uri,\n) -> Result<Response, ApiError> {"
+                "pub async fn index(\n    State(state): State<AppState>,\n    uri: Uri,\n) -> Result<Response, ApiError> {"
             ),
             "{rendered}"
         );
@@ -7660,7 +7865,7 @@ mod tests {
         // extract, and a document rather than a whole response.
         assert!(
             rendered.contains(
-                "async fn post_orders_act_put_order(\n    State(state): State<AppState>,\n) -> Result<Json<Value>, ApiError> {"
+                "pub async fn create(\n    State(state): State<AppState>,\n) -> Result<Json<Value>, ApiError> {"
             ),
             "{rendered}"
         );
@@ -8146,7 +8351,7 @@ pub enum ENUMStatus {
             inner_file_stem("Acme_User__EU__Location"),
             "acme_user_eu_location"
         );
-        assert_eq!(inner_file_stem("SPCProgram"), "spc_program");
+        assert_eq!(inner_file_stem("APIProgram"), "api_program");
         assert_eq!(inner_file_stem("_Legacy_"), "legacy");
         assert_eq!(inner_file_stem("2FA"), "_2_fa");
         assert_eq!(module_stem("API_Rest"), "api_rest");
@@ -8971,23 +9176,17 @@ pub enum ENUMStatus {
                 .join("src/application/services/sales/mod.rs")
                 .is_file()
         );
-        assert!(generated.join("src/presentation/mod.rs").is_file());
-        assert!(
-            generated
-                .join("src/presentation/nanoflows/sales/mod.rs")
-                .is_file()
-        );
-        assert!(generated.join("src/presentation/navigation.rs").is_file());
+        assert!(generated.join("src/ui/mod.rs").is_file());
+        assert!(generated.join("src/ui/nanoflows/sales/mod.rs").is_file());
+        assert!(generated.join("src/ui/navigation.rs").is_file());
         assert!(generated.join("src/infrastructure/mod.rs").is_file());
         assert!(!generated.join("src/generated").exists());
         assert!(generated.join("model/imported/manifest.json").is_file());
-        // The pages module is real, *compiled* Rust source, wired into
-        // `build()` from `src/presentation/mod.rs` (see `page_export`'s doc
-        // comment) — the `cargo check`/`cargo run` calls below, plus the
+        // The pages are real, *compiled* Rust source that registers itself
+        // (see `page_export`'s doc comment) — the `cargo check`/`cargo run` calls below, plus the
         // rebuilt-project assertions further down, prove it actually
         // contributes to the output `.mpr`, not just that it parses.
-        let home = std::fs::read_to_string(generated.join("src/presentation/pages/sales/home.rs"))
-            .unwrap();
+        let home = std::fs::read_to_string(generated.join("src/ui/pages/sales/home.rs")).unwrap();
         assert!(
             home.contains("#[page(module = \"Sales\")]\npub fn home(p: &mut PageBuilder) {"),
             "{home}"
@@ -8996,8 +9195,7 @@ pub enum ENUMStatus {
         assert!(home.contains("w.name("));
         assert!(home.contains("b.close_page()"));
         let detail =
-            std::fs::read_to_string(generated.join("src/presentation/pages/sales/order_detail.rs"))
-                .unwrap();
+            std::fs::read_to_string(generated.join("src/ui/pages/sales/order_detail.rs")).unwrap();
         assert!(detail.contains("data_view_from_microflow"));
         // The page names the model through the files that declare it: the
         // entity's own accessor, and the flows by their Mendix names.
@@ -9024,18 +9222,19 @@ pub enum ENUMStatus {
         // Every index, at every level, is a list of what it holds: the
         // declarations register themselves, so no file composes anything.
         assert_eq!(
-            std::fs::read_to_string(generated.join("src/presentation/pages/sales/mod.rs")).unwrap(),
+            std::fs::read_to_string(generated.join("src/ui/pages/sales/mod.rs")).unwrap(),
             "//! The sales module's pages.\n\npub mod home;\npub mod order_detail;\n"
         );
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(domain_source.contains("pub mod security;"));
         let application_source =
             std::fs::read_to_string(generated.join("src/application/mod.rs")).unwrap();
-        let presentation_source =
-            std::fs::read_to_string(generated.join("src/presentation/mod.rs")).unwrap();
-        assert!(presentation_source.contains("pub mod navigation;"));
-        assert!(presentation_source.contains("pub mod http;"));
-        for layer in [&domain_source, &application_source, &presentation_source] {
+        let ui_source = std::fs::read_to_string(generated.join("src/ui/mod.rs")).unwrap();
+        assert!(ui_source.contains("pub mod navigation;"));
+        // What the application serves over HTTP is a layer of its own.
+        assert!(!ui_source.contains("pub mod http;"), "{ui_source}");
+        assert!(!generated.join("src/presentation").exists());
+        for layer in [&domain_source, &application_source, &ui_source] {
             assert!(!layer.contains("fn apply"), "{layer}");
             assert!(!layer.contains("crate::"), "{layer}");
         }
@@ -9068,7 +9267,7 @@ pub fn security(security: &mut SecurityBuilder) {
 "#
         );
         assert_eq!(
-            std::fs::read_to_string(generated.join("src/presentation/navigation.rs")).unwrap(),
+            std::fs::read_to_string(generated.join("src/ui/navigation.rs")).unwrap(),
             r#"//! The project's navigation profiles.
 
 use mxrs::prelude::*;
@@ -9271,15 +9470,13 @@ pub fn get_order(flow: &mut FlowBuilder) {
 "#
         );
         let nanoflows =
-            std::fs::read_to_string(generated.join("src/presentation/nanoflows/sales/mod.rs"))
-                .unwrap();
+            std::fs::read_to_string(generated.join("src/ui/nanoflows/sales/mod.rs")).unwrap();
         assert_eq!(
             nanoflows,
             "//! The sales module's nanoflows.\n\npub mod validate;\n"
         );
         assert_eq!(
-            std::fs::read_to_string(generated.join("src/presentation/nanoflows/sales/validate.rs"))
-                .unwrap(),
+            std::fs::read_to_string(generated.join("src/ui/nanoflows/sales/validate.rs")).unwrap(),
             "use mxrs::prelude::*;\n\n#[nanoflow(NF, module = \"Sales\")]\npub fn validate(_flow: &mut FlowBuilder) {}\n"
         );
         // Runnable microflows surface as a typed service port plus the
@@ -9346,17 +9543,32 @@ pub fn get_order(flow: &mut FlowBuilder) {
                 .contains("engine.with_java_action(\"Sales.ReverseText\", Adapter(action))"),
             "{action_registry}"
         );
-        // The published REST service becomes a real axum router in the
-        // owning module, behind the project-wide state and error types.
-        let service_router =
-            std::fs::read_to_string(generated.join("src/presentation/http/sales/order_service.rs"))
+        // The published REST service becomes a route table in the owning
+        // module's controllers, behind the project-wide state and error
+        // types, and a controller for the resource it publishes.
+        let route_table =
+            std::fs::read_to_string(generated.join("src/controllers/sales/order_service.rs"))
                 .unwrap();
         assert!(
-            service_router.contains("pub fn router() -> Router<AppState>"),
-            "{service_router}"
+            route_table.contains("pub fn router() -> Router<AppState>"),
+            "{route_table}"
         );
         assert!(
-            service_router.contains("\"/api/v1/orders\", get(get_orders_act_ping)"),
+            route_table.contains("\"/api/v1/orders\", get(orders_controller::index)"),
+            "{route_table}"
+        );
+        // The route table routes; it handles nothing itself.
+        assert!(!route_table.contains("async fn"), "{route_table}");
+        assert_eq!(
+            std::fs::read_to_string(generated.join("src/controllers/sales/mod.rs")).unwrap(),
+            "//! The Sales module's published REST services: one route table per\n//! service, one controller per resource.\n\npub mod order_controller;\npub mod order_service;\npub mod orders_controller;\n"
+        );
+        // One controller per resource the service publishes.
+        let service_router =
+            std::fs::read_to_string(generated.join("src/controllers/sales/orders_controller.rs"))
+                .unwrap();
+        assert!(
+            service_router.contains("pub async fn index("),
             "{service_router}"
         );
         assert!(
@@ -9364,20 +9576,27 @@ pub fn get_order(flow: &mut FlowBuilder) {
             "{service_router}"
         );
         // The operation that declares an export mapping answers through it,
-        // from a declaration the module owns beside the service.
+        // from a declaration in the owning module's domain.
+        let mapped =
+            std::fs::read_to_string(generated.join("src/controllers/sales/order_controller.rs"))
+                .unwrap();
         assert!(
-            service_router.contains("use super::mappings;"),
-            "{service_router}"
+            mapped.contains("use crate::domain::mappings::sales::em_order;"),
+            "{mapped}"
         );
         assert!(
-            service_router.contains("state.call_mapped(")
-                && service_router.contains("&mappings::em_order::mapping()"),
-            "{service_router}"
+            mapped.contains("state.call_mapped(") && mapped.contains("&em_order::mapping()"),
+            "{mapped}"
         );
-        let mapping = std::fs::read_to_string(
-            generated.join("src/presentation/http/sales/mappings/em_order.rs"),
-        )
-        .unwrap();
+        // A controller that applies no mapping imports none.
+        assert!(!service_router.contains("mappings"), "{service_router}");
+        let mapping =
+            std::fs::read_to_string(generated.join("src/domain/mappings/sales/em_order.rs"))
+                .unwrap();
+        assert!(
+            domain_source.contains("pub mod mappings;"),
+            "{domain_source}"
+        );
         assert!(
             mapping.contains("ObjectMapping::object(\"Sales.Order\")"),
             "{mapping}"
@@ -9389,18 +9608,18 @@ pub fn get_order(flow: &mut FlowBuilder) {
         );
         assert!(mapping.contains("\"Sales.Order_Customer\""), "{mapping}");
         assert!(!mapping.contains(".sending_nils()"), "{mapping}");
-        let http = std::fs::read_to_string(generated.join("src/presentation/http/mod.rs")).unwrap();
+        let http = std::fs::read_to_string(generated.join("src/controllers/mod.rs")).unwrap();
         assert!(
-            http.contains("crate::presentation::http::sales::router()"),
+            http.contains("crate::controllers::sales::order_service::router()"),
             "{http}"
         );
-        assert!(generated.join("src/presentation/http/error.rs").is_file());
+        assert!(generated.join("src/controllers/error.rs").is_file());
         // The model requires Basic authentication and names an allowed role,
         // so the guard signs the request in before the model is called and
         // every operation runs as whoever signed in.
         assert!(
-            service_router.contains("const ALLOWED_ROLES: &[&str] = &[\"Sales.User\"];"),
-            "{service_router}"
+            route_table.contains("pub(super) const ALLOWED_ROLES: &[&str] = &[\"Sales.User\"];"),
+            "{route_table}"
         );
         assert!(
             service_router
@@ -9410,8 +9629,7 @@ pub fn get_order(flow: &mut FlowBuilder) {
         // A mapped response goes through the runtime, which asks the engine
         // the caller's read rules — never straight at `ExportMapping::apply`,
         // which asks none. The unmapped path asks the same question.
-        let state =
-            std::fs::read_to_string(generated.join("src/presentation/http/state.rs")).unwrap();
+        let state = std::fs::read_to_string(generated.join("src/controllers/state.rs")).unwrap();
         assert!(
             state.contains("runtime.mapped(mapping, &result, Some(caller))"),
             "{state}"
@@ -9460,13 +9678,15 @@ pub fn get_order(flow: &mut FlowBuilder) {
         // The crate root exposes layers; composition belongs to its own file.
         assert!(crate_root.contains("pub mod application;"));
         assert!(crate_root.contains("pub mod domain;"));
-        assert!(crate_root.contains("pub mod presentation;"));
+        assert!(crate_root.contains("pub mod controllers;"));
+        assert!(crate_root.contains("pub mod ui;"));
+        assert!(!crate_root.contains("pub mod presentation;"));
         assert!(!crate_root.contains("pub mod modules;"));
         // The crate root is the layers and the application, nothing more:
         // no composition function, no aliases for implementation crates.
         assert!(
             crate_root.ends_with(
-                "pub mod presentation;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
+                "pub mod ui;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
             ),
             "{crate_root}"
         );
@@ -9480,8 +9700,9 @@ pub fn get_order(flow: &mut FlowBuilder) {
             "src/modules",
             "src/domain/modules",
             "src/application/modules",
-            "src/presentation/modules",
-            "src/presentation/controllers",
+            "src/presentation",
+            "src/ui/modules",
+            "src/controllers/modules",
             "src/infrastructure/repositories",
             "src/infrastructure/database",
             "src/utils",
