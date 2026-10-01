@@ -7,11 +7,11 @@ matching native `mxrb presentation init`. It also accepts `--no-progress`,
 
 | Native workspace | Cargo workspace |
 | --- | --- |
-| `modules/Sales/presentation/presentation.rb` | `src/presentation/modules/sales/mod.rs` and `layouts/{mod.rs,application_layout.rs}` |
-| `pages/.keep` | `pages/{.keep,mod.rs}` |
-| `snippets/.keep` | `snippets/{.keep,mod.rs}` |
-| `client_actions/.keep` | `nanoflows/{.keep,mod.rs}` |
-| Module's Ruby presentation loader | Rust presentation module registry |
+| `modules/Sales/presentation/presentation.rb` | `src/ui/layouts/sales/{mod.rs,application_layout.rs}` |
+| `pages/.keep` | `src/ui/pages/sales/{.keep,mod.rs}` |
+| `snippets/.keep` | `src/ui/snippets/sales/{.keep,mod.rs}` |
+| `client_actions/.keep` | `src/ui/nanoflows/sales/{.keep,mod.rs}` |
+| Module's Ruby presentation loader | `pub mod` lines; declarations register themselves |
 | `.mxrb/scaffolds.json` | `.mxrs/scaffolds.json` |
 
 Rust module/family registries connect the generated declarations to the build.

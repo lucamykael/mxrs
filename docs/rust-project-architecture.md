@@ -37,8 +37,8 @@ services or genuinely reusable libraries.
 Dependencies point inward:
 
 ```text
-presentation ─┐
-              ├─> application ─> domain
+controllers ──┐
+ui ───────────┼─> application ─> domain
 infrastructure┘
 ```
 
@@ -47,8 +47,11 @@ infrastructure┘
 - Application owns services and the ports they require. A Mendix server
   microflow is an application service unless it is proven to be a pure domain
   rule.
-- Presentation translates HTTP, desktop commands or another delivery protocol
-  into application calls. Framework request/response types stop at this edge.
+- Controllers translate HTTP — or desktop commands, or another delivery
+  protocol — into application calls. Framework request/response types stop at
+  this edge.
+- UI is the user interface the model declares: pages, layouts, nanoflows and
+  navigation. It is not where the application's HTTP surface lives.
 - Infrastructure implements ports for persistence, runtimes, queues and
   external services.
 - Composition of the *model* needs no module at all: declarations register
@@ -65,6 +68,7 @@ src/
 │   ├── entities/<mendix_module>/<entity>.rs
 │   ├── dtos/<mendix_module>/<dto>.rs
 │   ├── enumerations/<mendix_module>/<enumeration>.rs
+│   ├── mappings/<mendix_module>/<export_mapping>.rs
 │   ├── documents/<mendix_module>/<document>.rs
 │   ├── module_security/<mendix_module>.rs
 │   └── security.rs
@@ -73,10 +77,16 @@ src/
 │   ├── services/<mendix_module>/imported.rs
 │   ├── ports/<mendix_module>/{services,actions}.rs
 │   └── task_queues.rs
-├── presentation/
-│   ├── http/
-│   ├── pages/
-│   ├── nanoflows/
+├── controllers/
+│   ├── mod.rs                              router() and serve()
+│   ├── state.rs, error.rs
+│   └── <mendix_module>/
+│       ├── <published_service>.rs          the route table
+│       └── <resource>_controller.rs        one function per operation
+├── ui/
+│   ├── pages/<mendix_module>/<page>.rs
+│   ├── layouts/<mendix_module>/<layout>.rs
+│   ├── nanoflows/<mendix_module>/<nanoflow>.rs
 │   └── navigation.rs
 ├── infrastructure/
 │   ├── adapters/
@@ -89,6 +99,39 @@ miniature copy of the whole architecture. A Mendix module remains a namespace
 inside a concept because Mendix names are only unique per module. Marketplace
 modules are the exception: they are external upgrade units and therefore stay
 module-shaped under `packages/`.
+
+## Controllers
+
+A published REST service is two kinds of file in its module's controllers
+folder. The service file is the route table and nothing else — the axum
+`Router`, every path the model publishes, each method bound to the function
+that handles it — together with what the model says about who may call:
+
+```rust
+// src/controllers/sales/order_service.rs
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/orders", get(orders_controller::index).post(orders_controller::create))
+        .route(
+            "/api/v1/orders/{id}",
+            get(orders_controller::show)
+                .put(orders_controller::update)
+                .delete(orders_controller::destroy),
+        )
+}
+```
+
+Each resource of the service is a controller, `<resource>_controller.rs`,
+with one function per operation calling the microflow the model bound to
+it. A function is named by what the operation does to the resource —
+`index`, `show`, `create`, `update`, `destroy` — when that says which
+operation it is; operations that would share one of those names are named
+after the microflow each calls. The project's `controllers/mod.rs` merges
+every route table behind the shared `AppState`.
+
+The JSON document an operation answers with is an export mapping, and a
+mapping describes the domain's data, not the transport: it lives in
+`src/domain/mappings/<module>/` and the controller imports it.
 
 ## Declaring the model
 
@@ -168,14 +211,15 @@ is named in its module's `imported.rs` (`mxrs::imported! { ... }`), so the
 rest of the project can still call and bind it. `mxrs::register!` registers
 anything assembled directly against the project.
 
-The crate root is therefore the four layers and the application, and no
-file composes another:
+The crate root is therefore the layers and the application, and no file
+composes another:
 
 ```rust
 pub mod application;
+pub mod controllers;
 pub mod domain;
 pub mod infrastructure;
-pub mod presentation;
+pub mod ui;
 
 #[mxrs::application(version = "11.12.1")]
 pub struct Application;
@@ -218,7 +262,7 @@ contracts. Sharing all internal models couples deployments and defeats the
 boundary.
 
 For desktop, Tauri keeps the Rust package under `src-tauri/` and the optional
-web UI outside it. Desktop commands are another presentation adapter; they call
+web UI outside it. Desktop commands are another delivery adapter; they call
 the same application use cases as HTTP and must not move framework types into
 the core. MXRS currently generates server delivery modes, so desktop guidance
 is architectural input rather than a promised conversion target.

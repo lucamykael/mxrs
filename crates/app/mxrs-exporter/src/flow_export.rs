@@ -1028,7 +1028,7 @@ pub(crate) struct FlowFile {
 
 /// `ACT_CreateOrder` → (`ACT`, `CreateOrder`): the capitals before the first
 /// underscore, when the name follows that convention.
-fn split_prefix(name: &str) -> (Option<&str>, &str) {
+pub(crate) fn split_prefix(name: &str) -> (Option<&str>, &str) {
     match name.split_once('_') {
         Some((prefix, rest))
             if (2..=5).contains(&prefix.len())

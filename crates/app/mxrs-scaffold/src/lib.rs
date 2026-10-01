@@ -232,7 +232,7 @@ fn project_files(
         (
             "src/lib.rs",
             format!(
-                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\n#[mxrs::application(version = {version})]\npub struct Application;\n"
+                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod ui;\n\n#[mxrs::application(version = {version})]\npub struct Application;\n"
             ),
         ),
         ("src/domain/mod.rs", templates::domain_layer()),
@@ -245,32 +245,32 @@ fn project_files(
             templates::module_declaration("Main"),
         ),
         ("src/application/mod.rs", templates::application_layer()),
-        ("src/presentation/mod.rs", templates::presentation_layer()),
+        ("src/ui/mod.rs", templates::ui_layer()),
         (
-            "src/presentation/layouts/mod.rs",
+            "src/ui/layouts/mod.rs",
             templates::registering_concept_index("layouts", "main"),
         ),
         (
-            "src/presentation/layouts/main/mod.rs",
+            "src/ui/layouts/main/mod.rs",
             templates::registering_folder_index("Main", "layouts", "application_layout"),
         ),
         (
-            "src/presentation/layouts/main/application_layout.rs",
+            "src/ui/layouts/main/application_layout.rs",
             templates::layouts("Main", "Main"),
         ),
         (
-            "src/presentation/pages/mod.rs",
+            "src/ui/pages/mod.rs",
             templates::registering_concept_index("pages", "main"),
         ),
         (
-            "src/presentation/pages/main/mod.rs",
+            "src/ui/pages/main/mod.rs",
             templates::registering_folder_index("Main", "pages", "home"),
         ),
         (
-            "src/presentation/pages/main/home.rs",
+            "src/ui/pages/main/home.rs",
             templates::home_page(&escape_rust_string(&options.name)),
         ),
-        ("src/presentation/navigation.rs", templates::navigation()),
+        ("src/ui/navigation.rs", templates::navigation()),
         (
             "src/infrastructure/mod.rs",
             templates::infrastructure_layer(),
@@ -564,8 +564,7 @@ mod tests {
         assert!(!main.contains("../"));
         // The display name reaches generated source through the home page's
         // text, not through `src/domain/mod.rs`.
-        let home = std::fs::read_to_string(destination.join("src/presentation/pages/main/home.rs"))
-            .unwrap();
+        let home = std::fs::read_to_string(destination.join("src/ui/pages/main/home.rs")).unwrap();
         assert!(home.contains("Welcome to ../../Escape / App"));
         let domain = std::fs::read_to_string(destination.join("src/domain/mod.rs")).unwrap();
         assert!(!domain.contains("Welcome to"));
@@ -615,7 +614,7 @@ mod tests {
         generate_project(&ProjectScaffold::new("Demo", "11.12.1", &destination)).unwrap();
 
         let crate_root = std::fs::read_to_string(destination.join("src/lib.rs")).unwrap();
-        for layer in ["application", "domain", "infrastructure", "presentation"] {
+        for layer in ["application", "domain", "infrastructure", "ui"] {
             assert!(
                 crate_root.contains(&format!("pub mod {layer};")),
                 "{layer} is not a public top-level module: {crate_root}"
@@ -626,9 +625,9 @@ mod tests {
         // outward to apply another.
         assert_eq!(
             crate_root,
-            "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
+            "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod ui;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
         );
-        for layer in ["domain", "application", "infrastructure", "presentation"] {
+        for layer in ["domain", "application", "infrastructure", "ui"] {
             let source =
                 std::fs::read_to_string(destination.join(format!("src/{layer}/mod.rs"))).unwrap();
             for composing in ["fn build", "fn apply", "ProjectDecl", "crate::"] {
@@ -644,11 +643,11 @@ mod tests {
         let read = |relative: &str| std::fs::read_to_string(destination.join(relative)).unwrap();
         assert!(read("src/domain/modules/main.rs").contains("#[declaration(module = \"Main\")]"));
         assert!(
-            read("src/presentation/layouts/main/application_layout.rs")
+            read("src/ui/layouts/main/application_layout.rs")
                 .contains("#[layout(module = \"Main\")]")
         );
-        assert!(read("src/presentation/pages/main/home.rs").contains("#[page(module = \"Main\")]"));
-        assert!(read("src/presentation/navigation.rs").contains("#[navigation]"));
+        assert!(read("src/ui/pages/main/home.rs").contains("#[page(module = \"Main\")]"));
+        assert!(read("src/ui/navigation.rs").contains("#[navigation]"));
 
         // There is no module tree at all: the authored tree is layer-first,
         // and a concept grows a folder for a module when the first artifact
@@ -682,14 +681,14 @@ mod tests {
             "src/infrastructure/mod.rs",
             "src/lib.rs",
             "src/main.rs",
-            "src/presentation/layouts/main/application_layout.rs",
-            "src/presentation/layouts/main/mod.rs",
-            "src/presentation/layouts/mod.rs",
-            "src/presentation/mod.rs",
-            "src/presentation/navigation.rs",
-            "src/presentation/pages/main/home.rs",
-            "src/presentation/pages/main/mod.rs",
-            "src/presentation/pages/mod.rs",
+            "src/ui/layouts/main/application_layout.rs",
+            "src/ui/layouts/main/mod.rs",
+            "src/ui/layouts/mod.rs",
+            "src/ui/mod.rs",
+            "src/ui/navigation.rs",
+            "src/ui/pages/main/home.rs",
+            "src/ui/pages/main/mod.rs",
+            "src/ui/pages/mod.rs",
         ];
         for relative in expected {
             assert!(

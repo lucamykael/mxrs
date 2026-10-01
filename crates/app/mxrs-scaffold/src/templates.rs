@@ -21,10 +21,10 @@ pub(crate) fn application_layer() -> String {
     "//! Application orchestration: each module's microflows as services.\n".to_string()
 }
 
-/// The presentation layer of a fresh project: the application layout, the
-/// home page that uses it, and the navigation that opens it.
-pub(crate) fn presentation_layer() -> String {
-    "//! Pages, layouts, nanoflows and navigation.\n\n\
+/// The user-interface layer of a fresh project: the application layout,
+/// the home page that uses it, and the navigation that opens it.
+pub(crate) fn ui_layer() -> String {
+    "//! The user interface: pages, layouts, nanoflows and navigation.\n\n\
      pub mod layouts;\n\
      pub mod navigation;\n\
      pub mod pages;\n"
@@ -256,7 +256,10 @@ pub(crate) fn nanoflow(module_name: &str, name: &str) -> String {
 /// mxrb scaffolds a microflow and says publishing the REST document itself is
 /// still a native Studio Pro operation. That is equally true here — mxrs has
 /// no `Rest$PublishedRestService` declaration surface — so the scaffold
-/// creates the editable half and names the half it cannot create.
+/// creates the editable half and names the half it cannot create. The
+/// handler is a microflow, so it is an application service like any other;
+/// `src/controllers/` holds what an import generates from a published
+/// service, which is the half this cannot write.
 pub(crate) fn published_rest(module_name: &str, name: &str) -> String {
     flow(
         module_name,
@@ -393,7 +396,9 @@ pub(crate) fn service_stem(name: &str) -> String {
 pub(crate) fn nanoflow_stem(name: &str) -> String {
     let function = flow_declaration("nanoflow", "", name).function;
     let stem = function.trim_end_matches('_');
-    if matches!(stem, "mod" | "imported") {
+    // The same rule the importer applies: a file Rust cannot name, or one
+    // the folder keeps for itself, says what it holds instead.
+    if stem.is_empty() || crate::is_rust_keyword(stem) || matches!(stem, "mod" | "imported") {
         format!("{stem}_nanoflow")
     } else {
         stem.to_string()
@@ -784,7 +789,7 @@ mod tests {
             module_registry("main"),
             domain_layer(),
             application_layer(),
-            presentation_layer(),
+            ui_layer(),
         ] {
             assert!(index.starts_with("//!"), "{index}");
             assert!(!index.contains("fn "), "{index}");
@@ -858,7 +863,7 @@ mod tests {
         for expected in [
             "use crate::application::services::sales::load_order_overview_service::ACT_LoadOrderOverview;\n",
             "use crate::domain::entities::sales::order_overview::OrderOverview;\n",
-            "use crate::presentation::nanoflows::sales::refresh_order_overview::NAN_RefreshOrderOverview;\n",
+            "use crate::ui::nanoflows::sales::refresh_order_overview::NAN_RefreshOrderOverview;\n",
             "#[page(module = \"Sales\")]\npub fn order_overview(page: &mut PageBuilder) {\n",
             "    page.data_view_from_microflow(MicroflowRef::<ACT_LoadOrderOverview>::new(), |view| {\n",
             "        view.text_box(OrderOverview::reference());\n",
@@ -1100,7 +1105,7 @@ pub(crate) fn page_from_template(
             imports.push(format!("use {path}::{action};"));
         }
         Some(RefreshAction::Nanoflow) => imports.push(format!(
-            "use crate::presentation::nanoflows::{}::{}::NAN_Refresh{name};",
+            "use crate::ui::nanoflows::{}::{}::NAN_Refresh{name};",
             snake_case(module_name),
             nanoflow_stem(&format!("NAN_Refresh{name}"))
         )),

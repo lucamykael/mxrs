@@ -49,7 +49,7 @@ pub struct UpgradeReport {
 /// Migrates the generated source layout without changing the Mendix version.
 ///
 /// This is the actionable path for projects created before application and
-/// presentation became first-class layers. It deliberately delegates to the
+/// the user interface became first-class layers. It deliberately delegates to the
 /// same transaction as a version upgrade, so preview and apply have identical
 /// safety guarantees.
 pub fn migrate_project_layers(target: impl AsRef<Path>, apply: bool) -> Result<UpgradeReport> {
@@ -108,8 +108,8 @@ pub fn upgrade_project(
         "src/domain/entities/mod.rs",
         "src/domain/documents/mod.rs",
         "src/application/microflows/mod.rs",
-        "src/presentation/nanoflows/mod.rs",
-        // Kept for projects imported before the application/presentation
+        "src/ui/nanoflows/mod.rs",
+        // Kept for projects imported before the application/user-interface
         // split. Upgrade is deliberately backward compatible with generated
         // source already under version control.
         "src/domain/flows/mod.rs",
@@ -147,7 +147,7 @@ pub fn upgrade_project(
 /// self-registering declarations.
 const MIGRATED_APPLICATION_LAYER: &str =
     "pub fn build() -> mxrs::ProjectDecl {\n    crate::domain::build()\n}\n";
-const MIGRATED_PRESENTATION_LAYER: &str = "pub fn apply(_project: &mut mxrs::ProjectDecl) {}\n";
+const MIGRATED_UI_LAYER: &str = "pub fn apply(_project: &mut mxrs::ProjectDecl) {}\n";
 
 fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<bool> {
     let library = root.join("src/lib.rs");
@@ -170,9 +170,9 @@ fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<b
 
     transaction.write(&library, layered_library(&source, &library)?)?;
     let application = root.join("src/application/mod.rs");
-    let presentation = root.join("src/presentation/mod.rs");
+    let ui = root.join("src/ui/mod.rs");
     transaction.create(&application, MIGRATED_APPLICATION_LAYER.to_string())?;
-    transaction.create(&presentation, MIGRATED_PRESENTATION_LAYER.to_string())?;
+    transaction.create(&ui, MIGRATED_UI_LAYER.to_string())?;
 
     let infrastructure = root.join("src/infrastructure/mod.rs");
     if transaction.content(&infrastructure)?.is_none() {
@@ -196,8 +196,8 @@ pub fn project_layout(root: impl AsRef<Path>) -> Result<ProjectLayout> {
 
 fn layout_from(root: &Path, library: &str) -> ProjectLayout {
     let application = root.join("src/application/mod.rs").is_file();
-    let presentation = root.join("src/presentation/mod.rs").is_file();
-    match (application, presentation) {
+    let ui = root.join("src/ui/mod.rs").is_file();
+    match (application, ui) {
         (false, false)
             if library
                 .lines()
@@ -227,7 +227,7 @@ fn complete_layered_layout(root: &Path, library: &str) -> bool {
             "pub mod application;",
             "pub mod domain;",
             "pub mod infrastructure;",
-            "pub mod presentation;",
+            "pub mod ui;",
         ]
         .iter()
         .all(|declaration| library.lines().any(|line| line.trim() == *declaration))
@@ -256,6 +256,8 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
                 | "pub mod modules;"
                 | "mod presentation;"
                 | "pub mod presentation;"
+                | "mod ui;"
+                | "pub mod ui;"
         );
         if matches!(declaration, "mod domain;" | "pub mod domain;") {
             found_domain = true;
@@ -267,7 +269,7 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
                         "pub mod application;",
                         "pub mod domain;",
                         "pub mod infrastructure;",
-                        "pub mod presentation;",
+                        "pub mod ui;",
                     ]
                     .map(str::to_string),
                 );
@@ -302,7 +304,7 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
     let composition = [
         "pub fn build() -> mxrs::ProjectDecl {",
         "    let mut project = application::build();",
-        "    presentation::apply(&mut project);",
+        "    ui::apply(&mut project);",
         "    project",
         "}",
         "",
@@ -427,7 +429,7 @@ mod tests {
                     "pub mod application;\n",
                     "pub mod domain;\n",
                     "pub mod infrastructure;\n",
-                    "pub mod presentation;\n\n",
+                    "pub mod ui;\n\n",
                     "pub fn build() {}\n\n",
                     "#[mxrs::application(version = \"11.12.1\", ",
                     "project = crate::build)]\npub struct Application;\n"
@@ -436,7 +438,7 @@ mod tests {
             ("src/domain/mod.rs", "pub fn build() {}\n"),
             ("src/application/mod.rs", ""),
             ("src/infrastructure/mod.rs", ""),
-            ("src/presentation/mod.rs", ""),
+            ("src/ui/mod.rs", ""),
         ] {
             write(root, relative, body);
         }
@@ -576,7 +578,7 @@ mod tests {
         let builder = "fn declarations() {\n    ::mxrs_dsl::ProjectBuilder::new(\"11.12.1\");\n}\n";
         for (relative, body) in [
             ("src/application/microflows/mod.rs", builder),
-            ("src/presentation/nanoflows/mod.rs", builder),
+            ("src/ui/nanoflows/mod.rs", builder),
             ("src/domain/flows/mod.rs", builder),
         ] {
             write(&root, relative, body);
@@ -589,7 +591,7 @@ mod tests {
         assert_eq!(report.files.len(), 4);
         for relative in [
             "src/application/microflows/mod.rs",
-            "src/presentation/nanoflows/mod.rs",
+            "src/ui/nanoflows/mod.rs",
             "src/domain/flows/mod.rs",
         ] {
             let source = std::fs::read_to_string(root.join(relative)).unwrap();
@@ -675,7 +677,7 @@ mod tests {
             assert!(applied.applied);
             for relative in [
                 "src/application/mod.rs",
-                "src/presentation/mod.rs",
+                "src/ui/mod.rs",
                 "src/infrastructure/mod.rs",
             ] {
                 assert!(root.join(relative).is_file(), "missing {relative}");
@@ -710,10 +712,10 @@ mod tests {
                 "pub mod application;",
                 "pub mod domain;",
                 "pub mod infrastructure;",
-                "pub mod presentation;",
+                "pub mod ui;",
                 "project = crate::build",
                 "let mut project = application::build();",
-                "presentation::apply(&mut project);",
+                "ui::apply(&mut project);",
             ] {
                 assert!(library.contains(declaration), "{declaration}: {library}");
             }
@@ -737,7 +739,7 @@ mod tests {
                 "one-layer" => write(&root, "src/application/mod.rs", "pub mod modules;\n"),
                 "missing-aggregators" => {
                     write(&root, "src/application/mod.rs", "pub mod modules;\n");
-                    write(&root, "src/presentation/mod.rs", "pub mod modules;\n");
+                    write(&root, "src/ui/mod.rs", "pub mod modules;\n");
                 }
                 "custom-entry-point" => {
                     let path = root.join("src/lib.rs");
