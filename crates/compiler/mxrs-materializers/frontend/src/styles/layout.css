@@ -1,0 +1,56 @@
+.mxrs-app > header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  color: #fff;
+  background: #142d3d;
+}
+
+.mxrs-app h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.mxrs-shell {
+  display: grid;
+  grid-template-columns: minmax(12rem, 18rem) 1fr;
+  min-height: calc(100vh - 4rem);
+}
+
+nav {
+  padding: 1rem;
+  background: #e8eef2;
+}
+
+nav ul {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+nav button {
+  width: 100%;
+  padding: 0.6rem;
+  text-align: left;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  cursor: pointer;
+}
+
+nav button:hover {
+  background: #d3e2ea;
+}
+
+main {
+  padding: 1.5rem;
+}
+
+@media (max-width: 700px) {
+  .mxrs-shell {
+    grid-template-columns: 1fr;
+  }
+}

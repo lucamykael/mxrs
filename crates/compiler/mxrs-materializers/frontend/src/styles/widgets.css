@@ -1,0 +1,37 @@
+.mxrs-layout-row {
+  display: flex;
+  gap: 1rem;
+}
+
+.mxrs-layout-column {
+  min-width: 0;
+}
+
+.mxrs-data-grid table {
+  width: 100%;
+  margin-top: 0.75rem;
+  border-collapse: collapse;
+}
+
+.mxrs-data-grid td {
+  padding: 0.75rem;
+  border: 1px solid #cad6dd;
+}
+
+.mxrs-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 1rem;
+}
+
+.mxrs-unsupported {
+  padding: 0.75rem;
+  border: 1px dashed #bd5b00;
+  background: #fff8ef;
+}
+
+@media (max-width: 700px) {
+  .mxrs-layout-row {
+    display: block;
+  }
+}
