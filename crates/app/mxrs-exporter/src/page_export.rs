@@ -1364,10 +1364,11 @@ mod tests {
         crate::names::ModelNames {
             entities,
             microflows: HashMap::from([
-                flow("ACT_GetOrder", "application::services"),
-                flow("ACT_Validate", "application::services"),
+                flow("ACT_GetOrder", "services"),
+                flow("ACT_Validate", "services"),
             ]),
             nanoflows: HashMap::from([flow("NF_Validate", "ui::nanoflows")]),
+            roles: HashMap::new(),
         }
     }
     use mxrs_bson::Bson;
@@ -2068,7 +2069,7 @@ mod tests {
         let source = render_page_file(&converted, &sales_names(&entities)).unwrap();
         assert!(
             source.contains(
-                "use crate::application::services::sales::imported::ACT_GetOrder;\nuse crate::domain::entities::sales::order::Order;\n"
+                "use crate::services::sales::imported::ACT_GetOrder;\nuse crate::domain::entities::sales::order::Order;\n"
             ),
             "{source}"
         );

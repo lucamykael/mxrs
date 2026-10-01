@@ -48,8 +48,8 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
                                           \-> cargo run -> new .mpr
 ```
 
-An import writes model declarations under `src/domain/`, each module's
-microflows as services under `src/application/`, published REST services as
+An import writes model declarations under `src/domain/`, every microflow as a
+service under `src/services/<module>/`, published REST services as
 route tables and controllers under `src/controllers/`, pages, navigation, and
 client-side nanoflows under `src/ui/`, and outbound/generated adapters under
 `src/infrastructure/`. Every declaration is one annotated item in its own
@@ -111,19 +111,20 @@ stable identities. Flow signatures support typed scalar, object, and list
 parameters, documentation, required flags, and typed defaults. Calls in one
 `project!` block check argument names and types at compile time; the writer
 checks builder/IR calls against authored or existing native signatures before
-writing. Parameter and type IDs survive synchronization. Imported graph shapes
-not yet decompiled remain complete
-in the snapshot, and are named in their module's `imported.rs` so the rest of
-the project can still call and bind them; server flows live in
-`src/application/services/<module>/`, while client flows live in
-`src/ui/nanoflows/<module>/`. Project security is imported into
+writing. Parameter and type IDs survive synchronization. Every microflow is a
+file of its own under `src/services/<module>/`, and every nanoflow under
+`src/ui/nanoflows/<module>/`: the function that declares it, under an
+attribute that states its kind, the roles that may run it and what it calls,
+uses and is used by. A flow that cannot be declared yet keeps its file, which
+names it so the rest of the project can still call and bind it and says why
+it stayed in the snapshot. Project security is imported into
 `src/domain/security.rs`, each module's roles into
 `src/domain/module_security/<module>.rs`, and modern navigation into
 `src/ui/navigation.rs`. Their writers validate role and target
 invariants, preserve native fields outside the typed surface, and keep
 existing identities. Unknown documents remain complete in the snapshot.
 Task queues import as editable declarations in
-`src/application/task_queues.rs`. `TaskQueueConfig` distinguishes legacy fixed
+`src/services/task_queues.rs`. `TaskQueueConfig` distinguishes legacy fixed
 parallelism from modern expressions with per-node or cluster-wide scope.
 Their metadata, queue/config identities, and folder placement survive sync;
 unknown native fields remain in the imported snapshot and block standalone

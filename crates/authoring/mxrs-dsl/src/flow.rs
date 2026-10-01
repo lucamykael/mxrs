@@ -266,6 +266,46 @@ impl FlowBuilder {
         self
     }
 
+    /// States the module roles that may run the flow, each as
+    /// `Module.Role`. Stating none lets nobody; not calling this at all
+    /// leaves the model's own list as it is.
+    pub fn allowed_roles<S: Into<String>>(
+        &mut self,
+        roles: impl IntoIterator<Item = S>,
+    ) -> &mut Self {
+        self.decl.allowed_roles = Some(roles.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// States the flows this one calls, by qualified name. A build reports
+    /// where the flow's body disagrees.
+    pub fn declares_calls<S: Into<String>>(
+        &mut self,
+        flows: impl IntoIterator<Item = S>,
+    ) -> &mut Self {
+        self.decl.relations.calls = Some(flows.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// States the entities this flow works with, by qualified name.
+    pub fn declares_uses<S: Into<String>>(
+        &mut self,
+        entities: impl IntoIterator<Item = S>,
+    ) -> &mut Self {
+        self.decl.relations.uses = Some(entities.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// States what uses this flow: the flows that call it and the pages,
+    /// services and other documents that refer to it, by qualified name.
+    pub fn declares_used_by<S: Into<String>>(
+        &mut self,
+        users: impl IntoIterator<Item = S>,
+    ) -> &mut Self {
+        self.decl.relations.used_by = Some(users.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Declares a scalar parameter and returns its typed `$name` expression.
     /// Object/list parameters can also use this method when an `Expr` is desired.
     ///

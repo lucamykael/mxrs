@@ -249,6 +249,14 @@ pub trait NanoflowMarker: 'static {
     }
 }
 
+/// A flow of either kind, named by the type its declaration generates. What
+/// a declaration says a flow calls or is used by is a list of these, which
+/// the compiler checks exist and an editor can follow to their files.
+pub trait FlowName: 'static {
+    /// `Module.Flow`.
+    fn flow_name() -> String;
+}
+
 /// A typed reference to a nanoflow, mirroring [`MicroflowRef`] — see
 /// [`NanoflowMarker`]'s doc comment for why this is a separate type.
 #[derive(Debug)]

@@ -302,7 +302,21 @@ fn signature(flow: &Microflow) -> Option<Vec<(String, Ty)>> {
         .collect()
 }
 
+/// Why each flow that is not declared in Rust stays in the imported model,
+/// by module, name and whether it is a nanoflow.
+pub(crate) type KeptFlows = HashMap<(String, String, bool), String>;
+
 pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<ConvertedFlow>> {
+    Ok(collect_all(project, modules)?.0)
+}
+
+/// Every flow that can be declared in Rust, and for each one that cannot,
+/// why not.
+pub(crate) fn collect_all(
+    project: &Project,
+    modules: &[Module],
+) -> Result<(Vec<ConvertedFlow>, KeptFlows)> {
+    let mut kept = KeptFlows::new();
     let attributes = attributes(modules);
     let entities: HashSet<_> = modules
         .iter()
@@ -399,10 +413,13 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
             }
             if parameters_attested(&doc).is_some() {
                 raw.push((module_name, doc));
-            } else if explain {
-                eprintln!(
-                    "[mxrs] {module_name}.{} stays imported: its parameters are stored in a form nothing here reads",
-                    doc.get_str("Name").unwrap_or_default()
+            } else {
+                keep(
+                    &mut kept,
+                    explain,
+                    module_name,
+                    &doc,
+                    "its parameters are stored in a form nothing here reads".to_string(),
                 );
             }
         }
@@ -411,19 +428,23 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
         if kind == "Microflows$Microflow" {
             targets.remove(name);
         }
-        if explain {
-            eprintln!("[mxrs] {name} stays imported: its module has two flows of that name");
-        }
     }
-    let mut result: Vec<_> = raw
-        .iter()
-        .filter(|(module, doc)| {
-            !ambiguous.contains(&(
-                format!("{module}.{}", doc.get_str("Name").unwrap_or_default()),
-                doc.get_str("$Type").unwrap_or_default().to_string(),
-            ))
-        })
-        .filter_map(|(module, doc)| {
+    let mut result = Vec::new();
+    for (module, doc) in &raw {
+        if ambiguous.contains(&(
+            format!("{module}.{}", doc.get_str("Name").unwrap_or_default()),
+            doc.get_str("$Type").unwrap_or_default().to_string(),
+        )) {
+            keep(
+                &mut kept,
+                explain,
+                module,
+                doc,
+                "its module has two flows of that name".to_string(),
+            );
+            continue;
+        }
+        let converted = {
             // The typed conversion first: it checks more. Whatever it cannot
             // express is stated in full instead.
             convert(module, doc, &targets, &entities, &attributes).or_else(|| {
@@ -435,20 +456,33 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
                         source: crate::flow_general::polish(source),
                     }),
                     Err(reason) => {
-                        if explain {
-                            eprintln!(
-                                "[mxrs] {module}.{} stays imported: {reason}",
-                                doc.get_str("Name").unwrap_or_default()
-                            );
-                        }
+                        keep(&mut kept, explain, module, doc, reason);
                         None
                     }
                 }
             })
-        })
-        .collect();
+        };
+        result.extend(converted);
+    }
     result.sort_by(|a, b| (&a.module, &a.declaration.name).cmp(&(&b.module, &b.declaration.name)));
-    Ok(result)
+    Ok((result, kept))
+}
+
+/// Records why a flow stays in the imported model; `MXRS_EXPLAIN_FLOWS=1`
+/// also says so while importing.
+fn keep(kept: &mut KeptFlows, explain: bool, module: &str, doc: &Document, reason: String) {
+    let name = doc.get_str("Name").unwrap_or_default();
+    if explain {
+        eprintln!("[mxrs] {module}.{name} stays imported: {reason}");
+    }
+    kept.insert(
+        (
+            module.to_string(),
+            name.to_string(),
+            doc.get_str("$Type").ok() == Some("Microflows$Nanoflow"),
+        ),
+        reason,
+    );
 }
 
 fn parameters_attested(doc: &Document) -> Option<()> {
@@ -1180,6 +1214,28 @@ fn flow_function(base: &str, marker: &str) -> String {
 /// `create_order_service.rs`, with `ACT` stated on the attribute. Two flows
 /// of one module that would share that name keep their whole Mendix name
 /// instead.
+/// The file a flow that stays in the imported model is named in: the one
+/// its declaration would have, so declaring it later replaces the file's
+/// contents and nothing else moves.
+pub(crate) fn kept_file_stem(name: &str, nanoflow: bool) -> String {
+    let function = flow_function(split_prefix(name).1, &names::flow_marker(name));
+    file_stem(&function, nanoflow)
+}
+
+/// The file a flow's declaring function lives in.
+fn file_stem(function: &str, nanoflow: bool) -> String {
+    let stem = function.trim_end_matches('_');
+    // A nanoflow's file is named after its function alone, so it must not
+    // be a word Rust keeps (`return.rs`) nor the folder's own index.
+    if !nanoflow {
+        format!("{stem}_service")
+    } else if stem.is_empty() || rust_keyword(stem) || stem == "mod" {
+        format!("{stem}_nanoflow")
+    } else {
+        stem.to_string()
+    }
+}
+
 pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
     let short = |flow: &ConvertedFlow| {
         let name = &flow.declaration.name;
@@ -1216,19 +1272,9 @@ pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
                 Some(prefix) => format!("{prefix}_{}", derive_pascal_case(&function)),
                 None => derive_pascal_case(&function),
             };
-            let stem = function.trim_end_matches('_');
-            // A nanoflow's file is named after its function alone, so it
-            // must not be a word Rust keeps (`return.rs`) nor one of the
-            // folder's own files.
-            let base = if !nanoflow {
-                format!("{stem}_service")
-            } else if stem.is_empty() || rust_keyword(stem) || matches!(stem, "mod" | "imported") {
-                format!("{stem}_nanoflow")
-            } else {
-                stem.to_string()
-            };
-            // Distinct functions can still ask for one file (`imported` and
-            // `imported_nanoflow`): the later one takes a numbered name.
+            let base = file_stem(&function, nanoflow);
+            // Distinct functions can still ask for one file (`return` and
+            // `return_nanoflow`): the later one takes a numbered name.
             let mut file_stem = base.clone();
             let mut suffix = 2;
             while !files.insert((flow.module.as_str(), nanoflow, file_stem.clone())) {
@@ -1252,6 +1298,7 @@ pub(crate) fn render_files(
     plans: &[FlowFile],
     nanoflow: bool,
     names: &ModelNames<'_>,
+    relations: &HashMap<String, mxrs_model::relations::FlowRelations>,
 ) -> Result<Vec<RenderedFlowSource>> {
     let attribute = if nanoflow { "nanoflow" } else { "microflow" };
     flows
@@ -1279,6 +1326,55 @@ pub(crate) fn render_files(
             arguments.push(format!("module = {}", rust_string(&flow.module)));
             if plan.explicit_name {
                 arguments.push(format!("name = {}", rust_string(name)));
+            }
+            // What the model says the flow is related to, each named by
+            // the Rust item that declares it where there is one.
+            if let Some(related) = relations.get(&format!("{}.{name}", flow.module)) {
+                let list = |name: &str, items: Vec<String>| {
+                    (!items.is_empty()).then(|| format!("{name}({})", items.join(", ")))
+                };
+                let flow_item = |target: &String| {
+                    if names.microflows.contains_key(target) {
+                        names::microflow(target)
+                    } else if names.nanoflows.contains_key(target) {
+                        names::nanoflow(target)
+                    } else {
+                        rust_string(target)
+                    }
+                };
+                arguments.extend(list(
+                    "roles",
+                    related
+                        .roles
+                        .iter()
+                        .map(|role| {
+                            if names.roles.contains_key(role) {
+                                names::role(role)
+                            } else {
+                                rust_string(role)
+                            }
+                        })
+                        .collect(),
+                ));
+                arguments.extend(list("calls", related.calls.iter().map(flow_item).collect()));
+                arguments.extend(list(
+                    "uses",
+                    related
+                        .uses
+                        .iter()
+                        .map(|entity| {
+                            if names.entities.contains_key(entity) {
+                                names::entity(entity)
+                            } else {
+                                rust_string(entity)
+                            }
+                        })
+                        .collect(),
+                ));
+                arguments.extend(list(
+                    "used_by",
+                    related.used_by.iter().map(flow_item).collect(),
+                ));
             }
             writeln!(item, "#[{attribute}({})]", arguments.join(", ")).unwrap();
             // A variable whose Mendix name does not read back from snake
@@ -1403,8 +1499,8 @@ mod tests {
         let flows = [
             flow("Sales", "ACT_Return", true),
             flow("Sales", "ACT_Type", true),
-            flow("Sales", "Imported", true),
-            flow("Sales", "ImportedNanoflow", true),
+            flow("Sales", "Mod", true),
+            flow("Sales", "ModNanoflow", true),
             flow("Sales", "ACT_Refresh", true),
             flow("Sales", "ACT_Return", false),
             flow("Crm", "ACT_Refresh", true),
@@ -1419,10 +1515,10 @@ mod tests {
                 // `return.rs` and `type.rs` are not modules Rust can declare.
                 "return_nanoflow",
                 "type_nanoflow",
-                // `imported.rs` is the folder's own; the flow that is really
-                // called `ImportedNanoflow` then finds its name taken.
-                "imported_nanoflow",
-                "imported_nanoflow_2",
+                // `mod.rs` is the folder's own; the flow that is really
+                // called `ModNanoflow` then finds its name taken.
+                "mod_nanoflow",
+                "mod_nanoflow_2",
                 "refresh",
                 "return_service",
                 // Another module's folder is another namespace.

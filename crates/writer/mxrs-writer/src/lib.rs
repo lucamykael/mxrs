@@ -47,6 +47,7 @@ pub mod module;
 mod navigation;
 pub mod page_compiler;
 pub mod project;
+pub mod relations;
 pub mod scaffold;
 mod security;
 

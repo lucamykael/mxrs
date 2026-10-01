@@ -124,7 +124,7 @@ fn imported_callees_survive_typed_caller_edits_and_transactional_rejections() {
     std::fs::remove_dir_all(&source_dir).unwrap();
     // Reuse a registered per-flow module so this edit replaces the typed Text
     // overlay while adding Caller; the imported Text document remains preserved.
-    let editable = generated.join("src/application/services/calls/text_service.rs");
+    let editable = generated.join("src/services/calls/text_service.rs");
     std::fs::write(&editable, CALLERS).unwrap();
     let built = run(&generated, &output);
     assert!(

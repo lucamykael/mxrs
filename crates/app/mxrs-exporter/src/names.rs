@@ -43,6 +43,20 @@ pub(crate) fn nanoflow(qualified_name: &str) -> String {
     reference('N', qualified_name)
 }
 
+/// The variant naming module role `Module.Role` in its module's roles enum.
+pub(crate) fn role(qualified_name: &str) -> String {
+    reference('R', qualified_name)
+}
+
+/// Where a module role is declared: the enum its module declares its roles
+/// with, and the variant that is this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoleTarget {
+    /// The Rust module the enum lives in.
+    pub(crate) module_path: String,
+    pub(crate) variant: String,
+}
+
 /// Where a flow's naming type is declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlowTarget {
@@ -81,6 +95,8 @@ pub(crate) struct ModelNames<'a> {
     pub(crate) entities: &'a HashMap<String, TypedEntityTarget>,
     pub(crate) microflows: HashMap<String, FlowTarget>,
     pub(crate) nanoflows: HashMap<String, FlowTarget>,
+    /// The module roles a Rust enum declares, by `Module.Role`.
+    pub(crate) roles: HashMap<String, RoleTarget>,
 }
 
 /// One file body with its references spelled, and the imports that spelling
@@ -114,12 +130,12 @@ impl ModelNames<'_> {
             })?;
             let token = &after[..end];
             let (kind, target) = token.split_at(1);
-            let (module_path, name, accessor) = self.locate(kind, target)?;
+            let (module_path, name, member) = self.locate(kind, target)?;
             requests.push((name.clone(), module_path.clone()));
             segments.push(Segment::Reference {
                 module_path,
                 name,
-                accessor,
+                member,
             });
             rest = &after[end + CLOSE.len_utf8()..];
         }
@@ -148,17 +164,24 @@ impl ModelNames<'_> {
                 Segment::Reference {
                     module_path,
                     name,
-                    accessor,
+                    member,
                 } => {
                     if imported.get(name.as_str()) != Some(&module_path.as_str()) {
                         source.push_str(module_path);
                         source.push_str("::");
                     }
                     source.push_str(name);
-                    if let Some(accessor) = accessor {
-                        source.push_str("::");
-                        source.push_str(accessor);
-                        source.push_str("()");
+                    match member {
+                        Member::None => {}
+                        Member::Accessor(accessor) => {
+                            source.push_str("::");
+                            source.push_str(accessor);
+                            source.push_str("()");
+                        }
+                        Member::Variant(variant) => {
+                            source.push_str("::");
+                            source.push_str(variant);
+                        }
                     }
                 }
             }
@@ -172,14 +195,14 @@ impl ModelNames<'_> {
         })
     }
 
-    /// `(module path, type name, accessor)` for one reference.
-    fn locate(&self, kind: &str, target: &str) -> Result<(String, String, Option<String>)> {
+    /// `(module path, type name, member)` for one reference.
+    fn locate(&self, kind: &str, target: &str) -> Result<(String, String, Member)> {
         let missing =
             |what: &str| ExportError::MarkerLayout(format!("{what} {target:?} is not declared"));
         match kind {
             "E" => {
                 let entity = self.entities.get(target).ok_or_else(|| missing("entity"))?;
-                Ok((entity.module_path(), entity.type_name.clone(), None))
+                Ok((entity.module_path(), entity.type_name.clone(), Member::None))
             }
             "A" => {
                 let (entity_name, attribute) =
@@ -195,7 +218,7 @@ impl ModelNames<'_> {
                 Ok((
                     entity.module_path(),
                     entity.type_name.clone(),
-                    Some(accessor.clone()),
+                    Member::Accessor(accessor.clone()),
                 ))
             }
             "M" | "N" => {
@@ -205,7 +228,15 @@ impl ModelNames<'_> {
                     &self.nanoflows
                 };
                 let flow = flows.get(target).ok_or_else(|| missing("flow"))?;
-                Ok((flow.module_path.clone(), flow.marker.clone(), None))
+                Ok((flow.module_path.clone(), flow.marker.clone(), Member::None))
+            }
+            "R" => {
+                let role = self.roles.get(target).ok_or_else(|| missing("role"))?;
+                Ok((
+                    role.module_path.clone(),
+                    "Role".to_string(),
+                    Member::Variant(role.variant.clone()),
+                ))
             }
             _ => Err(ExportError::MarkerLayout(format!(
                 "unknown model reference kind {kind:?}"
@@ -362,8 +393,18 @@ enum Segment {
     Reference {
         module_path: String,
         name: String,
-        accessor: Option<String>,
+        member: Member,
     },
+}
+
+/// What of a referenced type the reference names.
+enum Member {
+    /// The type itself.
+    None,
+    /// An accessor function: `Order::number()`.
+    Accessor(String),
+    /// An enum variant: `Role::Administrator`.
+    Variant(String),
 }
 
 #[cfg(test)]
@@ -391,11 +432,12 @@ mod tests {
             microflows: HashMap::from([(
                 "Sales.ACT_Ping".to_string(),
                 FlowTarget {
-                    module_path: "crate::application::services::sales::ping_service".to_string(),
+                    module_path: "crate::services::sales::ping_service".to_string(),
                     marker: "ACT_Ping".to_string(),
                 },
             )]),
             nanoflows: HashMap::new(),
+            roles: HashMap::new(),
         };
         let body = format!(
             "Ref::<{}>::new(); {}.set(1); MicroflowRef::<{}>::new(); {}",
@@ -412,7 +454,7 @@ mod tests {
         assert_eq!(
             resolved.imports,
             [
-                "use crate::application::services::sales::ping_service::ACT_Ping;",
+                "use crate::services::sales::ping_service::ACT_Ping;",
                 "use crate::domain::entities::sales::order::Order;",
             ]
         );
@@ -430,11 +472,12 @@ mod tests {
             microflows: HashMap::from([(
                 "Sales.cleanup".to_string(),
                 FlowTarget {
-                    module_path: "crate::application::services::sales::imported".to_string(),
+                    module_path: "crate::services::sales::imported".to_string(),
                     marker: "cleanup".to_string(),
                 },
             )]),
             nanoflows: HashMap::new(),
+            roles: HashMap::new(),
         };
         let body = format!(
             "{} {} {} {}",
@@ -446,7 +489,7 @@ mod tests {
         let resolved = names.resolve(&body, &["Line"]).unwrap();
         assert_eq!(
             resolved.source,
-            "crate::domain::entities::sales::order::Order crate::domain::entities::crm::order::Order crate::domain::entities::sales::line::Line crate::application::services::sales::imported::cleanup"
+            "crate::domain::entities::sales::order::Order crate::domain::entities::crm::order::Order crate::domain::entities::sales::line::Line crate::services::sales::imported::cleanup"
         );
         assert!(resolved.imports.is_empty());
     }
@@ -459,11 +502,12 @@ mod tests {
             microflows: HashMap::from([(
                 "Sales.None".to_string(),
                 FlowTarget {
-                    module_path: "crate::application::services::sales::none_service".to_string(),
+                    module_path: "crate::services::sales::none_service".to_string(),
                     marker: "None".to_string(),
                 },
             )]),
             nanoflows: HashMap::new(),
+            roles: HashMap::new(),
         };
         let body = format!(
             "Ref::<{}>::new(); call(MicroflowRef::<{}>::new(), None)",
@@ -473,7 +517,7 @@ mod tests {
         let resolved = names.resolve(&body, &[]).unwrap();
         assert_eq!(
             resolved.source,
-            "Ref::<crate::domain::entities::sales::ref_::Ref>::new(); call(MicroflowRef::<crate::application::services::sales::none_service::None>::new(), None)"
+            "Ref::<crate::domain::entities::sales::ref_::Ref>::new(); call(MicroflowRef::<crate::services::sales::none_service::None>::new(), None)"
         );
         assert!(resolved.imports.is_empty());
     }
@@ -512,6 +556,7 @@ mod tests {
             entities: &entities,
             microflows: HashMap::new(),
             nanoflows: HashMap::new(),
+            roles: HashMap::new(),
         };
         let error = names.resolve(&entity("Sales.Missing"), &[]).unwrap_err();
         assert!(error.to_string().contains("Sales.Missing"), "{error}");

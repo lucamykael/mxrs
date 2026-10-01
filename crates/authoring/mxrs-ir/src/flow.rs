@@ -449,6 +449,30 @@ pub struct MicroflowDecl {
     /// a void return.
     pub return_expression: Option<String>,
     pub return_type: Option<FlowReturnType>,
+    /// The module roles that may run the flow, as `Module.Role`. `None`
+    /// when the declaration does not say: the model keeps what it has.
+    pub allowed_roles: Option<Vec<String>>,
+    /// What the declaration says the flow is related to.
+    pub relations: FlowRelations,
+}
+
+/// What a flow's declaration says about the rest of the model: the flows it
+/// calls, the entities it works with, and what uses it — each by qualified
+/// name. Nothing here is written to the model, which already holds all of
+/// it in the flow's body and in the documents that refer to the flow; a
+/// build compares the two and reports where they disagree. `None` is a
+/// relation the declaration does not state, and nothing is compared.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlowRelations {
+    pub calls: Option<Vec<String>>,
+    pub uses: Option<Vec<String>>,
+    pub used_by: Option<Vec<String>>,
+}
+
+impl FlowRelations {
+    pub fn is_stated(&self) -> bool {
+        self.calls.is_some() || self.uses.is_some() || self.used_by.is_some()
+    }
 }
 
 impl MicroflowDecl {
@@ -461,6 +485,8 @@ impl MicroflowDecl {
             rescue_activities: vec![],
             return_expression: None,
             return_type: None,
+            allowed_roles: None,
+            relations: FlowRelations::default(),
         }
     }
 }

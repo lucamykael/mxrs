@@ -38,17 +38,20 @@ Dependencies point inward:
 
 ```text
 controllers ──┐
-ui ───────────┼─> application ─> domain
-infrastructure┘
+ui ───────────┼─> services ─> domain
+infrastructure┘   (ports)
 ```
 
 - Domain owns business data, invariants, value objects and domain rules. It
   must not import Axum, a database driver or desktop framework.
-- Application owns services and the ports they require. A Mendix server
-  microflow is an application service unless it is proven to be a pure domain
-  rule.
+- Services are what the application does. Every Mendix microflow is a
+  service: a layer of its own beside the domain, one folder per module and
+  one file per microflow. There is no `application` folder wrapping it.
+- Ports are the contracts between the model and hand-written code: what a
+  module's services offer to callers, and what its actions need an adapter
+  to provide.
 - Controllers translate HTTP — or desktop commands, or another delivery
-  protocol — into application calls. Framework request/response types stop at
+  protocol — into service calls. Framework request/response types stop at
   this edge.
 - UI is the user interface the model declares: pages, layouts, nanoflows and
   navigation. It is not where the application's HTTP surface lives.
@@ -72,11 +75,11 @@ src/
 │   ├── documents/<mendix_module>/<document>.rs
 │   ├── module_security/<mendix_module>.rs
 │   └── security.rs
-├── application/
-│   ├── services/<mendix_module>/<microflow>_service.rs
-│   ├── services/<mendix_module>/imported.rs
-│   ├── ports/<mendix_module>/{services,actions}.rs
+├── services/
+│   ├── <mendix_module>/<microflow>_service.rs   one per microflow
 │   └── task_queues.rs
+├── ports/
+│   └── <mendix_module>/{services,actions}.rs
 ├── controllers/
 │   ├── mod.rs                              router() and serve()
 │   ├── state.rs, error.rs
@@ -99,6 +102,92 @@ miniature copy of the whole architecture. A Mendix module remains a namespace
 inside a concept because Mendix names are only unique per module. Marketplace
 modules are the exception: they are external upgrade units and therefore stay
 module-shaped under `packages/`.
+
+## Services
+
+Every microflow of a module the project created is a file under
+`src/services/<module>/`, named for what it does: `ACT_Order_Create` is
+`order_create_service.rs`. The file holds the function that declares the
+flow, and the attribute on it says what the flow is beside what it does:
+
+```rust
+// src/services/sales/order_create_service.rs
+use mxrs::prelude::*;
+
+use crate::domain::entities::sales::order::Order;
+use crate::domain::module_security::sales::Role;
+use crate::services::sales::order_number_service::SUB_Order_Number;
+use crate::ui::nanoflows::sales::order_save::ACT_Order_Save;
+
+#[microflow(
+    ACT,
+    module = "Sales",
+    name = "ACT_Order_Create",
+    roles(Role::Administrator, Role::Clerk),
+    calls(SUB_Order_Number),
+    uses(Order),
+    used_by(ACT_Order_Save, "Sales.Order_Overview")
+)]
+pub fn order_create(flow: &mut FlowBuilder) {
+    let number = flow.call_into("Number", MicroflowRef::<SUB_Order_Number>::new(), |_| {});
+    let order = flow.create("NewOrder", Ref::<Order>::new(), |create| {
+        create.set(Order::number(), mx("$Number"));
+        create.commit(Commit::Yes);
+    });
+    flow.return_with(mx("$NewOrder"));
+}
+```
+
+- The first word is the flow's kind — the prefix its name carries (`ACT`,
+  `SUB`, `DS`, `VAL`, ...).
+- `roles(...)` are the module roles that may run it, as variants of the enum
+  the module declares its roles with. This is the model's own list: stating
+  it writes it, stating `roles()` allows nobody, and leaving it out keeps
+  what the model has.
+- `calls(...)`, `uses(...)` and `used_by(...)` name the flows it calls, the
+  entities it works with and what refers to it. Each item is the Rust item
+  that declares the thing — the type a flow's declaration generates, an
+  entity's struct — so the compiler checks it exists and an editor goes to
+  its file; what no Rust item declares, a page for instance, is named as the
+  model names it. They write nothing: the body and the documents that refer
+  to the flow already say all of it. A build compares the two and reports
+  each difference as a warning, so the lists stay true or say where they are
+  not. A relation left out is not compared.
+
+A flow the importer cannot declare yet keeps its file all the same. It names
+the flow, so the rest of the project can call and bind it, and says why it
+stayed in the imported model:
+
+```rust
+//! `Sales.SUB_Legacy` stays in the imported model: its module has two flows of that name.
+
+mxrs::imported! {
+    module = "Sales";
+    microflow SUB_Legacy;
+}
+```
+
+`MXRS_EXPLAIN_FLOWS=1 mxrs convert mendix-to-rust ...` prints the same
+reasons while importing.
+
+The body is written with the flow builder. Where a typed builder can check
+an expression it does (`Order::number().set(number)`); everything else is
+stated as Mendix writes it, with `mx("...")`. What the block structure alone
+does not say has a builder of its own:
+
+| In the model | In Rust |
+|---|---|
+| Custom error handling on an activity | `flow.on_error(\|flow\| ...)`, `on_error_without_rollback`, `continue_on_error()` before the activity; `flow.raise_error()` |
+| A split per enumeration value / per entity | `flow.switch(mx(..), \|on\| ...)`, `flow.switch_type(&var, \|on\| ...)` with `flow.cast(..)` |
+| A split a rule decides | `flow.decision_by_rule(..)`, `flow.switch_by_rule(..)` |
+| An activity kept but disabled | `flow.disabled()` before it |
+| A merge the flow returns to (a retry) | `flow.label("again")` and `flow.jump("again")` |
+| A call on a task queue, or one whose result is dropped | `call.queue(..)`, `call.discard_result(..)` |
+| An activity no builder covers yet | `flow.native_action(NativeDocument::new(..).with(..))` |
+
+An edit that keeps the flow's structure changes only what it says: node
+identities, positions, captions and annotations stay the model's. An edit
+that changes the structure rebuilds the graph.
 
 ## Controllers
 

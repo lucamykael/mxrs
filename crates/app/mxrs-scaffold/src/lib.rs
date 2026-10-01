@@ -232,7 +232,7 @@ fn project_files(
         (
             "src/lib.rs",
             format!(
-                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod ui;\n\n#[mxrs::application(version = {version})]\npub struct Application;\n"
+                "pub mod domain;\npub mod infrastructure;\npub mod services;\npub mod ui;\n\n#[mxrs::application(version = {version})]\npub struct Application;\n"
             ),
         ),
         ("src/domain/mod.rs", templates::domain_layer()),
@@ -244,7 +244,7 @@ fn project_files(
             "src/domain/modules/main.rs",
             templates::module_declaration("Main"),
         ),
-        ("src/application/mod.rs", templates::application_layer()),
+        ("src/services/mod.rs", templates::services_layer()),
         ("src/ui/mod.rs", templates::ui_layer()),
         (
             "src/ui/layouts/mod.rs",
@@ -614,7 +614,7 @@ mod tests {
         generate_project(&ProjectScaffold::new("Demo", "11.12.1", &destination)).unwrap();
 
         let crate_root = std::fs::read_to_string(destination.join("src/lib.rs")).unwrap();
-        for layer in ["application", "domain", "infrastructure", "ui"] {
+        for layer in ["services", "domain", "infrastructure", "ui"] {
             assert!(
                 crate_root.contains(&format!("pub mod {layer};")),
                 "{layer} is not a public top-level module: {crate_root}"
@@ -625,9 +625,9 @@ mod tests {
         // outward to apply another.
         assert_eq!(
             crate_root,
-            "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod ui;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
+            "pub mod domain;\npub mod infrastructure;\npub mod services;\npub mod ui;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
         );
-        for layer in ["domain", "application", "infrastructure", "ui"] {
+        for layer in ["domain", "services", "infrastructure", "ui"] {
             let source =
                 std::fs::read_to_string(destination.join(format!("src/{layer}/mod.rs"))).unwrap();
             for composing in ["fn build", "fn apply", "ProjectDecl", "crate::"] {
@@ -674,7 +674,7 @@ mod tests {
             ".gitignore",
             "Cargo.toml",
             "README.md",
-            "src/application/mod.rs",
+            "src/services/mod.rs",
             "src/domain/mod.rs",
             "src/domain/modules/main.rs",
             "src/domain/modules/mod.rs",

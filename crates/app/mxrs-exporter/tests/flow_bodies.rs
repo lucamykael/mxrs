@@ -10,10 +10,10 @@ use std::process::Command;
 mod nested_cargo;
 
 /// Every module's microflow services. The authored tree is layer-first, so
-/// `application/services/` holds one folder per Mendix module.
+/// `services/` holds one folder per Mendix module.
 fn service_files(generated: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let services = generated.join("src/application/services");
+    let services = generated.join("src/services");
     if !services.is_dir() {
         return paths;
     }
@@ -366,7 +366,7 @@ fn error_handling_retries_and_switches_are_declared_and_edit_in_place() {
 enum Outcome {
     /// Rust that states the flow, rebuilding its stored body unchanged.
     Declared,
-    /// A name in `imported.rs`; the flow stays in the imported model.
+    /// A name in a file of its own; the flow stays in the imported model.
     Preserved,
 }
 use Outcome::{Declared, Preserved};
@@ -645,8 +645,8 @@ fn customize(path: &Path, name: &str, edit: impl FnOnce(&mut Document)) {
     mpr.update_unit(&flow.0, flow.3).unwrap();
 }
 
-fn run(generated: &Path, output: &Path) {
-    let result = Command::new(env!("CARGO"))
+fn build(generated: &Path, output: &Path) -> std::process::Output {
+    Command::new(env!("CARGO"))
         .args(["run", "--quiet", "--offline", "--manifest-path"])
         .arg(generated.join("Cargo.toml"))
         .arg("--")
@@ -656,7 +656,11 @@ fn run(generated: &Path, output: &Path) {
             nested_cargo::target_dir(workspace().join("target")),
         )
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn run(generated: &Path, output: &Path) {
+    let result = build(generated, output);
     assert!(
         result.status.success(),
         "{}",
@@ -710,6 +714,26 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
     for forbidden in ["$ID", "Bson", "Expr::new", ".activities.push(", "777;333"] {
         assert!(!source.contains(forbidden));
     }
+    // A declaration says what its flow is related to, by the Rust items
+    // that declare those things: the flows it calls and the entity it
+    // works with here, and on the other side what calls it.
+    let attribute = |source: &str| -> String {
+        let start = source.find("#[microflow(").expect("a flow attribute");
+        let end = source[start..]
+            .find("pub fn ")
+            .expect("the flow's function");
+        source[start..start + end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let caller = attribute(&editable_source);
+    for relation in ["calls(", "Echo", "uses(", "Record"] {
+        assert!(caller.contains(relation), "{relation}: {caller}");
+    }
+    assert!(!caller.contains("used_by("), "{caller}");
+    let echo = attribute(&std::fs::read_to_string(flow_source_path(&generated, "Echo")).unwrap());
+    assert!(echo.contains("used_by(Caller)"), "{echo}");
     let lib = generated.join("src/lib.rs");
     std::fs::write(
         &lib,
@@ -760,6 +784,22 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
         }
         assert_eq!(new.3, expected, "only the edited argument may change");
     }
+    // A relation the flow no longer has is reported by the build that
+    // finds it, which still succeeds: the model is what the body says.
+    let current = std::fs::read_to_string(&editable).unwrap();
+    let stale = current.replacen("calls(", "calls(\"Calls.Gone\", ", 1);
+    assert_ne!(stale, current);
+    std::fs::write(&editable, stale).unwrap();
+    let output = build(&generated, &rebuilt);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "[mxrs] warning: Calls.Caller: calls(...) lists Calls.Gone, which it does not call"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(flows(&rebuilt), after);
 }
 
 #[test]
@@ -942,6 +982,18 @@ fn malformed_target_parameters_keep_both_target_and_caller_out_of_the_projection
     // passes the arguments the model passes.
     assert!(!source.contains("pub fn echo("), "{source}");
     assert!(source.contains("microflow Echo;"), "{source}");
+    // It keeps the file its declaration would have, which says why it
+    // stayed; no list of leftovers stands in for it.
+    let kept = std::fs::read_to_string(flow_source_path(&generated, "Echo")).unwrap();
+    assert!(
+        kept.starts_with("//! `Calls.Echo` stays in the imported model: ")
+            && kept.contains("mxrs::imported! {\n    module = \"Calls\";\n    microflow Echo;\n}"),
+        "{kept}"
+    );
+    assert!(
+        !generated.join("src/services/calls/imported.rs").exists()
+            && !generated.join("src/application").exists()
+    );
     assert!(source.contains("pub fn caller("), "{source}");
     assert!(!source.contains("call_microflow_result"), "{source}");
     assert!(
