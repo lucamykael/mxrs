@@ -366,6 +366,7 @@ pub(crate) fn same_parameters(previous: &Document, decl: &mxrs_ir::MicroflowDecl
                     && old.get_document("VariableType").ok().is_some_and(|prior| {
                         prior.get("$Type") == ty.get("$Type")
                             && prior.get("Entity") == ty.get("Entity")
+                            && prior.get("Enumeration") == ty.get("Enumeration")
                     })
             })
 }

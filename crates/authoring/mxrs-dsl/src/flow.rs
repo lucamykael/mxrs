@@ -166,6 +166,27 @@ impl FlowBuilder {
         self.decl
     }
 
+    pub(crate) fn push(&mut self, activity: Activity) -> &mut Self {
+        self.decl.activities.push(activity);
+        self
+    }
+
+    /// Runs `body` against a builder for a nested block — a branch or a loop
+    /// body — and answers with the activities it declared.
+    pub(crate) fn nested(body: impl FnOnce(&mut FlowBuilder)) -> Vec<Activity> {
+        let mut builder = FlowBuilder::branch();
+        body(&mut builder);
+        builder.decl.activities
+    }
+
+    pub(crate) fn is_nested(&self) -> bool {
+        !self.accepts_parameters
+    }
+
+    pub(crate) fn declaration_mut(&mut self) -> &mut MicroflowDecl {
+        &mut self.decl
+    }
+
     pub fn documentation(&mut self, text: impl Into<String>) -> &mut Self {
         self.decl.documentation = text.into();
         self
@@ -256,16 +277,20 @@ impl FlowBuilder {
         self
     }
 
-    pub fn commit<M: EntityMarker>(&mut self, variable: &Var<M>) -> &mut Self {
+    /// Commits an object or a list. `commit_with` states the options this
+    /// leaves at their defaults.
+    pub fn commit(&mut self, variable: &impl crate::flow_actions::Variable) -> &mut Self {
         self.decl.activities.push(Activity::Commit {
-            variable: variable.name().to_string(),
+            variable: variable.variable_name().to_string(),
         });
         self
     }
 
-    pub fn delete_object<M: EntityMarker>(&mut self, variable: &Var<M>) -> &mut Self {
+    /// Deletes an object or a list. `delete_with` states the options this
+    /// leaves at their defaults.
+    pub fn delete_object(&mut self, variable: &impl crate::flow_actions::Variable) -> &mut Self {
         self.decl.activities.push(Activity::DeleteObject {
-            variable: variable.name().to_string(),
+            variable: variable.variable_name().to_string(),
         });
         self
     }
@@ -391,7 +416,15 @@ impl FlowBuilder {
         self
     }
 
+    /// Returns `expression` from the flow. At the end of the flow this is
+    /// its result and its return type; inside a branch or a loop it ends the
+    /// flow there, and the flow's type is the one its outer body declares.
     pub fn return_value(&mut self, expression: impl TypedRenderExpr) -> &mut Self {
+        if self.is_nested() {
+            return self.push(Activity::ReturnValue {
+                expression: expression.render(),
+            });
+        }
         self.decl.return_expression = Some(expression.render());
         self.decl.return_type = Some(expression.flow_return_type());
         self

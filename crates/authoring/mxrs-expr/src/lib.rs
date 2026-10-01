@@ -248,6 +248,72 @@ fn binary<T: MendixType, U: MendixType>(left: Expr<T>, op: &str, right: Expr<T>)
     Expr::new(format!("({} {op} {})", left.source, right.source))
 }
 
+/// A Mendix expression, written the way Mendix writes it:
+/// `mx("$Order/Total > 100 and $Order/Status = Sales.OrderStatus.Open")`.
+///
+/// The typed builders (`Expr<T>`, [`Var::get`]) check what they can express;
+/// this states everything else an expression can be. It is accepted wherever
+/// an expression of any type is, so the type is the one the place asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mx(String);
+
+/// Writes a Mendix expression verbatim. See [`Mx`].
+pub fn mx(expression: impl Into<String>) -> Mx {
+    Mx(expression.into())
+}
+
+impl Mx {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_text(self) -> String {
+        self.0
+    }
+}
+
+impl<T: MendixType> IntoExpr<T> for Mx {
+    fn into_expr(self) -> Expr<T> {
+        Expr::new(self.0)
+    }
+}
+
+impl<T: MendixType> IntoExpr<T> for &Mx {
+    fn into_expr(self) -> Expr<T> {
+        Expr::new(self.0.clone())
+    }
+}
+
+impl RenderExpr for Mx {
+    fn render(&self) -> String {
+        self.0.clone()
+    }
+}
+
+impl<T: MendixType> From<Expr<T>> for Mx {
+    fn from(expression: Expr<T>) -> Self {
+        Mx(expression.source)
+    }
+}
+
+impl<T: MendixType> From<&Expr<T>> for Mx {
+    fn from(expression: &Expr<T>) -> Self {
+        Mx(expression.source.clone())
+    }
+}
+
+impl<M: EntityMarker> From<&Var<M>> for Mx {
+    fn from(variable: &Var<M>) -> Self {
+        Mx(format!("${}", variable.name()))
+    }
+}
+
+impl<M: EntityMarker> From<&ListVar<M>> for Mx {
+    fn from(variable: &ListVar<M>) -> Self {
+        Mx(format!("${}", variable.name()))
+    }
+}
+
 pub fn string(value: impl AsRef<str>) -> Expr<MxString> {
     let escaped = value.as_ref().replace('\'', "''");
     Expr::new(format!("'{escaped}'"))

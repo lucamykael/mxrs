@@ -81,6 +81,169 @@ pub enum FlowReturnType {
     Binary,
     Object(String),
     List(String),
+    /// A value of the qualified enumeration, e.g. `Sales.OrderStatus`.
+    Enumeration(String),
+}
+
+/// The type of a flow variable. The same set a flow can return, under the
+/// name a variable declaration reads better with.
+pub type DataType = FlowReturnType;
+
+impl FlowReturnType {
+    /// An object of the entity `E` declares.
+    pub fn object<E: crate::EntityMarker>() -> Self {
+        Self::Object(E::qualified_name())
+    }
+
+    /// A list of the entity `E` declares.
+    pub fn list<E: crate::EntityMarker>() -> Self {
+        Self::List(E::qualified_name())
+    }
+
+    /// A value of the enumeration `E` declares.
+    pub fn enumeration<E: crate::EnumerationMarker>() -> Self {
+        Self::Enumeration(E::qualified_name())
+    }
+}
+
+/// One value inside a [`NativeDocument`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeValue {
+    Null,
+    Bool(bool),
+    Int32(i32),
+    Int64(i64),
+    Text(String),
+    Document(NativeDocument),
+    /// A stored list: the marker Mendix prefixes it with, then its items.
+    List(i32, Vec<NativeValue>),
+}
+
+impl From<bool> for NativeValue {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<&str> for NativeValue {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+impl From<String> for NativeValue {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<NativeDocument> for NativeValue {
+    fn from(value: NativeDocument) -> Self {
+        Self::Document(value)
+    }
+}
+
+/// A model document as Mendix stores it, without identities: its type and
+/// its fields, in order.
+///
+/// An activity whose every option the authoring surface states is carried
+/// this way, so nothing the model can say about it is out of reach — and the
+/// writer assigns identities when it lowers the document into the model.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NativeDocument {
+    pub ty: String,
+    pub fields: Vec<(String, NativeValue)>,
+}
+
+impl NativeDocument {
+    pub fn new(ty: impl Into<String>) -> Self {
+        Self {
+            ty: ty.into(),
+            fields: Vec::new(),
+        }
+    }
+
+    /// Sets `key`, replacing its value in place when the document already
+    /// has it.
+    pub fn set(&mut self, key: &str, value: impl Into<NativeValue>) -> &mut Self {
+        let value = value.into();
+        match self.fields.iter_mut().find(|(name, _)| name == key) {
+            Some((_, slot)) => *slot = value,
+            None => self.fields.push((key.to_string(), value)),
+        }
+        self
+    }
+
+    /// Builder-style [`NativeDocument::set`].
+    pub fn with(mut self, key: &str, value: impl Into<NativeValue>) -> Self {
+        self.set(key, value);
+        self
+    }
+
+    pub fn get(&self, key: &str) -> Option<&NativeValue> {
+        self.fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut NativeValue> {
+        self.fields
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+
+    pub fn text(&self, key: &str) -> Option<&str> {
+        match self.get(key)? {
+            NativeValue::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// The nested document under `key`, when it holds one.
+    pub fn document_mut(&mut self, key: &str) -> Option<&mut NativeDocument> {
+        match self.get_mut(key)? {
+            NativeValue::Document(document) => Some(document),
+            _ => None,
+        }
+    }
+
+    /// The items of the list under `key`, when it holds one.
+    pub fn list_mut(&mut self, key: &str) -> Option<&mut Vec<NativeValue>> {
+        match self.get_mut(key)? {
+            NativeValue::List(_, items) => Some(items),
+            _ => None,
+        }
+    }
+
+    /// Sets the field a dotted `path` names, descending through the nested
+    /// documents on the way. A path through something that is not a document
+    /// changes nothing.
+    pub fn set_path(&mut self, path: &str, value: impl Into<NativeValue>) -> &mut Self {
+        match path.split_once('.') {
+            None => {
+                self.set(path, value);
+            }
+            Some((head, rest)) => {
+                if let Some(nested) = self.document_mut(head) {
+                    nested.set_path(rest, value);
+                }
+            }
+        }
+        self
+    }
+
+    /// The value a dotted `path` names.
+    pub fn get_path(&self, path: &str) -> Option<&NativeValue> {
+        match path.split_once('.') {
+            None => self.get(path),
+            Some((head, rest)) => match self.get(head)? {
+                NativeValue::Document(nested) => nested.get_path(rest),
+                _ => None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +312,10 @@ pub enum Activity {
     },
     BreakLoop,
     ContinueLoop,
+    /// One action activity, stated in full: the action document the model
+    /// stores for it. Every activity kind the typed variants above do not
+    /// cover is declared this way, as is every option they leave out.
+    Action(NativeDocument),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

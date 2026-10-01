@@ -30,7 +30,10 @@ pub use declaration::{
     MenuItemDecl, ModuleDecl, OnOverlap, OqlViewSourceDecl, ProjectDecl, RegularExpressionDecl,
     ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule, SystemMember, SystemMembersDecl,
 };
-pub use flow::{Activity, FlowParameterDecl, Member, MicroflowCallMapping, MicroflowDecl};
+pub use flow::{
+    Activity, DataType, FlowParameterDecl, Member, MicroflowCallMapping, MicroflowDecl,
+    NativeDocument, NativeValue,
+};
 pub use markers::system;
 pub use markers::{
     AssociationMarker, AssociationRef, AttributeMarker, AttributeRef, EntityMarker,

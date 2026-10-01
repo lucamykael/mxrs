@@ -51,6 +51,19 @@ pub(crate) fn validate_project(project: &ProjectDecl, existing: &[Module]) -> Re
     validate(&flows, &entities, existing)
 }
 
+/// Checks one flow declaration the way a build would before writing it:
+/// its parameters, the variables its activities declare, the entities its
+/// signature names. An importer asks this before it offers a flow as Rust,
+/// so what it generates is something the writer accepts.
+pub fn validate_flow_declaration(
+    module: &str,
+    flow: &MicroflowDecl,
+    nanoflow: bool,
+    entities: &HashSet<String>,
+) -> Result<()> {
+    validate(&[(module, flow, nanoflow)], entities, &[])
+}
+
 pub(crate) fn validate_documents(
     mpr: &MprFile,
     module: &str,
@@ -178,8 +191,11 @@ fn validate_entity(
     value_type: &FlowReturnType,
     entities: &HashSet<String>,
 ) -> std::result::Result<(), String> {
+    // The System module's entities are the runtime's: no model stores
+    // them, and every model may name them.
     if let FlowReturnType::Object(entity) | FlowReturnType::List(entity) = value_type
         && !entities.contains(entity)
+        && !entity.starts_with("System.")
     {
         return Err(format!("unknown flow value entity {entity:?}"));
     }
@@ -228,6 +244,11 @@ fn native_type(doc: &Document) -> std::result::Result<FlowReturnType, String> {
                 FlowReturnType::List(entity)
             }
         }
+        "DataTypes$EnumerationType" => FlowReturnType::Enumeration(
+            doc.get_str("Enumeration")
+                .map_err(|_| "native enumeration type has no enumeration")?
+                .to_string(),
+        ),
         kind => return Err(format!("unsupported native data type {kind:?}")),
     })
 }

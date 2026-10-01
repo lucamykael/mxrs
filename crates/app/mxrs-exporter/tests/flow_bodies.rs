@@ -206,21 +206,36 @@ fn nested_decisions_and_loops_rebuild_exactly_and_edit_in_place() {
     assert_eq!(after["Structured"].1, before["Structured"].1);
 }
 
+/// What a flow the importer met is expected to become.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// Rust that states the flow, rebuilding its stored body unchanged.
+    Declared,
+    /// A name in `imported.rs`; the flow stays in the imported model.
+    Preserved,
+}
+use Outcome::{Declared, Preserved};
+
+/// A flow is declared as whatever its model says — an expression the typed
+/// builders cannot check is written as Mendix writes it, and a model that
+/// is wrong is declared wrong — but only when the Rust says all of it. A
+/// field nothing knows, a graph that is not structured, a variable declared
+/// twice: those stay in the imported model.
 #[test]
-fn unsupported_control_semantics_and_out_of_scope_variables_stay_preserved() {
-    for mutation in [
-        "comparison",
-        "non-boolean",
-        "condition-option",
-        "error-handler",
-        "loop-option",
-        "unknown-loop",
-        "wrong-list",
-        "iterator-collision",
-        "iterator-leak",
-        "branch-return",
-        "break-outside",
-        "branch-local-leak",
+fn control_flow_is_declared_as_the_model_has_it_or_not_at_all() {
+    for (mutation, expected) in [
+        ("comparison", Declared),
+        ("non-boolean", Declared),
+        ("condition-option", Preserved),
+        ("error-handler", Preserved),
+        ("loop-option", Preserved),
+        ("unknown-loop", Preserved),
+        ("wrong-list", Declared),
+        ("iterator-collision", Preserved),
+        ("iterator-leak", Declared),
+        ("branch-return", Declared),
+        ("break-outside", Preserved),
+        ("branch-local-leak", Declared),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Unsupported.mpr");
@@ -322,13 +337,22 @@ fn unsupported_control_semantics_and_out_of_scope_variables_stay_preserved() {
             .iter()
             .find(|f| f.native_type == "Microflows$Microflow")
             .unwrap();
-        assert_eq!((family.partial, family.preserved), (0, 1), "{mutation}");
-        let generated = dir.path().join("generated");
-        mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
-        assert!(
-            !flow_sources(&generated).contains("pub fn structured("),
+        assert_eq!(
+            (family.partial, family.preserved),
+            if expected == Declared { (1, 0) } else { (0, 1) },
             "{mutation}"
         );
+        let generated = dir.path().join("generated");
+        mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
+        assert_eq!(
+            flow_sources(&generated).contains("pub fn structured("),
+            expected == Declared,
+            "{mutation}"
+        );
+        if expected == Declared {
+            let report = mxrs_exporter::verify_editable_document_round_trip(&path).unwrap();
+            assert!(report.passed, "{mutation}: {:?}", report.failures);
+        }
     }
 }
 
@@ -585,14 +609,16 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
 
 #[test]
 fn unsupported_graphs_and_action_options_are_reported_as_preserved() {
-    for mutation in [
-        "future",
-        "refresh",
-        "rollback",
-        "expression",
-        "duplicate-edge",
-        "missing-node",
-        "void-capture",
+    for (mutation, expected) in [
+        ("future", Preserved),
+        ("refresh", Preserved),
+        ("rollback", Preserved),
+        // An argument the typed call cannot check is still an expression
+        // the model states: it is written as Mendix writes it.
+        ("expression", Declared),
+        ("duplicate-edge", Preserved),
+        ("missing-node", Preserved),
+        ("void-capture", Preserved),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Unsupported.mpr");
@@ -656,13 +682,25 @@ fn unsupported_graphs_and_action_options_are_reported_as_preserved() {
             .unwrap();
         assert_eq!(
             (family.partial, family.preserved),
-            (4, 1),
+            if expected == Declared { (5, 0) } else { (4, 1) },
             "{mutation}: {family:?}"
         );
         let generated = dir.path().join("generated");
         mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
         let source = flow_sources(&generated);
-        assert!(!source.contains("\"Caller\""), "{mutation}");
+        assert_eq!(
+            source.contains("pub fn caller("),
+            expected == Declared,
+            "{mutation}"
+        );
+        if expected == Declared {
+            assert!(
+                source.contains("mx(\"toString([%CurrentDateTime%])\")"),
+                "{source}"
+            );
+            let report = mxrs_exporter::verify_editable_document_round_trip(&path).unwrap();
+            assert!(report.passed, "{mutation}: {:?}", report.failures);
+        }
     }
 }
 
@@ -740,11 +778,18 @@ fn malformed_target_parameters_keep_both_target_and_caller_out_of_the_projection
     let generated = dir.path().join("generated");
     mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
     let source = flow_sources(&generated);
-    // Neither is declared in Rust; both stay nameable from the imported model.
-    assert!(!source.contains("pub fn caller("), "{source}");
+    // The flow whose signature cannot be read stays in the imported model,
+    // nameable from there. Its caller is declared, but not through the typed
+    // call that would have needed that signature: it names the flow and
+    // passes the arguments the model passes.
     assert!(!source.contains("pub fn echo("), "{source}");
-    assert!(source.contains("microflow Caller;"), "{source}");
     assert!(source.contains("microflow Echo;"), "{source}");
+    assert!(source.contains("pub fn caller("), "{source}");
+    assert!(!source.contains("call_microflow_result"), "{source}");
+    assert!(
+        source.contains("flow.call_into(") && source.contains("MicroflowRef::<Echo>::new()"),
+        "{source}"
+    );
     assert!(source.contains("pub fn object("), "{source}");
 }
 
@@ -764,8 +809,12 @@ fn duplicate_flow_names_do_not_choose_an_arbitrary_call_signature() {
     let generated = dir.path().join("generated");
     mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
     let source = flow_sources(&generated);
+    // Neither flow of that name is declared, and the caller is not typed
+    // against either signature: it is declared naming the flow, as the
+    // model does.
     assert!(!source.contains("pub fn echo("), "{source}");
-    assert!(!source.contains("pub fn caller("), "{source}");
+    assert!(!source.contains("call_microflow_result"), "{source}");
+    assert!(source.contains("pub fn caller("), "{source}");
 }
 
 fn member_fixture() -> mxrs_ir::ProjectDecl {
@@ -965,21 +1014,28 @@ fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_nat
     }
 }
 
+/// A create the typed member API cannot check — a member no accessor
+/// names, a value of another type, an option it has no argument for — is
+/// declared in full instead, with the member and the value as the model
+/// writes them. What stays preserved is what cannot be said at all.
 #[test]
-fn invalid_members_unsupported_options_and_narrowing_stay_preserved() {
-    for mutation in [
-        "unknown-member",
-        "wrong-owner",
-        "wrong-type",
-        "overflow",
-        "self-reference",
-        "duplicate-member",
-        "association",
-        "operation",
-        "refresh",
-        "commit",
-        "long-to-integer",
-        "list-read",
+fn members_the_typed_api_cannot_check_are_declared_in_full() {
+    for (mutation, expected) in [
+        ("unknown-member", Declared),
+        ("wrong-owner", Declared),
+        ("wrong-type", Declared),
+        ("overflow", Declared),
+        ("self-reference", Declared),
+        // Two items for one member: the model's own rebuild would not tell
+        // them apart.
+        ("duplicate-member", Preserved),
+        // An item naming both an attribute and an association is neither.
+        ("association", Preserved),
+        ("operation", Declared),
+        ("refresh", Declared),
+        ("commit", Declared),
+        ("long-to-integer", Declared),
+        ("list-read", Declared),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Unsupported.mpr");
@@ -1047,14 +1103,32 @@ fn invalid_members_unsupported_options_and_narrowing_stay_preserved() {
         let generated = dir.path().join("generated");
         mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
         let source = flow_sources(&generated);
-        assert!(!source.contains("\"Create\""), "{mutation}");
+        assert_eq!(
+            source.contains("pub fn create("),
+            expected == Declared,
+            "{mutation}\n{source}"
+        );
+        // Never through the typed member API, which would have vouched for
+        // what it could not check.
+        assert!(
+            !source.contains("flow.create_object(\n        \"record\""),
+            "{mutation}"
+        );
         let report = mxrs_exporter::audit_portability(&path).unwrap();
         let family = report
             .families
             .iter()
             .find(|f| f.native_type == "Microflows$Microflow")
             .unwrap();
-        assert_eq!((family.partial, family.preserved), (3, 1), "{mutation}");
+        assert_eq!(
+            (family.partial, family.preserved),
+            if expected == Declared { (4, 0) } else { (3, 1) },
+            "{mutation}"
+        );
+        if expected == Declared {
+            let report = mxrs_exporter::verify_editable_document_round_trip(&path).unwrap();
+            assert!(report.passed, "{mutation}: {:?}", report.failures);
+        }
     }
 }
 
@@ -1119,17 +1193,19 @@ fn readonly_and_unknown_attribute_shapes_do_not_produce_writable_members() {
             );
             mpr.update_unit(&unit.unit_id, doc).unwrap();
         }
-        let report = mxrs_exporter::audit_portability(&path).unwrap();
-        let family = report
-            .families
-            .iter()
-            .find(|f| f.native_type == "Microflows$Microflow")
-            .unwrap();
-        assert_eq!(
-            family.partial,
-            if shape == "unknown" { 1 } else { 3 },
-            "{shape}: {family:?}"
+        // A member the typed API will not write — an autonumber, a
+        // calculated value, a type this version does not know — is never
+        // offered through it. The flow that sets one is still declared, in
+        // full, exactly as the model has it.
+        let generated = dir.path().join("generated");
+        mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
+        let source = flow_sources(&generated);
+        assert!(
+            !source.contains("Record::count().set("),
+            "{shape}\n{source}"
         );
-        assert!(family.preserved >= 1);
+        assert!(source.contains("pub fn create("), "{shape}\n{source}");
+        let report = mxrs_exporter::verify_editable_document_round_trip(&path).unwrap();
+        assert!(report.passed, "{shape}: {:?}", report.failures);
     }
 }

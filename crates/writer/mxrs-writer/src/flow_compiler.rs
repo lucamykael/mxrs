@@ -34,8 +34,41 @@ pub fn return_type_document(return_type: Option<&FlowReturnType>) -> Option<Docu
         FlowReturnType::List(entity) => {
             doc! { "$ID": id, "$Type": "DataTypes$ListType", "Entity": entity.clone() }
         }
+        FlowReturnType::Enumeration(enumeration) => {
+            doc! { "$ID": id, "$Type": "DataTypes$EnumerationType", "Enumeration": enumeration.clone() }
+        }
     };
     Some(document)
+}
+
+/// A stated action document as the model stores it: every nested document
+/// gets an identity of its own, and every list the marker it was declared
+/// with.
+pub(crate) fn native_document(document: &mxrs_ir::NativeDocument) -> Document {
+    let mut lowered = doc! {
+        "$ID": uuid::Uuid::new_v4().to_string(),
+        "$Type": document.ty.clone(),
+    };
+    for (key, value) in &document.fields {
+        lowered.insert(key.clone(), native_value(value));
+    }
+    lowered
+}
+
+fn native_value(value: &mxrs_ir::NativeValue) -> Bson {
+    use mxrs_ir::NativeValue;
+    match value {
+        NativeValue::Null => Bson::Null,
+        NativeValue::Bool(value) => Bson::Boolean(*value),
+        NativeValue::Int32(value) => Bson::Int32(*value),
+        NativeValue::Int64(value) => Bson::Int64(*value),
+        NativeValue::Text(value) => Bson::String(value.clone()),
+        NativeValue::Document(document) => Bson::Document(native_document(document)),
+        NativeValue::List(marker, items) => Bson::Array(mxrs_bson::build_array(
+            items.iter().map(native_value).collect(),
+            *marker,
+        )),
+    }
 }
 
 pub fn build_microflow_graph(
@@ -601,6 +634,9 @@ fn activity_action_doc(activity: &Activity, error_handling: &str) -> Document {
             },
             "Node": node.clone(),
         },
+        // The document states its own error handling along with everything
+        // else the action is.
+        Activity::Action(document) => native_document(document),
         Activity::Decision { .. }
         | Activity::LoopOver { .. }
         | Activity::WhileLoop { .. }

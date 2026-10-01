@@ -68,6 +68,7 @@ use entity_export::TypedEntityTarget;
 
 mod entity_export;
 mod flow_export;
+mod flow_general;
 mod names;
 #[cfg(test)]
 #[path = "../../../../xtask/support/nested_cargo.rs"]
@@ -4280,7 +4281,7 @@ fn port_type(
         Ty::Float => ("mxrs::MxFloat".into(), "f64".into()),
         Ty::Decimal => ("mxrs::MxDecimal".into(), "f64".into()),
         Ty::DateTime => ("mxrs::MxDateTime".into(), "f64".into()),
-        Ty::Binary => return None,
+        Ty::Binary | Ty::Enumeration(_) => return None,
         Ty::Object(entity) | Ty::List(entity) => {
             let target = typed_entities.get(entity)?;
             if target.dto {

@@ -180,12 +180,26 @@ fn parse_collection<'a>(
     if stop.is_some() || graph.seen.len() != graph.nodes.len() {
         return None;
     }
-    if !in_loop
-        && !matches!(body.last(), Some(Node::Simple(end)) if end.get_str("$Type").ok() == Some("Microflows$EndEvent"))
-    {
+    if !in_loop && !ends(&body) {
         return None;
     }
     Some(body)
+}
+
+/// Whether every path through `body` reaches an end event: the body closes
+/// with one, or with a decision whose branches each end on their own — the
+/// shape of a flow that returns early from one side of a check.
+fn ends(body: &[Node<'_>]) -> bool {
+    match body.last() {
+        Some(Node::Simple(end)) => end.get_str("$Type").ok() == Some("Microflows$EndEvent"),
+        Some(Node::Decision {
+            yes,
+            no,
+            merge: None,
+            ..
+        }) => ends(yes) && ends(no),
+        _ => false,
+    }
 }
 
 impl<'a> Graph<'a> {

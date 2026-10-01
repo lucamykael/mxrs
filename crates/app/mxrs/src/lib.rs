@@ -4,6 +4,11 @@
 //! remain available for framework development, but are not part of the
 //! normal application-facing dependency surface.
 
+pub use mxrs_dsl::flow_actions;
+pub use mxrs_dsl::{
+    AggregateFunction, AssociationName, AttributeName, ChangeKind, Commit, EntityName, FlowVar,
+    ListChange, LogSeverity, MemberName, MessageKind, MicroflowName, SortOrder, Variable, var,
+};
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, ConstantBuilder, ContainerBuilder, DataViewBuilder,
     DemoUserBuilder, EntityBuilder, EnumerationBuilder, FlowBuilder, FlowParameterBuilder,
@@ -166,6 +171,10 @@ pub trait ApplicationDefinition {
 
 /// Imports commonly used authoring types and macros.
 pub mod prelude {
+    pub use crate::{
+        AggregateFunction, ChangeKind, Commit, DataType, FlowVar, ListChange, LogSeverity,
+        MemberName, MessageKind, Mx, SortOrder, Variable, mx, var,
+    };
     pub use crate::{
         ApplicationDefinition, AssociationMarker, AttributeMarker, ButtonBuilder, CallArgument,
         ConstantBuilder, ConstantType, ContainerBuilder, DataViewBuilder, DemoUserBuilder,

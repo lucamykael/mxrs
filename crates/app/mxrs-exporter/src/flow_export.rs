@@ -118,7 +118,7 @@ pub(crate) fn data_type(doc: &Document) -> Option<Ty> {
 }
 
 /// A reference to the struct declaring entity `Module.Entity`.
-fn marker(name: &str) -> Option<String> {
+pub(crate) fn marker(name: &str) -> Option<String> {
     let (module, entity) = name.split_once('.')?;
     if !mxrs_typegen::is_rust_identifier(module) || !mxrs_typegen::is_rust_identifier(entity) {
         return None;
@@ -127,7 +127,7 @@ fn marker(name: &str) -> Option<String> {
 }
 
 /// A reference to the type naming microflow `Module.Flow`.
-fn flow_marker(name: &str) -> Option<String> {
+pub(crate) fn flow_marker(name: &str) -> Option<String> {
     let (module, flow) = name.split_once('.')?;
     if !mxrs_typegen::is_rust_identifier(module) || !mxrs_typegen::is_rust_identifier(flow) {
         return None;
@@ -145,6 +145,8 @@ fn tag(ty: &Ty, entities: &HashSet<String>) -> Option<String> {
         Ty::Decimal => "MxDecimal".into(),
         Ty::DateTime => "MxDateTime".into(),
         Ty::Binary => "MxBinary".into(),
+        // An enumeration value has no typed expression form here yet.
+        Ty::Enumeration(_) => return None,
         Ty::Object(entity) | Ty::List(entity) => {
             if !entities.contains(entity) {
                 return None;
@@ -169,7 +171,7 @@ fn tag(ty: &Ty, entities: &HashSet<String>) -> Option<String> {
 /// it can be read back (`new_order` → `NewOrder`), so two variables never
 /// share a binding; any other name keeps its exact spelling behind a
 /// `value_` prefix, which no converted name starts with.
-fn binding(name: &str) -> Option<String> {
+pub(crate) fn binding(name: &str) -> Option<String> {
     let mut chars = name.chars();
     if !chars
         .next()
@@ -194,6 +196,23 @@ fn binding(name: &str) -> Option<String> {
                 | "boolean"
                 | "attribute"
                 | "association"
+                // What the builders' own closures and helpers are called:
+                // a variable of the same name would hide them, or be taken
+                // for used because of them.
+                | "mx"
+                | "var"
+                | "create"
+                | "change"
+                | "commit"
+                | "delete"
+                | "rollback"
+                | "retrieve"
+                | "aggregate"
+                | "log"
+                | "call"
+                | "message"
+                | "page"
+                | "sort"
         );
     Some(if readable {
         snake
@@ -303,6 +322,43 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
                 .collect::<Vec<_>>()
         })
         .collect();
+    let accessors: HashSet<(String, String)> = modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_default();
+            module.entities().iter().flat_map(move |entity| {
+                let qualified = format!(
+                    "{module_name}.{}",
+                    entity.name.as_deref().unwrap_or_default()
+                );
+                entity
+                    .attributes
+                    .iter()
+                    .filter_map(|attribute| attribute.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .map(move |name| (qualified.clone(), name))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let microflows: HashSet<String> = modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_default();
+            module
+                .microflows
+                .iter()
+                .filter_map(move |flow| Some(format!("{module_name}.{}", flow.name.as_deref()?)))
+        })
+        .collect();
+    let model = crate::flow_general::Model {
+        entities: &entities,
+        attributes: &accessors,
+        microflows: &microflows,
+    };
+    // `MXRS_EXPLAIN_FLOWS=1` says why each flow that stays in the imported
+    // model does.
+    let explain = std::env::var_os("MXRS_EXPLAIN_FLOWS").is_some();
     let mut raw = Vec::new();
     let mut seen = HashSet::new();
     let mut ambiguous = HashSet::new();
@@ -354,7 +410,29 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
                 doc.get_str("$Type").unwrap_or_default().to_string(),
             ))
         })
-        .filter_map(|(module, doc)| convert(module, doc, &targets, &entities, &attributes))
+        .filter_map(|(module, doc)| {
+            // The typed conversion first: it checks more. Whatever it cannot
+            // express is stated in full instead.
+            convert(module, doc, &targets, &entities, &attributes).or_else(|| {
+                match crate::flow_general::convert(module, doc, &model) {
+                    Ok((declaration, source)) => Some(ConvertedFlow {
+                        module: (*module).to_string(),
+                        native_type: doc.get_str("$Type").ok()?.to_string(),
+                        declaration,
+                        source: crate::flow_general::polish(source),
+                    }),
+                    Err(reason) => {
+                        if explain {
+                            eprintln!(
+                                "[mxrs] {module}.{} stays imported: {reason}",
+                                doc.get_str("Name").unwrap_or_default()
+                            );
+                        }
+                        None
+                    }
+                }
+            })
+        })
         .collect();
     result.sort_by(|a, b| (&a.module, &a.declaration.name).cmp(&(&b.module, &b.declaration.name)));
     Ok(result)
@@ -534,7 +612,7 @@ fn polish_source(source: Vec<String>) -> Vec<String> {
 /// The identifier a line binds: `let name = ...` or a `|flow, name|` loop
 /// closure parameter. `None` for anything else, including bindings already
 /// underscore-prefixed.
-fn binding_name(line: &str) -> Option<String> {
+pub(crate) fn binding_name(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
     let closure_parameter = ["|flow, ", "|_flow, "]
         .iter()
@@ -560,7 +638,7 @@ fn binding_name(line: &str) -> Option<String> {
 /// string literals and model references, and neither a path segment
 /// (`Order::name()`) nor a method (`.name(...)`) — so a variable `name` is
 /// not kept alive by an attribute or a parameter that happens to share it.
-fn find_identifier(line: &str, name: &str) -> Option<usize> {
+pub(crate) fn find_identifier(line: &str, name: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
