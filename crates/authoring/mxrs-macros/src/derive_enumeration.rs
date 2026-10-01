@@ -133,10 +133,10 @@ pub fn expand_enumeration(
                     ::core::module_path!(),
                     ::core::file!(),
                     ::core::line!(),
-                    |project| {
-                        let mut module = ::mxrs::ModuleBuilder::new(#module);
-                        #ident::mx_register(&mut module);
-                        project.merge_module(module.into_decl());
+                    |__mxrs_project| {
+                        let mut __mxrs_module = ::mxrs::ModuleBuilder::new(#module);
+                        #ident::mx_register(&mut __mxrs_module);
+                        __mxrs_project.merge_module(__mxrs_module.into_decl());
                     },
                 )
             }

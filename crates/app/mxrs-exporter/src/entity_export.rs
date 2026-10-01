@@ -133,10 +133,11 @@ fn entity_type_name(entity_name: &str) -> String {
     type_name
 }
 
-/// Field identifiers the struct cannot use: Rust's keywords, and the two
-/// associated functions every entity already has.
+/// Field identifiers the struct cannot use: Rust's keywords, the two
+/// associated functions every entity already has, and the one word an
+/// `index(...)` option reads as a flag rather than as a member.
 fn reserved_field(ident: &str) -> bool {
-    rust_keyword(ident) || matches!(ident, "mx_register" | "qualified_name")
+    rust_keyword(ident) || matches!(ident, "mx_register" | "qualified_name" | "include_offline")
 }
 
 /// One Mendix member name as a struct field, unique within `seen`.
@@ -334,6 +335,53 @@ fn render_index(
     Some(format!("index({})", members.join(", ")))
 }
 
+/// Where the entity stands in the hierarchy: its parent, the system members
+/// a root keeps, nothing for a plain root — or `preserve(inheritance)` when
+/// the model holds a shape the declaration cannot restate.
+///
+/// `parent` is the spelled type of a parent this project declares.
+fn render_inheritance(entity: &Entity, parent: Option<String>) -> Option<String> {
+    const PRESERVE: &str = "preserve(inheritance)";
+    let Some(generalization) = &entity.generalization else {
+        return Some(PRESERVE.to_string());
+    };
+    if let Some(target) = &generalization.target {
+        let parent = parent.or_else(|| built_in_parent(target).map(str::to_string));
+        return Some(match parent {
+            Some(parent) => format!("generalizes = {parent}"),
+            None => PRESERVE.to_string(),
+        });
+    }
+    // A root states whether it persists; one that leaves it out inherits
+    // the answer, which only the model itself can keep saying.
+    if !generalization.native_type.ends_with("NoGeneralization")
+        || generalization.persistable != Some(entity.persistable)
+    {
+        return Some(PRESERVE.to_string());
+    }
+    let members = &generalization.system_members;
+    let stored = [
+        ("owner", members.owner),
+        ("created_date", members.created_date),
+        ("changed_date", members.changed_date),
+        ("changed_by", members.changed_by),
+    ]
+    .into_iter()
+    .filter_map(|(name, stored)| stored.then_some(name))
+    .collect::<Vec<_>>();
+    (!stored.is_empty()).then(|| format!("stores({})", stored.join(", ")))
+}
+
+/// The marker `mxrs` ships for a System entity a project may specialize.
+fn built_in_parent(target: &str) -> Option<&'static str> {
+    match target {
+        "System.User" => Some("mxrs::system::User"),
+        "System.FileDocument" => Some("mxrs::system::FileDocument"),
+        "System.Image" => Some("mxrs::system::Image"),
+        _ => None,
+    }
+}
+
 /// One event handler option, or `None` for an event the builder cannot name
 /// or a handler the project does not have.
 fn render_lifecycle(
@@ -423,6 +471,15 @@ fn render_entity_file(
             requests.push((&target.type_name, target.module_path()));
         }
     }
+    // Only an entity this project declares states its parent; an installed
+    // module's entity is named, and its hierarchy stays the module's own.
+    let parent = (!imported_module && !view)
+        .then(|| entity.generalization_target())
+        .flatten()
+        .and_then(|parent| typed.get(&parent));
+    if let Some(parent) = parent {
+        requests.push((&parent.type_name, parent.module_path()));
+    }
     let mut imported: BTreeMap<&str, &str> = BTreeMap::new();
     let mut colliding = HashSet::new();
     for (name, path) in &requests {
@@ -433,10 +490,7 @@ fn render_entity_file(
         }
     }
     imported.retain(|name, _| {
-        !colliding.contains(name)
-            && *name != type_name
-            && !enum_type_shadows_scalar(name)
-            && !matches!(*name, "Reference" | "ReferenceSet")
+        !colliding.contains(name) && *name != type_name && !crate::names::prelude_name(name)
     });
     let spell = |name: &str, path: &str| -> String {
         if imported.get(name).is_some_and(|found| *found == path) {
@@ -499,15 +553,24 @@ fn render_entity_file(
             None if implied.is_some() => options.push("no_default".to_string()),
             None => {}
         }
+        // A stored attribute assumes the platform's length and
+        // localization, so only a difference is worth stating. A view
+        // assumes nothing: what its model states, the source states.
         if kind == "string" {
             match attribute.length {
                 Some(0) => options.push("unlimited".to_string()),
-                Some(length) if length != 200 => options.push(format!("length = {length}")),
+                Some(length) if view || length != 200 => {
+                    options.push(format!("length = {length}"));
+                }
                 _ => {}
             }
         }
-        if attribute.localize_date == Some(false) {
-            options.push("localize_date = false".to_string());
+        match attribute.localize_date {
+            Some(false) => options.push("localize_date = false".to_string()),
+            Some(true) if view && kind == "datetime" => {
+                options.push("localize_date = true".to_string());
+            }
+            _ => {}
         }
         if attribute.required {
             options.push("required".to_string());
@@ -606,6 +669,10 @@ fn render_entity_file(
     if !imported_module {
         if let Some(image) = entity.image.as_deref().filter(|image| !image.is_empty()) {
             entity_options.push(format!("image = {image:?}"));
+        }
+        if !view {
+            let parent = parent.map(|parent| spell(&parent.type_name, &parent.module_path()));
+            entity_options.extend(render_inheritance(entity, parent));
         }
         let indexes = entity
             .indexes
@@ -760,8 +827,8 @@ mod tests {
     use mxrs_model::association::{AssociationType, Owner, StorageFormat};
     use mxrs_model::attribute::Attribute;
     use mxrs_model::entity::{
-        EntityIndex, IndexedAttribute, IndexedSystemMember, LifecycleCallback, Location,
-        SystemMembers,
+        EntityIndex, Generalization, IndexedAttribute, IndexedSystemMember, LifecycleCallback,
+        Location, SystemMembers,
     };
 
     use super::*;
@@ -777,7 +844,7 @@ mod tests {
             data_storage_guid: None,
             image: None,
             export_level: String::new(),
-            generalization: None,
+            generalization: Some(root(true, SystemMembers::default())),
             access_rules: Vec::new(),
             indexes: Vec::new(),
             system_members: SystemMembers::default(),
@@ -787,6 +854,29 @@ mod tests {
             oql_query: None,
             native_type: None,
             attributes: Vec::new(),
+        }
+    }
+
+    /// The hierarchy of an entity with no parent, as Studio Pro stores it.
+    fn root(persistable: bool, system_members: SystemMembers) -> Generalization {
+        Generalization {
+            id: None,
+            native_type: "DomainModels$NoGeneralization".to_string(),
+            target: None,
+            persistable: Some(persistable),
+            system_members,
+            raw: mxrs_bson::Document::new(),
+        }
+    }
+
+    fn specialization(target: &str) -> Generalization {
+        Generalization {
+            id: None,
+            native_type: "DomainModels$Generalization".to_string(),
+            target: Some(target.to_string()),
+            persistable: None,
+            system_members: SystemMembers::default(),
+            raw: mxrs_bson::Document::new(),
         }
     }
 
@@ -1005,6 +1095,7 @@ pub struct Parameter {
     fn the_attribute_says_what_kind_of_entity_it_is() {
         let mut dto = bare_entity("AccountPasswordData");
         dto.persistable = false;
+        dto.generalization = Some(root(false, SystemMembers::default()));
         assert_eq!(
             render_alone("Administration", &dto),
             "use mxrs::prelude::*;\n\n#[dto(module = \"Administration\")]\npub struct AccountPasswordData {}\n"
@@ -1279,6 +1370,124 @@ pub struct Order {
 
     /// What a struct cannot restate is kept from the imported model, and
     /// says so.
+    #[test]
+    fn an_entity_states_its_parent_or_the_system_members_it_stores() {
+        let options = |entity: &Entity, typed: &[(&str, &str, &str, &str)]| {
+            let rendered = render(
+                "Sales",
+                ModuleRoot::Authored,
+                entity,
+                &HashMap::new(),
+                typed,
+                &[],
+                &[],
+            );
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("#[mxrs(") || line.starts_with("use crate"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let mut entity = bare_entity("Order");
+        // A plain root is what a struct is without saying anything.
+        assert!(options(&entity, &[]).is_empty());
+
+        entity.generalization = Some(root(
+            true,
+            SystemMembers {
+                owner: true,
+                created_date: false,
+                changed_date: true,
+                changed_by: false,
+            },
+        ));
+        assert_eq!(
+            options(&entity, &[]),
+            ["#[mxrs(stores(owner, changed_date))]"]
+        );
+
+        // A parent the project declares is named by its struct.
+        entity.generalization = Some(specialization("Sales.Document"));
+        assert_eq!(
+            options(
+                &entity,
+                &[("Sales.Document", "sales", "document", "Document")]
+            ),
+            [
+                "use crate::domain::entities::sales::document::Document;",
+                "#[mxrs(generalizes = Document)]",
+            ]
+        );
+        // A System entity `mxrs` ships a marker for.
+        entity.generalization = Some(specialization("System.FileDocument"));
+        assert_eq!(
+            options(&entity, &[]),
+            ["#[mxrs(generalizes = mxrs::system::FileDocument)]"]
+        );
+
+        // What cannot be restated is kept, and says so: a parent nothing
+        // here names, a root that leaves persistability to be inherited, and
+        // a model with no hierarchy stored at all.
+        entity.generalization = Some(specialization("System.Session"));
+        assert_eq!(options(&entity, &[]), ["#[mxrs(preserve(inheritance))]"]);
+        let mut inherited = root(true, SystemMembers::default());
+        inherited.persistable = None;
+        entity.generalization = Some(inherited);
+        assert_eq!(options(&entity, &[]), ["#[mxrs(preserve(inheritance))]"]);
+        entity.generalization = None;
+        assert_eq!(options(&entity, &[]), ["#[mxrs(preserve(inheritance))]"]);
+    }
+
+    #[test]
+    fn a_view_states_what_its_model_states() {
+        let mut view = bare_entity("Order_Totals");
+        view.persistable = false;
+        view.source = Some(mxrs_bson::doc! {
+            "$Type": "DomainModels$OqlViewEntitySource",
+            "SourceDocument": "Sales.OrderTotals",
+        });
+        let mut label = attribute("Label", AttributeType::String);
+        label.length = Some(200);
+        let mut day = attribute("Day", AttributeType::DateTime);
+        day.localize_date = Some(true);
+        view.attributes.extend([label, day]);
+        let rendered = render_alone("Sales", &view);
+        // A stored entity would leave both unsaid; a view assumes nothing.
+        assert!(
+            rendered.contains("    #[mxrs(localize_date = true)]\n    pub day: MxDateTime,"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("    #[mxrs(length = 200)]\n    pub label: MxString,"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("inheritance"), "{rendered}");
+    }
+
+    #[test]
+    fn an_attribute_named_like_an_index_flag_is_spelled_apart_from_it() {
+        let mut entity = bare_entity("Device");
+        entity
+            .attributes
+            .push(attribute("IncludeOffline", AttributeType::Boolean));
+        entity.indexes.push(index(
+            vec![(
+                IndexMemberKind::Attribute("IncludeOffline".to_string()),
+                true,
+            )],
+            false,
+        ));
+        let rendered = render_alone("Sales", &entity);
+        assert!(
+            rendered.contains("#[mxrs(index(include_offline_))]"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("    pub include_offline_: MxBool,"),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn what_the_struct_cannot_restate_is_preserved_in_the_open() {
         let mut entity = bare_entity("Order");

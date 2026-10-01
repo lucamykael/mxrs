@@ -207,13 +207,13 @@ pub fn expand_flow(
                 ::core::module_path!(),
                 ::core::file!(),
                 ::core::line!(),
-                |project| {
-                    let mut module = #module_builder::new(#module);
-                    module.#method(#name, |__mxrs_flow| {
+                |__mxrs_project| {
+                    let mut __mxrs_module = #module_builder::new(#module);
+                    __mxrs_module.#method(#name, |__mxrs_flow| {
                         #documentation
                         #ident(__mxrs_flow);
                     });
-                    project.merge_module(module.into_decl());
+                    __mxrs_project.merge_module(__mxrs_module.into_decl());
                 },
             )
         }
@@ -235,10 +235,72 @@ fn marker_ident(name: &str, span: proc_macro2::Span) -> syn::Ident {
     if ident.starts_with(|character: char| character.is_ascii_digit()) {
         ident.insert(0, '_');
     }
-    if syn::parse_str::<syn::Ident>(&ident).is_err() {
+    if rust_keyword(&ident) || ident == "_" {
         ident.push('_');
     }
     syn::Ident::new(&ident, span)
+}
+
+/// Whether `ident` is a word Rust keeps for itself in any edition this
+/// project builds with. The importer's `rust_keyword` is the same list: a
+/// flow's type must be spelled identically by the macro that declares it and
+/// by the source that names it.
+fn rust_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "union"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+    )
 }
 
 /// A document a module declares through a builder of its own: the function
@@ -343,13 +405,13 @@ pub fn expand_document(
                 ::core::module_path!(),
                 ::core::file!(),
                 ::core::line!(),
-                |project| {
-                    let mut module = ::mxrs::ModuleBuilder::new(#module);
-                    module.#method(#name, |__mxrs_builder| {
+                |__mxrs_project| {
+                    let mut __mxrs_module = ::mxrs::ModuleBuilder::new(#module);
+                    __mxrs_module.#method(#name, |__mxrs_builder| {
                         #documentation
                         #ident(__mxrs_builder);
                     });
-                    project.merge_module(module.into_decl());
+                    __mxrs_project.merge_module(__mxrs_module.into_decl());
                 },
             )
         }
@@ -373,6 +435,11 @@ fn builder_function(item: &syn::ItemFn) -> syn::Result<&syn::Ident> {
     Ok(&signature.ident)
 }
 
+/// Registers `apply`, which finds the project as `__mxrs_project`.
+///
+/// Everything an expansion binds is spelled `__mxrs_*`: the body calls the
+/// user's own function by name, and a local called `project`, `module` or
+/// `user` would be what that name meant for a function called the same.
 fn registration(stage: TokenStream, apply: TokenStream) -> TokenStream {
     quote! {
         ::mxrs::inventory::submit! {
@@ -381,7 +448,7 @@ fn registration(stage: TokenStream, apply: TokenStream) -> TokenStream {
                 ::core::module_path!(),
                 ::core::file!(),
                 ::core::line!(),
-                |project| { #apply },
+                |__mxrs_project| { #apply },
             )
         }
     }
@@ -478,9 +545,9 @@ pub fn expand_declaration(args: &DeclarationArgs, item: &syn::ItemFn) -> syn::Re
     let registration = registration(
         stage,
         quote! {
-            let mut module = ::mxrs::ModuleBuilder::new(#module);
-            #ident(&mut module);
-            project.merge_module(module.into_decl());
+            let mut __mxrs_module = ::mxrs::ModuleBuilder::new(#module);
+            #ident(&mut __mxrs_module);
+            __mxrs_project.merge_module(__mxrs_module.into_decl());
         },
     );
     Ok(quote! {
@@ -506,9 +573,10 @@ pub fn expand_project(kind: ProjectKind, item: &syn::ItemFn) -> syn::Result<Toke
     let registration = registration(
         stage,
         quote! {
-            let mut builder = ::mxrs::ProjectBuilder::new(project.mendix_version.clone());
-            builder.#method(|__mxrs_builder| #ident(__mxrs_builder));
-            project.#field = builder.build().#field;
+            let mut __mxrs_assembled =
+                ::mxrs::ProjectBuilder::new(__mxrs_project.mendix_version.clone());
+            __mxrs_assembled.#method(|__mxrs_builder| #ident(__mxrs_builder));
+            __mxrs_project.#field = __mxrs_assembled.build().#field;
         },
     );
     Ok(quote! {
@@ -538,9 +606,9 @@ pub fn expand_navigation_item(
     let registration = registration(
         quote!(NavigationItem),
         quote! {
-            let mut item = ::mxrs::NavigationItemBuilder::new(#caption);
-            #ident(&mut item);
-            project.navigation_item(#profile, item.into_decl());
+            let mut __mxrs_item = ::mxrs::NavigationItemBuilder::new(#caption);
+            #ident(&mut __mxrs_item);
+            __mxrs_project.navigation_item(#profile, __mxrs_item.into_decl());
         },
     );
     Ok(quote! {
@@ -560,8 +628,9 @@ impl syn::parse::Parse for DemoUserArgs {
 
 /// Expands `#[mxrs::demo_user]`: a demo account, named by its function
 /// unless `name = "..."` states otherwise. It joins the security the project
-/// declares; a project that declares none keeps its imported security as it
-/// is, demo users included.
+/// declares; in a project that declares none it joins the security the model
+/// already stores, which the writer leaves otherwise untouched — and refuses
+/// to build when there is none to join.
 pub fn expand_demo_user(args: &DemoUserArgs, item: &syn::ItemFn) -> syn::Result<TokenStream> {
     let ident = builder_function(item)?;
     let name = match args.0.get("name") {
@@ -574,10 +643,11 @@ pub fn expand_demo_user(args: &DemoUserArgs, item: &syn::ItemFn) -> syn::Result<
     let registration = registration(
         quote!(DemoUser),
         quote! {
-            let mut user = ::mxrs::DemoUserBuilder::new(#name);
-            #ident(&mut user);
-            if let Some(security) = project.security.as_mut() {
-                security.demo_users.push(user.into_decl());
+            let mut __mxrs_user = ::mxrs::DemoUserBuilder::new(#name);
+            #ident(&mut __mxrs_user);
+            match __mxrs_project.security.as_mut() {
+                Some(__mxrs_security) => __mxrs_security.demo_users.push(__mxrs_user.into_decl()),
+                None => __mxrs_project.demo_users.push(__mxrs_user.into_decl()),
             }
         },
     );
@@ -648,7 +718,7 @@ pub fn expand_module_roles(
             .filter(|attribute| attribute.path().is_ident("doc"))
             .collect::<Vec<_>>();
         let description = description.or_else(|| doc_text(&docs)).unwrap_or_default();
-        roles.push(quote! { module.role(#name, #description); });
+        roles.push(quote! { __mxrs_module.role(#name, #description); });
         let variant_ident = &variant.ident;
         variants.push(variant_ident);
         names.push(name);
@@ -662,10 +732,10 @@ pub fn expand_module_roles(
     let registration = registration(
         quote!(ModuleSecurity),
         quote! {
-            let mut module = ::mxrs::ModuleBuilder::new(#module);
-            module.clear_roles();
+            let mut __mxrs_module = ::mxrs::ModuleBuilder::new(#module);
+            __mxrs_module.clear_roles();
             #(#roles)*
-            project.merge_module(module.into_decl());
+            __mxrs_project.merge_module(__mxrs_module.into_decl());
         },
     );
     let name_arms = if variants.is_empty() {

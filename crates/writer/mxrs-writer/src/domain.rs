@@ -1260,7 +1260,18 @@ fn build_entity_doc(
             previous_entity.generalization.as_ref(),
             identity,
         );
-        let key = native_key(prev, "generalization", "Generalization");
+        // Studio Pro stores the hierarchy under `MaybeGeneralization`;
+        // writing it under any other spelling would leave the stored
+        // document in place beside the new one, identities and all.
+        let key = [
+            "generalization",
+            "Generalization",
+            "maybeGeneralization",
+            "MaybeGeneralization",
+        ]
+        .into_iter()
+        .find(|key| prev.contains_key(*key))
+        .unwrap_or("generalization");
         out.insert(key, generalization.to_bson());
     }
 

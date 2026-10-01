@@ -139,13 +139,19 @@ The rules that keep these readable:
   (`MxString`, `MxDecimal`, `MxBool`, an enumeration's own enum) or the
   association's (`Reference<T>`, `ReferenceSet<T>`). `#[mxrs(...)]` states
   only what a type cannot: `length`, `required`, `unique`, `default`,
-  `index(...)`, an event handler.
+  `index(...)`, an event handler, the parent an entity specializes
+  (`generalizes = Document`, `generalizes = mxrs::system::User`) or the
+  system members a root keeps (`stores(owner, created_date, changed_date,
+  changed_by)`).
 - **Defaults are not restated.** A string is 200 characters, a date is
   localized, a boolean defaults to `false` and a number to `0` unless the
   field says otherwise — the platform's own defaults. Deleting an option
   returns the attribute to that default, not to whatever an imported model
-  held. `no_default` and `preserve(indexes|lifecycle|image)` are the explicit
-  exceptions, for a model that genuinely differs.
+  held. An entity that names no parent and stores no system member is a
+  plain root, by the same rule. `no_default` and
+  `preserve(indexes|lifecycle|image|inheritance)` are the explicit
+  exceptions, for a model that genuinely differs or holds something the
+  declaration has no word for.
 - **`///` is the documentation.** A doc comment on a struct, field, variant
   or function is the Mendix documentation of what it declares.
 - **A name is where the thing is.** An attribute is its entity's accessor:

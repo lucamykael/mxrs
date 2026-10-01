@@ -199,7 +199,7 @@ pub fn convert_pages_for_version(
                     report.typed_candidates += 1;
                     pages.push(ConvertedPage {
                         module_name: module_name.clone(),
-                        function_name: to_snake_case(&decl.name),
+                        function_name: String::new(),
                         source_type: page
                             .raw_document()
                             .get_str("$Type")
@@ -231,16 +231,20 @@ fn assign_page_function_names(pages: &mut [ConvertedPage]) {
         (&pages[left].module_name, &pages[left].decl.name)
             .cmp(&(&pages[right].module_name, &pages[right].decl.name))
     });
+    // A page's function names its file too, and both live in the module's
+    // own folder: names are unique per module, and spelled the way every
+    // other concept file is — one underscore between words, so Mendix's
+    // `Order_NewEdit` is `order_new_edit` and not a name Rust warns about.
     let mut used = HashSet::new();
     for index in order {
         let page = &mut pages[index];
-        let mut base = to_snake_case(&page.decl.name);
+        let mut base = crate::inner_file_stem(&page.decl.name);
         if !mxrs_typegen::is_rust_identifier(&base) {
             base.insert_str(0, "page_");
         }
         let mut name = base.clone();
         let mut suffix = 2;
-        while !used.insert(name.clone()) {
+        while !used.insert((page.module_name.clone(), name.clone())) {
             name = format!("{base}_{suffix}");
             suffix += 1;
         }
@@ -1325,29 +1329,6 @@ fn render_name_and_class(
     }
 }
 
-/// `OrderOverview` -> `order_overview`. A defensive, not exhaustive, name
-/// sanitizer mirroring `mxrs-exporter`'s own `sanitize_ident` for the
-/// domain-model renderer: non-alphanumeric characters become `_`.
-fn to_snake_case(name: &str) -> String {
-    let mut out = String::new();
-    for (index, ch) in name.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if index != 0 {
-                out.push('_');
-            }
-            out.extend(ch.to_lowercase());
-        } else if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() || out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        out.insert(0, '_');
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2206,5 +2187,40 @@ mod tests {
         configured.insert("Columns", mxrs_bson::build_array(vec![], 3));
         let page = page_from_documents("ConfiguredGrid", vec![configured]);
         assert!(try_convert_page(&page, &bound_context(), "Sales").is_some());
+    }
+
+    #[test]
+    fn a_page_function_is_one_rust_would_have_written_and_unique_per_module() {
+        let page = |module: &str, name: &str| ConvertedPage {
+            module_name: module.into(),
+            function_name: String::new(),
+            source_type: "Forms$Page".into(),
+            flow_return_entities: HashMap::new(),
+            decl: PageDecl::new(name),
+        };
+        let mut pages = [
+            page("Sales", "Order_NewEdit"),
+            page("Sales", "Home"),
+            page("Crm", "Home"),
+            page("Sales", "Type"),
+            page("Sales", "OrderNewEdit"),
+        ];
+        assign_page_function_names(&mut pages);
+        assert_eq!(
+            pages
+                .iter()
+                .map(|page| page.function_name.as_str())
+                .collect::<Vec<_>>(),
+            // One underscore between words; a keyword set apart; the same
+            // name free again in another module; and of two pages asking
+            // for one name, the later in name order numbered.
+            [
+                "order_new_edit_2",
+                "home",
+                "home",
+                "type_",
+                "order_new_edit"
+            ]
+        );
     }
 }

@@ -4,7 +4,10 @@
 [--dry-run] [--json]` ports mxrb's `demo-user` recipe to the Cargo-native
 layout (`new` is optional, as in native). It writes one `#[demo_user]`
 declaration under `src/domain/demo_users/`, which registers itself and joins
-the project security declared before it, and provisions the password:
+the project security declared before it, and provisions the password. A
+`#[demo_user]` written by hand in a project that declares no `#[security]`
+joins the security the model already stores instead, leaving the rest of it
+untouched; the build fails when there is none to join:
 
 | Native workspace | Cargo workspace |
 | --- | --- |

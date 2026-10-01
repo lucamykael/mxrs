@@ -135,7 +135,8 @@ Cargo-native domain code declares an entity with `#[entity]`, `#[dto]` or
 (`#[derive(MxEntity)]`/`#[derive(MxEnumeration)]` remain for code that
 registers by hand). Scalar field kinds are inferred from
 `MxString`, `MxDecimal`, `MxDateTime`, and the other Mendix value types;
-entity/attribute metadata — length, defaults, indexes, event handlers — uses
+entity/attribute metadata — length, defaults, indexes, event handlers, the
+parent it specializes or the system members it stores — uses
 `#[mxrs(...)]`, `///` comments are the model's documentation, and every field
 has an accessor (`Order::number()`) that flows and pages name it by. Enumeration references are
 trait-checked rather than written as qualified-name strings, and enumeration

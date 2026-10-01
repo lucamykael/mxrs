@@ -2559,6 +2559,7 @@ fn editable_project_declaration(project: &Project) -> Result<mxrs_ir::ProjectDec
         modules: modules.into_values().collect(),
         security: None,
         navigation: None,
+        demo_users: vec![],
     })
 }
 
@@ -3210,8 +3211,11 @@ fn toml_string(value: &str) -> String {
     rust_string(value)
 }
 
+/// `value` as a Rust string literal. Rust's own escaping, not JSON's: the
+/// two disagree on control characters (`\f`, `\u000b`), and a model's
+/// documentation is free to contain them.
 fn rust_string(value: &str) -> String {
-    serde_json::to_string(value).expect("a string always serializes")
+    format!("{value:?}")
 }
 
 fn write_text(path: &Path, contents: &str) -> Result<()> {
@@ -7133,7 +7137,7 @@ fn write_concept_files(
 
 /// File stem for one concept inside its module folder: snake_case, like
 /// any other Rust module file. A Mendix name that already separates words
-/// with underscores (`Jabil_User__EU__Location`) must not turn into a
+/// with underscores (`Acme_User__EU__Location`) must not turn into a
 /// module name Rust warns about, so runs collapse to one.
 fn inner_file_stem(name: &str) -> String {
     let mut stem = collapse_underscores(&snake_ident(name));
@@ -8139,14 +8143,14 @@ pub enum ENUMStatus {
     #[test]
     fn file_stems_never_carry_underscore_runs_rust_warns_about() {
         assert_eq!(
-            inner_file_stem("Jabil_User__EU__Location"),
-            "jabil_user_eu_location"
+            inner_file_stem("Acme_User__EU__Location"),
+            "acme_user_eu_location"
         );
         assert_eq!(inner_file_stem("SPCProgram"), "spc_program");
         assert_eq!(inner_file_stem("_Legacy_"), "legacy");
         assert_eq!(inner_file_stem("2FA"), "_2_fa");
         assert_eq!(module_stem("API_Rest"), "api_rest");
-        assert_eq!(module_stem("Jabil__Commons"), "jabil_commons");
+        assert_eq!(module_stem("Acme__Commons"), "acme_commons");
     }
 
     #[test]
@@ -9099,6 +9103,7 @@ use crate::domain::entities::sales::customer::Customer;
 
 #[entity(module = "Sales")]
 #[mxrs(image = "Sales.OrderIcon")]
+#[mxrs(stores(owner, created_date))]
 #[mxrs(index(number, desc(system(CreatedDate)), include_offline))]
 #[mxrs(before_commit("Sales.ACT_Ping", pass_event_object = false))]
 pub struct Order {
@@ -9120,6 +9125,7 @@ pub struct Order {
 
 #[view(module = "Sales", source = "Sales.OrderSource")]
 pub struct OrderReport {
+    #[mxrs(length = 200)]
     pub number: MxString,
 }
 "#

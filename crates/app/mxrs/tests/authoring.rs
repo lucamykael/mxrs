@@ -451,6 +451,9 @@ fn security_and_navigation_are_declared_where_they_belong() {
     // The demo user joins the security declared before it.
     assert_eq!(security.demo_users[0].name, "demo_manager");
     assert_eq!(security.demo_users[0].roles, ["Manager"]);
+    // Only a project that declares no security carries its demo users
+    // apart, for the writer to add to the security the model stores.
+    assert!(project.demo_users.is_empty());
 
     let profile = &project.navigation.as_ref().unwrap().profiles[0];
     assert_eq!(profile.home_page.as_deref(), Some("Sales.Order_Overview"));

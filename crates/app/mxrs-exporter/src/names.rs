@@ -15,7 +15,7 @@ use crate::entity_export::TypedEntityTarget;
 use crate::{ExportError, Result};
 
 /// Delimiters no rendered source can contain: every model string reaches the
-/// output through `{:?}`, which escapes control characters.
+/// output as a Rust string literal, which escapes control characters.
 const OPEN: char = '\u{1}';
 const CLOSE: char = '\u{2}';
 
@@ -53,7 +53,9 @@ pub(crate) struct FlowTarget {
 }
 
 /// A flow's Mendix name as the identifier of the type that names it. Mirrors
-/// `marker_ident` in `mxrs-macros`, which declares that type.
+/// `marker_ident` in `mxrs-macros`, which declares that type — down to the
+/// keyword list, or a flow would be declared under one name and referred to
+/// by another.
 pub(crate) fn flow_marker(name: &str) -> String {
     let mut ident: String = name
         .chars()
@@ -95,9 +97,11 @@ impl ModelNames<'_> {
     ///
     /// A referenced type is imported by its short name when that name means
     /// one thing in this file; a name two references share, one in `taken`
-    /// (the file's own items and the prelude types it writes), or a
-    /// lower-case one — which a `let` of the same name would otherwise be
-    /// read as matching against — is spelled by its full path instead.
+    /// (the file's own items), one the preludes already give a meaning
+    /// (an import would silently take `Ref` or `None` away from the code
+    /// around it), or a lower-case one — which a `let` of the same name
+    /// would otherwise be read as matching against — is spelled by its full
+    /// path instead.
     pub(crate) fn resolve(&self, body: &str, taken: &[&str]) -> Result<Resolved> {
         let mut requests: Vec<(String, String)> = Vec::new();
         let mut segments: Vec<Segment> = Vec::new();
@@ -133,6 +137,7 @@ impl ModelNames<'_> {
         imported.retain(|name, _| {
             !colliding.contains(name)
                 && !taken.contains(name)
+                && !prelude_name(name)
                 && !name.starts_with(|character: char| character.is_lowercase() || character == '_')
         });
 
@@ -208,6 +213,135 @@ impl ModelNames<'_> {
         }
     }
 }
+
+/// Names a generated file already has a meaning for without importing
+/// anything: what `mxrs::prelude` exports and what Rust's own prelude does.
+/// An explicit `use` wins over both, so a model element spelled like one of
+/// these is never imported by its short name.
+pub(crate) fn prelude_name(name: &str) -> bool {
+    MXRS_PRELUDE.contains(&name) || RUST_PRELUDE.contains(&name)
+}
+
+/// `mxrs::prelude`, upper-case names only: a lower-case name is never
+/// imported short in the first place. Pinned against the facade's source by
+/// `the_prelude_list_covers_the_facade_prelude`.
+const MXRS_PRELUDE: &[&str] = &[
+    "ApplicationDefinition",
+    "AssignAssociation",
+    "AssignAttribute",
+    "AssociationMarker",
+    "AssociationRef",
+    "AttributeMarker",
+    "AttributeRef",
+    "ButtonBuilder",
+    "CallArgument",
+    "ConstantBuilder",
+    "ConstantType",
+    "ContainerBuilder",
+    "DataViewBuilder",
+    "DemoUserBuilder",
+    "EntityMarker",
+    "EnumerationBuilder",
+    "EnumerationMarker",
+    "ExportLevel",
+    "Expr",
+    "FlowBuilder",
+    "LayoutBuilder",
+    "LayoutGridBuilder",
+    "LifecycleEvent",
+    "MemberRights",
+    "MendixType",
+    "MenuActionDecl",
+    "MenuBuilder",
+    "MenuIconDecl",
+    "MenuItemBuilder",
+    "MicroflowMarker",
+    "MicroflowModuleBuilder",
+    "MicroflowRef",
+    "ModuleBuilder",
+    "ModuleDecl",
+    "MxBinary",
+    "MxBool",
+    "MxDateTime",
+    "MxDecimal",
+    "MxEntity",
+    "MxEnumeration",
+    "MxFloat",
+    "MxInteger",
+    "MxList",
+    "MxLong",
+    "MxObject",
+    "MxString",
+    "NanoflowMarker",
+    "NanoflowModuleBuilder",
+    "NanoflowRef",
+    "NavigationBuilder",
+    "NavigationItemBuilder",
+    "NavigationProfileBuilder",
+    "OnOverlap",
+    "PageBuilder",
+    "ProjectBuilder",
+    "Ref",
+    "Reference",
+    "ReferenceSet",
+    "RenderExpr",
+    "ScheduleUnit",
+    "ScheduledEventBuilder",
+    "ScheduledEventSchedule",
+    "SecurityBuilder",
+    "SecurityLevel",
+    "SystemMember",
+    "TaskQueueBuilder",
+    "TaskQueueConfig",
+    "TaskQueueScope",
+    "TypedAttributeMarker",
+    "UserRoleBuilder",
+    "Var",
+];
+
+/// The types, traits and variants every Rust module starts with.
+const RUST_PRELUDE: &[&str] = &[
+    "AsMut",
+    "AsRef",
+    "Box",
+    "Clone",
+    "Copy",
+    "Default",
+    "DoubleEndedIterator",
+    "Drop",
+    "Eq",
+    "Err",
+    "ExactSizeIterator",
+    "Extend",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "From",
+    "FromIterator",
+    "Future",
+    "Into",
+    "IntoFuture",
+    "IntoIterator",
+    "Iterator",
+    "None",
+    "Ok",
+    "Option",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+    "Result",
+    "Send",
+    "Sized",
+    "Some",
+    "String",
+    "Sync",
+    "ToOwned",
+    "ToString",
+    "TryFrom",
+    "TryInto",
+    "Unpin",
+    "Vec",
+];
 
 enum Segment {
     Text(String),
@@ -304,6 +438,60 @@ mod tests {
     }
 
     #[test]
+    fn a_name_the_preludes_already_mean_is_never_imported_over_them() {
+        let entities = HashMap::from([("Sales.Ref".to_string(), target("sales", "ref_", "Ref"))]);
+        let names = ModelNames {
+            entities: &entities,
+            microflows: HashMap::from([(
+                "Sales.None".to_string(),
+                FlowTarget {
+                    module_path: "crate::application::services::sales::none_service".to_string(),
+                    marker: "None".to_string(),
+                },
+            )]),
+            nanoflows: HashMap::new(),
+        };
+        let body = format!(
+            "Ref::<{}>::new(); call(MicroflowRef::<{}>::new(), None)",
+            entity("Sales.Ref"),
+            microflow("Sales.None"),
+        );
+        let resolved = names.resolve(&body, &[]).unwrap();
+        assert_eq!(
+            resolved.source,
+            "Ref::<crate::domain::entities::sales::ref_::Ref>::new(); call(MicroflowRef::<crate::application::services::sales::none_service::None>::new(), None)"
+        );
+        assert!(resolved.imports.is_empty());
+    }
+
+    /// The list is a copy of what the facade exports, so it is checked
+    /// against the facade's own source: a name added to `mxrs::prelude` and
+    /// not here would be one an import could silently shadow.
+    #[test]
+    fn the_prelude_list_covers_the_facade_prelude() {
+        let facade = include_str!("../../mxrs/src/lib.rs");
+        let prelude = facade
+            .split_once("pub mod prelude {")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the facade declares its prelude");
+        let exported = prelude
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .filter(|word| word.starts_with(|character: char| character.is_uppercase()))
+            .collect::<Vec<_>>();
+        assert!(
+            exported.len() > 50,
+            "the prelude was not read: {exported:?}"
+        );
+        for name in exported {
+            assert!(prelude_name(name), "`{name}` is exported by mxrs::prelude");
+        }
+        let mut sorted = MXRS_PRELUDE.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, MXRS_PRELUDE, "kept sorted, so a duplicate shows");
+    }
+
+    #[test]
     fn a_reference_to_nothing_fails_loudly() {
         let entities = HashMap::new();
         let names = ModelNames {
@@ -321,5 +509,12 @@ mod tests {
         assert_eq!(flow_marker("9Lives"), "_9Lives");
         assert_eq!(flow_marker("return"), "return_");
         assert_eq!(flow_marker("My Flow"), "My_Flow");
+        // The same answers `marker_ident` gives in `mxrs-macros`, which the
+        // facade's `authoring_names` test pins from the other side: words
+        // Rust reserves in some edition are not left for one side to accept.
+        assert_eq!(flow_marker("union"), "union_");
+        assert_eq!(flow_marker("gen"), "gen_");
+        assert_eq!(flow_marker("Self"), "Self_");
+        assert_eq!(flow_marker("_"), "__");
     }
 }

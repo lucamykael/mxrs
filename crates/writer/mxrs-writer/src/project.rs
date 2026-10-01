@@ -52,9 +52,7 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
             &project.mendix_version,
         )?;
     }
-    if let Some(declaration) = &project.security {
-        security::synchronize_project_security(&mut mpr, &root_id, declaration, identity)?;
-    }
+    security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;
     if let Some(declaration) = &project.navigation {
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
     }
@@ -254,9 +252,7 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             identity,
         )?;
     }
-    if let Some(declaration) = &project.security {
-        security::synchronize_project_security(&mut mpr, &root_id, declaration, identity)?;
-    }
+    security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;
     if let Some(declaration) = &project.navigation {
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
     }

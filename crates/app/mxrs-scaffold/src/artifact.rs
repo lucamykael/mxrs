@@ -690,10 +690,10 @@ fn create_module_layer(
 }
 
 /// Ports mxrb's `scaffold_demo_user` to the Cargo-native layout: the
-/// declaration lands in `src/domain/security/demo_users/`, the generated
-/// password lands in a `0o600` `.env` at the project root (with an empty
-/// `.env.example` key for sharing), and the demo-user aggregator is wired
-/// into `build()` after `security::apply`. Role and entity references are
+/// `#[demo_user]` declaration lands in `src/domain/demo_users/` and
+/// registers itself, and the generated password lands in a `0o600` `.env`
+/// at the project root (with an empty `.env.example` key for sharing).
+/// Role and entity references are
 /// validated structurally against the generated layout — the same
 /// source-scanning contract mxrb applies to its Ruby projects.
 fn create_demo_user(
@@ -1277,7 +1277,9 @@ fn declare_child_module(
                 .map_or(0, |position| position + 1);
             let position = lines[first..=last]
                 .iter()
-                .position(|line| module_order(line) > module_order(&declaration))
+                .position(|line| {
+                    version_order(module_order(line), module_order(&declaration)).is_gt()
+                })
                 .map_or(last + 1, |offset| first + offset);
             lines.insert(position, declaration);
         }
@@ -1305,6 +1307,43 @@ fn module_order(declaration: &str) -> &str {
         .trim_start_matches("pub mod ")
         .trim_end_matches(';');
     name.strip_prefix("r#").unwrap_or(name)
+}
+
+/// rustfmt's version sort, for the names a module can have: runs of digits
+/// compare as numbers (`page2` before `page10`), everything else as text.
+fn version_order(left: &str, right: &str) -> std::cmp::Ordering {
+    fn chunk(text: &str) -> (&str, &str) {
+        let numeric = text.starts_with(|character: char| character.is_ascii_digit());
+        let end = text
+            .find(|character: char| character.is_ascii_digit() != numeric)
+            .unwrap_or(text.len());
+        text.split_at(end)
+    }
+    let (mut left, mut right) = (left, right);
+    loop {
+        if left.is_empty() || right.is_empty() {
+            return left.len().cmp(&right.len());
+        }
+        let (left_chunk, left_rest) = chunk(left);
+        let (right_chunk, right_rest) = chunk(right);
+        let numeric = |chunk: &str| chunk.starts_with(|character: char| character.is_ascii_digit());
+        let order = if numeric(left_chunk) && numeric(right_chunk) {
+            let (left_digits, right_digits) = (
+                left_chunk.trim_start_matches('0'),
+                right_chunk.trim_start_matches('0'),
+            );
+            left_digits
+                .len()
+                .cmp(&right_digits.len())
+                .then_with(|| left_digits.cmp(right_digits))
+        } else {
+            left_chunk.cmp(right_chunk)
+        };
+        if order.is_ne() {
+            return order;
+        }
+        (left, right) = (left_rest, right_rest);
+    }
 }
 
 /// The first line after the `//!` header and the blank line following it —
@@ -1458,4 +1497,25 @@ fn initialize_presentation(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_order;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn modules_are_ordered_the_way_rustfmt_orders_them() {
+        assert_eq!(version_order("page2", "page10"), Ordering::Less);
+        assert_eq!(version_order("page10", "page2"), Ordering::Greater);
+        assert_eq!(version_order("page02", "page2"), Ordering::Equal);
+        assert_eq!(version_order("order", "order_line"), Ordering::Less);
+        assert_eq!(version_order("order2", "order_line"), Ordering::Less);
+        assert_eq!(version_order("billing", "main"), Ordering::Less);
+        assert_eq!(
+            version_order("v1_10_orders", "v1_9_orders"),
+            Ordering::Greater
+        );
+        assert_eq!(version_order("sales", "sales"), Ordering::Equal);
+    }
 }

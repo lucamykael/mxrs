@@ -483,11 +483,23 @@ fn convert(
     if !mxrs_writer::flow_graph::preserves_body(doc, &declaration) {
         return None;
     }
+    let source = polish_source(source);
+    // The flow's file declares a unit type under the flow's own name, and a
+    // `let` cannot bind a name a unit type already has. A flow named in
+    // lower case whose body binds that very name stays in the imported
+    // model instead of becoming source that does not compile.
+    let marker = names::flow_marker(&declaration.name);
+    if source
+        .iter()
+        .any(|line| binding_name(line).as_deref() == Some(marker.as_str()))
+    {
+        return None;
+    }
     Some(ConvertedFlow {
         module: module.into(),
         native_type: doc.get_str("$Type").ok()?.into(),
         declaration,
-        source: polish_source(source),
+        source,
     })
 }
 
@@ -1077,6 +1089,7 @@ pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
             .or_default() += 1;
     }
     let mut taken: HashSet<(&str, bool, String)> = HashSet::new();
+    let mut files: HashSet<(&str, bool, String)> = HashSet::new();
     flows
         .iter()
         .map(|flow| {
@@ -1101,15 +1114,24 @@ pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
                 None => derive_pascal_case(&function),
             };
             let stem = function.trim_end_matches('_');
-            let file_stem = if nanoflow {
-                if matches!(stem, "mod" | "imported") {
-                    format!("{stem}_nanoflow")
-                } else {
-                    stem.to_string()
-                }
-            } else {
+            // A nanoflow's file is named after its function alone, so it
+            // must not be a word Rust keeps (`return.rs`) nor one of the
+            // folder's own files.
+            let base = if !nanoflow {
                 format!("{stem}_service")
+            } else if stem.is_empty() || rust_keyword(stem) || matches!(stem, "mod" | "imported") {
+                format!("{stem}_nanoflow")
+            } else {
+                stem.to_string()
             };
+            // Distinct functions can still ask for one file (`imported` and
+            // `imported_nanoflow`): the later one takes a numbered name.
+            let mut file_stem = base.clone();
+            let mut suffix = 2;
+            while !files.insert((flow.module.as_str(), nanoflow, file_stem.clone())) {
+                file_stem = format!("{base}_{suffix}");
+                suffix += 1;
+            }
             FlowFile {
                 file_stem,
                 explicit_name: derived != *name,
@@ -1257,5 +1279,63 @@ mod tests {
         );
         assert_eq!(flow_function("String", "ACT_String"), "string_");
         assert_eq!(flow_function("cleanup", "cleanup"), "cleanup_flow");
+    }
+
+    fn flow(module: &str, name: &str, nanoflow: bool) -> ConvertedFlow {
+        ConvertedFlow {
+            module: module.into(),
+            native_type: if nanoflow {
+                "Microflows$Nanoflow"
+            } else {
+                "Microflows$Microflow"
+            }
+            .into(),
+            declaration: MicroflowDecl::new(name),
+            source: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn every_flow_gets_a_file_rust_can_name_and_no_other_flow_has() {
+        let flows = [
+            flow("Sales", "ACT_Return", true),
+            flow("Sales", "ACT_Type", true),
+            flow("Sales", "Imported", true),
+            flow("Sales", "ImportedNanoflow", true),
+            flow("Sales", "ACT_Refresh", true),
+            flow("Sales", "ACT_Return", false),
+            flow("Crm", "ACT_Refresh", true),
+        ];
+        let stems = plan_files(&flows)
+            .into_iter()
+            .map(|plan| plan.file_stem)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stems,
+            [
+                // `return.rs` and `type.rs` are not modules Rust can declare.
+                "return_nanoflow",
+                "type_nanoflow",
+                // `imported.rs` is the folder's own; the flow that is really
+                // called `ImportedNanoflow` then finds its name taken.
+                "imported_nanoflow",
+                "imported_nanoflow_2",
+                "refresh",
+                "return_service",
+                // Another module's folder is another namespace.
+                "refresh",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_body_that_binds_the_flows_own_type_name_stays_imported() {
+        // `pub struct cleanup;` and `let cleanup = ...` cannot share a file.
+        assert_eq!(names::flow_marker("cleanup"), "cleanup");
+        assert_eq!(binding("Cleanup").as_deref(), Some("cleanup"));
+        assert_eq!(
+            binding_name("let cleanup = flow.create_list();").as_deref(),
+            Some("cleanup")
+        );
     }
 }

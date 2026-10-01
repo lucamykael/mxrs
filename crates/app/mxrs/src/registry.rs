@@ -25,7 +25,8 @@ pub enum Stage {
     ModuleSecurity,
     /// Project security: user roles and the password policy.
     Security,
-    /// Demo users, which join the project security declared before them.
+    /// Demo users. They join the project security declared before them,
+    /// or — in a project that declares none — the one its model stores.
     DemoUser,
     TaskQueue,
     Microflow,
@@ -112,7 +113,16 @@ pub fn declarations(crate_name: &str) -> Vec<&'static Declaration> {
         .into_iter()
         .filter(|declaration| declaration.crate_name() == crate_name)
         .collect::<Vec<_>>();
-    declarations.sort_by_key(|declaration| (declaration.stage, declaration.file, declaration.line));
+    // `file!()` spells a path with the separator of the machine that
+    // compiled it; compared as written, `a\b.rs` and `a/b.rs` would order
+    // the same tree differently on Windows.
+    declarations.sort_by_cached_key(|declaration| {
+        (
+            declaration.stage,
+            declaration.file.replace('\\', "/"),
+            declaration.line,
+        )
+    });
     declarations
 }
 

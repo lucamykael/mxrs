@@ -35,8 +35,8 @@
 //! each field an accessor (`Order::number()`), so no separately generated
 //! marker file is needed to name an attribute or an association. They are
 //! also authoritative where the derive merely preserves: an entity declared
-//! with `#[mxrs::entity]` has exactly the indexes and event handlers its
-//! source states.
+//! with `#[mxrs::entity]` has exactly the indexes, event handlers, parent
+//! and system members its source states.
 //!
 //! The legacy `#[mx_entity]`/`#[mx_attribute]` spelling remains accepted for
 //! source compatibility. Only plain structs with named fields are supported;
@@ -142,11 +142,15 @@ struct ParsedEntity {
     persistable: Option<bool>,
     image: Option<String>,
     generalizes: Option<syn::Path>,
+    /// `stores(owner, created_date, ...)`: the system members a root entity
+    /// keeps for every object.
+    stores: Option<Vec<syn::Ident>>,
     indexes: Vec<ParsedIndex>,
     lifecycle: Vec<ParsedLifecycle>,
     preserve_indexes: bool,
     preserve_lifecycle: bool,
     preserve_image: bool,
+    preserve_inheritance: bool,
 }
 
 struct ParsedIndex {
@@ -350,7 +354,9 @@ fn expand(
             .as_ref()
             .expect("named field always has an ident");
         let field_name = unraw(field_ident);
-        let member = format_ident!("{}", field_name);
+        // The member type is spelled as the field is, raw prefix included:
+        // `r#type` is a field and a type name alike, `type` is neither.
+        let member = field_ident.clone();
         if let Some((reference_set, target)) = association_target(&field.ty) {
             if entity.module.is_none() {
                 return Err(syn::Error::new_spanned(
@@ -466,7 +472,12 @@ fn expand(
             quote! { e.#method(#mendix_name) }
         };
         let default = match default {
-            Some(expr) => Some(quote! { attribute.default_value = Some((#expr).to_string()); }),
+            Some(expr) => Some(match integer_literal(&expr) {
+                // A whole number is the model's text as written. Evaluating
+                // it would give it Rust's `i32`, which a Long does not fit.
+                Some(digits) => quote! { attribute.default_value = Some(#digits.to_string()); },
+                None => quote! { attribute.default_value = Some((#expr).to_string()); },
+            }),
             None => (authoritative && !no_default)
                 .then(|| authoritative_default(&kind))
                 .flatten()
@@ -530,10 +541,19 @@ fn expand(
         (None, false) if facade.is_some() => Some(quote! { e.clear_image(); }),
         _ => None,
     };
-    let generalizes = entity
-        .generalizes
-        .as_ref()
-        .map(|parent| quote! { e.generalizes::<#parent>(); });
+    // A stored entity or a DTO states its place in the hierarchy the way it
+    // states its indexes: a parent, the system members a root keeps, or
+    // neither — a plain root. A view has no such place to state.
+    let generalizes = match (&entity.generalizes, &entity.stores) {
+        (Some(parent), _) => Some(quote! { e.generalizes::<#parent>(); }),
+        (None, Some(members)) => Some(quote! {
+            e.system_members(|s| {
+                #(s.#members(true);)*
+            });
+        }),
+        (None, None) if authoritative && !entity.preserve_inheritance => Some(quote! { e.root(); }),
+        (None, None) => None,
+    };
     let indexes = expand_indexes(&entity, &attribute_fields, &facade, &roots, &members_module)?;
     let lifecycle = expand_lifecycle(&entity, &facade, &roots);
     let marker = entity.module.as_ref().map(|module| {
@@ -562,10 +582,10 @@ fn expand(
                     ::core::module_path!(),
                     ::core::file!(),
                     ::core::line!(),
-                    |project| {
-                        let mut module = #dsl::ModuleBuilder::new(#module);
-                        #struct_name::mx_register(&mut module);
-                        project.merge_module(module.into_decl());
+                    |__mxrs_project| {
+                        let mut __mxrs_module = #dsl::ModuleBuilder::new(#module);
+                        #struct_name::mx_register(&mut __mxrs_module);
+                        __mxrs_project.merge_module(__mxrs_module.into_decl());
                     },
                 )
             }
@@ -603,6 +623,28 @@ fn expand(
 }
 
 const DEFAULT_STRING_LENGTH: i32 = 200;
+
+/// `42` or `-42` as decimal digits, when `expr` is exactly an unsuffixed
+/// integer literal.
+fn integer_literal(expr: &syn::Expr) -> Option<String> {
+    fn digits(expr: &syn::Expr) -> Option<&syn::LitInt> {
+        match expr {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(literal),
+                ..
+            }) if literal.suffix().is_empty() => Some(literal),
+            _ => None,
+        }
+    }
+    match expr {
+        syn::Expr::Unary(syn::ExprUnary {
+            op: syn::UnOp::Neg(_),
+            expr,
+            ..
+        }) => digits(expr).map(|literal| format!("-{}", literal.base10_digits())),
+        _ => digits(expr).map(|literal| literal.base10_digits().to_string()),
+    }
+}
 
 /// The default value Studio Pro gives a new stored attribute of `kind`.
 /// A facade entity states it implicitly, so deleting a `default = ...`
@@ -662,7 +704,7 @@ fn expand_indexes(
                 ParsedIndexMember::Attribute { field, ascending } => {
                     let attribute = attributes
                         .iter()
-                        .find(|attribute| attribute.ident == field)
+                        .find(|attribute| unraw(attribute.ident) == unraw(field))
                         .ok_or_else(|| {
                             syn::Error::new(
                                 field.span(),
@@ -680,7 +722,7 @@ fn expand_indexes(
                     } else {
                         format_ident!("attribute_descending")
                     };
-                    let member = format_ident!("{}", unraw(attribute.ident));
+                    let member = attribute.ident;
                     members.push(quote! { i.#method::<#members_module::#member>(); });
                 }
                 ParsedIndexMember::System { member, ascending } => {
@@ -838,11 +880,13 @@ fn parse_mx_entity(
         persistable: None,
         image: None,
         generalizes: None,
+        stores: None,
         indexes: Vec::new(),
         lifecycle: Vec::new(),
         preserve_indexes: false,
         preserve_lifecycle: false,
         preserve_image: false,
+        preserve_inheritance: false,
     };
     for attr in attrs {
         if attr.path().is_ident("mx_entity") {
@@ -882,6 +926,29 @@ fn parse_mx_entity(
             } else if meta.path.is_ident("generalizes") {
                 entity.generalizes = Some(meta.value()?.parse::<syn::Path>()?);
                 Ok(())
+            } else if meta.path.is_ident("stores") {
+                let members = entity.stores.get_or_insert_with(Vec::new);
+                meta.parse_nested_meta(|member| {
+                    let ident = member
+                        .path
+                        .get_ident()
+                        .filter(|ident| {
+                            matches!(
+                                ident.to_string().as_str(),
+                                "owner" | "created_date" | "changed_date" | "changed_by"
+                            )
+                        })
+                        .ok_or_else(|| {
+                            member.error(
+                                "unknown system member; expected `owner`, `created_date`, `changed_date`, or `changed_by`",
+                            )
+                        })?;
+                    if members.contains(ident) {
+                        return Err(member.error("this system member is already stored"));
+                    }
+                    members.push(ident.clone());
+                    Ok(())
+                })
             } else if meta.path.is_ident("index") {
                 entity.indexes.push(parse_index(&meta)?);
                 Ok(())
@@ -896,19 +963,33 @@ fn parse_mx_entity(
                         entity.preserve_lifecycle = true;
                     } else if preserved.path.is_ident("image") {
                         entity.preserve_image = true;
+                    } else if preserved.path.is_ident("inheritance") {
+                        entity.preserve_inheritance = true;
                     } else {
                         return Err(preserved.error(
-                            "unknown `preserve(...)` member; expected `indexes`, `lifecycle`, or `image`",
+                            "unknown `preserve(...)` member; expected `indexes`, `lifecycle`, `image`, or `inheritance`",
                         ));
                     }
                     Ok(())
                 })
             } else {
                 Err(meta.error(
-                    "unknown entity #[mxrs(...)] key; expected `name`, `module`, `documentation`, `persistable`, `image`, `generalizes`, `index`, `before_commit`, `after_commit`, `before_delete`, `after_delete`, or `preserve`",
+                    "unknown entity #[mxrs(...)] key; expected `name`, `module`, `documentation`, `persistable`, `image`, `generalizes`, `stores`, `index`, `before_commit`, `after_commit`, `before_delete`, `after_delete`, or `preserve`",
                 ))
             }
         })?;
+    }
+    if let (Some(parent), Some(_)) = (&entity.generalizes, &entity.stores) {
+        return Err(syn::Error::new_spanned(
+            parent,
+            "a specialization inherits its parent's system members; state `generalizes` or `stores(...)`, not both",
+        ));
+    }
+    if entity.preserve_inheritance && (entity.generalizes.is_some() || entity.stores.is_some()) {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`preserve(inheritance)` keeps the imported hierarchy; it cannot be combined with `generalizes` or `stores(...)`",
+        ));
     }
     Ok(entity)
 }
@@ -939,7 +1020,7 @@ fn parse_index(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<ParsedIndex
             };
             return Ok(());
         }
-        if member.path.is_ident("desc") {
+        if member.path.is_ident("desc") && member.input.peek(syn::token::Paren) {
             return member.parse_nested_meta(|descending| {
                 index.members.push(parse_index_member(&descending, false)?);
                 Ok(())
@@ -958,7 +1039,9 @@ fn parse_index_member(
     meta: &syn::meta::ParseNestedMeta<'_>,
     ascending: bool,
 ) -> syn::Result<ParsedIndexMember> {
-    if meta.path.is_ident("system") {
+    // `system(...)` names a system member; a bare `system` is a field of
+    // that name, like any other.
+    if meta.path.is_ident("system") && meta.input.peek(syn::token::Paren) {
         let mut system = None;
         meta.parse_nested_meta(|member| {
             let ident = member

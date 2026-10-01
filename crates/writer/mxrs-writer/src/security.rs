@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use mxrs_bson::{Bson, Document, build_array, doc, parse_array};
 use mxrs_identity::{ArtifactKind, ProjectIdentity};
-use mxrs_ir::{ModuleRoleDecl, ProjectSecurityDecl, SecurityLevel};
+use mxrs_ir::{DemoUserDecl, ModuleRoleDecl, ProjectDecl, ProjectSecurityDecl, SecurityLevel};
 use mxrs_mpr::MprFile;
 
 use crate::error::{Result, WriterError};
@@ -68,6 +68,75 @@ pub(crate) fn synchronize_module_security(
     } else {
         mpr.insert_unit(module_id, "ModuleSecurity", document, Some(&unit_id))?;
     }
+    Ok(())
+}
+
+/// Applies what `project` says about security.
+///
+/// A declared security is authoritative, and demo users declared apart from
+/// it are part of it. Without one the stored security is preserved as it is
+/// — except that demo users declared on their own still join it, because a
+/// declaration the build accepted and then ignored would be a silent loss.
+pub(crate) fn synchronize_declared_security(
+    mpr: &mut MprFile,
+    root_id: &str,
+    project: &ProjectDecl,
+    identity: ProjectIdentity,
+) -> Result<()> {
+    match &project.security {
+        Some(declaration) if project.demo_users.is_empty() => {
+            synchronize_project_security(mpr, root_id, declaration, identity)
+        }
+        Some(declaration) => {
+            let mut declaration = declaration.clone();
+            declaration
+                .demo_users
+                .extend(project.demo_users.iter().cloned());
+            synchronize_project_security(mpr, root_id, &declaration, identity)
+        }
+        None if project.demo_users.is_empty() => Ok(()),
+        None => join_stored_security(mpr, root_id, &project.demo_users, identity),
+    }
+}
+
+/// Adds `demo_users` to the project security the model stores, changing
+/// nothing else in it.
+fn join_stored_security(
+    mpr: &mut MprFile,
+    root_id: &str,
+    demo_users: &[DemoUserDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    ensure_unique(
+        demo_users.iter().map(|user| user.name.as_str()),
+        "demo user",
+    )?;
+    let stored = mpr.children_of(root_id)?.into_iter().find_map(|unit| {
+        let document = mpr.parse_contents(&unit).ok()?;
+        (document.get_str("$Type").ok() == Some("Security$ProjectSecurity"))
+            .then_some((unit.unit_id, document))
+    });
+    let Some((unit_id, mut document)) = stored else {
+        let mut names = demo_users
+            .iter()
+            .map(|user| user.name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        return Err(WriterError::DemoUsersWithoutProjectSecurity {
+            names: names.join(", "),
+        });
+    };
+    let stored_roles = documents_by_name(&document, "UserRoles");
+    for user in demo_users {
+        for role in &user.roles {
+            if !stored_roles.contains_key(role) {
+                return Err(WriterError::UnknownUserRole(role.clone()));
+            }
+        }
+    }
+    let lowered = lower_demo_users(&document, demo_users, &identity)?;
+    document.insert("DemoUsers", lowered);
+    mpr.update_unit(&unit_id, document)?;
     Ok(())
 }
 
@@ -172,7 +241,7 @@ pub(crate) fn synchronize_project_security(
     // (lossless preservation); MXRB rewrites the array unconditionally, but a
     // byte-preserving round-trip must not reserialize content nobody declared.
     if !declaration.demo_users.is_empty() {
-        let lowered = lower_demo_users(&document, declaration, &identity)?;
+        let lowered = lower_demo_users(&document, &declaration.demo_users, &identity)?;
         document.insert("DemoUsers", lowered);
     }
 
@@ -212,7 +281,7 @@ pub(crate) fn synchronize_project_security(
 /// without a resolvable password fails closed.
 fn lower_demo_users(
     document: &Document,
-    declaration: &ProjectSecurityDecl,
+    demo_users: &[DemoUserDecl],
     identity: &ProjectIdentity,
 ) -> Result<Bson> {
     let raw = match document.get("DemoUsers") {
@@ -240,11 +309,7 @@ fn lower_demo_users(
     // stored `DemoUserImpl` entries the declared list would silently drop
     // (the exporter deliberately emits no demo-user declarations, so an
     // imported project would otherwise lose its users on the first build).
-    let declared: HashSet<&str> = declaration
-        .demo_users
-        .iter()
-        .map(|user| user.name.as_str())
-        .collect();
+    let declared: HashSet<&str> = demo_users.iter().map(|user| user.name.as_str()).collect();
     let mut orphaned: Vec<String> = by_name
         .keys()
         .filter(|name| !declared.contains(name.as_str()))
@@ -256,8 +321,8 @@ fn lower_demo_users(
             names: orphaned.join(", "),
         });
     }
-    let mut users = Vec::with_capacity(declaration.demo_users.len());
-    for user in &declaration.demo_users {
+    let mut users = Vec::with_capacity(demo_users.len());
+    for user in demo_users {
         let matches = by_name.get(user.name.as_str());
         let prior = match matches.map(Vec::as_slice) {
             Some([single]) => (*single).clone(),
