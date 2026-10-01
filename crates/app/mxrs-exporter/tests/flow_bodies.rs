@@ -206,6 +206,161 @@ fn nested_decisions_and_loops_rebuild_exactly_and_edit_in_place() {
     assert_eq!(after["Structured"].1, before["Structured"].1);
 }
 
+/// A flow that says everything the block structure alone cannot: its own
+/// error handling, a retry, a branch per value, an activity kept but not
+/// run, and one no builder covers.
+fn handled_fixture() -> mxrs_ir::ProjectDecl {
+    use mxrs_dsl::flow_actions::actions;
+    use mxrs_ir::flow::{ErrorHandling, NativeDocument, SwitchCase};
+    let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+    builder.module("Calls", |m| {
+        m.entity("Record", |e| {
+            e.string("Name");
+            e.boolean("Active");
+        });
+    });
+    let mut project = builder.build();
+    let mut flow = MicroflowDecl::new("Handled");
+    flow.parameters.push(FlowParameterDecl::new(
+        "record",
+        Ty::Object("Calls.Record".into()),
+    ));
+    flow.activities = vec![
+        Activity::Label("again".into()),
+        Activity::OnError {
+            handling: ErrorHandling::CustomWithoutRollback,
+            activity: Box::new(Activity::Action(actions::commit("record"))),
+            handler: vec![Activity::Decision {
+                condition: "$record/Active".into(),
+                true_branch: vec![Activity::Jump("again".into())],
+                false_branch: vec![Activity::RaiseError],
+            }],
+        },
+        Activity::Switch {
+            expression: "$record/Name".into(),
+            cases: vec![
+                SwitchCase {
+                    values: vec!["A".into()],
+                    activities: vec![Activity::Action(actions::rollback("record"))],
+                },
+                SwitchCase {
+                    values: vec!["B".into(), "C".into()],
+                    activities: vec![Activity::ReturnValue {
+                        expression: "false".into(),
+                    }],
+                },
+                SwitchCase {
+                    values: vec!["(empty)".into()],
+                    activities: vec![],
+                },
+            ],
+        },
+        Activity::OnError {
+            handling: ErrorHandling::Continue,
+            activity: Box::new(Activity::Action(actions::delete("record"))),
+            handler: vec![],
+        },
+        Activity::Disabled(Box::new(Activity::Action(actions::commit("record")))),
+        Activity::Action(
+            NativeDocument::new("Microflows$DownloadFileAction")
+                .with("ErrorHandlingType", "Rollback")
+                .with("FileDocumentVariableName", "record")
+                .with("ShowFileInBrowser", false),
+        ),
+    ];
+    flow.return_type = Some(Ty::Boolean);
+    flow.return_expression = Some("true".into());
+    project.modules[0].microflows.push(flow.clone());
+    flow.name = "ClientHandled".into();
+    project.modules[0].nanoflows.push(flow);
+    project
+}
+
+#[test]
+fn error_handling_retries_and_switches_are_declared_and_edit_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_dir = dir.path().join("source");
+    std::fs::create_dir(&source_dir).unwrap();
+    let path = source_dir.join("Handled.mpr");
+    let generated = dir.path().join("generated");
+    let rebuilt = dir.path().join("Rebuilt.mpr");
+    mxrs_writer::write_project(&path, &handled_fixture()).unwrap();
+    let before = flows(&path);
+    // A nanoflow aborts where a microflow rolls back, and says so in what
+    // it stores.
+    let stored = format!("{:?}", before["ClientHandled"].3);
+    assert!(
+        stored.contains("Abort") && !stored.contains("\"Rollback\""),
+        "{stored}"
+    );
+    let report = mxrs_exporter::verify_editable_document_round_trip(&path).unwrap();
+    assert!(report.passed, "{:?}", report.failures);
+    assert_eq!(report.candidate_units, 2);
+    mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
+    let editable = flow_source_path(&generated, "Handled");
+    let source = std::fs::read_to_string(&editable).unwrap();
+    for token in [
+        "flow.label(\"point_1\")",
+        "flow.jump(\"point_1\")",
+        ".on_error_without_rollback(",
+        "flow.raise_error()",
+        "flow.switch(",
+        "on.case(\"A\"",
+        "on.cases([\"B\", \"C\"]",
+        "on.empty(",
+        ".continue_on_error()",
+        ".disabled()",
+        "flow.native_action(",
+        "NativeDocument::new(\"Microflows$DownloadFileAction\")",
+        "flow.return_with(mx(\"true\"))",
+    ] {
+        assert!(source.contains(token), "{token}\n{source}");
+    }
+    for forbidden in ["$ID", "Bson", ".activities.push(", "ErrorHandlingType"] {
+        assert!(!source.contains(forbidden), "{forbidden}\n{source}");
+    }
+    let client =
+        std::fs::read_to_string(generated.join("src/ui/nanoflows/calls/client_handled.rs"))
+            .unwrap();
+    assert!(client.contains("#[nanoflow("), "{client}");
+    assert!(client.contains(".on_error_without_rollback("), "{client}");
+    let lib = generated.join("src/lib.rs");
+    std::fs::write(
+        &lib,
+        format!(
+            "#![deny(warnings)]\n{}",
+            std::fs::read_to_string(&lib).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(source_dir).unwrap();
+    run(&generated, &rebuilt);
+    assert_eq!(flows(&rebuilt), before);
+    // An edit that keeps the structure changes what it says and nothing
+    // else: the switch decides on another expression, the handler keeps
+    // what the flow changed where it used not to roll back at all.
+    let edited = source
+        .replace("mx(\"$record/Name\")", "mx(\"$record/Other\")")
+        .replace(".on_error_without_rollback(", ".on_error(");
+    assert_ne!(source, edited);
+    std::fs::write(&editable, edited).unwrap();
+    run(&generated, &rebuilt);
+    let after = flows(&rebuilt);
+    assert_eq!(after["ClientHandled"], before["ClientHandled"]);
+    let mut expected = before["Handled"].3.clone();
+    visit_documents(&mut expected, &mut |doc| {
+        if doc.get_str("Expression").ok() == Some("$record/Name") {
+            doc.insert("Expression", "$record/Other");
+        }
+        if doc.get_str("ErrorHandlingType").ok() == Some("CustomWithoutRollBack") {
+            doc.insert("ErrorHandlingType", "Custom");
+        }
+    });
+    assert_eq!(after["Handled"].3, expected);
+    assert_eq!(after["Handled"].0, before["Handled"].0);
+    assert_eq!(after["Handled"].1, before["Handled"].1);
+}
+
 /// What a flow the importer met is expected to become.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -618,7 +773,9 @@ fn unsupported_graphs_and_action_options_are_reported_as_preserved() {
         ("expression", Declared),
         ("duplicate-edge", Preserved),
         ("missing-node", Preserved),
-        ("void-capture", Preserved),
+        // A return value on a flow typed to return nothing is what the model
+        // says, however little sense it makes: it is declared as said.
+        ("void-capture", Declared),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Unsupported.mpr");
@@ -695,7 +852,8 @@ fn unsupported_graphs_and_action_options_are_reported_as_preserved() {
         );
         if expected == Declared {
             assert!(
-                source.contains("mx(\"toString([%CurrentDateTime%])\")"),
+                mutation != "expression"
+                    || source.contains("mx(\"toString([%CurrentDateTime%])\")"),
                 "{source}"
             );
             let report = mxrs_exporter::verify_editable_document_round_trip(&path).unwrap();

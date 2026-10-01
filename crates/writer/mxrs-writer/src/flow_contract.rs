@@ -168,6 +168,7 @@ fn validate(
             .map(|parameter| parameter.name.clone())
             .collect();
         validate_activities(&name, &flow.activities, &targets, entities, &mut variables)?;
+        validate_labels(&name, &flow.activities)?;
         validate_activities(
             &name,
             &flow.rescue_activities,
@@ -368,6 +369,11 @@ fn validate_activities(
                 true_branch,
                 false_branch,
                 ..
+            }
+            | Activity::RuleDecision {
+                true_branch,
+                false_branch,
+                ..
             } => {
                 validate_activities(flow, true_branch, targets, entities, &mut variables.clone())?;
                 validate_activities(
@@ -398,8 +404,172 @@ fn validate_activities(
             Activity::AggregateCount {
                 output_variable, ..
             } => declare_variable(flow, output_variable, variables)?,
+            Activity::Disabled(inner) => validate_activities(
+                flow,
+                std::slice::from_ref(inner.as_ref()),
+                targets,
+                entities,
+                variables,
+            )?,
+            Activity::OnError {
+                handling,
+                activity,
+                handler,
+            } => {
+                let invalid = |reason: &str| WriterError::InvalidFlowActivity {
+                    flow: flow.into(),
+                    reason: reason.into(),
+                };
+                let mut handled = activity.as_ref();
+                while let Activity::Disabled(inner) = handled {
+                    handled = inner;
+                }
+                if matches!(
+                    handled,
+                    Activity::Decision { .. }
+                        | Activity::RuleDecision { .. }
+                        | Activity::RuleSwitch { .. }
+                        | Activity::Label(_)
+                        | Activity::Jump(_)
+                        | Activity::Switch { .. }
+                        | Activity::TypeSwitch { .. }
+                        | Activity::ReturnValue { .. }
+                        | Activity::BreakLoop
+                        | Activity::ContinueLoop
+                        | Activity::RaiseError
+                        | Activity::OnError { .. }
+                ) {
+                    return Err(invalid(
+                        "only an action or a loop can have an error handler",
+                    ));
+                }
+                if *handling == mxrs_ir::ErrorHandling::Continue && !handler.is_empty() {
+                    return Err(invalid(
+                        "an activity that continues on error has no handler to run",
+                    ));
+                }
+                // What the handler declares is its own: the activity it
+                // answers for did not finish.
+                let mut handler_variables = variables.clone();
+                validate_activities(
+                    flow,
+                    std::slice::from_ref(activity.as_ref()),
+                    targets,
+                    entities,
+                    variables,
+                )?;
+                validate_activities(flow, handler, targets, entities, &mut handler_variables)?;
+            }
+            Activity::Switch { cases, .. }
+            | Activity::RuleSwitch { cases, .. }
+            | Activity::TypeSwitch { cases, .. } => {
+                let mut values = HashSet::new();
+                for case in cases {
+                    if case.values.is_empty()
+                        || !case
+                            .values
+                            .iter()
+                            .all(|value| values.insert(value.as_str()))
+                    {
+                        return Err(WriterError::InvalidFlowActivity {
+                            flow: flow.into(),
+                            reason: "each case of a switch is selected by its own values".into(),
+                        });
+                    }
+                    validate_activities(
+                        flow,
+                        &case.activities,
+                        targets,
+                        entities,
+                        &mut variables.clone(),
+                    )?;
+                }
+            }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// Checks that every jump of one flow body — the flow's own, or a loop's —
+/// has a label of its name in that same body, and that no two labels share
+/// one. A jump cannot leave a loop or enter one.
+fn validate_labels(flow: &str, activities: &[Activity]) -> Result<()> {
+    fn collect<'a>(
+        activities: &'a [Activity],
+        labels: &mut Vec<&'a str>,
+        jumps: &mut Vec<&'a str>,
+        bodies: &mut Vec<&'a [Activity]>,
+    ) {
+        for activity in activities {
+            match activity {
+                Activity::Label(name) => labels.push(name),
+                Activity::Jump(name) => jumps.push(name),
+                Activity::Decision {
+                    true_branch,
+                    false_branch,
+                    ..
+                }
+                | Activity::RuleDecision {
+                    true_branch,
+                    false_branch,
+                    ..
+                } => {
+                    collect(true_branch, labels, jumps, bodies);
+                    collect(false_branch, labels, jumps, bodies);
+                }
+                Activity::Switch { cases, .. }
+                | Activity::RuleSwitch { cases, .. }
+                | Activity::TypeSwitch { cases, .. } => {
+                    for case in cases {
+                        collect(&case.activities, labels, jumps, bodies);
+                    }
+                }
+                Activity::OnError {
+                    activity, handler, ..
+                } => {
+                    collect(
+                        std::slice::from_ref(activity.as_ref()),
+                        labels,
+                        jumps,
+                        bodies,
+                    );
+                    collect(handler, labels, jumps, bodies);
+                }
+                Activity::Disabled(inner) => {
+                    collect(std::slice::from_ref(inner.as_ref()), labels, jumps, bodies)
+                }
+                Activity::LoopOver { activities, .. } | Activity::WhileLoop { activities, .. } => {
+                    bodies.push(activities)
+                }
+                _ => {}
+            }
+        }
+    }
+    let invalid = |reason: String| WriterError::InvalidFlowActivity {
+        flow: flow.into(),
+        reason,
+    };
+    let (mut labels, mut jumps, mut bodies) = (Vec::new(), Vec::new(), Vec::new());
+    collect(activities, &mut labels, &mut jumps, &mut bodies);
+    let mut known = HashSet::new();
+    for label in labels {
+        if !known.insert(label) {
+            return Err(invalid(format!("two labels are named {label:?}")));
+        }
+    }
+    for jump in jumps {
+        if !known.contains(jump) {
+            return Err(invalid(format!(
+                "a jump to {jump:?} has no label of that name in the same flow or loop body"
+            )));
+        }
+    }
+    if matches!(activities.first(), Some(Activity::Jump(_))) {
+        return Err(invalid("a body cannot open with a jump".to_string()));
+    }
+    for body in bodies {
+        validate_labels(flow, body)?;
     }
     Ok(())
 }

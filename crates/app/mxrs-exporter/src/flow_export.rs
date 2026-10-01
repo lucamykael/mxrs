@@ -388,18 +388,31 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
             if !seen.insert(key.clone()) {
                 ambiguous.insert(key);
             }
-            if parameters_attested(&doc).is_none() {
-                if let Some(name) = &flow.name {
-                    targets.remove(&format!("{module_name}.{name}"));
-                }
-            } else {
+            // A signature the typed builders cannot state is not one a typed
+            // call can be checked against; the flow itself may still be
+            // declared in full.
+            if (parameters_attested(&doc).is_none()
+                || signature(&Microflow::from_bson(&doc)).is_none())
+                && let Some(name) = &flow.name
+            {
+                targets.remove(&format!("{module_name}.{name}"));
+            }
+            if parameters_attested(&doc).is_some() {
                 raw.push((module_name, doc));
+            } else if explain {
+                eprintln!(
+                    "[mxrs] {module_name}.{} stays imported: its parameters are stored in a form nothing here reads",
+                    doc.get_str("Name").unwrap_or_default()
+                );
             }
         }
     }
     for (name, kind) in &ambiguous {
         if kind == "Microflows$Microflow" {
             targets.remove(name);
+        }
+        if explain {
+            eprintln!("[mxrs] {name} stays imported: its module has two flows of that name");
         }
     }
     let mut result: Vec<_> = raw
@@ -460,7 +473,6 @@ fn parameters_attested(doc: &Document) -> Option<()> {
             return None;
         }
     }
-    signature(&Microflow::from_bson(doc))?;
     Some(())
 }
 
@@ -532,6 +544,7 @@ fn convert(
         targets,
         entities,
         attributes,
+        nanoflow: doc.get_str("$Type").ok() == Some("Microflows$Nanoflow"),
     };
     declaration.activities = converter.block(
         &nodes[1..nodes.len().checked_sub(1)?],
@@ -679,9 +692,15 @@ struct Converter<'a> {
     targets: &'a HashMap<String, &'a Microflow>,
     entities: &'a HashSet<String>,
     attributes: &'a Attributes,
+    /// A nanoflow's activities abort where a microflow's roll back.
+    nanoflow: bool,
 }
 
 impl Converter<'_> {
+    fn default_handling(&self) -> &'static str {
+        if self.nanoflow { "Abort" } else { "Rollback" }
+    }
+
     fn block(
         &self,
         nodes: &[Node<'_>],
@@ -724,7 +743,7 @@ impl Converter<'_> {
                 _ => None,
             },
             Node::Decision { split, yes, no, .. } => {
-                if split.get_str("ErrorHandlingType").ok()? != "Rollback" {
+                if split.get_str("ErrorHandlingType").ok()? != self.default_handling() {
                     return None;
                 }
                 let condition_doc = split.get_document("SplitCondition").ok()?;
@@ -744,7 +763,7 @@ impl Converter<'_> {
                     true_branch,
                     false_branch,
                 };
-                attest_control(split, &activity, "SplitCondition")?;
+                attest_control(split, &activity, "SplitCondition", self.nanoflow)?;
                 source.push(format!(
                     "flow.decision({rendered}, {}",
                     closure_start(&yes_source)
@@ -755,8 +774,11 @@ impl Converter<'_> {
                 source.push("});".into());
                 Some(activity)
             }
+            // The typed builders have no error handlers and no switches; a
+            // flow with either is declared in full instead.
+            Node::Switch { .. } | Node::Handled { .. } | Node::Label(_) | Node::Jump(_) => None,
             Node::Loop { node, body } => {
-                if node.get_str("ErrorHandlingType").ok()? != "Rollback" {
+                if node.get_str("ErrorHandlingType").ok()? != self.default_handling() {
                     return None;
                 }
                 let native = node.get_document("LoopSource").ok()?;
@@ -814,7 +836,7 @@ impl Converter<'_> {
                     } => *target = activities,
                     _ => unreachable!(),
                 }
-                attest_control(node, &activity, "LoopSource")?;
+                attest_control(node, &activity, "LoopSource", self.nanoflow)?;
                 source.push(if body.is_empty() {
                     opening.replace("|flow", "|_flow")
                 } else {
@@ -837,6 +859,7 @@ impl Converter<'_> {
             targets,
             entities,
             attributes,
+            ..
         } = self;
         let action = node.get_document("Action").ok()?;
         let activity = match action.get_str("$Type").ok()? {
@@ -1036,10 +1059,11 @@ impl Converter<'_> {
             _ => return None,
         };
         // Unknown action fields/options must never be silently called editable.
-        let (fresh, _) = mxrs_writer::flow_compiler::build_microflow_graph(
+        let (fresh, _) = mxrs_writer::flow_compiler::build_flow_graph(
             std::slice::from_ref(&activity),
             &[],
             None,
+            self.nanoflow,
         );
         if !same_semantics(action, fresh.get(1)?.get_document("Action").ok()?) {
             return None;
@@ -1056,11 +1080,12 @@ fn closure_start(source: &[String]) -> &'static str {
     }
 }
 
-fn attest_control(node: &Document, activity: &Activity, field: &str) -> Option<()> {
-    let (fresh, _) = mxrs_writer::flow_compiler::build_microflow_graph(
+fn attest_control(node: &Document, activity: &Activity, field: &str, nanoflow: bool) -> Option<()> {
+    let (fresh, _) = mxrs_writer::flow_compiler::build_flow_graph(
         std::slice::from_ref(activity),
         &[],
         None,
+        nanoflow,
     );
     same_semantics(
         node.get_document(field).ok()?,

@@ -31,8 +31,8 @@ pub use declaration::{
     ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule, SystemMember, SystemMembersDecl,
 };
 pub use flow::{
-    Activity, DataType, FlowParameterDecl, Member, MicroflowCallMapping, MicroflowDecl,
-    NativeDocument, NativeValue,
+    Activity, DataType, ErrorHandling, FlowParameterDecl, Member, MicroflowCallMapping,
+    MicroflowDecl, NativeDocument, NativeValue, SwitchCase,
 };
 pub use markers::system;
 pub use markers::{

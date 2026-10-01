@@ -145,6 +145,12 @@ impl<T: MendixReturnType> FlowParameterBuilder<T> {
 pub struct FlowBuilder {
     decl: MicroflowDecl,
     accepts_parameters: bool,
+    /// Set by [`FlowBuilder::disabled`]: the next activity is kept but not
+    /// run.
+    disable_next: bool,
+    /// Set by [`FlowBuilder::on_error`] and its siblings: how the next
+    /// activity answers its own failure.
+    handle_next: Option<(mxrs_ir::ErrorHandling, Vec<Activity>)>,
 }
 
 impl FlowBuilder {
@@ -152,6 +158,8 @@ impl FlowBuilder {
         FlowBuilder {
             decl: MicroflowDecl::new(name),
             accepts_parameters: true,
+            disable_next: false,
+            handle_next: None,
         }
     }
 
@@ -159,6 +167,8 @@ impl FlowBuilder {
         Self {
             decl: MicroflowDecl::new(String::new()),
             accepts_parameters: false,
+            disable_next: false,
+            handle_next: None,
         }
     }
 
@@ -167,7 +177,71 @@ impl FlowBuilder {
     }
 
     pub(crate) fn push(&mut self, activity: Activity) -> &mut Self {
+        let activity = match self.handle_next.take() {
+            Some((handling, handler)) => Activity::OnError {
+                handling,
+                activity: Box::new(activity),
+                handler,
+            },
+            None => activity,
+        };
+        let activity = if std::mem::take(&mut self.disable_next) {
+            Activity::Disabled(Box::new(activity))
+        } else {
+            activity
+        };
         self.decl.activities.push(activity);
+        self
+    }
+
+    /// Gives the next activity an error handler: when it fails, what it did
+    /// is rolled back and `handler` runs. A handler that does not end the
+    /// flow carries on with whatever follows the activity.
+    ///
+    /// ```ignore
+    /// flow.on_error(|flow| {
+    ///     flow.log(LogSeverity::Error, "Orders", mx("'Could not ship'"), |_| {});
+    ///     flow.return_with(mx("false"));
+    /// })
+    /// .call(MicroflowRef::<SUB_ShipOrder>::new(), |call| {
+    ///     call.argument("Order", mx("$Order"));
+    /// });
+    /// ```
+    pub fn on_error(&mut self, handler: impl FnOnce(&mut FlowBuilder)) -> &mut Self {
+        self.handle_next = Some((mxrs_ir::ErrorHandling::Custom, Self::nested(handler)));
+        self
+    }
+
+    /// As [`FlowBuilder::on_error`], keeping what the flow changed before
+    /// the activity failed.
+    pub fn on_error_without_rollback(
+        &mut self,
+        handler: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        self.handle_next = Some((
+            mxrs_ir::ErrorHandling::CustomWithoutRollback,
+            Self::nested(handler),
+        ));
+        self
+    }
+
+    /// Lets the flow carry on past the next activity when it fails, as if
+    /// it had not.
+    pub fn continue_on_error(&mut self) -> &mut Self {
+        self.handle_next = Some((mxrs_ir::ErrorHandling::Continue, Vec::new()));
+        self
+    }
+
+    /// Ends the flow by raising the error being handled to its caller.
+    pub fn raise_error(&mut self) -> &mut Self {
+        self.push(Activity::RaiseError)
+    }
+
+    /// Keeps the next activity in the flow without running it — what
+    /// disabling an activity in the model does:
+    /// `flow.disabled().commit(&order);`.
+    pub fn disabled(&mut self) -> &mut Self {
+        self.disable_next = true;
         self
     }
 
@@ -247,7 +321,7 @@ impl FlowBuilder {
         commit: bool,
     ) -> Var<M> {
         let variable = variable.into();
-        self.decl.activities.push(Activity::CreateObject {
+        self.push(Activity::CreateObject {
             variable: variable.clone(),
             entity: entity.qualified_name(),
             members: members
@@ -265,7 +339,7 @@ impl FlowBuilder {
         members: Vec<MemberAssignment<M>>,
         commit: bool,
     ) -> &mut Self {
-        self.decl.activities.push(Activity::ChangeObject {
+        self.push(Activity::ChangeObject {
             variable: variable.name().to_string(),
             entity: M::qualified_name(),
             members: members
@@ -280,7 +354,7 @@ impl FlowBuilder {
     /// Commits an object or a list. `commit_with` states the options this
     /// leaves at their defaults.
     pub fn commit(&mut self, variable: &impl crate::flow_actions::Variable) -> &mut Self {
-        self.decl.activities.push(Activity::Commit {
+        self.push(Activity::Commit {
             variable: variable.variable_name().to_string(),
         });
         self
@@ -289,7 +363,7 @@ impl FlowBuilder {
     /// Deletes an object or a list. `delete_with` states the options this
     /// leaves at their defaults.
     pub fn delete_object(&mut self, variable: &impl crate::flow_actions::Variable) -> &mut Self {
-        self.decl.activities.push(Activity::DeleteObject {
+        self.push(Activity::DeleteObject {
             variable: variable.variable_name().to_string(),
         });
         self
@@ -301,7 +375,7 @@ impl FlowBuilder {
         entity: Ref<M>,
     ) -> ListVar<M> {
         let variable = variable.into();
-        self.decl.activities.push(Activity::CreateList {
+        self.push(Activity::CreateList {
             variable: variable.clone(),
             entity: entity.qualified_name(),
         });
@@ -318,7 +392,7 @@ impl FlowBuilder {
         use_return: bool,
         mappings: Vec<CallArgument>,
     ) -> &mut Self {
-        self.decl.activities.push(Activity::CallMicroflow {
+        self.push(Activity::CallMicroflow {
             name: target.qualified_name(),
             result_variable,
             result_type: None,
@@ -338,7 +412,7 @@ impl FlowBuilder {
         mappings: Vec<CallArgument>,
     ) -> T::Variable {
         let variable = variable.into();
-        self.decl.activities.push(Activity::CallMicroflow {
+        self.push(Activity::CallMicroflow {
             name: target.qualified_name(),
             result_variable: Some(variable.clone()),
             result_type: Some(T::flow_return_type()),
@@ -360,7 +434,7 @@ impl FlowBuilder {
         then(&mut true_builder);
         let mut false_builder = FlowBuilder::branch();
         otherwise(&mut false_builder);
-        self.decl.activities.push(Activity::Decision {
+        self.push(Activity::Decision {
             condition: condition.into_expr().render(),
             true_branch: true_builder.decl.activities,
             false_branch: false_builder.decl.activities,
@@ -377,7 +451,7 @@ impl FlowBuilder {
         let iterator_name = iterator_name.into();
         let mut builder = FlowBuilder::branch();
         body(&mut builder, Var::new(iterator_name.clone()));
-        self.decl.activities.push(Activity::LoopOver {
+        self.push(Activity::LoopOver {
             list_variable: list.name().to_string(),
             iterator: iterator_name,
             activities: builder.decl.activities,
@@ -392,7 +466,7 @@ impl FlowBuilder {
     ) -> &mut Self {
         let mut builder = FlowBuilder::branch();
         body(&mut builder);
-        self.decl.activities.push(Activity::WhileLoop {
+        self.push(Activity::WhileLoop {
             condition: condition.into_expr().render(),
             activities: builder.decl.activities,
         });
@@ -400,12 +474,12 @@ impl FlowBuilder {
     }
 
     pub fn break_loop(&mut self) -> &mut Self {
-        self.decl.activities.push(Activity::BreakLoop);
+        self.push(Activity::BreakLoop);
         self
     }
 
     pub fn continue_loop(&mut self) -> &mut Self {
-        self.decl.activities.push(Activity::ContinueLoop);
+        self.push(Activity::ContinueLoop);
         self
     }
 

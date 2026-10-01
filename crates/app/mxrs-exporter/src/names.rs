@@ -285,6 +285,8 @@ const MXRS_PRELUDE: &[&str] = &[
     "NanoflowMarker",
     "NanoflowModuleBuilder",
     "NanoflowRef",
+    "NativeDocument",
+    "NativeValue",
     "NavigationBuilder",
     "NavigationItemBuilder",
     "NavigationProfileBuilder",

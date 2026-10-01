@@ -125,6 +125,18 @@ impl From<bool> for NativeValue {
     }
 }
 
+impl From<i32> for NativeValue {
+    fn from(value: i32) -> Self {
+        Self::Int32(value)
+    }
+}
+
+impl From<i64> for NativeValue {
+    fn from(value: i64) -> Self {
+        Self::Int64(value)
+    }
+}
+
 impl From<&str> for NativeValue {
     fn from(value: &str) -> Self {
         Self::Text(value.to_string())
@@ -316,6 +328,91 @@ pub enum Activity {
     /// stores for it. Every activity kind the typed variants above do not
     /// cover is declared this way, as is every option they leave out.
     Action(NativeDocument),
+    /// An activity the model keeps but does not run.
+    Disabled(Box<Activity>),
+    /// An activity with its own answer to failing. `handler` runs when it
+    /// does; a handler that does not end the flow continues with whatever
+    /// follows the activity.
+    OnError {
+        handling: ErrorHandling,
+        activity: Box<Activity>,
+        handler: Vec<Activity>,
+    },
+    /// Ends the flow by raising the error being handled to its caller.
+    RaiseError,
+    /// A decision a rule makes: `arguments` are the rule's parameters, by
+    /// qualified name, and the expressions passed for them.
+    RuleDecision {
+        rule: String,
+        arguments: Vec<(String, String)>,
+        true_branch: Vec<Activity>,
+        false_branch: Vec<Activity>,
+    },
+    /// A branch per value of an enumeration expression.
+    Switch {
+        expression: String,
+        cases: Vec<SwitchCase>,
+    },
+    /// A branch per value of the enumeration a rule returns; `arguments` as
+    /// for [`Activity::RuleDecision`].
+    RuleSwitch {
+        rule: String,
+        arguments: Vec<(String, String)>,
+        cases: Vec<SwitchCase>,
+    },
+    /// Names this point of the flow, for [`Activity::Jump`] to come back —
+    /// or across — to.
+    Label(String),
+    /// Ends this path by carrying on at the [`Activity::Label`] of that
+    /// name, in the same flow or loop body.
+    Jump(String),
+    /// A branch per entity the object in `variable` may be an instance of.
+    TypeSwitch {
+        variable: String,
+        cases: Vec<SwitchCase>,
+    },
+}
+
+/// What an activity does about its own failure, when it is not the default
+/// of rolling back and failing the flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorHandling {
+    /// Rolls back, then runs the handler.
+    Custom,
+    /// Runs the handler, keeping what the flow changed so far.
+    CustomWithoutRollback,
+    /// Carries on as if the activity had succeeded.
+    Continue,
+}
+
+impl ErrorHandling {
+    /// The name the model stores.
+    pub fn native_name(self) -> &'static str {
+        match self {
+            ErrorHandling::Custom => "Custom",
+            ErrorHandling::CustomWithoutRollback => "CustomWithoutRollBack",
+            ErrorHandling::Continue => "Continue",
+        }
+    }
+
+    pub fn from_native_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "Custom" => ErrorHandling::Custom,
+            "CustomWithoutRollBack" => ErrorHandling::CustomWithoutRollback,
+            "Continue" => ErrorHandling::Continue,
+            _ => return None,
+        })
+    }
+}
+
+/// One branch of a [`Activity::Switch`] or [`Activity::TypeSwitch`]: the
+/// values that select it — enumeration value names, or qualified entity
+/// names — and what runs when one does. The model writes the absence of a
+/// value as `(empty)` for an enumeration and as an empty name for an entity.
+#[derive(Debug, Clone)]
+pub struct SwitchCase {
+    pub values: Vec<String>,
+    pub activities: Vec<Activity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

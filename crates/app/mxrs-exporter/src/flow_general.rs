@@ -19,7 +19,9 @@ use mxrs_dsl::flow_actions::{
     AggregateFunction, ChangeKind, ListChange, LogSeverity, MemberName, MessageKind, NativeEnum,
     OptionDefault, OptionKind, OptionSpec, SortOrder, actions,
 };
-use mxrs_ir::flow::{Activity, DataType, FlowParameterDecl, MicroflowDecl, NativeDocument};
+use mxrs_ir::flow::{
+    Activity, DataType, ErrorHandling, FlowParameterDecl, MicroflowDecl, NativeDocument, SwitchCase,
+};
 use mxrs_ir::{NativeValue, flow::FlowReturnType};
 use mxrs_model::Microflow;
 use mxrs_writer::flow_graph::{Node, structured_nodes};
@@ -165,6 +167,10 @@ struct Statement {
 
 struct Converter<'a> {
     model: &'a Model<'a>,
+    default_handling: &'static str,
+    /// The names given to the points the flow's paths converge on, by the
+    /// identity of the node each one precedes.
+    labels: std::cell::RefCell<HashMap<String, String>>,
 }
 
 /// The Mendix variables in scope and the Rust bindings that hold them.
@@ -188,9 +194,16 @@ fn closure(receiver: &str, lines: Vec<String>) -> Vec<String> {
         return vec!["|_| {}".to_string()];
     }
     let mut out = vec![format!("|{receiver}| {{")];
-    out.extend(lines);
+    out.extend(indented(lines));
     out.push("}".to_string());
     out
+}
+
+/// One level deeper. rustfmt lays the generated source out, but leaves a
+/// statement it cannot fit — one holding a long expression — exactly as it
+/// was written, so what is written is already indented.
+fn indented(lines: Vec<String>) -> impl Iterator<Item = String> {
+    lines.into_iter().map(|line| format!("    {line}"))
 }
 
 /// `head` followed by a trailing closure and the closing of the call.
@@ -481,11 +494,18 @@ impl Converter<'_> {
     fn action(&self, action: &Document, scope: &Scope) -> Outcome<Statement> {
         let mut fields = Fields::new(action);
         let kind = fields.kind();
-        let handling = fields.text("ErrorHandlingType")?;
-        if handling != "Rollback" {
-            return Err(format!("{kind} handles errors with {handling}"));
-        }
+        // How the action answers its own failure is said around it, by the
+        // caller that knows whether it has a handler.
+        fields.text("ErrorHandlingType")?;
         let statement = match kind {
+            "Microflows$CastAction" => {
+                let name = fields.text("VariableName")?;
+                Statement {
+                    document: actions::cast(name),
+                    lines: vec![format!("flow.cast({});", rust_string(name))],
+                    declares: Some(name.to_string()),
+                }
+            }
             "Microflows$CreateVariableAction" => {
                 let name = fields.text("VariableName")?;
                 let value = fields.text("InitialValue")?;
@@ -666,6 +686,19 @@ impl Converter<'_> {
                             "Microflows$CustomRange" => {
                                 let limit = range.text("LimitExpression")?;
                                 let offset = range.text("OffsetExpression")?;
+                                // Some models keep the flag of the range
+                                // this one replaced; only unset, it says
+                                // nothing the limit does not.
+                                range.seen.insert("SingleObject");
+                                if !matches!(
+                                    range.document.get("SingleObject"),
+                                    None | Some(Bson::Boolean(false))
+                                ) {
+                                    return Err(
+                                        "a custom range that also asks for a single object"
+                                            .to_string(),
+                                    );
+                                }
                                 document.set_path(
                                     "RetrieveSource.Range",
                                     actions::custom_range(limit, offset),
@@ -824,14 +857,24 @@ impl Converter<'_> {
                 let uses_result = fields.boolean("UseReturnVariable")?;
                 let mut call = Fields::new(fields.document("MicroflowCall")?);
                 let target = call.text("Microflow")?;
-                call.absent_or_null("QueueSettings")?;
-                if !uses_result && !result.is_empty() {
-                    return Err(format!(
-                        "a discarded call to {target} still names a result variable"
-                    ));
-                }
-                let mut document = actions::call(target, uses_result.then_some(result));
+                let keeps = uses_result && !result.is_empty();
+                let mut document = actions::call(target, keeps.then_some(result));
                 let mut lines = Vec::new();
+                if !uses_result {
+                    document
+                        .set("UseReturnVariable", false)
+                        .set("ResultVariableName", result);
+                    lines.push(format!("call.discard_result({});", rust_string(result)));
+                }
+                call.seen.insert("QueueSettings");
+                if let Some(Bson::Document(queue)) = call.document.get("QueueSettings") {
+                    let mut queue_fields = Fields::new(queue);
+                    let name = queue_fields.text("Queue")?;
+                    queue_fields.absent_or_null("Retry")?;
+                    queue_fields.finish()?;
+                    document.set_path("MicroflowCall.QueueSettings", actions::queue_settings(name));
+                    lines.push(format!("call.queue({});", rust_string(name)));
+                }
                 for mapping in call.items("ParameterMappings", 2)? {
                     let mut mapping_fields = Fields::new(mapping);
                     let parameter = mapping_fields.text("Parameter")?;
@@ -862,7 +905,7 @@ impl Converter<'_> {
                     ));
                 }
                 call.finish()?;
-                let head = if uses_result {
+                let head = if keeps {
                     format!(
                         "flow.call_into({}, {}, ",
                         rust_string(result),
@@ -874,7 +917,7 @@ impl Converter<'_> {
                 Statement {
                     document,
                     lines: call_with_closure(head, closure("call", lines)),
-                    declares: uses_result.then(|| result.to_string()),
+                    declares: keeps.then(|| result.to_string()),
                 }
             }
             "Microflows$JavaActionCallAction" => {
@@ -882,13 +925,15 @@ impl Converter<'_> {
                 let result = fields.text("ResultVariableName")?;
                 let uses_result = fields.boolean("UseReturnVariable")?;
                 fields.absent_or_null("QueueSettings")?;
-                if !uses_result && !result.is_empty() {
-                    return Err(format!(
-                        "a discarded call to {java_action} still names a result variable"
-                    ));
-                }
-                let mut document = actions::call_java(java_action, uses_result.then_some(result));
+                let keeps = uses_result && !result.is_empty();
+                let mut document = actions::call_java(java_action, keeps.then_some(result));
                 let mut lines = Vec::new();
+                if !uses_result {
+                    document
+                        .set("UseReturnVariable", false)
+                        .set("ResultVariableName", result);
+                    lines.push(format!("call.discard_result({});", rust_string(result)));
+                }
                 for mapping in fields.items("ParameterMappings", 2)? {
                     let mut mapping_fields = Fields::new(mapping);
                     let parameter = mapping_fields.text("Parameter")?;
@@ -950,7 +995,7 @@ impl Converter<'_> {
                     }
                     lines.push(line);
                 }
-                let head = if uses_result {
+                let head = if keeps {
                     format!(
                         "flow.call_java_into({}, {}, ",
                         rust_string(result),
@@ -962,7 +1007,7 @@ impl Converter<'_> {
                 Statement {
                     document,
                     lines: call_with_closure(head, closure("call", lines)),
-                    declares: uses_result.then(|| result.to_string()),
+                    declares: keeps.then(|| result.to_string()),
                 }
             }
             "Microflows$ShowMessageAction" => {
@@ -1038,9 +1083,56 @@ impl Converter<'_> {
             "Microflows$ShowFormAction" => {
                 let mut settings = Fields::new(fields.document("FormSettings")?);
                 let page = settings.text("Form")?;
-                settings.absent_or_null("TitleOverride")?;
                 let mut document = actions::show_page(page);
                 let mut lines = Vec::new();
+                settings.seen.insert("TitleOverride");
+                if let Some(Bson::Document(title)) = settings.document.get("TitleOverride") {
+                    let mut title_fields = Fields::new(title);
+                    if title_fields.kind() != "Microflows$TextTemplate" {
+                        return Err(format!("{page} is opened under an unknown kind of title"));
+                    }
+                    let mut declared = actions::title_override();
+                    let mut text = Fields::new(title_fields.document("Text")?);
+                    for translation in text.items("Items", 3)? {
+                        let mut translation_fields = Fields::new(translation);
+                        let language = translation_fields.text("LanguageCode")?;
+                        let content = translation_fields.text("Text")?;
+                        translation_fields.finish()?;
+                        if let Some(items) = declared
+                            .document_mut("Text")
+                            .and_then(|text| text.list_mut("Items"))
+                        {
+                            items.push(NativeValue::Document(
+                                NativeDocument::new("Texts$Translation")
+                                    .with("LanguageCode", language)
+                                    .with("Text", content),
+                            ));
+                        }
+                        lines.push(format!(
+                            "page.title({}, {});",
+                            rust_string(language),
+                            rust_string(content)
+                        ));
+                    }
+                    text.finish()?;
+                    for parameter in title_fields.items("Parameters", 2)? {
+                        let mut parameter_fields = Fields::new(parameter);
+                        let value = parameter_fields.text("Expression")?;
+                        parameter_fields.finish()?;
+                        if let Some(parameters) = declared.list_mut("Parameters") {
+                            parameters
+                                .push(NativeValue::Document(actions::template_parameter(value)));
+                        }
+                        lines.push(format!("page.title_parameter({});", expression(value)));
+                    }
+                    title_fields.finish()?;
+                    document.set_path("FormSettings.TitleOverride", declared);
+                } else if !matches!(
+                    settings.document.get("TitleOverride"),
+                    None | Some(Bson::Null)
+                ) {
+                    return Err(format!("{page} is opened under an unknown kind of title"));
+                }
                 for mapping in settings.items("ParameterMappings", 2)? {
                     let mut mapping_fields = Fields::new(mapping);
                     let parameter = mapping_fields.text("Parameter")?;
@@ -1097,7 +1189,27 @@ impl Converter<'_> {
                     declares: None,
                 }
             }
-            other => return Err(format!("{other} has no builder yet")),
+            // An activity no builder covers yet is still declared: as the
+            // document the model stores for it, field by field.
+            _ => {
+                let document = native(action, true)?;
+                for key in action.keys() {
+                    fields.seen.insert(key);
+                }
+                let mut lines = native_source(&document);
+                lines[0] = format!("flow.native_action({}", lines[0]);
+                lines
+                    .last_mut()
+                    .expect("a document has a line")
+                    .push_str(");");
+                let mut document = document;
+                document.set("ErrorHandlingType", "Rollback");
+                Statement {
+                    document,
+                    lines,
+                    declares: None,
+                }
+            }
         };
         fields.finish()?;
         Ok(statement)
@@ -1220,8 +1332,204 @@ impl Converter<'_> {
     ) -> Outcome<Vec<Activity>> {
         let mut activities = Vec::new();
         for node in nodes {
+            let (node, handler) = match node {
+                Node::Handled { node, handler } => (node.as_ref(), Some(handler.as_slice())),
+                node => (node, None),
+            };
+            // What the handler sees is what was there before the activity
+            // it answers for.
+            let before = scope.clone();
+            let mut statement = Vec::new();
+            let Some(activity) = self.statement(node, scope, &mut statement, nested)? else {
+                lines.extend(statement);
+                continue;
+            };
+            let handling = match node {
+                Node::Simple(document) => document
+                    .get_document("Action")
+                    .ok()
+                    .and_then(|action| action.get_str("ErrorHandlingType").ok()),
+                Node::Loop { node, .. } => node.get_str("ErrorHandlingType").ok(),
+                _ => None,
+            }
+            .unwrap_or(self.default_handling);
+            let activity = match (ErrorHandling::from_native_name(handling), handler) {
+                (None, None) if handling == self.default_handling => activity,
+                (Some(ErrorHandling::Continue), None) => {
+                    modify(&mut statement, vec!["continue_on_error()".to_string()])?;
+                    Activity::OnError {
+                        handling: ErrorHandling::Continue,
+                        activity: Box::new(activity),
+                        handler: Vec::new(),
+                    }
+                }
+                (
+                    Some(handling @ (ErrorHandling::Custom | ErrorHandling::CustomWithoutRollback)),
+                    Some(handler),
+                ) => {
+                    let mut handler_lines = Vec::new();
+                    let handler =
+                        self.block(handler, &mut before.clone(), &mut handler_lines, true)?;
+                    let method = if handling == ErrorHandling::Custom {
+                        "on_error"
+                    } else {
+                        "on_error_without_rollback"
+                    };
+                    let mut call = closure("flow", handler_lines);
+                    call[0] = format!("{method}({}", call[0]);
+                    call.last_mut().expect("a closure has a line").push(')');
+                    modify(&mut statement, call)?;
+                    Activity::OnError {
+                        handling,
+                        activity: Box::new(activity),
+                        handler,
+                    }
+                }
+                (_, Some(_)) => {
+                    return Err(format!(
+                        "an activity with an error handler handles errors with {handling}"
+                    ));
+                }
+                (_, None) => {
+                    return Err(format!(
+                        "an activity handles errors with {handling} but has no handler"
+                    ));
+                }
+            };
+            lines.extend(statement);
+            activities.push(activity);
+        }
+        Ok(activities)
+    }
+
+    /// Converts one node into the builder call that declares it. `None`
+    /// when the node needs no statement of its own: the flow's last end
+    /// event, whose return the caller states.
+    fn statement(
+        &self,
+        node: &Node<'_>,
+        scope: &mut Scope,
+        lines: &mut Vec<String>,
+        nested: bool,
+    ) -> Outcome<Option<Activity>> {
+        let mut activities = Vec::new();
+        {
             match node {
+                Node::Handled { .. } => {
+                    return Err("an error handler on an error handler".to_string());
+                }
+                Node::Label(target) => {
+                    let mut labels = self.labels.borrow_mut();
+                    let name = format!("point_{}", labels.len() + 1);
+                    labels.insert(target.clone(), name.clone());
+                    lines.push(format!("flow.label({});", rust_string(&name)));
+                    activities.push(Activity::Label(name));
+                }
+                Node::Jump(target) => {
+                    let name = self
+                        .labels
+                        .borrow()
+                        .get(target)
+                        .cloned()
+                        .ok_or("a jump to a point nothing names")?;
+                    lines.push(format!("flow.jump({});", rust_string(&name)));
+                    activities.push(Activity::Jump(name));
+                }
+                Node::Switch { split, cases } => {
+                    let inheritance =
+                        split.get_str("$Type").ok() == Some("Microflows$InheritanceSplit");
+                    let mut case_lines = Vec::new();
+                    let mut declared = Vec::new();
+                    for case in cases {
+                        let mut branch_lines = Vec::new();
+                        let branch =
+                            self.block(&case.body, &mut scope.clone(), &mut branch_lines, true)?;
+                        let head = match case.values.as_slice() {
+                            [value] if value.is_empty() && inheritance => "on.empty(".to_string(),
+                            [value] if value == "(empty)" && !inheritance => {
+                                "on.empty(".to_string()
+                            }
+                            [value] if inheritance => format!("on.case({}, ", self.entity(value)),
+                            [value] => format!("on.case({}, ", rust_string(value)),
+                            values if inheritance => {
+                                return Err(format!(
+                                    "one branch for {} entities has no builder yet",
+                                    values.len()
+                                ));
+                            }
+                            values => format!(
+                                "on.cases([{}], ",
+                                values
+                                    .iter()
+                                    .map(|value| rust_string(value))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        };
+                        case_lines.extend(call_with_closure(head, closure("flow", branch_lines)));
+                        declared.push(SwitchCase {
+                            values: case.values.clone(),
+                            activities: branch,
+                        });
+                    }
+                    if inheritance {
+                        let mut split_fields = node_fields(split, &["Caption", "Documentation"])?;
+                        let variable = split_fields.text("SplitVariableName")?;
+                        split_fields.finish()?;
+                        lines.extend(call_with_closure(
+                            format!("flow.switch_type({}, ", Self::variable(scope, variable)),
+                            closure("on", case_lines),
+                        ));
+                        activities.push(Activity::TypeSwitch {
+                            variable: variable.to_string(),
+                            cases: declared,
+                        });
+                    } else {
+                        match self.split_condition(split)? {
+                            Condition::Expression(condition) => {
+                                lines.extend(call_with_closure(
+                                    format!("flow.switch({}, ", expression(condition)),
+                                    closure("on", case_lines),
+                                ));
+                                activities.push(Activity::Switch {
+                                    expression: condition.to_string(),
+                                    cases: declared,
+                                });
+                            }
+                            Condition::Rule { rule, arguments } => {
+                                let mut rule_lines =
+                                    closure("rule", rule_arguments(rule, &arguments));
+                                rule_lines
+                                    .last_mut()
+                                    .expect("a closure has a line")
+                                    .push(',');
+                                let mut on_lines = closure("on", case_lines);
+                                on_lines.last_mut().expect("a closure has a line").push(',');
+                                lines.push("flow.switch_by_rule(".to_string());
+                                lines.push(format!("    {},", rust_string(rule)));
+                                lines.extend(indented(rule_lines));
+                                lines.extend(indented(on_lines));
+                                lines.push(");".to_string());
+                                activities.push(Activity::RuleSwitch {
+                                    rule: rule.to_string(),
+                                    arguments: arguments
+                                        .iter()
+                                        .map(|(parameter, argument)| {
+                                            (parameter.to_string(), argument.to_string())
+                                        })
+                                        .collect(),
+                                    cases: declared,
+                                });
+                            }
+                        }
+                    }
+                }
                 Node::Simple(document) => match document.get_str("$Type").unwrap_or_default() {
+                    "Microflows$ErrorEvent" => {
+                        node_fields(document, &[])?.finish()?;
+                        activities.push(Activity::RaiseError);
+                        lines.push("flow.raise_error();".to_string());
+                    }
                     "Microflows$EndEvent" => {
                         node_fields(document, &["Documentation", "ReturnValue"])?.finish()?;
                         let returned = document.get_str("ReturnValue").unwrap_or_default();
@@ -1262,51 +1570,71 @@ impl Converter<'_> {
                             ],
                         )?
                         .finish()?;
-                        // A disabled activity does not run, and no builder
-                        // says so yet.
-                        if document.get_bool("Disabled").unwrap_or(false) {
-                            return Err("it has a disabled activity".to_string());
-                        }
+                        let disabled = document.get_bool("Disabled").unwrap_or(false);
                         let action = document
                             .get_document("Action")
                             .map_err(|_| "an activity without an action".to_string())?;
                         let statement = self.action(action, scope)?;
+
                         let mut statement_lines = statement.lines;
                         if let Some(name) = &statement.declares {
                             let binding = Self::declare(scope, name)?;
                             statement_lines[0] = format!("let {binding} = {}", statement_lines[0]);
                         }
+                        let mut activity = Activity::Action(statement.document);
+                        if disabled {
+                            let first = &mut statement_lines[0];
+                            let call = first
+                                .find("flow.")
+                                .ok_or("a statement that is not a builder call")?;
+                            first.insert_str(call + "flow.".len(), "disabled().");
+                            activity = Activity::Disabled(Box::new(activity));
+                        }
                         lines.extend(statement_lines);
-                        activities.push(Activity::Action(statement.document));
+                        activities.push(activity);
                     }
                     other => return Err(format!("unexpected node {other}")),
                 },
-                Node::Decision {
-                    split,
-                    yes,
-                    no,
-                    merge,
-                } => {
-                    let mut split_fields =
-                        node_fields(split, &["Caption", "Documentation", "SplitCondition"])?;
-                    if split_fields.text("ErrorHandlingType")? != "Rollback" {
-                        return Err("a split with its own error handling".to_string());
-                    }
-                    split_fields.finish()?;
-                    if let Some(merge) = merge {
-                        node_fields(merge, &[])?.finish()?;
-                    }
-                    let condition = split
-                        .get_document("SplitCondition")
-                        .map_err(|_| "a split without a condition".to_string())?;
-                    if condition.get_str("$Type").ok()
-                        != Some("Microflows$ExpressionSplitCondition")
-                    {
-                        return Err("a rule-based split has no builder yet".to_string());
-                    }
-                    let mut condition_fields = Fields::new(condition);
-                    let condition = condition_fields.text("Expression")?;
-                    condition_fields.finish()?;
+                Node::Decision { split, yes, no } => {
+                    let condition = match self.split_condition(split)? {
+                        Condition::Expression(condition) => condition,
+                        Condition::Rule { rule, arguments } => {
+                            let branch =
+                                |nodes: &[Node<'_>]| -> Outcome<(Vec<Activity>, Vec<String>)> {
+                                    let mut branch_lines = Vec::new();
+                                    let activities = self.block(
+                                        nodes,
+                                        &mut scope.clone(),
+                                        &mut branch_lines,
+                                        true,
+                                    )?;
+                                    Ok((activities, closure("flow", branch_lines)))
+                                };
+                            let (true_branch, mut yes_lines) = branch(yes)?;
+                            let (false_branch, mut no_lines) = branch(no)?;
+                            let mut rule_lines = closure("rule", rule_arguments(rule, &arguments));
+                            for closure in [&mut rule_lines, &mut yes_lines, &mut no_lines] {
+                                closure.last_mut().expect("a closure has a line").push(',');
+                            }
+                            lines.push("flow.decision_by_rule(".to_string());
+                            lines.push(format!("    {},", rust_string(rule)));
+                            lines.extend(indented(rule_lines));
+                            lines.extend(indented(yes_lines));
+                            lines.extend(indented(no_lines));
+                            lines.push(");".to_string());
+                            return Ok(Some(Activity::RuleDecision {
+                                rule: rule.to_string(),
+                                arguments: arguments
+                                    .iter()
+                                    .map(|(parameter, argument)| {
+                                        (parameter.to_string(), argument.to_string())
+                                    })
+                                    .collect(),
+                                true_branch,
+                                false_branch,
+                            }));
+                        }
+                    };
                     let branch = |nodes: &[Node<'_>]| -> Outcome<(Vec<Activity>, Vec<String>)> {
                         let mut branch_lines = Vec::new();
                         let activities =
@@ -1316,14 +1644,14 @@ impl Converter<'_> {
                     let (true_branch, mut yes_lines) = branch(yes)?;
                     let (false_branch, mut no_lines) = branch(no)?;
                     lines.push("flow.decision(".to_string());
-                    lines.push(format!("{},", expression(condition)));
+                    lines.push(format!("    {},", expression(condition)));
                     yes_lines
                         .last_mut()
                         .expect("a closure has a line")
                         .push(',');
                     no_lines.last_mut().expect("a closure has a line").push(',');
-                    lines.extend(yes_lines);
-                    lines.extend(no_lines);
+                    lines.extend(indented(yes_lines));
+                    lines.extend(indented(no_lines));
                     lines.push(");".to_string());
                     activities.push(Activity::Decision {
                         condition: condition.to_string(),
@@ -1334,10 +1662,7 @@ impl Converter<'_> {
                 Node::Loop { node, body } => {
                     let mut loop_fields =
                         node_fields(node, &["Documentation", "LoopSource", "ObjectCollection"])?;
-                    let handling = loop_fields.text("ErrorHandlingType")?;
-                    if handling != "Rollback" {
-                        return Err(format!("a loop handles errors with {handling}"));
-                    }
+                    loop_fields.text("ErrorHandlingType")?;
                     loop_fields.finish()?;
                     let source = node
                         .get_document("LoopSource")
@@ -1358,7 +1683,7 @@ impl Converter<'_> {
                                 Self::variable(scope, list),
                                 rust_string(iterator)
                             ));
-                            lines.extend(body_lines);
+                            lines.extend(indented(body_lines));
                             lines.push("});".to_string());
                             activities.push(Activity::LoopOver {
                                 list_variable: list.to_string(),
@@ -1378,7 +1703,7 @@ impl Converter<'_> {
                                 "flow.while_loop({}, |flow| {{",
                                 expression(condition)
                             ));
-                            lines.extend(body_lines);
+                            lines.extend(indented(body_lines));
                             lines.push("});".to_string());
                             activities.push(Activity::WhileLoop {
                                 condition: condition.to_string(),
@@ -1390,26 +1715,193 @@ impl Converter<'_> {
                 }
             }
         }
-        Ok(activities)
+        Ok(activities.pop())
+    }
+
+    /// What an exclusive split decides on.
+    fn split_condition<'a>(&self, split: &'a Document) -> Outcome<Condition<'a>> {
+        let mut split_fields = node_fields(split, &["Caption", "Documentation", "SplitCondition"])?;
+        if split_fields.text("ErrorHandlingType")? != self.default_handling {
+            return Err("a split with its own error handling".to_string());
+        }
+        split_fields.finish()?;
+        let condition = split
+            .get_document("SplitCondition")
+            .map_err(|_| "a split without a condition".to_string())?;
+        let mut condition_fields = Fields::new(condition);
+        match condition_fields.kind() {
+            "Microflows$ExpressionSplitCondition" => {
+                let expression = condition_fields.text("Expression")?;
+                condition_fields.finish()?;
+                Ok(Condition::Expression(expression))
+            }
+            "Microflows$RuleSplitCondition" => {
+                let mut call = Fields::new(condition_fields.document("RuleCall")?);
+                condition_fields.finish()?;
+                let rule = call.text("Microflow")?;
+                let mut arguments = Vec::new();
+                for mapping in call.items("ParameterMappings", 2)? {
+                    let mut mapping_fields = Fields::new(mapping);
+                    arguments.push((
+                        mapping_fields.text("Parameter")?,
+                        mapping_fields.text("Argument")?,
+                    ));
+                    mapping_fields.finish()?;
+                }
+                call.finish()?;
+                Ok(Condition::Rule { rule, arguments })
+            }
+            other => Err(format!("a split decided by {other} has no builder yet")),
+        }
     }
 }
 
-fn returns_a_value(declaration: &MicroflowDecl) -> bool {
-    fn any(activities: &[Activity]) -> bool {
-        activities.iter().any(|activity| match activity {
-            Activity::ReturnValue { expression } => !expression.is_empty(),
-            Activity::Decision {
-                true_branch,
-                false_branch,
-                ..
-            } => any(true_branch) || any(false_branch),
-            Activity::LoopOver { activities, .. } | Activity::WhileLoop { activities, .. } => {
-                any(activities)
-            }
-            _ => false,
+/// The statements that pass a rule its arguments.
+fn rule_arguments(rule: &str, arguments: &[(&str, &str)]) -> Vec<String> {
+    arguments
+        .iter()
+        .map(|(parameter, argument)| {
+            // The builder qualifies a bare name with the rule.
+            let short = parameter
+                .strip_prefix(rule)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .filter(|name| !name.contains('.'))
+                .unwrap_or(parameter);
+            format!(
+                "rule.argument({}, {});",
+                rust_string(short),
+                expression(argument)
+            )
         })
+        .collect()
+}
+
+/// What a split decides on: an expression, or a rule called with arguments
+/// (its qualified parameter names and the expressions passed for them).
+enum Condition<'a> {
+    Expression(&'a str),
+    Rule {
+        rule: &'a str,
+        arguments: Vec<(&'a str, &'a str)>,
+    },
+}
+
+/// A stored document as the authoring surface carries one: its type and its
+/// fields in order, without identities. `action` leaves out how the action
+/// answers failing, which is said around it.
+fn native(document: &Document, action: bool) -> Outcome<NativeDocument> {
+    let ty = document
+        .get_str("$Type")
+        .map_err(|_| "a document without a type".to_string())?;
+    let mut out = NativeDocument::new(ty);
+    for (key, value) in document {
+        if matches!(key.as_str(), "$ID" | "$Type") || (action && key == "ErrorHandlingType") {
+            continue;
+        }
+        out.set(key, native_value(value, ty, key)?);
     }
-    declaration.return_expression.is_some() || any(&declaration.activities)
+    Ok(out)
+}
+
+fn native_value(value: &Bson, ty: &str, key: &str) -> Outcome<NativeValue> {
+    Ok(match value {
+        Bson::Null => NativeValue::Null,
+        Bson::Boolean(value) => NativeValue::Bool(*value),
+        Bson::Int32(value) => NativeValue::Int32(*value),
+        Bson::Int64(value) => NativeValue::Int64(*value),
+        Bson::String(value) => NativeValue::Text(value.clone()),
+        Bson::Document(value) => NativeValue::Document(native(value, false)?),
+        Bson::Array(values) => {
+            let Some(Bson::Int32(marker)) = values.first() else {
+                return Err(format!("{ty}.{key} is a list without a marker"));
+            };
+            NativeValue::List(
+                *marker,
+                values[1..]
+                    .iter()
+                    .map(|value| native_value(value, ty, key))
+                    .collect::<Outcome<_>>()?,
+            )
+        }
+        other => {
+            return Err(format!(
+                "{ty}.{key} holds a value nothing here can state: {other:?}"
+            ));
+        }
+    })
+}
+
+/// The expression that builds `document`, one field to a line.
+fn native_source(document: &NativeDocument) -> Vec<String> {
+    let mut lines = vec![format!(
+        "NativeDocument::new({})",
+        rust_string(&document.ty)
+    )];
+    for (key, value) in &document.fields {
+        let mut value_lines = native_value_source(value);
+        value_lines[0] = format!(".with({}, {}", rust_string(key), value_lines[0]);
+        value_lines
+            .last_mut()
+            .expect("a value has a line")
+            .push(')');
+        lines.extend(indented(value_lines));
+    }
+    lines
+}
+
+fn native_value_source(value: &NativeValue) -> Vec<String> {
+    match value {
+        NativeValue::Null => vec!["NativeValue::Null".to_string()],
+        NativeValue::Bool(value) => vec![value.to_string()],
+        NativeValue::Int32(value) => vec![format!("{value}_i32")],
+        NativeValue::Int64(value) => vec![format!("{value}_i64")],
+        NativeValue::Text(value) => vec![rust_string(value)],
+        NativeValue::Document(document) => native_source(document),
+        NativeValue::List(marker, items) if items.is_empty() => {
+            vec![format!("NativeValue::List({marker}, Vec::new())")]
+        }
+        NativeValue::List(marker, items) => {
+            let mut lines = vec![
+                "NativeValue::List(".to_string(),
+                format!("    {marker},"),
+                "    vec![".to_string(),
+            ];
+            for item in items {
+                let mut item_lines = native_value_source(item);
+                let last = item_lines.last_mut().expect("a value has a line");
+                if !matches!(item, NativeValue::Null) {
+                    last.push_str(".into()");
+                }
+                last.push(',');
+                lines.extend(indented(indented(item_lines).collect()));
+            }
+            lines.push("    ],".to_string());
+            lines.push(")".to_string());
+            lines
+        }
+    }
+}
+
+/// Puts a modifier between `flow` and the builder call a statement makes:
+/// `flow.call(..)` becomes `flow.<modifier>.call(..)`. The modifier may span
+/// lines; the statement keeps whatever it binds.
+fn modify(statement: &mut Vec<String>, modifier: Vec<String>) -> Outcome<()> {
+    let first = statement
+        .first()
+        .ok_or("an activity without a statement")?
+        .clone();
+    let at = first
+        .find("flow.")
+        .ok_or("a statement that is not a builder call")?
+        + "flow.".len();
+    let (head, rest) = first.split_at(at);
+    let mut lines = modifier;
+    lines[0] = format!("{head}{}", lines[0]);
+    let last = lines.last_mut().expect("a modifier has a line");
+    last.push('.');
+    last.push_str(rest);
+    statement.splice(0..1, lines);
+    Ok(())
 }
 
 /// Reads the fields a graph node carries around what it does: where it is
@@ -1445,7 +1937,16 @@ pub(crate) fn convert(
     let nodes = structured_nodes(document).ok_or("its graph is not structured")?;
     let flow = Microflow::from_bson(document);
     let name = flow.name.as_ref().ok_or("it has no name")?;
-    let converter = Converter { model };
+    let converter = Converter {
+        model,
+        // What an activity does about failing when nothing says otherwise.
+        default_handling: if document.get_str("$Type").ok() == Some("Microflows$Nanoflow") {
+            "Abort"
+        } else {
+            "Rollback"
+        },
+        labels: Default::default(),
+    };
     let mut declaration = MicroflowDecl::new(name);
     declaration.documentation = flow.documentation.clone();
     let mut lines = Vec::new();
@@ -1536,13 +2037,10 @@ pub(crate) fn convert(
     if matches!(declaration.return_type, Some(FlowReturnType::Binary)) {
         return Err("a binary return type has no builder".to_string());
     }
-    // A flow that returns nothing has nothing to return anywhere: a value on
-    // one of its end events is a model the writer would have to guess about.
-    if declaration.return_type.is_none() && returns_a_value(&declaration) {
-        return Err("it returns a value but declares no return type".to_string());
-    }
-    if !mxrs_writer::flow_graph::preserves_body(document, &declaration) {
-        return Err("the writer would not rebuild its stored body unchanged".to_string());
+    if let Some(difference) = mxrs_writer::flow_graph::rebuild_difference(document, &declaration) {
+        return Err(format!(
+            "the writer would not rebuild its stored body unchanged: {difference}"
+        ));
     }
     // What is offered as Rust has to be something a build accepts.
     mxrs_writer::validate_flow_declaration(
@@ -1580,8 +2078,9 @@ pub(crate) fn polish(mut lines: Vec<String>) -> Vec<String> {
         if used {
             continue;
         }
-        if let Some(rest) = lines[index].strip_prefix(&declaration) {
-            lines[index] = rest.to_string();
+        let indent = lines[index].len() - lines[index].trim_start().len();
+        if let Some(rest) = lines[index][indent..].strip_prefix(&declaration) {
+            lines[index] = format!("{}{rest}", &lines[index][..indent]);
         } else if let Some(position) = crate::flow_export::find_identifier(&lines[index], &name) {
             lines[index].insert(position, '_');
         }

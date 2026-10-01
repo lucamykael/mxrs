@@ -9,6 +9,9 @@ pub enum WriterError {
         reason: String,
     },
 
+    #[error("flow {flow:?} has an invalid activity: {reason}")]
+    InvalidFlowActivity { flow: String, reason: String },
+
     #[error("flow {flow:?} has invalid parameter {parameter:?}: {reason}")]
     InvalidFlowParameter {
         flow: String,

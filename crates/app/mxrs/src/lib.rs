@@ -173,7 +173,7 @@ pub trait ApplicationDefinition {
 pub mod prelude {
     pub use crate::{
         AggregateFunction, ChangeKind, Commit, DataType, FlowVar, ListChange, LogSeverity,
-        MemberName, MessageKind, Mx, SortOrder, Variable, mx, var,
+        MemberName, MessageKind, Mx, NativeDocument, NativeValue, SortOrder, Variable, mx, var,
     };
     pub use crate::{
         ApplicationDefinition, AssociationMarker, AttributeMarker, ButtonBuilder, CallArgument,

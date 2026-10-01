@@ -41,7 +41,7 @@
 //! person would.
 
 use mxrs_expr::{ListVar, Mx, Var};
-use mxrs_ir::flow::{Activity, DataType, NativeDocument, NativeValue};
+use mxrs_ir::flow::{Activity, DataType, NativeDocument, NativeValue, SwitchCase};
 use mxrs_ir::{
     AssociationMarker, AssociationRef, AttributeMarker, AttributeRef, EntityMarker,
     MicroflowMarker, MicroflowRef, Ref,
@@ -684,12 +684,41 @@ impl CallOptions<'_> {
     }
 }
 
+impl CallOptions<'_> {
+    /// Says the call's result is not used. `name` is the variable name the
+    /// model still keeps for it — empty when it keeps none.
+    pub fn discard_result(&mut self, name: &str) -> &mut Self {
+        self.document
+            .set("UseReturnVariable", false)
+            .set("ResultVariableName", name);
+        self
+    }
+
+    /// Runs the call in the background, on the task queue `Module.Queue`.
+    pub fn queue(&mut self, queue: &str) -> &mut Self {
+        self.document.set_path(
+            "MicroflowCall.QueueSettings",
+            actions::queue_settings(queue),
+        );
+        self
+    }
+}
+
 /// The arguments a Java action is called with.
 pub struct JavaCallOptions<'a> {
     document: &'a mut NativeDocument,
 }
 
 impl JavaCallOptions<'_> {
+    /// Says the call's result is not used. `name` is the variable name the
+    /// model still keeps for it — empty when it keeps none.
+    pub fn discard_result(&mut self, name: &str) -> &mut Self {
+        self.document
+            .set("UseReturnVariable", false)
+            .set("ResultVariableName", name);
+        self
+    }
+
     fn mapping(&mut self, parameter: &str, value: NativeDocument) -> &mut Self {
         let action = self.document.text("JavaAction").unwrap_or_default();
         let parameter = if parameter.contains('.') {
@@ -805,6 +834,42 @@ impl PageOptions<'_> {
         }
         self
     }
+
+    /// Opens the page under a title of its own instead of the one it
+    /// declares: the title in one language, with `{n}` placeholders.
+    pub fn title(&mut self, language: &str, text: impl Into<String>) -> &mut Self {
+        let translation = NativeDocument::new("Texts$Translation")
+            .with("LanguageCode", language)
+            .with("Text", text.into());
+        if let Some(items) = self
+            .title_template()
+            .and_then(|template| template.document_mut("Text"))
+            .and_then(|text| text.list_mut("Items"))
+        {
+            items.push(NativeValue::Document(translation));
+        }
+        self
+    }
+
+    /// Supplies the next `{n}` placeholder of the title.
+    pub fn title_parameter(&mut self, value: impl Into<Mx>) -> &mut Self {
+        let parameter = actions::template_parameter(value.into().as_str());
+        if let Some(parameters) = self
+            .title_template()
+            .and_then(|template| template.list_mut("Parameters"))
+        {
+            parameters.push(NativeValue::Document(parameter));
+        }
+        self
+    }
+
+    fn title_template(&mut self) -> Option<&mut NativeDocument> {
+        let settings = self.document.document_mut("FormSettings")?;
+        if settings.document_mut("TitleOverride").is_none() {
+            settings.set("TitleOverride", actions::title_override());
+        }
+        settings.document_mut("TitleOverride")
+    }
 }
 
 /// The action documents the activities above declare, as the model stores
@@ -890,6 +955,12 @@ pub mod actions {
         let mut document = action("Microflows$DeleteAction").with("DeleteVariableName", variable);
         apply_defaults(&mut document, REFRESH_OPTIONS);
         document
+    }
+
+    /// Narrows the object an inheritance split decided on to the entity of
+    /// the branch it runs in, under a variable of its own.
+    pub fn cast(variable: &str) -> NativeDocument {
+        action("Microflows$CastAction").with("VariableName", variable)
     }
 
     pub fn rollback(variable: &str) -> NativeDocument {
@@ -1045,8 +1116,15 @@ pub mod actions {
         NativeDocument::new("Microflows$TemplateParameter").with("Expression", expression)
     }
 
+    /// What a call on a task queue stores about the queue.
+    pub fn queue_settings(queue: &str) -> NativeDocument {
+        NativeDocument::new("Queues$QueueSettings")
+            .with("Queue", queue)
+            .with("Retry", NativeValue::Null)
+    }
+
     /// A microflow call; `result` names the variable its return value goes
-    /// into, when it is kept.
+    /// into, when it has one worth naming.
     pub fn call(microflow: &str, result: Option<&str>) -> NativeDocument {
         action("Microflows$MicroflowCallAction")
             .with(
@@ -1056,7 +1134,7 @@ pub mod actions {
                     .with("ParameterMappings", list(2)),
             )
             .with("ResultVariableName", result.unwrap_or_default())
-            .with("UseReturnVariable", result.is_some())
+            .with("UseReturnVariable", true)
     }
 
     /// A Java action call; `result` as for [`call`].
@@ -1065,7 +1143,7 @@ pub mod actions {
             .with("JavaAction", java_action)
             .with("ParameterMappings", list(2))
             .with("ResultVariableName", result.unwrap_or_default())
-            .with("UseReturnVariable", result.is_some())
+            .with("UseReturnVariable", true)
     }
 
     pub fn show_message(kind: MessageKind) -> NativeDocument {
@@ -1086,6 +1164,17 @@ pub mod actions {
 
     pub fn close_page(pages: &str) -> NativeDocument {
         action("Microflows$CloseFormAction").with("NumberOfPagesToClose", pages)
+    }
+
+    /// The title a page is opened under in place of its own, before any
+    /// translation or placeholder is given.
+    pub fn title_override() -> NativeDocument {
+        NativeDocument::new("Microflows$TextTemplate")
+            .with("Parameters", list(2))
+            .with(
+                "Text",
+                NativeDocument::new("Texts$Text").with("Items", list(3)),
+            )
     }
 
     pub fn show_page(page: &str) -> NativeDocument {
@@ -1645,6 +1734,141 @@ impl FlowBuilder {
         self.action(document)
     }
 
+    /// Declares an activity as the action document the model stores for it,
+    /// field by field. This is how an activity no builder here covers yet is
+    /// still stated — and edited — in Rust; what it declares is reached
+    /// afterwards with [`var`].
+    pub fn native_action(&mut self, mut document: NativeDocument) -> &mut Self {
+        if document.get("ErrorHandlingType").is_none() {
+            document.set("ErrorHandlingType", "Rollback");
+        }
+        self.action(document)
+    }
+
+    /// A decision a rule makes rather than an expression.
+    ///
+    /// ```ignore
+    /// flow.decision_by_rule(
+    ///     "Sales.RULE_CanShip",
+    ///     |rule| {
+    ///         rule.argument("Order", mx("$Order"));
+    ///     },
+    ///     |flow| { /* it can */ },
+    ///     |flow| { /* it cannot */ },
+    /// );
+    /// ```
+    pub fn decision_by_rule(
+        &mut self,
+        rule: impl MicroflowName,
+        arguments: impl FnOnce(&mut RuleArguments),
+        then: impl FnOnce(&mut FlowBuilder),
+        otherwise: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        let mut rule = RuleArguments {
+            rule: rule.microflow_name(),
+            arguments: Vec::new(),
+        };
+        arguments(&mut rule);
+        self.push(Activity::RuleDecision {
+            rule: rule.rule,
+            arguments: rule.arguments,
+            true_branch: FlowBuilder::nested(then),
+            false_branch: FlowBuilder::nested(otherwise),
+        })
+    }
+
+    /// A switch a rule decides: a branch per value of the enumeration the
+    /// rule returns.
+    pub fn switch_by_rule(
+        &mut self,
+        rule: impl MicroflowName,
+        arguments: impl FnOnce(&mut RuleArguments),
+        cases: impl FnOnce(&mut Cases),
+    ) -> &mut Self {
+        let mut rule = RuleArguments {
+            rule: rule.microflow_name(),
+            arguments: Vec::new(),
+        };
+        arguments(&mut rule);
+        let mut on = Cases { cases: Vec::new() };
+        cases(&mut on);
+        self.push(Activity::RuleSwitch {
+            rule: rule.rule,
+            arguments: rule.arguments,
+            cases: on.cases,
+        })
+    }
+
+    /// Names this point of the flow so that [`FlowBuilder::jump`] can carry
+    /// on from it: what a flow that tries again goes back to.
+    ///
+    /// ```ignore
+    /// flow.label("again");
+    /// let response = flow.call_into("Response", MicroflowRef::<SUB_Fetch>::new(), |_| {});
+    /// flow.decision(
+    ///     mx("$Response = empty"),
+    ///     |flow| {
+    ///         flow.jump("again");
+    ///     },
+    ///     |_| {},
+    /// );
+    /// ```
+    pub fn label(&mut self, name: impl Into<String>) -> &mut Self {
+        self.push(Activity::Label(name.into()))
+    }
+
+    /// Ends this path by carrying on at the [`FlowBuilder::label`] of that
+    /// name, which the same flow — or the same loop body — declares.
+    pub fn jump(&mut self, name: impl Into<String>) -> &mut Self {
+        self.push(Activity::Jump(name.into()))
+    }
+
+    /// Inside a branch of [`FlowBuilder::switch_type`]: the object the
+    /// switch decided on, as the entity of that branch.
+    pub fn cast(&mut self, name: impl Into<String>) -> FlowVar {
+        let name = name.into();
+        self.action(actions::cast(&name));
+        FlowVar(name)
+    }
+
+    /// Runs the branch that the value of an enumeration expression selects.
+    ///
+    /// ```ignore
+    /// flow.switch(mx("$Order/Status"), |on| {
+    ///     on.case("Open", |flow| { /* ... */ });
+    ///     on.cases(["Shipped", "Closed"], |flow| { /* ... */ });
+    ///     on.empty(|flow| { /* no status at all */ });
+    /// });
+    /// ```
+    pub fn switch(
+        &mut self,
+        expression: impl Into<Mx>,
+        cases: impl FnOnce(&mut Cases),
+    ) -> &mut Self {
+        let mut on = Cases { cases: Vec::new() };
+        cases(&mut on);
+        self.push(Activity::Switch {
+            expression: expression.into().into_text(),
+            cases: on.cases,
+        })
+    }
+
+    /// Runs the branch for the entity the object in `variable` is an
+    /// instance of. A branch reaches the object as that entity with
+    /// [`FlowBuilder::cast`].
+    pub fn switch_type(
+        &mut self,
+        variable: &impl Variable,
+        cases: impl FnOnce(&mut TypeCases),
+    ) -> &mut Self {
+        let mut on = TypeCases { cases: Vec::new() };
+        cases(&mut on);
+        self.push(Activity::TypeSwitch {
+            variable: variable.variable_name().to_string(),
+            cases: on.cases,
+        })
+    }
+
     /// Runs `body` for each object of `list`, which it receives under the
     /// name `iterator`.
     pub fn for_each(
@@ -1661,6 +1885,89 @@ impl FlowBuilder {
             iterator,
             activities,
         })
+    }
+}
+
+/// What a rule is called with in [`FlowBuilder::decision_by_rule`].
+pub struct RuleArguments {
+    rule: String,
+    arguments: Vec<(String, String)>,
+}
+
+impl RuleArguments {
+    /// Passes `value` for the rule's parameter `parameter`: its own name,
+    /// or the qualified `Module.Rule.Parameter`.
+    pub fn argument(&mut self, parameter: &str, value: impl Into<Mx>) -> &mut Self {
+        let parameter = if parameter.contains('.') {
+            parameter.to_string()
+        } else {
+            format!("{}.{parameter}", self.rule)
+        };
+        self.arguments.push((parameter, value.into().into_text()));
+        self
+    }
+}
+
+/// The branches of a [`FlowBuilder::switch`], one per value.
+pub struct Cases {
+    cases: Vec<SwitchCase>,
+}
+
+impl Cases {
+    /// What runs when the expression is the enumeration value `value`.
+    pub fn case(
+        &mut self,
+        value: impl Into<String>,
+        body: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        self.cases([value], body)
+    }
+
+    /// One branch for several values.
+    pub fn cases<S: Into<String>>(
+        &mut self,
+        values: impl IntoIterator<Item = S>,
+        body: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        self.cases.push(SwitchCase {
+            values: values.into_iter().map(Into::into).collect(),
+            activities: FlowBuilder::nested(body),
+        });
+        self
+    }
+
+    /// What runs when the expression has no value.
+    pub fn empty(&mut self, body: impl FnOnce(&mut FlowBuilder)) -> &mut Self {
+        self.case("(empty)", body)
+    }
+}
+
+/// The branches of a [`FlowBuilder::switch_type`], one per entity.
+pub struct TypeCases {
+    cases: Vec<SwitchCase>,
+}
+
+impl TypeCases {
+    /// What runs when the object is an instance of `entity`.
+    pub fn case(
+        &mut self,
+        entity: impl EntityName,
+        body: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        self.cases.push(SwitchCase {
+            values: vec![entity.entity_name()],
+            activities: FlowBuilder::nested(body),
+        });
+        self
+    }
+
+    /// What runs when there is no object.
+    pub fn empty(&mut self, body: impl FnOnce(&mut FlowBuilder)) -> &mut Self {
+        self.cases.push(SwitchCase {
+            values: vec![String::new()],
+            activities: FlowBuilder::nested(body),
+        });
+        self
     }
 }
 
@@ -1757,6 +2064,187 @@ mod tests {
             panic!("mapping")
         };
         assert_eq!(text(mapping, "Parameter"), "Sales.SUB_Ship.Order");
+    }
+
+    fn built(body: impl FnOnce(&mut FlowBuilder)) -> Vec<Activity> {
+        FlowBuilder::nested(body)
+    }
+
+    #[test]
+    fn a_modifier_says_how_the_next_activity_runs_and_no_other() {
+        let order = var("Order");
+        let activities = built(|flow| {
+            flow.on_error(|flow| {
+                flow.raise_error();
+            })
+            .commit_with(&order, |_| {});
+            flow.continue_on_error().delete_with(&order, |_| {});
+            flow.disabled().rollback(&order);
+            flow.rollback(&order);
+        });
+        let [handled, continued, disabled, plain] = activities.as_slice() else {
+            panic!("{activities:?}")
+        };
+        let Activity::OnError {
+            handling: mxrs_ir::ErrorHandling::Custom,
+            activity,
+            handler,
+        } = handled
+        else {
+            panic!("{handled:?}")
+        };
+        assert!(matches!(activity.as_ref(), Activity::Action(_)));
+        assert!(matches!(handler.as_slice(), [Activity::RaiseError]));
+        assert!(matches!(
+            continued,
+            Activity::OnError {
+                handling: mxrs_ir::ErrorHandling::Continue,
+                handler,
+                ..
+            } if handler.is_empty()
+        ));
+        assert!(
+            matches!(disabled, Activity::Disabled(inner) if matches!(inner.as_ref(), Activity::Action(_)))
+        );
+        assert!(matches!(plain, Activity::Action(_)));
+    }
+
+    #[test]
+    fn a_switch_has_a_branch_per_case_and_a_rule_its_arguments() {
+        let animal = var("Animal");
+        let activities = built(|flow| {
+            flow.switch(mxrs_expr::mx("$Order/Status"), |on| {
+                on.case("Open", |flow| {
+                    flow.end();
+                });
+                on.cases(["Shipped", "Closed"], |_| {});
+                on.empty(|_| {});
+            });
+            flow.switch_type(&animal, |on| {
+                on.case("Zoo.Dog", |flow| {
+                    flow.cast("Dog");
+                });
+                on.empty(|_| {});
+            });
+            flow.decision_by_rule(
+                "Sales.RULE_CanShip",
+                |rule| {
+                    rule.argument("Order", mxrs_expr::mx("$Order"));
+                },
+                |_| {},
+                |flow| {
+                    flow.jump("again");
+                },
+            );
+            flow.label("again");
+        });
+        let [switch, by_type, by_rule, label] = activities.as_slice() else {
+            panic!("{activities:?}")
+        };
+        let values = |cases: &[SwitchCase]| -> Vec<Vec<String>> {
+            cases.iter().map(|case| case.values.clone()).collect()
+        };
+        let Activity::Switch { expression, cases } = switch else {
+            panic!("{switch:?}")
+        };
+        assert_eq!(expression, "$Order/Status");
+        assert_eq!(
+            values(cases),
+            [
+                vec!["Open".to_string()],
+                vec!["Shipped".to_string(), "Closed".to_string()],
+                vec!["(empty)".to_string()],
+            ]
+        );
+        assert!(matches!(
+            cases[0].activities.as_slice(),
+            [Activity::ReturnValue { .. }]
+        ));
+        let Activity::TypeSwitch { variable, cases } = by_type else {
+            panic!("{by_type:?}")
+        };
+        assert_eq!(variable, "Animal");
+        assert_eq!(
+            values(cases),
+            [vec!["Zoo.Dog".to_string()], vec![String::new()]]
+        );
+        let Activity::RuleDecision {
+            rule,
+            arguments,
+            false_branch,
+            ..
+        } = by_rule
+        else {
+            panic!("{by_rule:?}")
+        };
+        assert_eq!(rule, "Sales.RULE_CanShip");
+        assert_eq!(
+            arguments,
+            &[("Sales.RULE_CanShip.Order".to_string(), "$Order".to_string())]
+        );
+        assert!(matches!(false_branch.as_slice(), [Activity::Jump(name)] if name == "again"));
+        assert!(matches!(label, Activity::Label(name) if name == "again"));
+    }
+
+    #[test]
+    fn a_call_can_discard_its_result_or_run_on_a_queue() {
+        let mut call = actions::call("Sales.SUB_Ship", None);
+        CallOptions {
+            document: &mut call,
+        }
+        .discard_result("Shipped")
+        .queue("Sales.Shipping");
+        assert_eq!(
+            call.get("UseReturnVariable"),
+            Some(&NativeValue::Bool(false))
+        );
+        assert_eq!(text(&call, "ResultVariableName"), "Shipped");
+        assert_eq!(
+            text(&call, "MicroflowCall.QueueSettings.Queue"),
+            "Sales.Shipping"
+        );
+    }
+
+    #[test]
+    fn a_page_can_be_opened_under_a_title_of_its_own() {
+        let mut page = actions::show_page("Sales.Order_Edit");
+        assert_eq!(page.get_path("FormSettings.TitleOverride"), None);
+        PageOptions {
+            document: &mut page,
+        }
+        .title("en_US", "Edit {1}")
+        .title_parameter(mxrs_expr::mx("$Order/Number"));
+        let Some(NativeValue::List(3, translations)) =
+            page.get_path("FormSettings.TitleOverride.Text.Items")
+        else {
+            panic!("translations")
+        };
+        let NativeValue::Document(translation) = &translations[0] else {
+            panic!("translation")
+        };
+        assert_eq!(text(translation, "LanguageCode"), "en_US");
+        assert_eq!(text(translation, "Text"), "Edit {1}");
+        assert!(matches!(
+            page.get_path("FormSettings.TitleOverride.Parameters"),
+            Some(NativeValue::List(2, parameters)) if parameters.len() == 1
+        ));
+    }
+
+    #[test]
+    fn an_activity_no_builder_covers_is_stated_as_its_document() {
+        let activities = built(|flow| {
+            flow.native_action(
+                NativeDocument::new("Microflows$DownloadFileAction")
+                    .with("FileDocumentVariableName", "Report")
+                    .with("ShowFileInBrowser", false),
+            );
+        });
+        let [Activity::Action(document)] = activities.as_slice() else {
+            panic!("{activities:?}")
+        };
+        assert_eq!(document.ty, "Microflows$DownloadFileAction");
+        // How it fails is the default unless something says otherwise.
+        assert_eq!(text(document, "ErrorHandlingType"), "Rollback");
     }
 
     #[test]

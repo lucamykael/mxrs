@@ -132,10 +132,11 @@ fn synchronize_flows_with_identity(
     let mut updates = Vec::new();
 
     for decl in declarations {
-        let (objects, flows) = flow_compiler::build_microflow_graph(
+        let (objects, flows) = flow_compiler::build_flow_graph(
             &decl.activities,
             &decl.rescue_activities,
             decl.return_expression.as_deref(),
+            native_type == "Microflows$Nanoflow",
         );
         let previous = existing_by_name.get(&decl.name);
         let existing_id = previous.map(|(id, _)| id.clone());

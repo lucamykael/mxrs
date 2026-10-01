@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use mxrs_bson::{Bson, Document, extract_id};
 
 mod structured;
-pub use structured::{Node, structured_nodes};
+pub use structured::{Case, Node, structured_nodes};
 
 pub fn documents(value: &Bson) -> Option<Vec<&Document>> {
     let array = value.as_array()?;
@@ -153,8 +153,25 @@ pub(crate) fn merge(previous: &Document, fresh: &Document) -> Option<Document> {
                 merged.insert(field, merge_value(prior, value));
             }
         }
-        if let Some(value) = new.get("ReturnValue") {
-            merged.insert("ReturnValue", value.clone());
+        // What a node is declared to do, where the declaration says it on
+        // the node itself rather than in a document of its own.
+        for field in ["ReturnValue", "SplitVariableName"] {
+            if let Some(value) = new.get(field) {
+                merged.insert(field, value.clone());
+            }
+        }
+        // A loop's answer to failing is the node's; a split's is always the
+        // default, and an action's is part of its action document.
+        if new.get_str("$Type").ok() == Some("Microflows$LoopedActivity")
+            && let Some(value) = new.get("ErrorHandlingType")
+        {
+            merged.insert("ErrorHandlingType", value.clone());
+        }
+        // Whether the node runs is the declaration's to say. A model that
+        // never stored the flag keeps not storing it.
+        let disabled = new.get_bool("Disabled").unwrap_or(false);
+        if disabled || old.contains_key("Disabled") {
+            merged.insert("Disabled", disabled);
         }
         replacements.insert(id(old)?, merged);
     }
@@ -163,6 +180,9 @@ pub(crate) fn merge(previous: &Document, fresh: &Document) -> Option<Document> {
     Some(collection)
 }
 
+/// Pairs each stored node with the rebuilt node that stands for it. Merges
+/// are not paired: they do nothing, a model may draw one join as several or
+/// several as one, and the edges are compared with them resolved away.
 fn pair_nodes<'a>(
     old: &[Node<'a>],
     new: &[Node<'a>],
@@ -187,58 +207,85 @@ fn pair_nodes<'a>(
                     split: a,
                     yes: ay,
                     no: an,
-                    merge: am,
                 },
                 Node::Decision {
                     split: b,
                     yes: by,
                     no: bn,
-                    merge: bm,
                 },
             ) => {
                 pairs.push((a, b));
                 pair_nodes(ay, by, pairs)?;
                 pair_nodes(an, bn, pairs)?;
-                match (am, bm) {
-                    (Some(a), Some(b)) => pairs.push((a, b)),
-                    (None, None) => {}
-                    _ => return None,
+            }
+            (
+                Node::Switch {
+                    split: a,
+                    cases: ac,
+                },
+                Node::Switch {
+                    split: b,
+                    cases: bc,
+                },
+            ) if a.get_str("$Type").ok()? == b.get_str("$Type").ok()? && ac.len() == bc.len() => {
+                pairs.push((a, b));
+                // A case is the values that select it, in whatever order the
+                // branches are written.
+                for case in ac {
+                    let mut values: Vec<_> = case.values.iter().collect();
+                    values.sort();
+                    let other = bc.iter().find(|other| {
+                        let mut theirs: Vec<_> = other.values.iter().collect();
+                        theirs.sort();
+                        theirs == values
+                    })?;
+                    pair_nodes(&case.body, &other.body, pairs)?;
                 }
             }
+            (
+                Node::Handled {
+                    node: a,
+                    handler: ah,
+                },
+                Node::Handled {
+                    node: b,
+                    handler: bh,
+                },
+            ) => {
+                pair_nodes(std::slice::from_ref(a), std::slice::from_ref(b), pairs)?;
+                pair_nodes(ah, bh, pairs)?;
+            }
+            // Which point a label names and a jump goes to is in the edges,
+            // compared once every node is paired.
+            (Node::Label(_), Node::Label(_)) | (Node::Jump(_), Node::Jump(_)) => {}
             _ => return None,
         }
     }
     Some(())
 }
 
-fn edge_keys(
-    doc: &Document,
-    mapping: Option<&HashMap<String, String>>,
-) -> Option<Vec<(String, String, Option<String>)>> {
-    let collection = doc.get_document("ObjectCollection").ok()?;
+/// One edge: where it leaves, where it arrives, the case values that select
+/// it, and whether it is the edge a failure follows.
+type EdgeKey = (String, String, Vec<String>, bool);
+
+/// The edges of a graph between the objects that do something, in the
+/// identities `mapping` translates them to. A path that ends at a merge
+/// nothing leaves ends where a path with no edge at all does.
+fn edge_keys(doc: &Document, mapping: Option<&HashMap<String, String>>) -> Option<Vec<EdgeKey>> {
+    let translate = |key: &str| match mapping {
+        Some(mapping) => mapping.get(key).cloned(),
+        None => Some(key.to_string()),
+    };
     let mut keys = Vec::new();
-    for edge in documents(doc.get("Flows").or_else(|| collection.get("Flows"))?)? {
-        let translate = |field| {
-            let key = extract_id(edge.get(field)?)?;
-            match mapping {
-                Some(mapping) => mapping.get(&key).cloned(),
-                None => Some(key),
-            }
-        };
-        let case = edge
-            .get("CaseValues")
-            .and_then(documents)
-            .and_then(|cases| {
-                cases
-                    .first()
-                    .and_then(|case| case.get_str("Value").ok())
-                    .map(str::to_string)
-            });
-        keys.push((
-            translate("OriginPointer")?,
-            translate("DestinationPointer")?,
-            case,
-        ));
+    for (from, edges) in &structured::read_edges(doc)?.outgoing {
+        for edge in edges {
+            let Some(to) = &edge.to else {
+                continue;
+            };
+            let mut cases = edge.cases.clone();
+            cases.sort();
+            keys.push((translate(from)?, translate(to)?, cases, edge.error));
+        }
     }
     keys.sort();
     Some(keys)
@@ -329,16 +376,103 @@ pub fn preserves_body(previous: &Document, declaration: &mxrs_ir::MicroflowDecl)
     {
         return false;
     }
-    let (objects, flows) = crate::flow_compiler::build_microflow_graph(
+    let (objects, flows) = crate::flow_compiler::build_flow_graph(
         &declaration.activities,
         &declaration.rescue_activities,
         declaration.return_expression.as_deref(),
+        previous.get_str("$Type").ok() == Some("Microflows$Nanoflow"),
     );
     let fresh = mxrs_bson::doc! {
         "ObjectCollection": { "Objects": mxrs_bson::build_array(objects.into_iter().map(Bson::Document).collect(),3) },
         "Flows":mxrs_bson::build_array(flows.into_iter().map(Bson::Document).collect(),3),
     };
     merge(previous, &fresh).as_ref() == previous.get_document("ObjectCollection").ok()
+}
+
+/// Where an unedited rebuild of `previous` from `declaration` would first
+/// differ from what is stored, for diagnostics: `None` when
+/// [`preserves_body`] holds.
+pub fn rebuild_difference(
+    previous: &Document,
+    declaration: &mxrs_ir::MicroflowDecl,
+) -> Option<String> {
+    if !same_parameters(previous, declaration) {
+        return Some("its parameters differ".to_string());
+    }
+    if previous.get_str("Documentation").ok() != Some(declaration.documentation.as_str()) {
+        return Some("its documentation differs".to_string());
+    }
+    let (objects, flows) = crate::flow_compiler::build_flow_graph(
+        &declaration.activities,
+        &declaration.rescue_activities,
+        declaration.return_expression.as_deref(),
+        previous.get_str("$Type").ok() == Some("Microflows$Nanoflow"),
+    );
+    let fresh = mxrs_bson::doc! {
+        "ObjectCollection": { "Objects": mxrs_bson::build_array(objects.into_iter().map(Bson::Document).collect(),3) },
+        "Flows":mxrs_bson::build_array(flows.into_iter().map(Bson::Document).collect(),3),
+    };
+    let Some(merged) = merge(previous, &fresh) else {
+        let reason = match (structured_nodes(previous), structured_nodes(&fresh)) {
+            (None, _) => "the stored graph is not structured",
+            (_, None) => "the rebuilt graph is not structured",
+            (Some(old), Some(new)) => {
+                if pair_nodes(&old, &new, &mut Vec::new()).is_none() {
+                    "its nodes do not pair up with the rebuilt graph"
+                } else {
+                    "its edges differ from the rebuilt graph"
+                }
+            }
+        };
+        return Some(reason.to_string());
+    };
+    let stored = previous.get_document("ObjectCollection").ok()?;
+    first_difference(
+        &Bson::Document(stored.clone()),
+        &Bson::Document(merged),
+        "ObjectCollection",
+    )
+}
+
+fn first_difference(stored: &Bson, rebuilt: &Bson, path: &str) -> Option<String> {
+    match (stored, rebuilt) {
+        (Bson::Document(stored), Bson::Document(rebuilt)) => {
+            let kind = stored.get_str("$Type").unwrap_or_default();
+            for (key, value) in stored {
+                let here = format!("{path}.{key}");
+                match rebuilt.get(key) {
+                    None => return Some(format!("{here} ({kind}) is missing after the rebuild")),
+                    Some(other) => {
+                        if let Some(difference) = first_difference(value, other, &here) {
+                            return Some(difference);
+                        }
+                    }
+                }
+            }
+            rebuilt
+                .keys()
+                .find(|key| !stored.contains_key(key.as_str()))
+                .map(|key| format!("{path}.{key} ({kind}) appears after the rebuild"))
+        }
+        (Bson::Array(stored), Bson::Array(rebuilt)) => {
+            if stored.len() != rebuilt.len() {
+                return Some(format!(
+                    "{path} holds {} items, {} after the rebuild",
+                    stored.len(),
+                    rebuilt.len()
+                ));
+            }
+            stored
+                .iter()
+                .zip(rebuilt)
+                .enumerate()
+                .find_map(|(index, (left, right))| {
+                    first_difference(left, right, &format!("{path}[{index}]"))
+                })
+        }
+        (stored, rebuilt) if stored == rebuilt => None,
+        (stored, rebuilt) => Some(format!("{path}: {stored:?} becomes {rebuilt:?}")),
+    }
 }
 
 /// Compatibility entry point for callers that require a linear body.
