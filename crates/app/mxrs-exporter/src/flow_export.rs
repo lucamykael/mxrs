@@ -11,13 +11,20 @@ use mxrs_model::attribute::AttributeType;
 use mxrs_model::{Microflow, Module, Project};
 use mxrs_writer::flow_graph::{Node, documents, structured_nodes};
 
-use crate::{Result, rust_string};
+use crate::names::{self, ModelNames};
+use crate::{Result, derive_pascal_case, inner_file_stem, rust_keyword, rust_string};
 
 pub(crate) struct ConvertedFlow {
     pub module: String,
     pub native_type: String,
     pub declaration: MicroflowDecl,
     source: Vec<String>,
+}
+
+impl ConvertedFlow {
+    pub(crate) fn is_nanoflow(&self) -> bool {
+        self.native_type == "Microflows$Nanoflow"
+    }
 }
 
 pub(crate) struct RenderedFlowSource {
@@ -79,7 +86,7 @@ fn attributes(modules: &[Module]) -> Attributes {
                 result.insert(
                     (qualified.clone(), name.into()),
                     AttributeInfo {
-                        marker: format!("model::{module_name}::{entity_name}_{name}"),
+                        marker: names::attribute(&qualified, name),
                         value_type,
                         writable: attribute.attribute_type != AttributeType::AutoNumber
                             && attribute
@@ -93,22 +100,6 @@ fn attributes(modules: &[Module]) -> Attributes {
         }
     }
     result
-}
-
-pub(crate) fn typed_attribute_markers(modules: &[Module]) -> String {
-    let mut entries: Vec<_> = attributes(modules).into_values().collect();
-    entries.sort_by(|a, b| a.marker.cmp(&b.marker));
-    let mut source = String::new();
-    for entry in entries {
-        let marker = entry.marker.strip_prefix("model::").expect("marker prefix");
-        writeln!(
-            source,
-            "impl mxrs::TypedAttributeMarker for {marker} {{ type Value = {}; }}",
-            tag(&entry.value_type, &HashSet::new()).expect("scalar tag")
-        )
-        .unwrap();
-    }
-    source
 }
 
 pub(crate) fn data_type(doc: &Document) -> Option<Ty> {
@@ -126,30 +117,40 @@ pub(crate) fn data_type(doc: &Document) -> Option<Ty> {
     })
 }
 
+/// A reference to the struct declaring entity `Module.Entity`.
 fn marker(name: &str) -> Option<String> {
     let (module, entity) = name.split_once('.')?;
     if !mxrs_typegen::is_rust_identifier(module) || !mxrs_typegen::is_rust_identifier(entity) {
         return None;
     }
-    Some(format!("model::{module}::{entity}"))
+    Some(names::entity(name))
+}
+
+/// A reference to the type naming microflow `Module.Flow`.
+fn flow_marker(name: &str) -> Option<String> {
+    let (module, flow) = name.split_once('.')?;
+    if !mxrs_typegen::is_rust_identifier(module) || !mxrs_typegen::is_rust_identifier(flow) {
+        return None;
+    }
+    Some(names::microflow(name))
 }
 
 fn tag(ty: &Ty, entities: &HashSet<String>) -> Option<String> {
     Some(match ty {
-        Ty::String => "mxrs::MxString".into(),
-        Ty::Integer => "mxrs::MxInteger".into(),
-        Ty::Long => "mxrs::MxLong".into(),
-        Ty::Boolean => "mxrs::MxBool".into(),
-        Ty::Float => "mxrs::MxFloat".into(),
-        Ty::Decimal => "mxrs::MxDecimal".into(),
-        Ty::DateTime => "mxrs::MxDateTime".into(),
-        Ty::Binary => "mxrs::MxBinary".into(),
+        Ty::String => "MxString".into(),
+        Ty::Integer => "MxInteger".into(),
+        Ty::Long => "MxLong".into(),
+        Ty::Boolean => "MxBool".into(),
+        Ty::Float => "MxFloat".into(),
+        Ty::Decimal => "MxDecimal".into(),
+        Ty::DateTime => "MxDateTime".into(),
+        Ty::Binary => "MxBinary".into(),
         Ty::Object(entity) | Ty::List(entity) => {
             if !entities.contains(entity) {
                 return None;
             }
             format!(
-                "mxrs::{}<{}>",
+                "{}<{}>",
                 if matches!(ty, Ty::Object(_)) {
                     "MxObject"
                 } else {
@@ -161,6 +162,13 @@ fn tag(ty: &Ty, entities: &HashSet<String>) -> Option<String> {
     })
 }
 
+/// The Rust binding for one flow variable.
+///
+/// A variable named the way Mendix names them — `NewOrder` — is bound as a
+/// Rust author would bind it, `new_order`. That mapping is only taken when
+/// it can be read back (`new_order` → `NewOrder`), so two variables never
+/// share a binding; any other name keeps its exact spelling behind a
+/// `value_` prefix, which no converted name starts with.
 fn binding(name: &str) -> Option<String> {
     let mut chars = name.chars();
     if !chars
@@ -170,7 +178,28 @@ fn binding(name: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!("value_{name}"))
+    let snake = crate::snake_ident(name);
+    let readable = derive_pascal_case(&snake) == name
+        && !snake.starts_with("value_")
+        && !rust_keyword(&snake)
+        && !matches!(
+            snake.as_str(),
+            "flow"
+                | "parameter"
+                | "string"
+                | "integer"
+                | "long"
+                | "float"
+                | "decimal"
+                | "boolean"
+                | "attribute"
+                | "association"
+        );
+    Some(if readable {
+        snake
+    } else {
+        format!("value_{name}")
+    })
 }
 
 fn expression(
@@ -185,7 +214,7 @@ fn expression(
                 return None;
             };
             let attribute = attributes.get(&(entity.clone(), member.into()))?;
-            let rendered = format!("{}.attribute::<{}>()", binding(object)?, attribute.marker);
+            let rendered = format!("{}.get({})", binding(object)?, attribute.marker);
             return if &attribute.value_type == ty {
                 Some(rendered)
             } else if attribute.value_type == Ty::Integer && ty == &Ty::Long {
@@ -197,7 +226,7 @@ fn expression(
         if variables.get(name) != Some(ty) {
             return None;
         }
-        return Some(format!("{}.clone()", binding(name)?));
+        return Some(format!("&{}", binding(name)?));
     }
     match ty {
         Ty::String => {
@@ -206,16 +235,16 @@ fn expression(
             if format!("'{}'", text.replace('\'', "''")) != value {
                 return None;
             }
-            Some(format!("mxrs::string({})", rust_string(&text)))
+            Some(format!("string({})", rust_string(&text)))
         }
-        Ty::Boolean if matches!(value, "true" | "false") => Some(format!("mxrs::boolean({value})")),
+        Ty::Boolean if matches!(value, "true" | "false") => Some(format!("boolean({value})")),
         Ty::Long => {
             let parsed = value.parse::<i64>().ok()?;
-            (parsed.to_string() == value).then(|| format!("mxrs::long({value})"))
+            (parsed.to_string() == value).then(|| format!("long({value})"))
         }
         Ty::Integer => {
             let parsed = value.parse::<i32>().ok()?;
-            (parsed.to_string() == value).then(|| format!("mxrs::integer({value})"))
+            (parsed.to_string() == value).then(|| format!("integer({value})"))
         }
         Ty::Float | Ty::Decimal => {
             let parsed = value.parse::<f64>().ok()?;
@@ -228,7 +257,7 @@ fn expression(
                 return None;
             }
             Some(format!(
-                "mxrs::{}({value})",
+                "{}({value})",
                 if ty == &Ty::Float { "float" } else { "decimal" }
             ))
         }
@@ -370,12 +399,6 @@ fn convert(
     declaration.documentation = model.documentation.clone();
     let mut source = Vec::new();
     let mut variables = HashMap::new();
-    if !model.documentation.is_empty() {
-        source.push(format!(
-            "flow.documentation({});",
-            rust_string(&model.documentation)
-        ));
-    }
     for ((name, ty), native) in signature(&model)?.into_iter().zip(&model.parameters) {
         let rust_name = binding(&name)?;
         let mut parameter = FlowParameterDecl::new(&name, ty.clone());
@@ -407,7 +430,7 @@ fn convert(
             Ty::Object(entity) | Ty::List(entity) => {
                 tag(&ty, entities)?;
                 format!(
-                    "flow.{}_parameter({}, mxrs::Ref::<{}>::new(), {options})",
+                    "flow.{}_parameter({}, Ref::<{}>::new(), {options})",
                     if matches!(&ty, Ty::Object(_)) {
                         "object"
                     } else {
@@ -460,11 +483,23 @@ fn convert(
     if !mxrs_writer::flow_graph::preserves_body(doc, &declaration) {
         return None;
     }
+    let source = polish_source(source);
+    // The flow's file declares a unit type under the flow's own name, and a
+    // `let` cannot bind a name a unit type already has. A flow named in
+    // lower case whose body binds that very name stays in the imported
+    // model instead of becoming source that does not compile.
+    let marker = names::flow_marker(&declaration.name);
+    if source
+        .iter()
+        .any(|line| binding_name(line).as_deref() == Some(marker.as_str()))
+    {
+        return None;
+    }
     Some(ConvertedFlow {
         module: module.into(),
         native_type: doc.get_str("$Type").ok()?.into(),
         declaration,
-        source: polish_source(source),
+        source,
     })
 }
 
@@ -521,26 +556,43 @@ fn binding_name(line: &str) -> Option<String> {
     valid.then(|| candidate.to_string())
 }
 
-/// The byte position of `name` as a whole word, so `value_UserSearch` never
-/// counts as (or receives the underscore of) `value_User`.
+/// The byte position of `name` used as a variable: a whole word, outside
+/// string literals and model references, and neither a path segment
+/// (`Order::name()`) nor a method (`.name(...)`) — so a variable `name` is
+/// not kept alive by an attribute or a parameter that happens to share it.
 fn find_identifier(line: &str, name: &str) -> Option<usize> {
     let bytes = line.as_bytes();
-    let mut from = 0;
-    while let Some(position) = line[from..].find(name) {
-        let start = from + position;
-        let end = start + name.len();
-        let before = start
-            .checked_sub(1)
-            .map(|i| bytes[i] as char)
-            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
-        let after = bytes
-            .get(end)
-            .map(|&b| b as char)
-            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
-        if before && after {
-            return Some(start);
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                index += 1;
+            }
+            1 => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != 2 {
+                    index += 1;
+                }
+                index += 1;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                let qualified = line[..start].trim_end().ends_with([':', '.']);
+                if &line[start..index] == name && !qualified {
+                    return Some(start);
+                }
+            }
+            _ => index += 1,
         }
-        from = end;
     }
     None
 }
@@ -752,7 +804,7 @@ impl Converter<'_> {
                     }
                     let value = item.get_str("Value").ok()?;
                     rendered.push(format!(
-                        "mxrs::attribute::<{}>({})",
+                        "{}.set({})",
                         attribute.marker,
                         expression(value, &attribute.value_type, variables, attributes)?
                     ));
@@ -766,7 +818,11 @@ impl Converter<'_> {
                     {
                         return None;
                     }
-                    source.push(format!("let {variable} = flow.create_object({}, mxrs::Ref::<{}>::new(), {members_source}, {commit});",rust_string(name),marker(&entity)?));
+                    source.push(format!(
+                        "let {variable} = flow.create_object({}, Ref::<{}>::new(), {members_source}, {commit});",
+                        rust_string(name),
+                        marker(&entity)?
+                    ));
                     Activity::CreateObject {
                         variable: name.into(),
                         entity,
@@ -791,7 +847,7 @@ impl Converter<'_> {
                 if entities.contains(target) {
                     return None;
                 }
-                let target_marker = marker(target)?;
+                let target_marker = flow_marker(target)?;
                 let callee = *targets.get(target)?;
                 let expected: HashMap<_, _> = signature(callee)?.into_iter().collect();
                 let mut mappings = Vec::new();
@@ -806,7 +862,7 @@ impl Converter<'_> {
                     }
                     let value = mapping.get_str("Argument").ok()?;
                     rendered.push(format!(
-                        "mxrs::CallArgument::new({}, {})",
+                        "CallArgument::new({}, {})",
                         rust_string(name),
                         expression(value, ty, variables, attributes)?
                     ));
@@ -829,13 +885,18 @@ impl Converter<'_> {
                     if variables.insert(name.into(), ty.clone()).is_some() {
                         return None;
                     }
-                    source.push(format!("let {variable} = flow.call_microflow_result::<{result_tag}>(mxrs::MicroflowRef::<{target_marker}>::new(), {}, {mappings_source});",rust_string(name)));
+                    source.push(format!(
+                        "let {variable} = flow.call_microflow_result::<{result_tag}>(MicroflowRef::<{target_marker}>::new(), {}, {mappings_source});",
+                        rust_string(name)
+                    ));
                     (Some(name.into()), Some(ty))
                 } else {
                     if !action.get_str("ResultVariableName").ok()?.is_empty() {
                         return None;
                     }
-                    source.push(format!("flow.call_microflow(mxrs::MicroflowRef::<{target_marker}>::new(), None, false, {mappings_source});"));
+                    source.push(format!(
+                        "flow.call_microflow(MicroflowRef::<{target_marker}>::new(), None, false, {mappings_source});"
+                    ));
                     (None, None)
                 };
                 Activity::CallMicroflow {
@@ -858,7 +919,7 @@ impl Converter<'_> {
                     return None;
                 }
                 source.push(format!(
-                    "let {variable} = flow.create_list({}, mxrs::Ref::<{}>::new());",
+                    "let {variable} = flow.create_list({}, Ref::<{}>::new());",
                     rust_string(name),
                     marker(entity)?
                 ));
@@ -951,98 +1012,175 @@ fn same_semantics(old: &Document, fresh: &Document) -> bool {
             })
 }
 
-#[allow(dead_code)]
-pub(crate) fn render(flows: &[ConvertedFlow], version: &str, nanoflow: bool) -> String {
-    let kind = if nanoflow { "nanoflow" } else { "microflow" };
-    let native = if nanoflow {
-        "Microflows$Nanoflow"
-    } else {
-        "Microflows$Microflow"
-    };
-    let selected: Vec<_> = flows.iter().filter(|f| f.native_type == native).collect();
-    let mutable = if selected.is_empty() { "" } else { "mut " };
-    let imports = if selected
-        .iter()
-        .any(|flow| flow.source.iter().any(|line| line.contains("model::")))
-    {
-        "use crate::infrastructure::markers as model;\n\n"
-    } else {
-        ""
-    };
-    let mut output = format!(
-        "//! Editable {kind} declarations.\n\n{imports}pub fn apply(project: &mut mxrs::ProjectDecl) {{\n    let {mutable}declarations = mxrs::ProjectBuilder::new({});\n",
-        rust_string(version)
-    );
-    for flow in selected {
-        writeln!(
-            output,
-            "    declarations.{kind}_module({}, |module| {{",
-            rust_string(&flow.module)
-        )
-        .unwrap();
-        let parameter = if flow.source.is_empty() {
-            "_flow"
-        } else {
-            "flow"
-        };
-        writeln!(
-            output,
-            "        module.{kind}({}, |{parameter}| {{",
-            rust_string(&flow.declaration.name)
-        )
-        .unwrap();
-        for line in &flow.source {
-            writeln!(output, "            {line}").unwrap();
-        }
-        output.push_str("        });\n    });\n");
-    }
-    output.push_str(
-        "    for module in declarations.build().modules { project.merge_module(module); }\n}\n",
-    );
-    output
+/// How one converted flow is written: the file it lives in and the function
+/// that declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FlowFile {
+    pub(crate) file_stem: String,
+    /// The declaring function's identifier.
+    function: String,
+    /// The naming-convention prefix the flow states (`ACT`, `SUB`, `DS`, ...).
+    prefix: Option<String>,
+    /// Whether the Mendix name has to be stated because the prefix and the
+    /// function do not spell it.
+    explicit_name: bool,
 }
 
-/// Renders each recovered flow as its own application/use-case source file.
-/// Mendix module names are kept in the declaration metadata; they do not
-/// become nested Rust folders.
-pub(crate) fn render_files(flows: &[ConvertedFlow], nanoflow: bool) -> Vec<RenderedFlowSource> {
-    let native = if nanoflow {
-        "Microflows$Nanoflow"
-    } else {
-        "Microflows$Microflow"
+/// `ACT_CreateOrder` → (`ACT`, `CreateOrder`): the capitals before the first
+/// underscore, when the name follows that convention.
+fn split_prefix(name: &str) -> (Option<&str>, &str) {
+    match name.split_once('_') {
+        Some((prefix, rest))
+            if (2..=5).contains(&prefix.len())
+                && !rest.is_empty()
+                && prefix.starts_with(|c: char| c.is_ascii_uppercase())
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) =>
+        {
+            (Some(prefix), rest)
+        }
+        _ => (None, name),
+    }
+}
+
+/// The function declaring a flow, from the part of its name `base` covers.
+/// Never one of the prelude's expression functions — a flow body calls
+/// those — and never the flow's own naming type.
+fn flow_function(base: &str, marker: &str) -> String {
+    let mut function = inner_file_stem(base);
+    if function.is_empty() {
+        function = "flow".to_string();
+    }
+    if matches!(
+        function.as_str(),
+        "string"
+            | "integer"
+            | "long"
+            | "float"
+            | "decimal"
+            | "boolean"
+            | "attribute"
+            | "association"
+    ) {
+        function.push('_');
+    }
+    if function == marker {
+        function.push_str("_flow");
+    }
+    function
+}
+
+/// Decides every converted flow's file and function, index for index.
+///
+/// A flow is named by what it does: `ACT_CreateOrder` is `create_order` in
+/// `create_order_service.rs`, with `ACT` stated on the attribute. Two flows
+/// of one module that would share that name keep their whole Mendix name
+/// instead.
+pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
+    let short = |flow: &ConvertedFlow| {
+        let name = &flow.declaration.name;
+        flow_function(split_prefix(name).1, &names::flow_marker(name))
     };
-    let kind = if nanoflow { "nanoflow" } else { "microflow" };
-    let mut selected = flows
+    let mut uses: HashMap<(&str, bool, String), usize> = HashMap::new();
+    for flow in flows {
+        *uses
+            .entry((flow.module.as_str(), flow.is_nanoflow(), short(flow)))
+            .or_default() += 1;
+    }
+    let mut taken: HashSet<(&str, bool, String)> = HashSet::new();
+    let mut files: HashSet<(&str, bool, String)> = HashSet::new();
+    flows
         .iter()
-        .filter(|flow| flow.native_type == native)
-        .collect::<Vec<_>>();
-    selected.sort_by(|left, right| {
-        (&left.module, &left.declaration.name).cmp(&(&right.module, &right.declaration.name))
-    });
-    let noun = if nanoflow {
-        "nanoflow"
-    } else {
-        "microflow service"
-    };
-    let builder = if nanoflow {
-        "NanoflowModuleBuilder"
-    } else {
-        "MicroflowModuleBuilder"
-    };
-    selected
-        .into_iter()
         .map(|flow| {
-            let artifact_kind = flow_kind(&flow.declaration.name, nanoflow);
-            let imports = if flow.source.iter().any(|line| line.contains("model::")) {
-                "use crate::infrastructure::markers as model;\n\n"
-            } else {
-                ""
+            let name = &flow.declaration.name;
+            let nanoflow = flow.is_nanoflow();
+            let marker = names::flow_marker(name);
+            let (prefix, _) = split_prefix(name);
+            let mut function = short(flow);
+            if uses[&(flow.module.as_str(), nanoflow, function.clone())] > 1 {
+                function = flow_function(name, &marker);
+            }
+            if !taken.insert((flow.module.as_str(), nanoflow, function.clone())) {
+                function = (2..)
+                    .map(|suffix| format!("{function}_{suffix}"))
+                    .find(|candidate| {
+                        taken.insert((flow.module.as_str(), nanoflow, candidate.clone()))
+                    })
+                    .expect("an unbounded suffix always finds a free name");
+            }
+            let derived = match prefix {
+                Some(prefix) => format!("{prefix}_{}", derive_pascal_case(&function)),
+                None => derive_pascal_case(&function),
             };
-            let parameter = if flow.source.is_empty() { "_flow" } else { "flow" };
-            // Reconstructed variables keep Mendix's own names, so files
-            // whose `value_*` bindings carry uppercase allow that casing
-            // rather than rewriting the model's spelling.
-            let allow = if flow.source.iter().any(|line| {
+            let stem = function.trim_end_matches('_');
+            // A nanoflow's file is named after its function alone, so it
+            // must not be a word Rust keeps (`return.rs`) nor one of the
+            // folder's own files.
+            let base = if !nanoflow {
+                format!("{stem}_service")
+            } else if stem.is_empty() || rust_keyword(stem) || matches!(stem, "mod" | "imported") {
+                format!("{stem}_nanoflow")
+            } else {
+                stem.to_string()
+            };
+            // Distinct functions can still ask for one file (`imported` and
+            // `imported_nanoflow`): the later one takes a numbered name.
+            let mut file_stem = base.clone();
+            let mut suffix = 2;
+            while !files.insert((flow.module.as_str(), nanoflow, file_stem.clone())) {
+                file_stem = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            FlowFile {
+                file_stem,
+                explicit_name: derived != *name,
+                function,
+                prefix: prefix.map(str::to_string),
+            }
+        })
+        .collect()
+}
+
+/// Renders each recovered flow as the function that declares it, in its own
+/// file. `plans` is [`plan_files`]' answer for the same `flows`.
+pub(crate) fn render_files(
+    flows: &[ConvertedFlow],
+    plans: &[FlowFile],
+    nanoflow: bool,
+    names: &ModelNames<'_>,
+) -> Result<Vec<RenderedFlowSource>> {
+    let attribute = if nanoflow { "nanoflow" } else { "microflow" };
+    flows
+        .iter()
+        .zip(plans)
+        .filter(|(flow, _)| flow.is_nanoflow() == nanoflow)
+        .map(|(flow, plan)| {
+            let name = &flow.declaration.name;
+            let mut lines = flow.source.clone();
+            let mut item = String::new();
+            match crate::entity_export::doc_comment(&flow.declaration.documentation, "") {
+                Some(comment) => item.push_str(&comment),
+                None => lines.insert(
+                    0,
+                    format!(
+                        "flow.documentation({});",
+                        rust_string(&flow.declaration.documentation)
+                    ),
+                ),
+            }
+            let mut arguments = Vec::new();
+            if let Some(prefix) = &plan.prefix {
+                arguments.push(prefix.clone());
+            }
+            arguments.push(format!("module = {}", rust_string(&flow.module)));
+            if plan.explicit_name {
+                arguments.push(format!("name = {}", rust_string(name)));
+            }
+            writeln!(item, "#[{attribute}({})]", arguments.join(", ")).unwrap();
+            // A variable whose Mendix name does not read back from snake
+            // case keeps its exact spelling, capitals included.
+            if lines.iter().any(|line| {
                 line.match_indices("value_").any(|(index, _)| {
                     line[index + "value_".len()..]
                         .chars()
@@ -1050,59 +1188,154 @@ pub(crate) fn render_files(flows: &[ConvertedFlow], nanoflow: bool) -> Vec<Rende
                         .any(|c| c.is_ascii_uppercase())
                 })
             }) {
-                "#[allow(non_snake_case)]\n"
-            } else {
-                ""
-            };
-            let mut source = format!(
-                "//! Editable {noun} declaration.\n\nuse mxrs::prelude::*;\n\n{imports}#[mxrs::microflow(module = {}, name = {}, kind = {artifact_kind:?})]\n{allow}pub fn declaration() -> ModuleDecl {{\n    let mut module = {builder}::new({});\n    module.{kind}({}, |{parameter}| {{\n",
-                rust_string(&flow.module),
-                rust_string(&flow.declaration.name),
-                rust_string(&flow.module),
-                rust_string(&flow.declaration.name),
-            );
-            for line in &flow.source {
-                writeln!(source, "        {line}").unwrap();
+                item.push_str("#[allow(non_snake_case)]\n");
             }
-            source.push_str("    });\n    module.into_decl()\n}\n");
-            RenderedFlowSource {
+            let parameter = if lines.is_empty() { "_flow" } else { "flow" };
+            writeln!(
+                item,
+                "pub fn {}({parameter}: &mut FlowBuilder) {{",
+                plan.function
+            )
+            .unwrap();
+            for line in &lines {
+                writeln!(item, "    {line}").unwrap();
+            }
+            item.push_str("}\n");
+            let marker = names::flow_marker(name);
+            let resolved = names.resolve(&item, &[&marker])?;
+            let mut source = String::from("use mxrs::prelude::*;\n\n");
+            for import in &resolved.imports {
+                writeln!(source, "{import}").unwrap();
+            }
+            if !resolved.imports.is_empty() {
+                source.push('\n');
+            }
+            source.push_str(&resolved.source);
+            Ok(RenderedFlowSource {
                 module: flow.module.clone(),
-                file_name: flow_file_name(&flow.declaration.name),
+                file_name: plan.file_stem.clone(),
                 source,
-            }
+            })
         })
         .collect()
 }
 
-fn flow_kind(name: &str, nanoflow: bool) -> &'static str {
-    if nanoflow {
-        return "NAN";
-    }
-    match name.split_once('_').map_or(name, |(prefix, _)| prefix) {
-        "ACT" => "ACT",
-        "SUB" => "SUB",
-        "VAL" => "VAL",
-        "QRY" => "QRY",
-        _ => "OTHER",
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn flow_file_name(name: &str) -> String {
-    let mut result = String::new();
-    for character in name.chars() {
-        if character.is_ascii_alphanumeric() || character == '_' {
-            result.push(character.to_ascii_lowercase());
-        } else if !result.ends_with('_') {
-            result.push('_');
+    #[test]
+    fn a_variable_is_bound_the_way_a_rust_author_would_bind_it() {
+        assert_eq!(binding("NewOrder").as_deref(), Some("new_order"));
+        assert_eq!(binding("Name").as_deref(), Some("name"));
+        // Names that do not read back from snake case keep their spelling.
+        assert_eq!(binding("NewJSON").as_deref(), Some("value_NewJSON"));
+        assert_eq!(binding("order").as_deref(), Some("value_order"));
+        assert_eq!(binding("Order_Line").as_deref(), Some("value_Order_Line"));
+        // Names the body already uses for something else.
+        assert_eq!(binding("Flow").as_deref(), Some("value_Flow"));
+        assert_eq!(binding("String").as_deref(), Some("value_String"));
+        assert_eq!(binding("Type").as_deref(), Some("value_Type"));
+        assert_eq!(binding("ValueTotal").as_deref(), Some("value_ValueTotal"));
+        assert_eq!(binding("not valid"), None);
+    }
+
+    #[test]
+    fn a_variable_use_is_not_a_path_a_method_a_string_or_a_reference() {
+        assert_eq!(find_identifier("let name = x;", "name"), Some(4));
+        assert_eq!(
+            find_identifier("flow.return_value(name.clone());", "name"),
+            Some(18)
+        );
+        assert_eq!(find_identifier("Order::name().set(1)", "name"), None);
+        assert_eq!(find_identifier("order.name(1)", "name"), None);
+        assert_eq!(
+            find_identifier("f(\"name\", \"a \\\" name\")", "name"),
+            None
+        );
+        assert_eq!(
+            find_identifier(&names::attribute("Sales.Order", "name"), "name"),
+            None
+        );
+        assert_eq!(find_identifier("rename(names)", "name"), None);
+    }
+
+    #[test]
+    fn a_flow_is_named_by_what_it_does() {
+        assert_eq!(
+            split_prefix("ACT_CreateOrder"),
+            (Some("ACT"), "CreateOrder")
+        );
+        assert_eq!(
+            split_prefix("DS_Login_Create"),
+            (Some("DS"), "Login_Create")
+        );
+        assert_eq!(split_prefix("PetApi"), (None, "PetApi"));
+        assert_eq!(split_prefix("Act_Create"), (None, "Act_Create"));
+        assert_eq!(split_prefix("A_Create"), (None, "A_Create"));
+        assert_eq!(
+            flow_function("CreateOrder", "ACT_CreateOrder"),
+            "create_order"
+        );
+        assert_eq!(flow_function("String", "ACT_String"), "string_");
+        assert_eq!(flow_function("cleanup", "cleanup"), "cleanup_flow");
+    }
+
+    fn flow(module: &str, name: &str, nanoflow: bool) -> ConvertedFlow {
+        ConvertedFlow {
+            module: module.into(),
+            native_type: if nanoflow {
+                "Microflows$Nanoflow"
+            } else {
+                "Microflows$Microflow"
+            }
+            .into(),
+            declaration: MicroflowDecl::new(name),
+            source: Vec::new(),
         }
     }
-    if result.is_empty()
-        || result
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_digit())
-    {
-        result.insert(0, '_');
+
+    #[test]
+    fn every_flow_gets_a_file_rust_can_name_and_no_other_flow_has() {
+        let flows = [
+            flow("Sales", "ACT_Return", true),
+            flow("Sales", "ACT_Type", true),
+            flow("Sales", "Imported", true),
+            flow("Sales", "ImportedNanoflow", true),
+            flow("Sales", "ACT_Refresh", true),
+            flow("Sales", "ACT_Return", false),
+            flow("Crm", "ACT_Refresh", true),
+        ];
+        let stems = plan_files(&flows)
+            .into_iter()
+            .map(|plan| plan.file_stem)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stems,
+            [
+                // `return.rs` and `type.rs` are not modules Rust can declare.
+                "return_nanoflow",
+                "type_nanoflow",
+                // `imported.rs` is the folder's own; the flow that is really
+                // called `ImportedNanoflow` then finds its name taken.
+                "imported_nanoflow",
+                "imported_nanoflow_2",
+                "refresh",
+                "return_service",
+                // Another module's folder is another namespace.
+                "refresh",
+            ]
+        );
     }
-    result.trim_end_matches('_').to_string()
+
+    #[test]
+    fn a_body_that_binds_the_flows_own_type_name_stays_imported() {
+        // `pub struct cleanup;` and `let cleanup = ...` cannot share a file.
+        assert_eq!(names::flow_marker("cleanup"), "cleanup");
+        assert_eq!(binding("Cleanup").as_deref(), Some("cleanup"));
+        assert_eq!(
+            binding_name("let cleanup = flow.create_list();").as_deref(),
+            Some("cleanup")
+        );
+    }
 }

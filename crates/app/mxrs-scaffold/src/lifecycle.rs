@@ -141,6 +141,14 @@ pub fn upgrade_project(
     })
 }
 
+/// The layers a migrated pre-layered project gains. Such a project builds
+/// its model by hand in `domain::build`, so the migration composes that
+/// entry point explicitly instead of moving the user's source into
+/// self-registering declarations.
+const MIGRATED_APPLICATION_LAYER: &str =
+    "pub fn build() -> mxrs::ProjectDecl {\n    crate::domain::build()\n}\n";
+const MIGRATED_PRESENTATION_LAYER: &str = "pub fn apply(_project: &mut mxrs::ProjectDecl) {}\n";
+
 fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<bool> {
     let library = root.join("src/lib.rs");
     let source = transaction
@@ -163,8 +171,8 @@ fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<b
     transaction.write(&library, layered_library(&source, &library)?)?;
     let application = root.join("src/application/mod.rs");
     let presentation = root.join("src/presentation/mod.rs");
-    transaction.create(&application, crate::templates::application_layer())?;
-    transaction.create(&presentation, crate::templates::empty_presentation_layer())?;
+    transaction.create(&application, MIGRATED_APPLICATION_LAYER.to_string())?;
+    transaction.create(&presentation, MIGRATED_PRESENTATION_LAYER.to_string())?;
 
     let infrastructure = root.join("src/infrastructure/mod.rs");
     if transaction.content(&infrastructure)?.is_none() {
@@ -223,8 +231,11 @@ fn complete_layered_layout(root: &Path, library: &str) -> bool {
         ]
         .iter()
         .all(|declaration| library.lines().any(|line| line.trim() == *declaration))
+        // The application either registers its declarations — the shape
+        // `mxrs new` and the importer write — or names the entry point that
+        // composes them; both are complete.
         && crate::artifact::rust_application_metadata(library)
-            .is_ok_and(|(version, has_project)| version.is_some() && has_project)
+            .is_ok_and(|(version, _)| version.is_some())
 }
 
 fn layered_library(source: &str, path: &Path) -> Result<String> {
@@ -464,12 +475,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("app");
         crate::generate_project(&crate::ProjectScaffold::new("App", "11.12.1", &root)).unwrap();
-        // A version-shaped literal that is *not* a `ProjectBuilder::new`
-        // argument must survive the upgrade untouched.
+        // A fresh project states its version once, on the application. A
+        // project that also composes part of its model by hand restates it
+        // on each builder, and those follow the upgrade too — while a
+        // version-shaped literal that is *not* a `ProjectBuilder::new`
+        // argument survives untouched.
         let domain = root.join("src/domain/mod.rs");
-        let source = std::fs::read_to_string(&domain)
-            .unwrap()
-            .replace("\"Main\"", "\"literal 11.12.1 must stay\"");
+        let mut source = std::fs::read_to_string(&domain).unwrap();
+        source.push_str(
+            "\npub fn composed() -> mxrs::ProjectDecl {\n    let mut builder = mxrs::ProjectBuilder::new(\"11.12.1\");\n    builder.module(\"literal 11.12.1 must stay\", |_module| {});\n    builder.build()\n}\n",
+        );
         std::fs::write(&domain, source).unwrap();
 
         let preview = upgrade_project(&root, "11.13.0", false).unwrap();

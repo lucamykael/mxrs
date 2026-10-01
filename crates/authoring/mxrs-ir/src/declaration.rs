@@ -6,7 +6,8 @@
 use crate::flow::MicroflowDecl;
 use crate::page::{LayoutDecl, PageDecl};
 use crate::{
-    ModuleRoleDecl, NavigationDecl, NavigationItemDecl, NavigationProfileDecl, ProjectSecurityDecl,
+    DemoUserDecl, ModuleRoleDecl, NavigationDecl, NavigationItemDecl, NavigationProfileDecl,
+    ProjectSecurityDecl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,6 +691,11 @@ pub struct ProjectDecl {
     /// `None` preserves imported navigation verbatim. `Some` makes the
     /// declared profile collection authoritative.
     pub navigation: Option<NavigationDecl>,
+    /// Demo users declared in a project that declares no security of its
+    /// own. They join the security the model already stores, which stays
+    /// otherwise untouched; with a declared `security` they are listed there
+    /// instead.
+    pub demo_users: Vec<DemoUserDecl>,
 }
 
 impl ProjectDecl {
@@ -808,6 +814,7 @@ mod tests {
             modules: vec![module("Sales"), module("CRM")],
             security: None,
             navigation: None,
+            demo_users: vec![],
         };
         project
             .module_mut("Sales")
@@ -851,6 +858,7 @@ mod tests {
             modules: vec![],
             security: None,
             navigation: None,
+            demo_users: vec![],
         };
         bare.navigation_item("Responsive", item("Main.Home"));
         let navigation = bare.navigation.as_ref().expect("navigation was declared");
@@ -869,6 +877,7 @@ mod tests {
             navigation: Some(NavigationDecl {
                 profiles: vec![NavigationProfileDecl::new("Phone"), existing],
             }),
+            demo_users: vec![],
         };
         project.navigation_item("Responsive", item("Main.Second"));
         let navigation = project.navigation.as_ref().unwrap();
@@ -895,6 +904,7 @@ mod tests {
             navigation: Some(NavigationDecl {
                 profiles: vec![NavigationProfileDecl::new("Phone")],
             }),
+            demo_users: vec![],
         };
         renamed.navigation_item("Responsive", item("Main.Home"));
         let names: Vec<&str> = renamed
@@ -915,6 +925,7 @@ mod tests {
             modules: vec![module("Sales")],
             security: None,
             navigation: None,
+            demo_users: vec![],
         };
         project.modules[0].entities.push(EntityDecl::new("Order"));
         let mut declared = module("Sales");
@@ -947,6 +958,7 @@ mod tests {
             modules: vec![module("Sales")],
             security: None,
             navigation: None,
+            demo_users: vec![],
         };
         project.modules[0].roles = Some(vec![ModuleRoleDecl::new("User")]);
         project.merge_module(module("Sales"));

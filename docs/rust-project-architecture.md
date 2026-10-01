@@ -40,20 +40,20 @@ Dependencies point inward:
 presentation ─┐
               ├─> application ─> domain
 infrastructure┘
-composition imports every layer and wires implementations to ports
 ```
 
 - Domain owns business data, invariants, value objects and domain rules. It
   must not import Axum, a database driver or desktop framework.
-- Application owns use cases and the ports they require. A Mendix server
-  microflow is an application use case unless it is proven to be a pure domain
+- Application owns services and the ports they require. A Mendix server
+  microflow is an application service unless it is proven to be a pure domain
   rule.
 - Presentation translates HTTP, desktop commands or another delivery protocol
   into application calls. Framework request/response types stop at this edge.
 - Infrastructure implements ports for persistence, runtimes, queues and
   external services.
-- Composition is the one outward-looking module that assembles concrete
-  adapters. This avoids service locators and hidden global dependencies.
+- Composition of the *model* needs no module at all: declarations register
+  themselves. What assembles concrete runtime adapters stays explicit, in
+  `infrastructure`, which avoids service locators for behavior.
 
 ## Generated layout
 
@@ -61,15 +61,16 @@ composition imports every layer and wires implementations to ports
 src/
 ├── lib.rs
 ├── main.rs
-├── composition.rs
 ├── domain/
 │   ├── entities/<mendix_module>/<entity>.rs
 │   ├── dtos/<mendix_module>/<dto>.rs
 │   ├── enumerations/<mendix_module>/<enumeration>.rs
 │   ├── documents/<mendix_module>/<document>.rs
+│   ├── module_security/<mendix_module>.rs
 │   └── security.rs
 ├── application/
-│   ├── use_cases/<mendix_module>/<microflow>.rs
+│   ├── services/<mendix_module>/<microflow>_service.rs
+│   ├── services/<mendix_module>/imported.rs
 │   ├── ports/<mendix_module>/{services,actions}.rs
 │   └── task_queues.rs
 ├── presentation/
@@ -88,6 +89,112 @@ miniature copy of the whole architecture. A Mendix module remains a namespace
 inside a concept because Mendix names are only unique per module. Marketplace
 modules are the exception: they are external upgrade units and therefore stay
 module-shaped under `packages/`.
+
+## Declaring the model
+
+A declaration is one annotated item in its own file. It registers itself with
+the application, so adding an artifact is the file plus its `pub mod` line —
+there is no aggregator to edit and no composition call to add.
+
+```rust
+use mxrs::prelude::*;
+
+use crate::domain::entities::sales::customer::Customer;
+
+/// A customer order.
+#[entity(module = "Sales")]
+#[mxrs(index(number))]
+#[mxrs(before_commit = "Sales.VAL_Order")]
+pub struct Order {
+    /// Printed on the invoice.
+    #[mxrs(length = 80, required, unique)]
+    pub number: MxString,
+    pub total: MxDecimal,
+    pub customer: Reference<Customer>,
+}
+```
+
+| Declaration | On | Declares |
+| --- | --- | --- |
+| `#[entity(module = "...")]` | struct | a persistable entity |
+| `#[dto(module = "...")]` | struct | a non-persistable entity |
+| `#[view(module = "...", source = "...")]` | struct | an OQL view entity |
+| `#[enumeration(module = "...")]` | enum | an enumeration; variants are its values |
+| `#[microflow(ACT, module = "...")]` | fn | a server-side microflow |
+| `#[nanoflow(NAN, module = "...")]` | fn | a client-side nanoflow |
+| `#[page(module = "...")]` | fn | a page |
+| `#[layout(module = "...")]` | fn | a page layout |
+| `#[constant(module = "...")]` | fn | a constant |
+| `#[menu(module = "...")]` | fn | a standalone menu |
+| `#[declaration(module = "...")]` | fn | anything else a module holds, through its `ModuleBuilder` |
+| `#[module_roles(module = "...")]` | enum | a module's roles; variants are the roles |
+| `#[security]` | fn | the project's security |
+| `#[navigation]` | fn | the project's navigation profiles |
+| `#[navigation_item(profile = "...", caption = "...")]` | fn | one item, declared next to the page it opens |
+| `#[demo_user]` | fn | a local demo user |
+
+The rules that keep these readable:
+
+- **The type says what it can.** A field's type is the attribute's
+  (`MxString`, `MxDecimal`, `MxBool`, an enumeration's own enum) or the
+  association's (`Reference<T>`, `ReferenceSet<T>`). `#[mxrs(...)]` states
+  only what a type cannot: `length`, `required`, `unique`, `default`,
+  `index(...)`, an event handler, the parent an entity specializes
+  (`generalizes = Document`, `generalizes = mxrs::system::User`) or the
+  system members a root keeps (`stores(owner, created_date, changed_date,
+  changed_by)`).
+- **Defaults are not restated.** A string is 200 characters, a date is
+  localized, a boolean defaults to `false` and a number to `0` unless the
+  field says otherwise — the platform's own defaults. Deleting an option
+  returns the attribute to that default, not to whatever an imported model
+  held. An entity that names no parent and stores no system member is a
+  plain root, by the same rule. `no_default` and
+  `preserve(indexes|lifecycle|image|inheritance)` are the explicit
+  exceptions, for a model that genuinely differs or holds something the
+  declaration has no word for.
+- **`///` is the documentation.** A doc comment on a struct, field, variant
+  or function is the Mendix documentation of what it declares.
+- **A name is where the thing is.** An attribute is its entity's accessor:
+  `Order::number().set("A-1")`, `order.get(Order::total())`,
+  `view.text_box(Order::number())`. A flow is the type its declaration
+  generates, under its Mendix name: `fn create_order` declared with
+  `#[microflow(ACT, ...)]` is `Sales.ACT_CreateOrder`, named elsewhere as
+  `ACT_CreateOrder`. There is no separate marker file to keep in step.
+- **A Rust name that cannot spell the Mendix name states it.** `name =
+  "..."` on the declaration, `#[mxrs(name = "...")]` on a field.
+
+A flow the project keeps in its imported model without declaring it in Rust
+is named in its module's `imported.rs` (`mxrs::imported! { ... }`), so the
+rest of the project can still call and bind it. `mxrs::register!` registers
+anything assembled directly against the project.
+
+The crate root is therefore the four layers and the application, and no
+file composes another:
+
+```rust
+pub mod application;
+pub mod domain;
+pub mod infrastructure;
+pub mod presentation;
+
+#[mxrs::application(version = "11.12.1")]
+pub struct Application;
+```
+
+A layer or concept `mod.rs` is a list of `pub mod` lines and nothing else.
+The order declarations are assembled in does not depend on the order they
+are linked or listed in: it is fixed by what each one declares and where it
+is written, so the same source builds the same model everywhere.
+
+## Identity
+
+Generated source carries no Mendix identifier, and none is written by hand.
+An artifact that came from an imported model keeps the identity
+`model/imported/` records for it, matched by qualified name. A new artifact
+gets an identity derived from the project and its kind and qualified name:
+stable across builds and machines, and never random. The consequence is that
+renaming an artifact in Rust declares a new one rather than renaming the
+imported one.
 
 ## API and Axum rules
 

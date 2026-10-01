@@ -179,7 +179,7 @@ fn import_cargo_project_emits_task_queues_under_the_application_layer() {
     assert!(task_queues_source.contains("|queue| {"));
     assert!(task_queues_source.contains("queue.documentation(\"Fixed-size import queue\");"));
     assert!(task_queues_source.contains("queue.excluded(true);"));
-    assert!(task_queues_source.contains("queue.export_level(::mxrs_ir::ExportLevel::Published);"));
+    assert!(task_queues_source.contains("queue.export_level(ExportLevel::Published);"));
     // The all-defaults dynamic queue collapses to an ignored closure
     // parameter with no restated options, matching every other editable
     // document renderer's minimal-emission convention.
@@ -189,7 +189,15 @@ fn import_cargo_project_emits_task_queues_under_the_application_layer() {
     let application_source =
         std::fs::read_to_string(generated.join("src/application/mod.rs")).unwrap();
     assert!(application_source.contains("pub mod task_queues;"));
-    assert!(application_source.contains("task_queues::apply"));
+    // The queues register themselves, into the module that owns them.
+    assert!(
+        !application_source.contains("apply"),
+        "{application_source}"
+    );
+    assert!(
+        task_queues_source.contains("#[declaration(module = \"Jobs\", stage = TaskQueue)]"),
+        "{task_queues_source}"
+    );
 }
 
 #[test]

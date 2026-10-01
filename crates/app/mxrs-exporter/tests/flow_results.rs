@@ -38,34 +38,42 @@ fn fixture() -> mxrs_ir::ProjectDecl {
     project
 }
 
+/// A hand-written service in the shape the importer generates: the flow is
+/// the function that builds it, the entity is named by its struct, and the
+/// flows it calls — which this file does not declare — are named with
+/// `imported!`.
 const CALLERS: &str = r#"
 #![deny(warnings)]
-use crate::infrastructure::markers::Calls;
 use mxrs::prelude::*;
-use mxrs::{CallArgument, MicroflowRef, MxList, MxString, MxObject};
 
-pub fn declaration() -> ModuleDecl {
-    let mut module = MicroflowModuleBuilder::new("Calls");
-    module.microflow("Caller", |flow| {
-        let object = flow.object_parameter("object", mxrs::Ref::<Calls::Record>::new(), |_| {});
-        let list = flow.list_parameter("list", mxrs::Ref::<Calls::Record>::new(), |_| {});
-        let text = flow.call_microflow_result::<MxString>(
-            MicroflowRef::<Calls::Text>::new(), "text",
-            vec![CallArgument::new("input", mxrs::string("before"))]);
-        let record = flow.call_microflow_result::<MxObject<Calls::Record>>(
-            MicroflowRef::<Calls::Object>::new(), "record",
-            vec![CallArgument::new("input", object)]);
-        flow.commit(&record);
-        let records = flow.call_microflow_result::<MxList<Calls::Record>>(
-            MicroflowRef::<Calls::List>::new(), "records",
-            vec![CallArgument::new("input", list)]);
-        flow.loop_over(&records, "item", |flow, item| { flow.commit(&item); });
-        let result = flow.call_microflow_result::<MxString>(
-            MicroflowRef::<Calls::Text>::new(), "result",
-            vec![CallArgument::new("input", text)]);
-        flow.return_value(result);
-    });
-    module.into_decl()
+use crate::domain::entities::calls::record::Record;
+
+mxrs::imported! {
+    module = "Calls";
+    microflow Text;
+    microflow Object;
+    microflow List;
+}
+
+#[microflow(module = "Calls")]
+pub fn caller(flow: &mut FlowBuilder) {
+    let object = flow.object_parameter("object", Ref::<Record>::new(), |_| {});
+    let list = flow.list_parameter("list", Ref::<Record>::new(), |_| {});
+    let text = flow.call_microflow_result::<MxString>(
+        MicroflowRef::<Text>::new(), "text",
+        vec![CallArgument::new("input", string("before"))]);
+    let record = flow.call_microflow_result::<MxObject<Record>>(
+        MicroflowRef::<Object>::new(), "record",
+        vec![CallArgument::new("input", object)]);
+    flow.commit(&record);
+    let records = flow.call_microflow_result::<MxList<Record>>(
+        MicroflowRef::<List>::new(), "records",
+        vec![CallArgument::new("input", list)]);
+    flow.loop_over(&records, "item", |flow, item| { flow.commit(&item); });
+    let result = flow.call_microflow_result::<MxString>(
+        MicroflowRef::<Text>::new(), "result",
+        vec![CallArgument::new("input", text)]);
+    flow.return_value(result);
 }
 "#;
 
@@ -116,7 +124,7 @@ fn imported_callees_survive_typed_caller_edits_and_transactional_rejections() {
     std::fs::remove_dir_all(&source_dir).unwrap();
     // Reuse a registered per-flow module so this edit replaces the typed Text
     // overlay while adding Caller; the imported Text document remains preserved.
-    let editable = generated.join("src/application/use_cases/calls/text.rs");
+    let editable = generated.join("src/application/services/calls/text_service.rs");
     std::fs::write(&editable, CALLERS).unwrap();
     let built = run(&generated, &output);
     assert!(
@@ -157,12 +165,10 @@ fn imported_callees_survive_typed_caller_edits_and_transactional_rejections() {
     // return. Preflight must reject it before replacing an existing output.
     std::fs::write(
         &editable,
-        CALLERS
-            .replace(
-                "call_microflow_result::<MxString>(",
-                "call_microflow_result::<mxrs::MxBool>(",
-            )
-            .replace(", MxString,", ","),
+        CALLERS.replace(
+            "call_microflow_result::<MxString>(",
+            "call_microflow_result::<mxrs::MxBool>(",
+        ),
     )
     .unwrap();
     let bytes = std::fs::read(&output).unwrap();

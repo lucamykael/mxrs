@@ -17,7 +17,16 @@ pub use mxrs_expr::*;
 pub use mxrs_ir::*;
 #[doc(hidden)]
 pub use mxrs_macros::project_facade as __project;
-pub use mxrs_macros::{MxEntity, MxEnumeration, application, entity, microflow, route};
+pub use mxrs_macros::{
+    MxEntity, MxEnumeration, application, constant, declaration, demo_user, dto, entity,
+    enumeration, layout, menu, microflow, module_roles, nanoflow, navigation, navigation_item,
+    page, route, security, view,
+};
+
+/// The collector declaration macros submit to. Re-exported so an application
+/// crate depends on `mxrs` alone.
+#[doc(hidden)]
+pub use inventory;
 
 /// Declares a project using the public `mxrs` authoring surface.
 #[macro_export]
@@ -64,6 +73,89 @@ pub use mxrs_writer::{synchronize_project, write_project};
 
 pub mod mapping;
 pub mod ports;
+pub mod registry;
+
+/// Registers a declaration assembled by hand.
+///
+/// The declaration attributes cover what a model usually holds; this is the
+/// same registration for anything built directly against the project. The
+/// first argument is the [`registry::Stage`] it belongs to.
+///
+/// ```
+/// mxrs::register!(Document, |project| {
+///     let mut module = mxrs::ModuleBuilder::new("Sales");
+///     module.constant("Region", |constant| {
+///         constant.value("EU");
+///     });
+///     project.merge_module(module.into_decl());
+/// });
+/// ```
+#[macro_export]
+macro_rules! register {
+    ($stage:ident, $apply:expr $(,)?) => {
+        $crate::inventory::submit! {
+            $crate::registry::Declaration::new(
+                $crate::registry::Stage::$stage,
+                ::core::module_path!(),
+                ::core::file!(),
+                ::core::line!(),
+                $apply,
+            )
+        }
+    };
+}
+
+/// Names flows the project keeps in its imported model without declaring
+/// them in Rust.
+///
+/// Each line declares a unit type carrying the flow's Mendix name, so the
+/// flow can be called, bound to a button or attached to an entity event like
+/// any flow written with `#[mxrs::microflow]`. A name Rust cannot spell
+/// states the Mendix name after `=`.
+///
+/// ```
+/// mxrs::imported! {
+///     module = "Sales";
+///     microflow ACT_ApproveOrder;
+///     microflow type_ = "type";
+///     nanoflow NAN_OpenOrder;
+/// }
+/// # use mxrs::MicroflowMarker;
+/// assert_eq!(ACT_ApproveOrder::qualified_name(), "Sales.ACT_ApproveOrder");
+/// assert_eq!(type_::qualified_name(), "Sales.type");
+/// ```
+#[macro_export]
+macro_rules! imported {
+    (module = $module:literal; $($kind:ident $marker:ident $(= $name:literal)?;)*) => {
+        $($crate::__imported_flow!($kind, $module, $marker $(, $name)?);)*
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __imported_flow {
+    ($kind:ident, $module:literal, $marker:ident) => {
+        $crate::__imported_flow!($kind, $module, $marker, ::core::stringify!($marker));
+    };
+    (microflow, $module:literal, $marker:ident, $name:expr) => {
+        #[allow(non_camel_case_types)]
+        #[derive(Debug, Clone, Copy)]
+        pub struct $marker;
+        impl $crate::MicroflowMarker for $marker {
+            const MODULE: &'static str = $module;
+            const NAME: &'static str = $name;
+        }
+    };
+    (nanoflow, $module:literal, $marker:ident, $name:expr) => {
+        #[allow(non_camel_case_types)]
+        #[derive(Debug, Clone, Copy)]
+        pub struct $marker;
+        impl $crate::NanoflowMarker for $marker {
+            const MODULE: &'static str = $module;
+            const NAME: &'static str = $name;
+        }
+    };
+}
 
 /// Implemented by `#[mxrs::application]` for the root application type.
 pub trait ApplicationDefinition {
@@ -87,5 +179,11 @@ pub mod prelude {
         ScheduledEventSchedule, SecurityBuilder, SecurityLevel, TaskQueueBuilder, TaskQueueConfig,
         TaskQueueScope, TypedAttributeMarker, UserRoleBuilder, Var, application, boolean, decimal,
         float, integer, long, project, string,
+    };
+    pub use crate::{
+        AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, LayoutBuilder,
+        LifecycleEvent, MemberRights, MxBinary, MxList, MxObject, SystemMember, constant,
+        declaration, demo_user, dto, entity, enumeration, layout, menu, microflow, module_roles,
+        nanoflow, navigation, navigation_item, page, route, security, view,
     };
 }

@@ -21,14 +21,31 @@ read-only behavioral oracle; never edit it.
   typed DSL/IR/writer/exporter surface for it.
 - Generated projects are layer-first for the modules the project created
   (user directive, 2026-09-29, superseding the module-first directive of
-  2026-09-28): one `src/domain/` and one `src/presentation/` for the whole
-  project, each concept — entities, DTOs, enumerations, documents, module
-  security, ports, markers, microflow services; pages, nanoflows, published
-  routes — holding a folder per Mendix module. The module folder inside a
-  concept is not a repetition of the layers: Mendix entity names are unique
-  per module and not across a project, so it is what keeps them apart.
-  Project-level layers keep cross-cutting concerns (project security,
-  navigation, shared infrastructure, composition). Dependencies point inward.
+  2026-09-28): one `src/domain/`, one `src/application/` and one
+  `src/presentation/` for the whole project, each concept — entities, DTOs,
+  enumerations, documents, module security; microflow services and ports;
+  pages, nanoflows, published routes — holding a folder per Mendix module.
+  The module folder inside a concept is not a repetition of the layers:
+  Mendix entity names are unique per module and not across a project, so it
+  is what keeps them apart. Project-level layers keep cross-cutting concerns
+  (project security, navigation, shared infrastructure).
+  Dependencies point inward.
+- A declaration is one annotated item in its own file, and it registers
+  itself (user directive, 2026-10-01). `#[entity]`/`#[dto]`/`#[view]` on a
+  struct, `#[enumeration]`/`#[module_roles]` on an enum, and `#[microflow]`/
+  `#[nanoflow]`/`#[page]`/`#[layout]`/`#[constant]`/`#[security]`/
+  `#[navigation]` — or `#[declaration]` for what none of those cover — on the
+  function that builds it. The importer, `mxrs new` and every scaffold write
+  these forms, and adding an artifact is the file plus its `pub mod` line:
+  no aggregator, no `apply` chain, no composition root. Generated source
+  never restates what a macro already assumes, never carries a Mendix
+  identifier, and never falls back to an imperative IR dump where a
+  declaration can say it: a name Rust cannot spell is spelled differently and
+  stated with `name = "..."`, and what a declaration genuinely cannot restate
+  is kept from the imported model with an explicit `preserve(...)`. What
+  names an artifact lives with it — an attribute is its entity's accessor
+  (`Order::number()`), a flow is the type its declaration generates — so
+  authored modules have no separate marker file.
 - Modules the project *installed* are module-first, under
   `src/packages/<module>/` (user directive, 2026-09-29):
   `Projects$Module`'s `FromAppStore` decides which, and a package carries only

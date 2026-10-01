@@ -8,7 +8,9 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use mxrs_ir::flow::FlowReturnType;
-use mxrs_ir::{AssociationMarker, AttributeMarker, EntityMarker, Member};
+use mxrs_ir::{
+    AssociationMarker, AssociationRef, AttributeMarker, AttributeRef, EntityMarker, Member,
+};
 
 pub trait MendixType: 'static {}
 
@@ -355,6 +357,15 @@ impl<M: EntityMarker> Var<M> {
         Expr::new(format!("${}/{}", self.name, A::NAME))
     }
 
+    /// Reads one attribute through the accessor its entity declares:
+    /// `order.get(Order::total())` renders `$order/Total`.
+    pub fn get<A>(&self, _attribute: AttributeRef<A>) -> Expr<A::Value>
+    where
+        A: TypedAttributeMarker<Entity = M>,
+    {
+        self.attribute::<A>()
+    }
+
     pub fn expression(&self) -> Expr<MxObject<M>> {
         Expr::new(format!("${}", self.name))
     }
@@ -482,6 +493,30 @@ where
     }
 }
 
+/// Assigning through the accessor an entity declares, instead of through a
+/// marker type: `Order::number().set("A-1")`.
+pub trait AssignAttribute<A: TypedAttributeMarker> {
+    fn set(self, value: impl IntoExpr<A::Value>) -> MemberAssignment<A::Entity>;
+}
+
+impl<A: TypedAttributeMarker> AssignAttribute<A> for AttributeRef<A> {
+    fn set(self, value: impl IntoExpr<A::Value>) -> MemberAssignment<A::Entity> {
+        attribute::<A>(value)
+    }
+}
+
+/// The association counterpart of [`AssignAttribute`]:
+/// `Order::customer().set(&customer)`.
+pub trait AssignAssociation<A: AssociationMarker> {
+    fn set(self, value: &Var<A::To>) -> MemberAssignment<A::From>;
+}
+
+impl<A: AssociationMarker> AssignAssociation<A> for AssociationRef<A> {
+    fn set(self, value: &Var<A::To>) -> MemberAssignment<A::From> {
+        association::<A>(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +544,15 @@ mod tests {
             order.attribute::<Total>().gt(100.0).to_string(),
             "($order/Total > 100.0)"
         );
+    }
+
+    #[test]
+    fn attribute_handles_read_and_assign_like_their_marker_types() {
+        let order = Var::<Order>::new("order");
+        let total = AttributeRef::<Total>::new();
+        assert_eq!(order.get(total).to_string(), "$order/Total");
+        let member = total.set(12.5).into_member();
+        assert_eq!(member.attribute.as_deref(), Some("Total"));
+        assert_eq!(member.value, "12.5");
     }
 }

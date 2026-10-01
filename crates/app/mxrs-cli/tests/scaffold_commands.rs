@@ -156,10 +156,11 @@ fn quality_integration_and_ci_scaffolds_emit_consumable_files() {
             .status
             .success()
     );
-    // Validations and integrations are server-side use cases, so they land in
-    // the application layer rather than next to the model declarations.
+    // A validation is a server-side service, so it lands in the application
+    // layer rather than next to the model declarations, in the file its
+    // declaring function names.
     assert!(
-        root.join("src/application/use_cases/sales/validate_order.rs")
+        root.join("src/application/services/sales/validate_order_service.rs")
             .is_file()
     );
     assert!(
@@ -346,7 +347,8 @@ fn inspecting_reports_the_declared_version_modules_and_registered_scaffolds() {
     assert_eq!(document["manifest"], true);
     assert_eq!(document["domain_module"], true);
     assert_eq!(document["layout"], "layered");
-    assert_eq!(document["modules"][0], "sales");
+    // The module `mxrs new` starts a project with, and the one scaffolded.
+    assert_eq!(document["modules"], serde_json::json!(["main", "sales"]));
     assert_eq!(document["mprs"].as_array().unwrap().len(), 0);
     assert_eq!(
         document["registered_scaffolds"],
@@ -483,7 +485,12 @@ fn the_constant_and_scheduled_event_generators_write_their_families_and_registry
     let path = root.join("src/domain/documents/sales/api_endpoint.rs");
     assert!(text(&constant).contains(&format!("  create  {}", path.display())));
     let source = std::fs::read_to_string(&path).unwrap();
-    assert!(source.contains("module.constant(\"ApiEndpoint\""));
+    assert!(
+        source.contains(
+            "#[constant(module = \"Sales\")]\npub fn api_endpoint(constant: &mut ConstantBuilder) {"
+        ),
+        "{source}"
+    );
 
     let event = scaffold(&root, &["scheduled-event", "new", "Sales.SE_ExpireCarts"]);
     assert!(event.status.success(), "{:?}", event.stderr);
@@ -492,8 +499,21 @@ fn the_constant_and_scheduled_event_generators_write_their_families_and_registry
     // Event and handler land in one file under one name, as in mxrb's
     // "scheduled event and handler" template.
     let source = std::fs::read_to_string(&path).unwrap();
-    assert!(source.contains("module.microflow(\"SE_ExpireCarts\""));
-    assert!(source.contains("module.scheduled_event(\"SE_ExpireCarts\", \"SE_ExpireCarts\""));
+    assert!(
+        source.contains("#[microflow(SE, module = \"Sales\")]\npub fn expire_carts("),
+        "{source}"
+    );
+    // The file is formatted as rustfmt leaves it, so compare without the
+    // line breaks it chose.
+    let compact = source.split_whitespace().collect::<String>();
+    assert!(
+        compact.contains("module.scheduled_event(\"SE_ExpireCarts\",\"SE_ExpireCarts\","),
+        "{source}"
+    );
+    assert!(
+        source.contains("#[declaration(module = \"Sales\")]\npub fn expire_carts_event("),
+        "{source}"
+    );
 
     // Registry keys underscore the command name, so `scaffold destroy` takes
     // `scheduled_event:...` rather than the dashed command spelling.
@@ -565,15 +585,15 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
         ("domain", "domain/entities/sales/order_overview.rs"),
         (
             "application",
-            "application/use_cases/sales/act_load_order_overview.rs",
+            "application/services/sales/load_order_overview_service.rs",
         ),
         (
-            "domain",
-            "application/use_cases/sales/act_refresh_order_overview.rs",
+            "application",
+            "application/services/sales/refresh_order_overview_service.rs",
         ),
         (
             "presentation",
-            "presentation/nanoflows/sales/nan_refresh_order_overview.rs",
+            "presentation/nanoflows/sales/refresh_order_overview.rs",
         ),
         ("presentation", "presentation/pages/sales/order_overview.rs"),
     ] {
@@ -583,22 +603,28 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
             "{layer}/{relative}: {rendered}"
         );
     }
-    let navigation = root.join("src/presentation/navigation/order_overview.rs");
-    assert!(rendered.contains(&format!("  create  {}", navigation.display())));
-    let entry = std::fs::read_to_string(navigation).unwrap();
-    assert!(entry.contains("Sales.OrderOverview"), "{entry}");
-    // The generated entry goes through the find-or-create accessor. It must
-    // not assume the application still declares the profile it names: MXRB
-    // refuses the scaffold outright when the Responsive aggregator is
-    // missing, and deferring that to a panic inside the user's build — which
-    // an `expect` here would do — is strictly worse than either.
+    // The page adds itself to the navigation from its own file, so the
+    // item is created and destroyed with the page and there is no separate
+    // navigation module to collide with the project's `navigation.rs`.
+    assert!(!root.join("src/presentation/navigation").exists());
+    let page = std::fs::read_to_string(root.join("src/presentation/pages/sales/order_overview.rs"))
+        .unwrap();
     assert!(
-        entry.contains("project.navigation_item("),
-        "the navigation entry should use the total accessor: {entry}"
+        page.contains("#[navigation_item(profile = \"Responsive\", caption = \"Order Overview\")]"),
+        "{page}"
     );
     assert!(
-        !entry.contains("expect("),
-        "generated navigation must not contain a panic path: {entry}"
+        page.contains("item.page(\"Sales.OrderOverview\");"),
+        "{page}"
+    );
+    // The item joins the profile it names, creating it when the application
+    // no longer declares one. It must not assume the profile is still there:
+    // MXRB refuses the scaffold outright when the Responsive aggregator is
+    // missing, and deferring that to a panic inside the user's build is
+    // strictly worse than either.
+    assert!(
+        !page.contains("expect("),
+        "generated navigation must not contain a panic path: {page}"
     );
     assert!(text(&scaffold(&root, &["scaffold", "list"])).contains("page:Sales.OrderOverview"));
 }

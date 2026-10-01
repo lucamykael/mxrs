@@ -111,6 +111,16 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     )
     .unwrap();
 
+    // Everything scaffolded — and the project it was scaffolded into — is
+    // already the way rustfmt would leave it: generated source is edited by
+    // people, and their first `cargo fmt` should change nothing.
+    let formatted = cargo(&root, &["fmt", "--check"]);
+    assert!(
+        formatted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&formatted.stdout)
+    );
+
     let output = cargo_env(
         &root,
         &["run", "--offline", "--quiet", "--", "build/Sales.mpr"],
@@ -309,19 +319,22 @@ fn scaffolding_the_same_artifact_twice_changes_nothing_the_first_run_wrote() {
     ));
 
     scaffold(&root, ArtifactKind::Entity, "Sales.Invoice");
-    let after = std::fs::read_to_string(&aggregator).unwrap();
-    assert!(after.contains("pub mod order;\npub mod invoice;\n"));
-    assert!(
-        after.contains("    project.merge_module(order::declaration());\n")
-            && after.contains("    project.merge_module(invoice::declaration());\n"),
-        "{after}"
+    // An entity registers itself, so its folder's index is a list of
+    // modules and nothing else: there is no `apply` to keep in step.
+    assert_eq!(
+        std::fs::read_to_string(&aggregator).unwrap(),
+        "//! The Sales module's `entities`.\n\npub mod invoice;\npub mod order;\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/domain/entities/sales/order.rs")).unwrap(),
+        "//! Entity `Sales.Order`.\n//!\n//! Fields are attributes (`MxString`, `MxDecimal`, `MxBool`, ...) and\n//! associations (`Reference<T>`, `ReferenceSet<T>`); `#[mxrs(...)]`\n//! states what a type cannot: `length`, `required`, `default`, `index(...)`.\n\nuse mxrs::prelude::*;\n\n#[entity(module = \"Sales\")]\npub struct Order {}\n"
     );
     // The first entity creates the concept index and its module folder index
     // as well; the second reuses both.
     assert_eq!(first.len(), 3);
 
     let inspection = inspect_project(&root).unwrap();
-    assert_eq!(inspection.modules, ["sales"]);
+    assert_eq!(inspection.modules, ["main", "sales"]);
     assert_eq!(inspection.declared_version.as_deref(), Some("11.12.1"));
     assert_eq!(
         inspection.registered_scaffolds,
@@ -378,14 +391,18 @@ fn a_formatted_project_can_still_be_scaffolded_into() {
     assert!(
         std::fs::read_to_string(&aggregator)
             .unwrap()
-            .contains("project.merge_module(order::declaration());")
+            .contains("pub mod order;")
     );
     scaffold(&root, ArtifactKind::Entity, "Sales.Invoice");
     let aggregator_source = std::fs::read_to_string(&aggregator).unwrap();
     assert!(
-        aggregator_source.contains("project.merge_module(order::declaration());")
-            && aggregator_source.contains("project.merge_module(invoice::declaration());"),
+        aggregator_source.contains("pub mod invoice;\npub mod order;\n"),
         "{aggregator_source}"
+    );
+    scaffold(&root, ArtifactKind::Module, "Billing");
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/domain/modules/mod.rs")).unwrap(),
+        "//! The Mendix modules this project declares, one file each.\n\npub mod billing;\npub mod main;\npub mod sales;\n"
     );
     let output = cargo(&root, &["build", "--offline", "--quiet"]);
     assert!(
@@ -466,18 +483,20 @@ fn names_and_projects_that_cannot_be_scaffolded_are_reported_not_guessed() {
         Err(ScaffoldError::ProjectNotFound(_))
     ));
 
-    // The guard that refuses to guess how to edit an unrecognized `build()`
-    // is reachable whenever a project's composition root was restructured by
-    // hand. Reproduce that shape rather than dropping the guard.
+    // A scaffold never has to understand how a project composes its model:
+    // a declaration registers itself, so the only edit to existing source is
+    // a `pub mod` line. A layer restructured by hand is therefore scaffolded
+    // into, not refused — and what was written there by hand is left alone.
     std::fs::write(
         root.join("src/domain/mod.rs"),
         "pub fn build() -> mxrs::ProjectDecl { unimplemented!() }\n",
     )
     .unwrap();
-    assert!(matches!(
-        scaffold_artifact(&ArtifactScaffold::new(ArtifactKind::Module, "Sales", &root)),
-        Err(ScaffoldError::UnrecognizedProjectBuild(_))
-    ));
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/domain/mod.rs")).unwrap(),
+        "pub mod modules;\n\npub fn build() -> mxrs::ProjectDecl { unimplemented!() }\n"
+    );
     assert!(!root.join("src/modules").exists());
 }
 
@@ -584,6 +603,21 @@ fn scaffolding_into_a_project_missing_its_composition_root_fails_closed() {
 fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
     let directory = tempfile::tempdir().unwrap();
     let root = application(directory.path());
+    // A pre-layered project builds its whole model by hand in one `domain`
+    // module, and its application attribute names no entry point.
+    std::fs::remove_dir_all(root.join("src/domain")).unwrap();
+    std::fs::create_dir_all(root.join("src/domain")).unwrap();
+    std::fs::write(
+        root.join("src/domain/mod.rs"),
+        concat!(
+            "pub fn build() -> mxrs::ProjectDecl {\n",
+            "    let mut builder = mxrs::ProjectBuilder::new(\"11.12.1\");\n",
+            "    builder.module(\"Main\", |_module| {});\n",
+            "    builder.build()\n",
+            "}\n"
+        ),
+    )
+    .unwrap();
     let domain = std::fs::read(root.join("src/domain/mod.rs")).unwrap();
     std::fs::remove_dir_all(root.join("src/application")).unwrap();
     std::fs::remove_dir_all(root.join("src/presentation")).unwrap();
@@ -610,6 +644,9 @@ fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
     );
     assert_eq!(project_layout(&root).unwrap(), ProjectLayout::Layered);
 
+    // The migrated project still composes its hand-built model through an
+    // explicit entry point; what is scaffolded from here on registers
+    // itself beside it.
     scaffold(&root, ArtifactKind::Module, "Sales");
     scaffold(&root, ArtifactKind::UseCase, "Sales.ACT_CreateOrder");
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
@@ -643,40 +680,31 @@ fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
     );
 }
 
-/// Both generators pre-write every layer's `modules` aggregator *and* its
-/// `apply` call, so the code that splices that call back in is only reached for
-/// a project whose layer has been edited by hand. Each layer has its own
-/// expected tail there, and a wrong one reports `UnrecognizedProjectBuild` on
-/// source mxrs itself emitted — a refusal the user cannot act on. Reproduce
-/// that shape per layer and require the rewiring to still build.
+/// A layer index a user emptied by hand is filled back in, once per concept:
+/// the scaffold declares the module it needs and touches nothing else, so
+/// there is no composition call to splice and no shape to recognize.
 #[test]
-fn a_hand_removed_layer_apply_call_is_spliced_back_instead_of_refused() {
+fn a_hand_emptied_layer_index_is_declared_into_again() {
     let directory = tempfile::tempdir().unwrap();
     let root = application(directory.path());
-    // The module index and the call that composes it are both removed by
-    // hand; scaffolding must put them back exactly once.
     let domain = root.join("src/domain/mod.rs");
-    let source = std::fs::read_to_string(&domain).unwrap();
-    std::fs::write(&domain, source.clone()).unwrap();
+    std::fs::write(&domain, "").unwrap();
 
     scaffold(&root, ArtifactKind::Module, "Sales");
     scaffold(&root, ArtifactKind::Entity, "Sales.Order");
+    scaffold(&root, ArtifactKind::Entity, "Sales.Invoice");
     scaffold(&root, ArtifactKind::UseCase, "Sales.ACT_CreateOrder");
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
 
-    let source = std::fs::read_to_string(&domain).unwrap();
-    // Exactly one call per concept, not one per scaffolded artifact.
+    // Exactly one declaration per concept, not one per scaffolded artifact.
     assert_eq!(
-        source.matches("entities::apply(&mut project);").count(),
-        1,
-        "{source}"
+        std::fs::read_to_string(&domain).unwrap(),
+        "pub mod entities;\npub mod modules;\n"
     );
     let entities = std::fs::read_to_string(root.join("src/domain/entities/mod.rs")).unwrap();
-    assert!(entities.contains("pub mod sales;"), "{entities}");
     assert_eq!(
-        entities.matches("sales::apply(project);").count(),
-        1,
-        "{entities}"
+        entities,
+        "//! Every module's `entities`, one folder per Mendix module.\n\npub mod sales;\n"
     );
 
     let output = cargo(

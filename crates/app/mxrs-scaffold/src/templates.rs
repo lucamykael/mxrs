@@ -10,46 +10,74 @@
 //! surface mxrs lacks is not implemented at all rather than scaffolded into
 //! something that will not compile.
 
-/// Entry function every scaffolded artifact file exposes, and that the family
-/// aggregator's `DECLARATIONS` table points at.
-pub(crate) const DECLARE: &str = "declare";
-pub(crate) const DECLARATIONS_LIST: &str = "DECLARATIONS";
-
-pub(crate) fn application_layer() -> String {
-    "pub fn build() -> mxrs::ProjectDecl {\n    crate::domain::build()\n}\n".to_string()
-}
-
-pub(crate) fn empty_presentation_layer() -> String {
-    "pub fn apply(_project: &mut mxrs::ProjectDecl) {}\n".to_string()
-}
-
-pub(crate) fn page_navigation_aggregator() -> String {
-    "//! Navigation entries created by `mxrs page --template` or `--chain`.\n\n\
-     pub fn apply(project: &mut ::mxrs::ProjectDecl) {\n}\n"
+/// The domain layer of a fresh project: the modules it declares.
+pub(crate) fn domain_layer() -> String {
+    "//! Business data and rules that do not depend on delivery or infrastructure.\n\n\
+     pub mod modules;\n"
         .to_string()
 }
 
-/// The navigation entry a templated/chain page contributes.
-///
-/// `navigation_item` is a find-or-create accessor precisely so this generated
-/// body cannot panic: the profile it names is a default, not an invariant, and
-/// an application that declares only Phone/Tablet profiles — or that renames
-/// this one while editing its own generated Rust — must keep building.
-pub(crate) fn page_navigation_entry(module_name: &str, name: &str) -> String {
+pub(crate) fn application_layer() -> String {
+    "//! Application orchestration: each module's microflows as services.\n".to_string()
+}
+
+/// The presentation layer of a fresh project: the application layout, the
+/// home page that uses it, and the navigation that opens it.
+pub(crate) fn presentation_layer() -> String {
+    "//! Pages, layouts, nanoflows and navigation.\n\n\
+     pub mod layouts;\n\
+     pub mod navigation;\n\
+     pub mod pages;\n"
+        .to_string()
+}
+
+/// `src/domain/modules/mod.rs`: the Mendix modules the project declares, one
+/// file each.
+pub(crate) fn module_registry(first: &str) -> String {
+    format!("//! The Mendix modules this project declares, one file each.\n\npub mod {first};\n")
+}
+
+/// The home page `mxrs new` starts a project with. `title` is already
+/// escaped for a Rust string literal.
+pub(crate) fn home_page(title: &str) -> String {
+    format!(
+        "//! Page `Main.Home`.\n\
+         //!\n\
+         //! Widget vocabulary: `mxrs::PageBuilder`.\n\n\
+         use mxrs::prelude::*;\n\n\
+         #[page(module = \"Main\")]\n\
+         pub fn home(page: &mut PageBuilder) {{\n    \
+         page.layout(\"Main.ApplicationLayout\", \"Main\");\n    \
+         page.text(\"Welcome to {title}\");\n\
+         }}\n"
+    )
+}
+
+/// The navigation `mxrs new` starts a project with: one Responsive profile
+/// opening the home page.
+pub(crate) fn navigation() -> String {
+    "//! The project's navigation profiles.\n\n\
+     use mxrs::prelude::*;\n\n\
+     #[navigation]\n\
+     pub fn navigation(navigation: &mut NavigationBuilder) {\n    \
+     navigation.profile(\"Responsive\", |profile| {\n        \
+     profile.home_page(\"Main.Home\");\n    \
+     });\n\
+     }\n"
+    .to_string()
+}
+
+/// The navigation item a templated/chain page adds for itself, declared in
+/// the page's own file. `#[navigation_item]` appends to the profile it
+/// names — creating the profile if the application no longer declares it —
+/// so the generated item cannot break a build by assuming one.
+fn page_navigation_item(module_name: &str, name: &str, function: &str) -> String {
     let caption = humanize(name);
     format!(
-        "//! Navigation entry for `{module_name}.{name}`.\n\n\
-         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         project.navigation_item(\n        \
-         \"Responsive\",\n        \
-         ::mxrs::NavigationItemDecl {{\n            \
-         caption: ::std::collections::BTreeMap::from([(\"en_US\".to_string(), {caption:?}.to_string())]),\n            \
-         page: Some(\"{module_name}.{name}\".to_string()),\n            \
-         microflow: None,\n            \
-         icon: Some(::mxrs::NavigationIconDecl::Glyph(\"file\".to_string())),\n            \
-         items: vec![],\n        \
-         }},\n    \
-         );\n\
+        "\n#[navigation_item(profile = \"Responsive\", caption = {caption:?})]\n\
+         pub fn {function}_navigation(item: &mut NavigationItemBuilder) {{\n    \
+         item.page(\"{module_name}.{name}\");\n    \
+         item.icon(\"file\");\n\
          }}\n"
     )
 }
@@ -58,32 +86,79 @@ pub(crate) fn infrastructure_layer() -> String {
     "//! Outbound adapters and generated platform integration.\n".to_string()
 }
 
+/// A Mendix name as the Rust type that declares it, the way the importer
+/// spells it: each `_`-separated segment capitalized. `explicit` is whether
+/// the declaration has to state the Mendix name because the type does not
+/// read back to it.
+pub(crate) fn type_name(name: &str) -> (String, bool) {
+    let type_name = pascal_case(name);
+    let explicit = type_name != name;
+    (type_name, explicit)
+}
+
+/// `order_date` → `OrderDate`: the casing the declaration macros apply to a
+/// Rust identifier to get its Mendix name.
+pub(crate) fn pascal_case(value: &str) -> String {
+    value
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut characters = segment.chars();
+            match characters.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// `module = "Sales"`, plus `name = "..."` when the Rust item does not
+/// spell the Mendix name.
+fn declaration_arguments(module_name: &str, name: &str, explicit: bool) -> String {
+    if explicit {
+        format!("module = {module_name:?}, name = {name:?}")
+    } else {
+        format!("module = {module_name:?}")
+    }
+}
+
 pub(crate) fn entity(module_name: &str, name: &str) -> String {
+    let (type_name, explicit) = type_name(name);
+    let arguments = declaration_arguments(module_name, name, explicit);
     format!(
-        "//! Domain entity `{module_name}.{name}`.\n\
+        "//! Entity `{module_name}.{name}`.\n\
          //!\n\
-         //! Attribute and association vocabulary: `mxrs::EntityBuilder`.\n\n\
+         //! Fields are attributes (`MxString`, `MxDecimal`, `MxBool`, ...) and\n\
+         //! associations (`Reference<T>`, `ReferenceSet<T>`); `#[mxrs(...)]`\n\
+         //! states what a type cannot: `length`, `required`, `default`, `index(...)`.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.entity({name:?}, |_entity| {{}});\n    \
-         module.into_decl()\n\
-         }}\n"
+         #[entity({arguments})]\n\
+         pub struct {type_name} {{}}\n"
     )
 }
 
 pub(crate) fn enumeration(module_name: &str, name: &str) -> String {
+    let (type_name, explicit) = type_name(name);
+    let arguments = declaration_arguments(module_name, name, explicit);
     format!(
         "//! Enumeration `{module_name}.{name}`.\n\
          //!\n\
-         //! Value vocabulary: `mxrs::EnumerationBuilder`.\n\n\
+         //! Variants are the values; `#[mxrs(caption = \"...\")]` captions one.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.enumeration({name:?}, |_enumeration| {{}});\n    \
-         module.into_decl()\n\
-         }}\n"
+         #[enumeration({arguments})]\n\
+         pub enum {type_name} {{}}\n"
     )
+}
+
+/// The function declaring a document named `name`, and whether the
+/// declaration has to state that name.
+fn document_function(name: &str) -> (String, bool) {
+    let mut function = snake_case(name);
+    if crate::is_rust_keyword(&function) {
+        function.push('_');
+    }
+    let explicit = pascal_case(&function) != name;
+    (function, explicit)
 }
 
 /// mxrb's `constant` template creates a string constant with an empty value,
@@ -91,17 +166,16 @@ pub(crate) fn enumeration(module_name: &str, name: &str) -> String {
 /// the type and value are one edit away, but an empty string is the only
 /// starting value that cannot be mistaken for a real one.
 pub(crate) fn constant(module_name: &str, name: &str) -> String {
+    let (function, explicit) = document_function(name);
+    let arguments = declaration_arguments(module_name, name, explicit);
     format!(
         "//! Constant `{module_name}.{name}`.\n\
          //!\n\
          //! Type and value vocabulary: `mxrs::ConstantBuilder`.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.constant({name:?}, |constant| {{\n        \
-         constant.value(\"\");\n    \
-         }});\n    \
-         module.into_decl()\n\
+         #[constant({arguments})]\n\
+         pub fn {function}(constant: &mut ConstantBuilder) {{\n    \
+         constant.value(\"\");\n\
          }}\n"
     )
 }
@@ -112,18 +186,21 @@ pub(crate) fn constant(module_name: &str, name: &str) -> String {
 /// that does not exist would fail the writer's reference checks on the very
 /// first build, so scaffolding only half of the pair is not an option.
 pub(crate) fn scheduled_event(module_name: &str, name: &str) -> String {
+    let flow = flow_declaration("microflow", module_name, name);
     format!(
         "//! Scheduled event `{module_name}.{name}` and the microflow it runs.\n\
          //!\n\
          //! Cadence vocabulary: `mxrs::ScheduledEventBuilder`. Day schedules\n\
          //! run once per day; `every` applies to minutes and hours.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.microflow({name:?}, |_flow| {{}});\n    \
-         module.scheduled_event({name:?}, {name:?}, ::mxrs::ScheduleUnit::Days, |_event| {{}});\n    \
-         module.into_decl()\n\
-         }}\n"
+         #[{attribute}]\n\
+         pub fn {function}(_flow: &mut FlowBuilder) {{}}\n\n\
+         #[declaration(module = {module_name:?})]\n\
+         pub fn {function}_event(module: &mut ModuleBuilder) {{\n    \
+         module.scheduled_event({name:?}, {name:?}, ScheduleUnit::Days, |_event| {{}});\n\
+         }}\n",
+        attribute = flow.attribute,
+        function = flow.function,
     )
 }
 
@@ -132,7 +209,7 @@ pub(crate) fn use_case(module_name: &str, name: &str) -> String {
         module_name,
         name,
         "microflow",
-        "Application use case",
+        "Application service",
         String::new(),
     )
 }
@@ -238,23 +315,103 @@ pub(crate) fn repository_adapter(module_name: &str, name: &str, stem: &str) -> S
     )
 }
 
-fn flow(
-    module_name: &str,
-    name: &str,
-    builder_method: &str,
-    description: &str,
-    note: String,
-) -> String {
+/// How a scaffolded flow is declared: the attribute and the function it
+/// sits on. `ACT_CreateOrder` is `#[microflow(ACT, module = "Sales")]` on
+/// `create_order` — the same naming the importer applies, so a scaffolded
+/// flow and an imported one are the same file.
+pub(crate) struct FlowDeclaration {
+    pub(crate) attribute: String,
+    pub(crate) function: String,
+}
+
+/// `ACT_CreateOrder` → (`ACT`, `CreateOrder`): the capitals before the first
+/// underscore, when the name follows that convention.
+fn split_prefix(name: &str) -> (Option<&str>, &str) {
+    match name.split_once('_') {
+        Some((prefix, rest))
+            if (2..=5).contains(&prefix.len())
+                && !rest.is_empty()
+                && prefix.starts_with(|c: char| c.is_ascii_uppercase())
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) =>
+        {
+            (Some(prefix), rest)
+        }
+        _ => (None, name),
+    }
+}
+
+pub(crate) fn flow_declaration(kind: &str, module_name: &str, name: &str) -> FlowDeclaration {
+    let (prefix, rest) = split_prefix(name);
+    let mut function = snake_case(rest);
+    // A flow body calls the prelude's expression functions, and the flow is
+    // named by a type carrying its Mendix name: the function is neither.
+    if crate::is_rust_keyword(&function)
+        || matches!(
+            function.as_str(),
+            "string"
+                | "integer"
+                | "long"
+                | "float"
+                | "decimal"
+                | "boolean"
+                | "attribute"
+                | "association"
+        )
+    {
+        function.push('_');
+    }
+    if function == name {
+        function.push_str("_flow");
+    }
+    let derived = match prefix {
+        Some(prefix) => format!("{prefix}_{}", pascal_case(&function)),
+        None => pascal_case(&function),
+    };
+    let mut arguments = Vec::new();
+    if let Some(prefix) = prefix {
+        arguments.push(prefix.to_string());
+    }
+    arguments.push(format!("module = {module_name:?}"));
+    if derived != name {
+        arguments.push(format!("name = {name:?}"));
+    }
+    FlowDeclaration {
+        attribute: format!("{kind}({})", arguments.join(", ")),
+        function,
+    }
+}
+
+/// The file a scaffolded microflow service lives in.
+pub(crate) fn service_stem(name: &str) -> String {
+    let function = flow_declaration("microflow", "", name).function;
+    format!("{}_service", function.trim_end_matches('_'))
+}
+
+/// The file a scaffolded nanoflow lives in.
+pub(crate) fn nanoflow_stem(name: &str) -> String {
+    let function = flow_declaration("nanoflow", "", name).function;
+    let stem = function.trim_end_matches('_');
+    if matches!(stem, "mod" | "imported") {
+        format!("{stem}_nanoflow")
+    } else {
+        stem.to_string()
+    }
+}
+
+fn flow(module_name: &str, name: &str, kind: &str, description: &str, note: String) -> String {
+    let FlowDeclaration {
+        attribute,
+        function,
+    } = flow_declaration(kind, module_name, name);
     format!(
         "//! {description} `{module_name}.{name}`.\n\
          {note}//!\n\
          //! Activity vocabulary: `mxrs::FlowBuilder`.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.{builder_method}({name:?}, |_flow| {{}});\n    \
-         module.into_decl()\n\
-         }}\n"
+         #[{attribute}]\n\
+         pub fn {function}(_flow: &mut FlowBuilder) {{}}\n"
     )
 }
 
@@ -267,24 +424,23 @@ pub(crate) fn page(
     roles: &[String],
 ) -> String {
     let title = humanize(name);
+    let (function, explicit) = document_function(name);
+    let arguments = declaration_arguments(module_name, name, explicit);
     let allowed = roles
         .iter()
-        .map(|role| format!("        page.allow_role({role:?});\n"))
+        .map(|role| format!("    page.allow_role({role:?});\n"))
         .collect::<String>();
     format!(
         "//! Page `{module_name}.{name}`.\n\
          //!\n\
          //! Widget vocabulary: `mxrs::PageBuilder`.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.page({name:?}, |page| {{\n        \
-         page.title({title:?});\n        \
+         #[page({arguments})]\n\
+         pub fn {function}(page: &mut PageBuilder) {{\n    \
+         page.title({title:?});\n    \
          page.layout(\"{module_name}.ApplicationLayout\", {layout_parameter:?});\n\
-         {allowed}        \
-         page.text({title:?});\n    \
-         }});\n    \
-         module.into_decl()\n\
+         {allowed}    \
+         page.text({title:?});\n\
          }}\n"
     )
 }
@@ -297,12 +453,9 @@ pub(crate) fn layouts(module_name: &str, layout_parameter: &str) -> String {
          //! page scaffold creates this alongside the first page rather than\n\
          //! emitting a declaration that resolves to nothing.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.layout(\"ApplicationLayout\", |layout| {{\n        \
-         layout.placeholder({layout_parameter:?});\n    \
-         }});\n    \
-         module.into_decl()\n\
+         #[layout(module = {module_name:?})]\n\
+         pub fn application_layout(layout: &mut LayoutBuilder) {{\n    \
+         layout.placeholder({layout_parameter:?});\n\
          }}\n"
     )
 }
@@ -311,56 +464,48 @@ pub(crate) fn module_roles(module_name: &str) -> String {
     format!(
         "//! Module roles for `{module_name}`.\n\
          //!\n\
-         //! Declaring roles here makes them authoritative for this module: the\n\
-         //! writer replaces the module's persisted role set rather than merging\n\
-         //! into it (see `mxrs_ir::ModuleDecl::roles`).\n\n\
+         //! The enum is authoritative for this module: the writer replaces the\n\
+         //! module's persisted role set with these rather than merging into it.\n\
+         //! A variant's comment is the role's description.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.role(\"User\", \"Application user\");\n    \
-         module.role(\"Administrator\", \"Module administrator\");\n    \
-         module.into_decl()\n\
+         #[module_roles(module = {module_name:?})]\n\
+         pub enum Role {{\n    \
+         /// Application user\n    \
+         User,\n    \
+         /// Module administrator\n    \
+         Administrator,\n\
          }}\n"
     )
 }
 
-/// Project security is declared as its own `apply` peer rather than inside a
-/// module, matching the layout `mxrs import` already generates. It returns
-/// early when security is already declared so re-running `security init` for a
-/// second module never silently replaces the first module's bindings.
+/// Project security, declared once: `security init` writes it for the first
+/// module and leaves it alone afterwards, so initializing a second module
+/// never replaces the first module's bindings.
 ///
-/// `clear_roles` comes first because `ProjectSecurityDecl::default` already
-/// carries an `Administrator` role: declaring one without clearing would hand
-/// the writer two roles of the same name, which it rejects. Clearing means
+/// `clear_roles` comes first because the builder already carries an
+/// `Administrator` role: declaring one without clearing would hand the
+/// writer two roles of the same name, which it rejects. Clearing means
 /// `System.Administrator` has to be restated, and it is — dropping it would
 /// silently unbind the platform's own administrator module role.
 pub(crate) fn project_security(module_name: &str) -> String {
     format!(
-        "//! Project-level security.\n\
-         //!\n\
-         //! `None` means \"preserve whatever the imported project already has\"\n\
-         //! (see `mxrs_ir::ProjectDecl::security`), so this only declares\n\
-         //! security when nothing else has.\n\n\
-         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         if project.security.is_some() {{\n        \
-         return;\n    \
-         }}\n    \
-         let mut builder = ::mxrs::ProjectBuilder::new(project.mendix_version.clone());\n    \
-         builder.security(|security| {{\n        \
-         security.level(::mxrs::SecurityLevel::CheckEverything);\n        \
-         security.clear_roles();\n        \
-         security.role(\"User\", |role| {{\n            \
-         role.description(\"Application user\");\n            \
-         role.module_role(\"{module_name}.User\");\n        \
-         }});\n        \
-         security.role(\"Administrator\", |role| {{\n            \
-         role.administrator(true);\n            \
-         role.description(\"Application administrator\");\n            \
-         role.module_role(\"System.Administrator\");\n            \
-         role.module_role(\"{module_name}.Administrator\");\n        \
+        "//! The project's security. Each module's own roles are declared in\n\
+         //! `crate::domain::module_security`.\n\n\
+         use mxrs::prelude::*;\n\n\
+         #[security]\n\
+         pub fn security(security: &mut SecurityBuilder) {{\n    \
+         security.level(SecurityLevel::CheckEverything);\n    \
+         security.clear_roles();\n    \
+         security.role(\"User\", |role| {{\n        \
+         role.description(\"Application user\");\n        \
+         role.module_role(\"{module_name}.User\");\n    \
          }});\n    \
-         }});\n    \
-         project.security = builder.build().security;\n\
+         security.role(\"Administrator\", |role| {{\n        \
+         role.administrator(true);\n        \
+         role.description(\"Application administrator\");\n        \
+         role.module_role(\"System.Administrator\");\n        \
+         role.module_role(\"{module_name}.Administrator\");\n    \
+         }});\n\
          }}\n"
     )
 }
@@ -388,77 +533,76 @@ pub(crate) fn theme_exclusion_variables() -> String {
         .to_string()
 }
 
-/// Aggregates demo-user declarations. The build wires this `apply` after
-/// `security::apply`, so project security is always present — declared by
-/// the security scaffold or carried by an imported model — when these run.
-pub(crate) fn demo_users_aggregator() -> String {
-    format!(
-        "//! Local demo user declarations.\n\n\
-         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         for declare in {DECLARATIONS_LIST} {{\n        \
-         declare(project);\n    \
-         }}\n\
-         }}\n\n\
-         const {DECLARATIONS_LIST}: &[fn(&mut ::mxrs::ProjectDecl)] = &[];\n"
-    )
-}
-
 /// One demo-user declaration. The password never appears here: the writer
 /// resolves the named environment variable at write time, and an existing
 /// stored password is preserved when the variable is absent.
 pub(crate) fn demo_user(name: &str, entity: &str, roles: &[String], password_env: &str) -> String {
-    let roles = roles
-        .iter()
-        .map(|role| format!("{role:?}.to_string()"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut function = snake_case(name);
+    if crate::is_rust_keyword(&function) {
+        function.push('_');
+    }
+    let attribute = if function == name {
+        "#[demo_user]".to_string()
+    } else {
+        format!("#[demo_user(name = {name:?})]")
+    };
+    let mut lines = Vec::new();
+    if entity != "System.User" {
+        lines.push(format!("    user.entity({entity:?});\n"));
+    }
+    for role in roles {
+        lines.push(format!("    user.role({role:?});\n"));
+    }
+    lines.push(format!("    user.password_from_env({password_env:?});\n"));
     format!(
         "//! Demo user `{name}`.\n\n\
-         pub fn declare(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         let security = project\n        \
-         .security\n        \
-         .as_mut()\n        \
-         .expect(\"project security must be declared before demo users\");\n    \
-         let mut user = ::mxrs::DemoUserDecl::new({name:?});\n    \
-         user.entity = {entity:?}.to_string();\n    \
-         user.roles = vec![{roles}];\n    \
-         user.password_env = Some({password_env:?}.to_string());\n    \
-         security.demo_users.push(user);\n\
-         }}\n"
-    )
-}
-
-/// One layer or concept index — `domain`, `entities`, `presentation`,
-/// `pages` — in the same shape the importer writes: a header, `pub mod`
-/// declarations, and one `apply`. A concept holds one folder per Mendix
-/// module, because entity names are unique per module and not across a
-/// project.
-pub(crate) fn concept_index(concept: &str) -> String {
-    format!(
-        "//! Every module's `{concept}`, one folder per Mendix module.\n\n\
-         pub fn apply(_project: &mut ::mxrs::ProjectDecl) {{}}\n"
+         use mxrs::prelude::*;\n\n\
+         {attribute}\n\
+         pub fn {function}(user: &mut DemoUserBuilder) {{\n{}}}\n",
+        lines.concat()
     )
 }
 
 /// The declaration `mxrs module new` writes into the module registry: a
 /// Mendix module exists as a named thing before it holds anything.
 pub(crate) fn module_declaration(module_name: &str) -> String {
+    let mut function = snake_case(module_name);
+    if crate::is_rust_keyword(&function) {
+        function.push('_');
+    }
     format!(
         "//! The {module_name} Mendix module.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n\
-         \x20   ModuleBuilder::new({module_name:?}).into_decl()\n\
-         }}\n"
+         #[declaration(module = {module_name:?})]\n\
+         pub fn {function}(_module: &mut ModuleBuilder) {{}}\n"
     )
 }
 
-/// One concept folder inside a module — `domain`, `entities`, `services` —
-/// in the same shape the importer writes.
-pub(crate) fn folder_index(module_name: &str, folder: &str) -> String {
-    format!(
-        "//! The {module_name} module's `{folder}`.\n\n\
-         pub fn apply(_project: &mut ::mxrs::ProjectDecl) {{}}\n"
-    )
+/// A concept index: the header and the first module folder it holds. Every
+/// declaration registers itself, so `pub mod` is all an index ever holds.
+pub(crate) fn registering_concept_index(concept: &str, first: &str) -> String {
+    format!("//! Every module's `{concept}`, one folder per Mendix module.\n\npub mod {first};\n")
+}
+
+/// One module's folder inside a concept, holding its first file.
+pub(crate) fn registering_folder_index(module_name: &str, folder: &str, first: &str) -> String {
+    format!("//! The {module_name} module's `{folder}`.\n\npub mod {first};\n")
+}
+
+/// The index of a concept that holds one file per module rather than a
+/// folder: the module registry, module security.
+pub(crate) fn registry_index(concept: &str) -> String {
+    format!("//! Each Mendix module's `{concept}`, one file per module.\n")
+}
+
+/// An index created before it holds anything.
+pub(crate) fn empty_concept_index(concept: &str) -> String {
+    format!("//! Every module's `{concept}`, one folder per Mendix module.\n")
+}
+
+/// A module folder index created before it holds anything.
+pub(crate) fn empty_folder_index(module_name: &str, folder: &str) -> String {
+    format!("//! The {module_name} module's `{folder}`.\n")
 }
 
 /// mxrb's `Templates.snake_case`, character for character — the generated file
@@ -530,7 +674,7 @@ pub(crate) fn functional_test(module_name: &str, name: &str) -> String {
 
 pub(crate) fn presentation_layout(module_name: &str) -> String {
     format!(
-        "//! Application layout for `{module_name}`.\n\nuse mxrs::prelude::*;\n\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({module_name:?});\n    module.layout(\"ApplicationLayout\", |layout| {{\n        layout.class(\"mxrb-application-shell\");\n        layout.application_shell(\"ApplicationLayout\", Some(\"Responsive\"));\n    }});\n    module.into_decl()\n}}\n"
+        "//! Application layout for `{module_name}`.\n\nuse mxrs::prelude::*;\n\n#[layout(module = {module_name:?})]\npub fn application_layout(layout: &mut LayoutBuilder) {{\n    layout.class(\"mxrb-application-shell\");\n    layout.application_shell(\"ApplicationLayout\", Some(\"Responsive\"));\n}}\n"
     )
 }
 
@@ -560,59 +704,170 @@ mod tests {
         }
     }
 
+    /// Every scaffolded artifact is the same file an import would have
+    /// written: the prelude and one annotated item that registers itself.
     #[test]
-    fn every_template_declares_the_function_its_aggregator_calls() {
-        let sources = [
-            entity("Sales", "Order"),
-            enumeration("Sales", "Status"),
-            use_case("Sales", "ACT_Create"),
-            nanoflow("Sales", "NAN_Refresh"),
-            published_rest("Sales", "Handle"),
-            consumed_rest("Sales", "Fetch"),
-            java_action("Sales", "Invoke"),
-            page("Sales", "Overview", "Main", &["Sales.User".to_string()]),
-            layouts("Sales", "Main"),
-            module_roles("Sales"),
-        ];
-        // Every scaffolded artifact is the same file an import would have
-        // written: the prelude, one `declaration()`, one module builder.
-        for source in &sources {
-            assert!(source.contains("use mxrs::prelude::*;"), "{source}");
-            assert!(
-                source.contains("pub fn declaration() -> ModuleDecl {"),
-                "{source}"
-            );
-            assert!(
-                source.contains("let mut module = ModuleBuilder::new(\"Sales\");"),
-                "{source}"
-            );
-            assert!(source.contains("module.into_decl()"), "{source}");
-            assert!(source.ends_with("}\n"), "{source}");
-        }
-        assert!(sources[7].contains("page.allow_role(\"Sales.User\");"));
-        assert!(sources[7].contains("page.layout(\"Sales.ApplicationLayout\", \"Main\");"));
-        assert!(project_security("Sales").contains("pub fn apply(project"));
-        // Every index the scaffold creates has the shape the importer
-        // writes: a header and one `apply`, empty until something registers.
-        for index in [
-            concept_index("domain"),
-            concept_index("entities"),
-            folder_index("Sales", "entities"),
+    fn every_template_is_one_self_registering_declaration() {
+        for (source, declaration) in [
+            (
+                entity("Sales", "Order"),
+                "#[entity(module = \"Sales\")]\npub struct Order {}\n",
+            ),
+            (
+                entity("Sales", "order_line"),
+                "#[entity(module = \"Sales\", name = \"order_line\")]\npub struct OrderLine {}\n",
+            ),
+            (
+                enumeration("Sales", "Status"),
+                "#[enumeration(module = \"Sales\")]\npub enum Status {}\n",
+            ),
+            (
+                use_case("Sales", "ACT_Create"),
+                "#[microflow(ACT, module = \"Sales\")]\npub fn create(_flow: &mut FlowBuilder) {}\n",
+            ),
+            (
+                validation("Sales", "VAL_Order_Total"),
+                "#[microflow(VAL, module = \"Sales\", name = \"VAL_Order_Total\")]\npub fn order_total(_flow: &mut FlowBuilder) {}\n",
+            ),
+            (
+                nanoflow("Sales", "NAN_Refresh"),
+                "#[nanoflow(NAN, module = \"Sales\")]\npub fn refresh(_flow: &mut FlowBuilder) {}\n",
+            ),
+            (
+                published_rest("Sales", "Handle"),
+                "#[microflow(module = \"Sales\")]\npub fn handle(_flow: &mut FlowBuilder) {}\n",
+            ),
+            (
+                consumed_rest("Sales", "String"),
+                "#[microflow(module = \"Sales\")]\npub fn string_(_flow: &mut FlowBuilder) {}\n",
+            ),
+            (
+                java_action("Sales", "invoke"),
+                "#[microflow(module = \"Sales\", name = \"invoke\")]\npub fn invoke_flow(_flow: &mut FlowBuilder) {}\n",
+            ),
+            (
+                constant("Sales", "MaximumOrders"),
+                "#[constant(module = \"Sales\")]\npub fn maximum_orders(constant: &mut ConstantBuilder) {\n    constant.value(\"\");\n}\n",
+            ),
+            (
+                layouts("Sales", "Main"),
+                "#[layout(module = \"Sales\")]\npub fn application_layout(layout: &mut LayoutBuilder) {\n    layout.placeholder(\"Main\");\n}\n",
+            ),
         ] {
-            assert!(
-                index.contains("pub fn apply(_project: &mut ::mxrs::ProjectDecl) {}"),
-                "{index}"
-            );
-            assert!(index.starts_with("//!"), "{index}");
+            assert!(source.starts_with("//! "), "{source}");
+            assert!(source.contains("\nuse mxrs::prelude::*;\n\n"), "{source}");
+            assert!(source.ends_with(declaration), "{source}");
+            for legacy in ["declaration()", "ModuleBuilder", "into_decl", "markers"] {
+                assert!(!source.contains(legacy), "{legacy}\n{source}");
+            }
         }
-        // A module is declared by a file of its own, so it carries a
-        // `declaration` rather than an `apply`.
-        let module = module_declaration("Sales");
+        let page = page("Sales", "Overview", "Main", &["Sales.User".to_string()]);
         assert!(
-            module.contains("pub fn declaration() -> ModuleDecl"),
-            "{module}"
+            page.ends_with(
+                "#[page(module = \"Sales\")]\npub fn overview(page: &mut PageBuilder) {\n    page.title(\"Overview\");\n    page.layout(\"Sales.ApplicationLayout\", \"Main\");\n    page.allow_role(\"Sales.User\");\n    page.text(\"Overview\");\n}\n"
+            ),
+            "{page}"
         );
-        assert!(module.contains("ModuleBuilder::new(\"Sales\")"), "{module}");
+        // The flow a service file declares decides the file's name.
+        assert_eq!(service_stem("ACT_CreateOrder"), "create_order_service");
+        assert_eq!(service_stem("String"), "string_service");
+        assert_eq!(nanoflow_stem("NAN_Refresh"), "refresh");
+        assert_eq!(nanoflow_stem("Imported"), "imported_nanoflow");
+        // Every index is its header and the modules it holds — nothing
+        // composes, so there is no `apply` anywhere.
+        for index in [
+            registering_concept_index("entities", "sales"),
+            registering_folder_index("Sales", "entities", "order"),
+            empty_concept_index("entities"),
+            empty_folder_index("Sales", "entities"),
+            registry_index("modules"),
+            module_registry("main"),
+            domain_layer(),
+            application_layer(),
+            presentation_layer(),
+        ] {
+            assert!(index.starts_with("//!"), "{index}");
+            assert!(!index.contains("fn "), "{index}");
+        }
+    }
+
+    /// What used to be composed by hand is declared like everything else.
+    #[test]
+    fn project_level_declarations_are_annotated_items() {
+        assert!(module_declaration("Sales").ends_with(
+            "#[declaration(module = \"Sales\")]\npub fn sales(_module: &mut ModuleBuilder) {}\n"
+        ));
+        assert!(
+            module_roles("Sales").ends_with(
+                "#[module_roles(module = \"Sales\")]\npub enum Role {\n    /// Application user\n    User,\n    /// Module administrator\n    Administrator,\n}\n"
+            )
+        );
+        let security = project_security("Sales");
+        assert!(
+            security.contains("#[security]\npub fn security(security: &mut SecurityBuilder) {\n"),
+            "{security}"
+        );
+        assert!(security.contains("role.module_role(\"Sales.Administrator\");"));
+        assert_eq!(
+            demo_user(
+                "demo_admin",
+                "System.User",
+                &["Administrator".to_string()],
+                "MXRS_DEMO_USER_DEMO_ADMIN_PASSWORD"
+            ),
+            "//! Demo user `demo_admin`.\n\nuse mxrs::prelude::*;\n\n#[demo_user]\npub fn demo_admin(user: &mut DemoUserBuilder) {\n    user.role(\"Administrator\");\n    user.password_from_env(\"MXRS_DEMO_USER_DEMO_ADMIN_PASSWORD\");\n}\n"
+        );
+        let named = demo_user("DemoAdmin", "Sales.Account", &[], "X");
+        assert!(named.contains("#[demo_user(name = \"DemoAdmin\")]\npub fn demo_admin("));
+        assert!(named.contains("    user.entity(\"Sales.Account\");\n"));
+        assert!(navigation().contains("#[navigation]\npub fn navigation("));
+        assert!(home_page("Shop").contains("#[page(module = \"Main\")]\npub fn home("));
+    }
+
+    /// A page slice names the model through the files that declare it.
+    #[test]
+    fn a_page_slice_imports_what_it_names() {
+        let loader = page_chain_loader("Sales", "OrderOverview");
+        assert!(
+            loader.contains("use crate::domain::entities::sales::order_overview::OrderOverview;"),
+            "{loader}"
+        );
+        assert!(
+            loader.contains("#[microflow(ACT, module = \"Sales\")]\npub fn load_order_overview("),
+            "{loader}"
+        );
+        assert!(
+            loader.contains("OrderOverview::total().set(0.0),"),
+            "{loader}"
+        );
+        let nanoflow = page_chain_nanoflow("Sales", "OrderOverview", true);
+        assert!(
+            nanoflow.contains(
+                "use crate::application::services::sales::refresh_order_overview_service::ACT_RefreshOrderOverview;"
+            ),
+            "{nanoflow}"
+        );
+        let page = page_from_template(
+            "Sales",
+            "OrderOverview",
+            "Main",
+            "form-vertical",
+            Some(RefreshAction::Nanoflow),
+            &[],
+        );
+        for expected in [
+            "use crate::application::services::sales::load_order_overview_service::ACT_LoadOrderOverview;\n",
+            "use crate::domain::entities::sales::order_overview::OrderOverview;\n",
+            "use crate::presentation::nanoflows::sales::refresh_order_overview::NAN_RefreshOrderOverview;\n",
+            "#[page(module = \"Sales\")]\npub fn order_overview(page: &mut PageBuilder) {\n",
+            "    page.data_view_from_microflow(MicroflowRef::<ACT_LoadOrderOverview>::new(), |view| {\n",
+            "        view.text_box(OrderOverview::reference());\n",
+            "            b.call_nanoflow(NanoflowRef::<NAN_RefreshOrderOverview>::new());\n",
+            // The page adds itself to the navigation, from its own file.
+            "\n#[navigation_item(profile = \"Responsive\", caption = \"Order Overview\")]\npub fn order_overview_navigation(item: &mut NavigationItemBuilder) {\n    item.page(\"Sales.OrderOverview\");\n    item.icon(\"file\");\n}\n",
+        ] {
+            assert!(page.contains(expected), "{expected}\n{page}");
+        }
     }
 }
 
@@ -625,84 +880,52 @@ pub(crate) enum RefreshAction {
     Nanoflow,
 }
 
-/// Marker impls the scaffolded page and flows reference.
-///
-/// mxrb's templates name flows and entities with strings, so its generated
-/// slice needs nothing like this. The mxrs DSL takes marker *types*
-/// (`MicroflowRef<M>`, `text_box::<A>()`), so a generated vertical slice has
-/// to generate the markers too — hand-implemented markers are a supported
-/// alternative to `mxrs-typegen` output (see `mxrs_ir::markers`). They are
-/// declared `pub` in a `markers` module so sibling files in the slice can
-/// refer to them by path.
-fn entity_markers(module_name: &str, entity: &str, attributes: &[(&str, &str)]) -> String {
-    let mut out = format!(
-        "#[allow(non_camel_case_types, non_snake_case, dead_code)]\n\
-         pub mod markers {{\n    \
-         //! Marker types for the generated slice. `mxrs-typegen` emits the\n    \
-         //! same shapes from a manifest, under the same `Entity_Attribute`\n    \
-         //! naming; these are written out because a scaffolded artifact has\n    \
-         //! no manifest entry yet.\n\n    \
-         pub struct {entity};\n    \
-         impl ::mxrs::EntityMarker for {entity} {{\n        \
-         const MODULE: &'static str = {module_name:?};\n        \
-         const NAME: &'static str = {entity:?};\n    \
-         }}\n"
-    );
-    for (attribute, value) in attributes {
-        out.push_str(&format!(
-            "\n    pub struct {entity}_{attribute};\n    \
-             impl ::mxrs::AttributeMarker for {entity}_{attribute} {{\n        \
-             type Entity = {entity};\n        \
-             const NAME: &'static str = {attribute:?};\n    \
-             }}\n    \
-             impl ::mxrs::TypedAttributeMarker for {entity}_{attribute} {{\n        \
-             type Value = ::mxrs::{value};\n    \
-             }}\n"
-        ));
-    }
-    out.push_str("}\n");
-    out
-}
-
-fn flow_marker(module_name: &str, name: &str, trait_name: &str) -> String {
-    format!(
-        "#[allow(non_camel_case_types, non_snake_case, dead_code)]\n\
-         pub mod markers {{\n    \
-         //! See the entity slice's `markers` module for why these are\n    \
-         //! hand-written rather than generated from a manifest.\n\n    \
-         pub struct {name};\n    \
-         impl ::mxrs::{trait_name} for {name} {{\n        \
-         const MODULE: &'static str = {module_name:?};\n        \
-         const NAME: &'static str = {name:?};\n    \
-         }}\n\
-         }}\n"
-    )
-}
-
 /// The three attributes mxrb's `page_chain_entity` template declares. Kept in
 /// one place because the entity template, the loader that populates them and
 /// the form template that binds them must agree.
-const CHAIN_ATTRIBUTES: &[(&str, &str)] = &[
-    ("Reference", "MxString"),
-    ("Total", "MxDecimal"),
-    ("Active", "MxBool"),
-];
+const CHAIN_FIELDS: [&str; 3] = ["reference", "total", "active"];
+
+/// Where the slice's backing entity is declared, and the struct declaring it.
+fn chain_entity(module_name: &str, feature: &str) -> (String, String) {
+    (
+        format!(
+            "crate::domain::entities::{}::{}",
+            snake_case(module_name),
+            snake_case(feature)
+        ),
+        type_name(feature).0,
+    )
+}
+
+/// `ACT_Load<Feature>`, `ACT_Refresh<Feature>`: the server-side flows of a
+/// page slice, named by the type their own declaration generates.
+fn chain_microflow(module_name: &str, action: &str, feature: &str) -> (String, String) {
+    let name = format!("ACT_{action}{feature}");
+    (
+        format!(
+            "crate::application::services::{}::{}",
+            snake_case(module_name),
+            service_stem(&name)
+        ),
+        name,
+    )
+}
 
 pub(crate) fn page_chain_entity(module_name: &str, name: &str) -> String {
-    let markers = entity_markers(module_name, name, CHAIN_ATTRIBUTES);
+    let (type_name, explicit) = type_name(name);
+    let arguments = declaration_arguments(module_name, name, explicit);
+    let [reference, total, active] = CHAIN_FIELDS;
     format!(
         "//! Backing entity for the executable vertical slice generated by\n\
          //! `mxrs page new --chain`.\n\n\
-         {markers}\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.entity({name:?}, |entity| {{\n        \
-         entity.string(\"Reference\").length = Some(80);\n        \
-         entity.decimal(\"Total\").default_value = Some(\"0\".into());\n        \
-         entity.boolean(\"Active\").default_value = Some(\"true\".into());\n    \
-         }});\n    \
-         module.into_decl()\n\
+         #[entity({arguments})]\n\
+         pub struct {type_name} {{\n    \
+         #[mxrs(length = 80)]\n    \
+         pub {reference}: MxString,\n    \
+         pub {total}: MxDecimal,\n    \
+         #[mxrs(default = true)]\n    \
+         pub {active}: MxBool,\n\
          }}\n"
     )
 }
@@ -711,36 +934,31 @@ pub(crate) fn page_chain_entity(module_name: &str, name: &str) -> String {
 /// data view renders. Mirrors mxrb's `page_chain_loader`, including creating
 /// the record uncommitted with the same seed values.
 pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> String {
-    let entity_path = format!(
-        "crate::domain::entities::{}::{}::markers",
-        snake_case(module_name),
-        snake_case(feature)
-    );
-    let name = format!("ACT_Load{feature}");
-    let markers = flow_marker(module_name, &name, "MicroflowMarker");
+    let (entity_path, entity) = chain_entity(module_name, feature);
+    let FlowDeclaration {
+        attribute,
+        function,
+    } = flow_declaration("microflow", module_name, &format!("ACT_Load{feature}"));
+    let [reference, total, active] = CHAIN_FIELDS;
     format!(
         "//! Loader for the `{module_name}.{feature}` page slice.\n\
          //!\n\
          //! Returns an uncommitted record for the page's data view to bind to.\n\n\
-         use {entity_path}::{{{feature}, {feature}_Active, {feature}_Reference, {feature}_Total}};\n\n\
-         {markers}\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.microflow({name:?}, |flow| {{\n        \
-         let record = flow.create_object(\n            \
-         \"record\",\n            \
-         ::mxrs::Ref::<{feature}>::new(),\n            \
-         vec![\n                \
-         ::mxrs::attribute::<{feature}_Reference>(::mxrs::string(\"NEW\")),\n                \
-         ::mxrs::attribute::<{feature}_Total>(::mxrs::decimal(0.0)),\n                \
-         ::mxrs::attribute::<{feature}_Active>(::mxrs::boolean(true)),\n            \
-         ],\n            \
-         false,\n        \
-         );\n        \
-         flow.return_value(record);\n    \
-         }});\n    \
-         module.into_decl()\n\
+         use {entity_path}::{entity};\n\n\
+         #[{attribute}]\n\
+         pub fn {function}(flow: &mut FlowBuilder) {{\n    \
+         let record = flow.create_object(\n        \
+         \"record\",\n        \
+         Ref::<{entity}>::new(),\n        \
+         vec![\n            \
+         {entity}::{reference}().set(\"NEW\"),\n            \
+         {entity}::{total}().set(0.0),\n            \
+         {entity}::{active}().set(true),\n        \
+         ],\n        \
+         false,\n    \
+         );\n    \
+         flow.return_value(record);\n\
          }}\n"
     )
 }
@@ -750,20 +968,18 @@ pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> String {
 /// log activity, so the body is left empty rather than faked with an
 /// unrelated activity.
 pub(crate) fn page_chain_action(module_name: &str, feature: &str) -> String {
-    let name = format!("ACT_Refresh{feature}");
-    let markers = flow_marker(module_name, &name, "MicroflowMarker");
+    let FlowDeclaration {
+        attribute,
+        function,
+    } = flow_declaration("microflow", module_name, &format!("ACT_Refresh{feature}"));
     format!(
         "//! Refresh action for the `{module_name}.{feature}` page slice.\n\
          //!\n\
          //! Body intentionally empty: mxrb's template logs a message here and\n\
          //! `mxrs_ir::Activity` has no log activity to mirror it with.\n\n\
-         {markers}\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.microflow({name:?}, |_flow| {{}});\n    \
-         module.into_decl()\n\
-         }}\n"
+         #[{attribute}]\n\
+         pub fn {function}(_flow: &mut FlowBuilder) {{}}\n"
     )
 }
 
@@ -776,59 +992,45 @@ pub(crate) fn page_chain_nanoflow(
     feature: &str,
     calls_microflow: bool,
 ) -> String {
-    let name = format!("NAN_Refresh{feature}");
-    let markers = flow_marker(module_name, &name, "NanoflowMarker");
-    let (note, body) = if calls_microflow {
-        let action_path = format!(
-            "crate::application::use_cases::{}::act_refresh_{}::markers::ACT_Refresh{feature}",
-            snake_case(module_name),
-            snake_case(feature)
+    let FlowDeclaration {
+        attribute,
+        function,
+    } = flow_declaration("nanoflow", module_name, &format!("NAN_Refresh{feature}"));
+    if !calls_microflow {
+        return format!(
+            "//! Client refresh action for the `{module_name}.{feature}` page slice.\n\
+             //!\n\
+             //! Body intentionally empty: mxrb's template shows a client\n\
+             //! message here and `mxrs_ir::Activity` has no equivalent.\n\n\
+             use mxrs::prelude::*;\n\n\
+             #[{attribute}]\n\
+             pub fn {function}(_flow: &mut FlowBuilder) {{}}\n"
         );
-        (
-            "//! Calls the generated microflow, completing the client-to-server\n\
-             //! half of a `page:nanoflow:microflow` chain.\n"
-                .to_string(),
-            format!(
-                "|flow| {{\n        \
-                 flow.call_microflow(\n            \
-                 ::mxrs::MicroflowRef::<{action_path}>::new(),\n            \
-                 None,\n            \
-                 false,\n            \
-                 vec![],\n        \
-                 );\n    \
-                 }}"
-            ),
-        )
-    } else {
-        (
-            "//! Body intentionally empty: mxrb's template shows a client\n\
-             //! message here and `mxrs_ir::Activity` has no equivalent.\n"
-                .to_string(),
-            "|_flow| {}".to_string(),
-        )
-    };
+    }
+    let (action_path, action) = chain_microflow(module_name, "Refresh", feature);
     format!(
         "//! Client refresh action for the `{module_name}.{feature}` page slice.\n\
          //!\n\
-         {note}\n\
-         {markers}\n\
+         //! Calls the generated microflow, completing the client-to-server\n\
+         //! half of a `page:nanoflow:microflow` chain.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.nanoflow({name:?}, {body});\n    \
-         module.into_decl()\n\
+         use {action_path}::{action};\n\n\
+         #[{attribute}]\n\
+         pub fn {function}(flow: &mut FlowBuilder) {{\n    \
+         flow.call_microflow(MicroflowRef::<{action}>::new(), None, false, vec![]);\n\
          }}\n"
     )
 }
 
 /// Renders one of the catalogued page patterns. Mirrors mxrb's
-/// `page_from_template` dispatch, with two deviations forced by the typed
-/// DSL and named here rather than left to be discovered:
+/// `page_from_template` dispatch, with one deviation forced by the typed DSL
+/// and named here rather than left to be discovered: mxrb's `number_input`
+/// has no mxrs widget, so a decimal attribute binds to a `text_box`, which is
+/// what Mendix itself renders for one.
 ///
-/// 1. mxrb's `number_input` has no mxrs widget; a decimal attribute binds to
-///    a `text_box`, which is what Mendix itself renders for one.
-/// 2. Widgets bind through attribute *markers*, so `form-vertical` references
-///    the generated entity slice's `markers` module by path.
+/// Widgets bind through the accessors the slice's entity declares, and the
+/// flows are named by the types their own declarations generate — the page
+/// imports both from the files that own them.
 pub(crate) fn page_from_template(
     module_name: &str,
     name: &str,
@@ -838,72 +1040,91 @@ pub(crate) fn page_from_template(
     roles: &[String],
 ) -> String {
     let title = humanize(name);
+    let (function, explicit) = document_function(name);
+    let arguments = declaration_arguments(module_name, name, explicit);
     let allowed = roles
         .iter()
-        .map(|role| format!("        page.allow_role({role:?});\n"))
+        .map(|role| format!("    page.allow_role({role:?});\n"))
         .collect::<String>();
     let header = format!(
-        "pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.page({name:?}, |page| {{\n        \
-         page.title({title:?});\n        \
+        "#[page({arguments})]\n\
+         pub fn {function}(page: &mut PageBuilder) {{\n    \
+         page.title({title:?});\n    \
          page.layout(\"{module_name}.ApplicationLayout\", {layout_parameter:?});\n\
          {allowed}"
     );
     let body = match template {
         "starter" => format!(
-            "        page.container(|header| {{\n            \
-             header.name(\"pageHeader\");\n            \
-             header.class(\"mxrs-page-header\");\n            \
-             header.text({title:?});\n            \
-             header.text(\"Page generated from the starter template\");\n        \
+            "    page.container(|header| {{\n        \
+             header.name(\"pageHeader\");\n        \
+             header.class(\"mxrs-page-header\");\n        \
+             header.text({title:?});\n        \
+             header.text(\"Page generated from the starter template\");\n    \
              }});\n\
              {}",
-            refresh_button(module_name, name, refresh, "page", 2)
+            refresh_button(refresh, name, "page", 1)
         ),
         "blank" => format!(
-            "        page.container(|content| {{\n            \
-             content.name(\"content\");\n            \
+            "    page.container(|content| {{\n        \
+             content.name(\"content\");\n        \
              content.class(\"mxrs-page-content\");\n\
-             {}        \
+             {}    \
              }});\n",
-            refresh_button(module_name, name, refresh, "content", 3)
+            refresh_button(refresh, name, "content", 2)
         ),
         "dashboard" => format!(
-            "        page.container(|header| {{\n            \
-             header.name(\"pageHeader\");\n            \
-             header.class(\"mxrs-page-header\");\n            \
-             header.text({title:?});\n            \
-             header.text(\"Dashboard overview\");\n        \
-             }});\n        \
-             page.container(|dashboard| {{\n            \
-             dashboard.name(\"dashboard\");\n            \
+            "    page.container(|header| {{\n        \
+             header.name(\"pageHeader\");\n        \
+             header.class(\"mxrs-page-header\");\n        \
+             header.text({title:?});\n        \
+             header.text(\"Dashboard overview\");\n    \
+             }});\n    \
+             page.container(|dashboard| {{\n        \
+             dashboard.name(\"dashboard\");\n        \
              dashboard.class(\"mxrs-dashboard-grid\");\n\
-             {}        \
+             {}    \
              }});\n\
              {}",
             dashboard_cards(),
-            refresh_button(module_name, name, refresh, "page", 2)
+            refresh_button(refresh, name, "page", 1)
         ),
-        _ => form_vertical_body(module_name, name, &title, refresh),
+        _ => form_vertical_body(name, &title, refresh),
     };
-    let imports = if template == DATA_BACKED_TEMPLATE {
-        format!(
-            "use mxrs::prelude::*;\n\n\
-             use crate::domain::entities::{}::{}::markers::{{\n    \
-             {name}_Active, {name}_Reference, {name}_Total,\n\
-             }};\n\n",
+    // What the page names beyond its own widgets: the flow its Refresh
+    // button calls, and for the data-backed template the entity it binds
+    // and the loader that supplies it.
+    let mut imports = Vec::new();
+    match refresh {
+        Some(RefreshAction::Microflow) => {
+            let (path, action) = chain_microflow(module_name, "Refresh", name);
+            imports.push(format!("use {path}::{action};"));
+        }
+        Some(RefreshAction::Nanoflow) => imports.push(format!(
+            "use crate::presentation::nanoflows::{}::{}::NAN_Refresh{name};",
             snake_case(module_name),
-            snake_case(name)
-        )
+            nanoflow_stem(&format!("NAN_Refresh{name}"))
+        )),
+        None => {}
+    }
+    if template == DATA_BACKED_TEMPLATE {
+        let (path, loader) = chain_microflow(module_name, "Load", name);
+        imports.push(format!("use {path}::{loader};"));
+        let (path, entity) = chain_entity(module_name, name);
+        imports.push(format!("use {path}::{entity};"));
+    }
+    imports.sort();
+    let imports = if imports.is_empty() {
+        String::new()
     } else {
-        "use mxrs::prelude::*;\n\n".to_string()
+        format!("{}\n\n", imports.join("\n"))
     };
+    let navigation = page_navigation_item(module_name, name, &function);
     format!(
         "//! Page `{module_name}.{name}` from the `{template}` template.\n\
          //!\n\
          //! Widget vocabulary: `mxrs::PageBuilder`.\n\n\
-         {imports}{header}{body}    }});\n    module.into_decl()\n}}\n"
+         use mxrs::prelude::*;\n\n\
+         {imports}{header}{body}}}\n{navigation}"
     )
 }
 
@@ -936,63 +1157,51 @@ fn dashboard_cards() -> String {
     .iter()
     .map(|(slot, label, value, help)| {
         format!(
-            "                dashboard.container(|card| {{\n                    \
-             card.name(\"{slot}Metric\");\n                    \
-             card.class(\"mxrs-card\");\n                    \
-             card.text({label:?});\n                    \
-             card.text({value:?});\n                    \
-             card.text({help:?});\n                \
+            "        dashboard.container(|card| {{\n            \
+             card.name(\"{slot}Metric\");\n            \
+             card.class(\"mxrs-card\");\n            \
+             card.text({label:?});\n            \
+             card.text({value:?});\n            \
+             card.text({help:?});\n        \
              }});\n"
         )
     })
     .collect()
 }
 
-fn form_vertical_body(
-    module_name: &str,
-    name: &str,
-    title: &str,
-    refresh: Option<RefreshAction>,
-) -> String {
-    let loader = format!(
-        "crate::application::use_cases::{}::act_load_{}::markers::ACT_Load{name}",
-        snake_case(module_name),
-        snake_case(name)
-    );
+fn form_vertical_body(name: &str, title: &str, refresh: Option<RefreshAction>) -> String {
+    let entity = type_name(name).0;
+    let [reference, total, active] = CHAIN_FIELDS;
     format!(
-        "        page.data_view_from_microflow(\n            \
-         ::mxrs::MicroflowRef::<{loader}>::new(),\n            \
-         |view| {{\n                \
-         view.container(|header| {{\n                    \
-         header.name(\"pageHeader\");\n                    \
-         header.class(\"mxrs-page-header\");\n                    \
-         header.text({title:?});\n                    \
-         header.text(\"Executable page scaffold\");\n                \
-         }});\n                \
-         view.text_box::<{name}_Reference>();\n                \
-         view.text_box::<{name}_Total>();\n                \
-         view.check_box::<{name}_Active>();\n                \
-         view.button(\"Save\", |b| {{\n                    \
-         b.name(\"save\");\n                    \
-         b.save_changes();\n                \
-         }});\n                \
-         view.button(\"Cancel\", |b| {{\n                    \
-         b.name(\"cancel\");\n                    \
-         b.cancel_changes();\n                \
+        "    page.data_view_from_microflow(MicroflowRef::<ACT_Load{name}>::new(), |view| {{\n        \
+         view.container(|header| {{\n            \
+         header.name(\"pageHeader\");\n            \
+         header.class(\"mxrs-page-header\");\n            \
+         header.text({title:?});\n            \
+         header.text(\"Executable page scaffold\");\n        \
+         }});\n        \
+         view.text_box({entity}::{reference}());\n        \
+         view.text_box({entity}::{total}());\n        \
+         view.check_box({entity}::{active}());\n        \
+         view.button(\"Save\", |b| {{\n            \
+         b.name(\"save\");\n            \
+         b.save_changes();\n        \
+         }});\n        \
+         view.button(\"Cancel\", |b| {{\n            \
+         b.name(\"cancel\");\n            \
+         b.cancel_changes();\n        \
          }});\n\
-         {}            \
-         }},\n        \
-         );\n",
-        refresh_button(module_name, name, refresh, "view", 4)
+         {}    \
+         }});\n",
+        refresh_button(refresh, name, "view", 2)
     )
 }
 
 /// mxrb emits this button only when a chain was requested; without one the
 /// template has nothing to call.
 fn refresh_button(
-    module_name: &str,
-    name: &str,
     refresh: Option<RefreshAction>,
+    name: &str,
     receiver: &str,
     depth: usize,
 ) -> String {
@@ -1001,20 +1210,12 @@ fn refresh_button(
     };
     let indent = "    ".repeat(depth);
     let call = match refresh {
-        RefreshAction::Microflow => format!(
-            "b.call_microflow(::mxrs::MicroflowRef::<\
-             crate::application::use_cases::{}::act_refresh_{}::markers::ACT_Refresh{name}\
-             >::new());",
-            snake_case(module_name),
-            snake_case(name)
-        ),
-        RefreshAction::Nanoflow => format!(
-            "b.call_nanoflow(::mxrs::NanoflowRef::<\
-             crate::presentation::nanoflows::{}::nan_refresh_{}::markers::NAN_Refresh{name}\
-             >::new());",
-            snake_case(module_name),
-            snake_case(name)
-        ),
+        RefreshAction::Microflow => {
+            format!("b.call_microflow(MicroflowRef::<ACT_Refresh{name}>::new());")
+        }
+        RefreshAction::Nanoflow => {
+            format!("b.call_nanoflow(NanoflowRef::<NAN_Refresh{name}>::new());")
+        }
     };
     format!(
         "{indent}{receiver}.button(\"Refresh\", |b| {{\n{indent}    \

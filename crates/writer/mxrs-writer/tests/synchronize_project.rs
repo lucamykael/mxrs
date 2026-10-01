@@ -1073,3 +1073,153 @@ fn a_stored_demo_user_no_declaration_covers_fails_closed_instead_of_vanishing() 
         mxrs_bson::Bson::Document(doc) if doc.get_str("UserName").ok() == Some("Legacy")
     )));
 }
+
+/// A project that declares demo users and no security of its own: what an
+/// imported project is until someone rewrites its security in Rust.
+fn standalone_demo_user(
+    name: &str,
+    configure: impl FnOnce(&mut mxrs_dsl::DemoUserBuilder),
+) -> mxrs_ir::ProjectDecl {
+    let mut project = ProjectBuilder::new("11.12.1").build();
+    let mut user = mxrs_dsl::DemoUserBuilder::new(name);
+    configure(&mut user);
+    project.demo_users.push(user.into_decl());
+    project
+}
+
+fn stored_security(path: &std::path::Path) {
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |module| {
+        module.role("User", "App user");
+    });
+    initial.security(|security| {
+        security
+            .clear_roles()
+            .role("Administrator", |role| {
+                role.administrator(true).module_role("Sales.User");
+            })
+            .role("User", |role| {
+                role.module_role("Sales.User");
+            });
+    });
+    mxrs_writer::write_project(path, &initial.build()).unwrap();
+}
+
+#[test]
+fn a_demo_user_declared_without_security_joins_the_stored_security() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    stored_security(&path);
+    plant_stored_demo_user(&path, "Manager", "kept-secret");
+    let before = document_by_type(&path, "Security$ProjectSecurity");
+
+    let declaration = standalone_demo_user("Manager", |user| {
+        user.role("Administrator")
+            .password_from_env("MXRS_TEST_STANDALONE_DEMO_USER_UNSET");
+    });
+    mxrs_writer::synchronize_project(&path, &declaration).unwrap();
+
+    let after = document_by_type(&path, "Security$ProjectSecurity");
+    let Some(mxrs_bson::Bson::Array(raw)) = after.get("DemoUsers") else {
+        panic!("DemoUsers array missing")
+    };
+    let users = mxrs_bson::parse_array(Some(raw)).items;
+    assert_eq!(users.len(), 2, "declared + opaque");
+    let mxrs_bson::Bson::Document(manager) = &users[0] else {
+        panic!("first entry is not a document")
+    };
+    let Some(mxrs_bson::Bson::Array(roles)) = manager.get("UserRoles") else {
+        panic!("UserRoles array missing")
+    };
+    assert_eq!(
+        mxrs_bson::parse_array(Some(roles)).items,
+        [mxrs_bson::Bson::String("Administrator".into())],
+        "the declaration reached the model"
+    );
+    assert_eq!(manager.get_str("Password").unwrap(), "kept-secret");
+
+    // Everything the declaration does not speak for is what was stored.
+    for key in before.keys().filter(|key| key.as_str() != "DemoUsers") {
+        assert_eq!(before.get(key), after.get(key), "{key}");
+    }
+    assert_eq!(before.keys().count(), after.keys().count());
+}
+
+#[test]
+fn a_demo_user_declared_without_security_is_checked_against_the_stored_roles() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    stored_security(&path);
+
+    let declaration = standalone_demo_user("Manager", |user| {
+        user.role("Ghost");
+    });
+    let error = mxrs_writer::synchronize_project(&path, &declaration).unwrap_err();
+    assert!(
+        matches!(error, mxrs_writer::WriterError::UnknownUserRole(ref role) if role == "Ghost"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_demo_user_with_no_security_to_join_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    mxrs_writer::write_project(&path, &ProjectBuilder::new("11.12.1").build()).unwrap();
+    // A model that lost its project security: nothing a demo user could be
+    // added to, and nothing to check its roles against.
+    {
+        let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+        let root = mpr.root_unit().unwrap().unwrap().unit_id;
+        let unit = mpr
+            .children_of(&root)
+            .unwrap()
+            .into_iter()
+            .find(|unit| {
+                mpr.parse_contents(unit)
+                    .ok()
+                    .and_then(|document| document.get_str("$Type").ok().map(str::to_string))
+                    .as_deref()
+                    == Some("Security$ProjectSecurity")
+            })
+            .unwrap();
+        mpr.transaction(|mpr| mpr.delete_unit(&unit.unit_id))
+            .unwrap();
+    }
+
+    let declaration = standalone_demo_user("Manager", |user| {
+        user.role("Administrator");
+    });
+    let error = mxrs_writer::synchronize_project(&path, &declaration).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            mxrs_writer::WriterError::DemoUsersWithoutProjectSecurity { ref names }
+                if names == "Manager"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_demo_user_in_a_new_project_joins_the_security_every_model_starts_with() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Demo.mpr");
+    mxrs_writer::write_project(&path, &ProjectBuilder::new("11.12.1").build()).unwrap();
+    plant_stored_demo_user(&path, "Manager", "kept-secret");
+
+    let declaration = standalone_demo_user("Manager", |user| {
+        user.role("Administrator");
+    });
+    mxrs_writer::synchronize_project(&path, &declaration).unwrap();
+
+    let security = document_by_type(&path, "Security$ProjectSecurity");
+    let Some(mxrs_bson::Bson::Array(raw)) = security.get("DemoUsers") else {
+        panic!("DemoUsers array missing")
+    };
+    let users = mxrs_bson::parse_array(Some(raw)).items;
+    assert!(users.iter().any(|user| matches!(
+        user,
+        mxrs_bson::Bson::Document(doc) if doc.get_str("UserName").ok() == Some("Manager")
+    )));
+}

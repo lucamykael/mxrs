@@ -311,6 +311,80 @@ impl<M: EntityMarker> Clone for Ref<M> {
 
 impl<M: EntityMarker> Copy for Ref<M> {}
 
+/// A value-level handle to one attribute of one entity.
+///
+/// `#[mxrs::entity]` gives every field an accessor returning one of these
+/// (`Order::number()`), so authored code names an attribute through the
+/// entity it belongs to instead of through a separately generated marker
+/// type. The handle is zero-sized: everything it knows lives in `A`.
+#[derive(Debug)]
+pub struct AttributeRef<A: AttributeMarker>(PhantomData<A>);
+
+impl<A: AttributeMarker> AttributeRef<A> {
+    pub const fn new() -> Self {
+        AttributeRef(PhantomData)
+    }
+
+    /// The attribute's Mendix name, exactly as the model stores it.
+    pub fn name(&self) -> &'static str {
+        A::NAME
+    }
+
+    /// `Module.Entity.Attribute`.
+    pub fn qualified_name(&self) -> String {
+        format!("{}.{}", A::Entity::qualified_name(), A::NAME)
+    }
+}
+
+impl<A: AttributeMarker> Default for AttributeRef<A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<A: AttributeMarker> Clone for AttributeRef<A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A: AttributeMarker> Copy for AttributeRef<A> {}
+
+/// A value-level handle to one association, the counterpart of
+/// [`AttributeRef`] for `Reference<T>`/`ReferenceSet<T>` fields.
+#[derive(Debug)]
+pub struct AssociationRef<A: AssociationMarker>(PhantomData<A>);
+
+impl<A: AssociationMarker> AssociationRef<A> {
+    pub const fn new() -> Self {
+        AssociationRef(PhantomData)
+    }
+
+    /// The association's Mendix name, exactly as the model stores it.
+    pub fn name(&self) -> &'static str {
+        A::NAME
+    }
+
+    /// `Module.Association` — the form the native model stores.
+    pub fn qualified_name(&self) -> String {
+        format!("{}.{}", A::From::MODULE, A::NAME)
+    }
+}
+
+impl<A: AssociationMarker> Default for AssociationRef<A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<A: AssociationMarker> Clone for AssociationRef<A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A: AssociationMarker> Copy for AssociationRef<A> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

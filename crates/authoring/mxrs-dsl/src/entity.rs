@@ -230,15 +230,40 @@ impl EntityBuilder {
         self
     }
 
+    /// Declares a lifecycle callback whose handler is named instead of
+    /// typed: `"Module.Microflow"`.
+    ///
+    /// This is for a handler the project keeps in its imported model without
+    /// declaring it in Rust, where there is no marker type to name. A
+    /// misspelled handler is still caught — by the writer's reference check
+    /// rather than by `cargo build`.
+    pub fn lifecycle_handler(
+        &mut self,
+        event: LifecycleEvent,
+        handler: impl Into<String>,
+        configure: impl FnOnce(&mut LifecycleBuilder),
+    ) -> &mut Self {
+        self.push_lifecycle(event, handler.into(), configure)
+    }
+
     fn lifecycle<M: MicroflowMarker>(
         &mut self,
         event: LifecycleEvent,
         configure: impl FnOnce(&mut LifecycleBuilder),
     ) -> &mut Self {
+        self.push_lifecycle(event, M::qualified_name(), configure)
+    }
+
+    fn push_lifecycle(
+        &mut self,
+        event: LifecycleEvent,
+        handler: String,
+        configure: impl FnOnce(&mut LifecycleBuilder),
+    ) -> &mut Self {
         let mut builder = LifecycleBuilder {
             callback: LifecycleDecl {
                 event,
-                handler: M::qualified_name(),
+                handler,
                 pass_event_object: true,
                 raise_error_on_false: matches!(
                     event,

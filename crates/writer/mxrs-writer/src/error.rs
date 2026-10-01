@@ -39,6 +39,11 @@ pub enum WriterError {
     )]
     UndeclaredStoredDemoUsers { names: String },
 
+    #[error(
+        "demo user(s) {names} have no project security to join: the project declares none and the model stores none — declare it with `#[security]` (`mxrs security init`)"
+    )]
+    DemoUsersWithoutProjectSecurity { names: String },
+
     #[error("widget package error: {0}")]
     WidgetPackage(String),
 

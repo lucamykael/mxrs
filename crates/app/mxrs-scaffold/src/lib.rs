@@ -49,8 +49,6 @@ pub enum ScaffoldError {
         "{0}: aggregator not found (for a project created before layered generation, run `mxrs upgrade` from its root, inspect the preview, then rerun with `--apply`)"
     )]
     AggregatorNotFound(String),
-    #[error("{0}: build() does not end in a shape this scaffold can extend")]
-    UnrecognizedProjectBuild(String),
     #[error("{label} name must be a Mendix identifier: {value}")]
     InvalidIdentifier { label: &'static str, value: String },
     #[error("name must be qualified as Module.Artifact: {0}")]
@@ -165,14 +163,20 @@ pub fn generate_project(options: &ProjectScaffold) -> Result<ScaffoldReport> {
         .prefix(&format!(".{file_name}.mxrs-"))
         .tempdir_in(parent)
         .map_err(|source| io_error(parent, source))?;
-    for (relative, body) in &files {
-        write_file(staging.path(), relative, body)?;
+    let count = files.len();
+    for (relative, body) in files {
+        let body = if relative.ends_with(".rs") {
+            format_rust(body)
+        } else {
+            body
+        };
+        write_file(staging.path(), relative, &body)?;
     }
     publish(staging.path(), &destination)?;
     Ok(ScaffoldReport {
         destination,
         package_name,
-        files: files.len(),
+        files: count,
     })
 }
 
@@ -223,26 +227,50 @@ fn project_files(
             ),
         ),
         (".gitignore", "/build\n/target\n".to_string()),
+        // The crate root is the layers and the application: every
+        // declaration below registers itself, so nothing here composes.
         (
             "src/lib.rs",
             format!(
-                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\npub fn build() -> mxrs::ProjectDecl {{\n    let mut project = application::build();\n    presentation::apply(&mut project);\n    project\n}}\n\n#[mxrs::application(version = {version}, project = crate::build)]\npub struct Application;\n"
+                "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\n#[mxrs::application(version = {version})]\npub struct Application;\n"
             ),
         ),
+        ("src/domain/mod.rs", templates::domain_layer()),
         (
-            "src/domain/mod.rs",
-            format!(
-                "pub fn build() -> mxrs::ProjectDecl {{\n    let mut builder = mxrs::ProjectBuilder::new({version});\n    builder.module(\"Main\", |_module| {{}});\n    #[allow(unused_mut)]\n    let mut project = builder.build();\n    project\n}}\n"
-            ),
+            "src/domain/modules/mod.rs",
+            templates::module_registry("main"),
+        ),
+        (
+            "src/domain/modules/main.rs",
+            templates::module_declaration("Main"),
         ),
         ("src/application/mod.rs", templates::application_layer()),
+        ("src/presentation/mod.rs", templates::presentation_layer()),
         (
-            "src/presentation/mod.rs",
-            format!(
-                "pub fn apply(project: &mut mxrs::ProjectDecl) {{\n    let mut builder = mxrs::ProjectBuilder::new(project.mendix_version.clone());\n    builder.module(\"Main\", |module| {{\n        module.layout(\"ApplicationLayout\", |layout| {{\n            layout.placeholder(\"Main\");\n        }});\n        module.page(\"Home\", |page| {{\n            page.layout(\"Main.ApplicationLayout\", \"Main\");\n            page.text(\"Welcome to {}\");\n        }});\n    }});\n    builder.navigation(|navigation| {{\n        navigation.profile(\"Responsive\", |profile| {{\n            profile.home_page(\"Main.Home\");\n        }});\n    }});\n    let presentation = builder.build();\n    for module in presentation.modules {{\n        project.merge_module(module);\n    }}\n    project.navigation = presentation.navigation;\n}}\n",
-                escape_rust_string(&options.name)
-            ),
+            "src/presentation/layouts/mod.rs",
+            templates::registering_concept_index("layouts", "main"),
         ),
+        (
+            "src/presentation/layouts/main/mod.rs",
+            templates::registering_folder_index("Main", "layouts", "application_layout"),
+        ),
+        (
+            "src/presentation/layouts/main/application_layout.rs",
+            templates::layouts("Main", "Main"),
+        ),
+        (
+            "src/presentation/pages/mod.rs",
+            templates::registering_concept_index("pages", "main"),
+        ),
+        (
+            "src/presentation/pages/main/mod.rs",
+            templates::registering_folder_index("Main", "pages", "home"),
+        ),
+        (
+            "src/presentation/pages/main/home.rs",
+            templates::home_page(&escape_rust_string(&options.name)),
+        ),
+        ("src/presentation/navigation.rs", templates::navigation()),
         (
             "src/infrastructure/mod.rs",
             templates::infrastructure_layer(),
@@ -262,6 +290,42 @@ fn project_files(
             ),
         ),
     ])
+}
+
+/// Generated Rust as rustfmt would leave it.
+///
+/// A template cannot know how long the names it is given are, and rustfmt's
+/// line-breaking depends on exactly that, so the formatter itself has the
+/// last word. It is best effort by design: without rustfmt on the path —
+/// or if it rejects the source — the template's own layout is kept, which
+/// is valid Rust either way.
+pub(crate) fn format_rust(source: String) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let Ok(mut formatter) = Command::new("rustfmt")
+        .args(["--edition", "2024", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return source;
+    };
+    let written = formatter
+        .stdin
+        .take()
+        .is_some_and(|mut input| input.write_all(source.as_bytes()).is_ok());
+    let Ok(output) = formatter.wait_with_output() else {
+        return source;
+    };
+    if !written || !output.status.success() {
+        return source;
+    }
+    match String::from_utf8(output.stdout) {
+        Ok(formatted) if !formatted.trim().is_empty() => formatted,
+        _ => source,
+    }
 }
 
 fn write_file(root: &Path, relative: &str, body: &str) -> Result<()> {
@@ -498,11 +562,11 @@ mod tests {
         let main = std::fs::read_to_string(destination.join("src/main.rs")).unwrap();
         assert!(main.contains("build/escape-app.mpr"));
         assert!(!main.contains("../"));
-        // The display name reaches generated source through the page text the
-        // presentation layer declares, not through `src/domain/mod.rs`.
-        let presentation =
-            std::fs::read_to_string(destination.join("src/presentation/mod.rs")).unwrap();
-        assert!(presentation.contains("Welcome to ../../Escape / App"));
+        // The display name reaches generated source through the home page's
+        // text, not through `src/domain/mod.rs`.
+        let home = std::fs::read_to_string(destination.join("src/presentation/pages/main/home.rs"))
+            .unwrap();
+        assert!(home.contains("Welcome to ../../Escape / App"));
         let domain = std::fs::read_to_string(destination.join("src/domain/mod.rs")).unwrap();
         assert!(!domain.contains("Welcome to"));
         assert_eq!(package_name("日本語"), "mendix-app");
@@ -541,13 +605,11 @@ mod tests {
     }
 
     /// `mxrs new` and `mxrs import` have to agree on the layered shape, or a
-    /// scaffolded project and an imported one would need different `mxrs add`
-    /// wiring. The compile check elsewhere in this suite would still pass if
-    /// `application::build` reached outward into `presentation`, so assert the
-    /// dependency direction and the module visibility on the source itself —
-    /// this mirrors `mxrs-exporter`'s `generated_layers_point_dependencies_inward`.
+    /// scaffolded project and an imported one would be different projects to
+    /// work in. This mirrors `mxrs-exporter`'s
+    /// `generated_layers_only_list_what_they_hold`.
     #[test]
-    fn a_fresh_project_exposes_every_layer_and_points_dependencies_inward() {
+    fn a_fresh_project_is_its_layers_and_self_registering_declarations() {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("demo");
         generate_project(&ProjectScaffold::new("Demo", "11.12.1", &destination)).unwrap();
@@ -559,40 +621,40 @@ mod tests {
                 "{layer} is not a public top-level module: {crate_root}"
             );
         }
-        // The crate root is the single composition root, and the attribute
-        // enters the model through it rather than through `domain::build`.
-        assert!(crate_root.contains("pub fn build() -> mxrs::ProjectDecl"));
-        assert!(crate_root.contains("let mut project = application::build();"));
-        assert!(crate_root.contains("presentation::apply(&mut project);"));
-        assert!(crate_root.contains("project = crate::build"));
-
-        let domain = std::fs::read_to_string(destination.join("src/domain/mod.rs")).unwrap();
-        assert!(!domain.contains("crate::application"));
-        assert!(!domain.contains("crate::presentation"));
-
-        // Applying presentation from the application layer is the outward
-        // dependency this layout exists to avoid.
-        let application =
-            std::fs::read_to_string(destination.join("src/application/mod.rs")).unwrap();
-        assert!(application.contains("crate::domain::build()"));
-        assert!(!application.contains("crate::presentation"));
-
-        let presentation =
-            std::fs::read_to_string(destination.join("src/presentation/mod.rs")).unwrap();
-        assert!(presentation.contains("pub fn apply(project: &mut mxrs::ProjectDecl)"));
-        assert!(!presentation.contains("pub fn build()"));
-        assert!(!presentation.contains("crate::application"));
+        // The crate root is the layers and the application. Nothing composes:
+        // every declaration below registers itself, so no layer can reach
+        // outward to apply another.
+        assert_eq!(
+            crate_root,
+            "pub mod application;\npub mod domain;\npub mod infrastructure;\npub mod presentation;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
+        );
+        for layer in ["domain", "application", "infrastructure", "presentation"] {
+            let source =
+                std::fs::read_to_string(destination.join(format!("src/{layer}/mod.rs"))).unwrap();
+            for composing in ["fn build", "fn apply", "ProjectDecl", "crate::"] {
+                assert!(
+                    !source.contains(composing),
+                    "{layer}: {composing}\n{source}"
+                );
+            }
+        }
+        // A fresh project is the same shape an import produces: the module
+        // it declares, a layout, a home page and the navigation opening it,
+        // each the annotated item that declares it.
+        let read = |relative: &str| std::fs::read_to_string(destination.join(relative)).unwrap();
+        assert!(read("src/domain/modules/main.rs").contains("#[declaration(module = \"Main\")]"));
+        assert!(
+            read("src/presentation/layouts/main/application_layout.rs")
+                .contains("#[layout(module = \"Main\")]")
+        );
+        assert!(read("src/presentation/pages/main/home.rs").contains("#[page(module = \"Main\")]"));
+        assert!(read("src/presentation/navigation.rs").contains("#[navigation]"));
 
         // There is no module tree at all: the authored tree is layer-first,
         // and a concept grows a folder for a module when the first artifact
         // of that concept is scaffolded into it.
         assert!(!destination.join("src/modules").exists());
         assert!(!crate_root.contains("pub mod modules;"), "{crate_root}");
-        for layer in ["domain", "application", "presentation"] {
-            let source =
-                std::fs::read_to_string(destination.join(format!("src/{layer}/mod.rs"))).unwrap();
-            assert!(!source.contains("pub mod modules;"), "{layer}: {source}");
-        }
     }
 
     #[test]
@@ -615,10 +677,19 @@ mod tests {
             "README.md",
             "src/application/mod.rs",
             "src/domain/mod.rs",
+            "src/domain/modules/main.rs",
+            "src/domain/modules/mod.rs",
             "src/infrastructure/mod.rs",
             "src/lib.rs",
             "src/main.rs",
+            "src/presentation/layouts/main/application_layout.rs",
+            "src/presentation/layouts/main/mod.rs",
+            "src/presentation/layouts/mod.rs",
             "src/presentation/mod.rs",
+            "src/presentation/navigation.rs",
+            "src/presentation/pages/main/home.rs",
+            "src/presentation/pages/main/mod.rs",
+            "src/presentation/pages/mod.rs",
         ];
         for relative in expected {
             assert!(

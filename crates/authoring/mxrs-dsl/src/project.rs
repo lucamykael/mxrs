@@ -63,6 +63,7 @@ impl ProjectBuilder {
             modules: self.modules,
             security: self.security,
             navigation: self.navigation,
+            demo_users: vec![],
         }
     }
 

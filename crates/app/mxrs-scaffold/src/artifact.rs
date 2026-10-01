@@ -10,26 +10,21 @@
 //!
 //! **What is necessarily different**: mxrb scaffolds Ruby into
 //! `modules/<Module>/<layer>/<family>/`, evaluated at runtime by `project.rb`.
-//! mxrs scaffolds Rust into
-//! `src/{domain,application,presentation}/modules/<module>/<family>/`, compiled
-//! by `cargo`. Two consequences follow from that and are not stylistic:
+//! mxrs scaffolds Rust into `src/<layer>/<concept>/<module>/`, compiled by
+//! `cargo` — the same folders the importer writes. Two consequences follow
+//! from that and are not stylistic:
 //!
 //! 1. Rust module paths must be identifiers, so directories are snake_cased
-//!    (`src/modules/sales`, not `.../Sales`). The Mendix name stays
+//!    (`src/domain/entities/sales`, not `.../Sales`). The Mendix name stays
 //!    verbatim inside the generated declaration and in the registry key.
-//! 2. Aggregators cannot be "a list of files to evaluate". Each one exposes an
-//!    `apply` function plus a `const` table of function pointers, so adding an
-//!    artifact is a two-line edit (`pub mod x;` and one table entry) with no
-//!    ambiguity about where a line goes.
-//!
-//! Wiring into `build()` recognizes the two shapes mxrs itself generates (the
-//! `mxrs new` scaffold and the `mxrs import` layout). Anything else fails with
-//! [`ScaffoldError::UnrecognizedProjectBuild`] naming the file rather than
-//! guessing where a call belongs in source the user restructured.
+//! 2. There is no aggregator to keep in step. A scaffolded declaration
+//!    registers itself with the application, so connecting it is one
+//!    `pub mod` line per level — and the scaffold never has to recognize how
+//!    a project composes its model, or refuse one it does not recognize.
 
 use std::path::{Path, PathBuf};
 
-use crate::templates::{DECLARATIONS_LIST, DECLARE, snake_case};
+use crate::templates::snake_case;
 use crate::transaction::Transaction;
 use crate::{Result, ScaffoldError, io_error, page_templates, registry, templates};
 
@@ -212,7 +207,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "init",
         argument: "<Module>",
         summary: "Create module roles and project security",
-        destination: "src/domain/module_security/<module>",
+        destination: "src/domain/module_security",
         kind: ArtifactKind::Security,
     },
     // Listed after `security`: a demo user requires initialized project
@@ -239,15 +234,15 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application validation microflow",
-        destination: "src/application/use_cases/<module>",
+        destination: "src/application/services/<module>",
         kind: ArtifactKind::Validation,
     },
     ScaffoldCommand {
         name: "use-case",
         action: "new",
         argument: "<Module.Flow>",
-        summary: "Create an application use-case microflow",
-        destination: "src/application/use_cases/<module>",
+        summary: "Create an application service microflow",
+        destination: "src/application/services/<module>",
         kind: ArtifactKind::UseCase,
     },
 ];
@@ -695,10 +690,10 @@ fn create_module_layer(
 }
 
 /// Ports mxrb's `scaffold_demo_user` to the Cargo-native layout: the
-/// declaration lands in `src/domain/security/demo_users/`, the generated
-/// password lands in a `0o600` `.env` at the project root (with an empty
-/// `.env.example` key for sharing), and the demo-user aggregator is wired
-/// into `build()` after `security::apply`. Role and entity references are
+/// `#[demo_user]` declaration lands in `src/domain/demo_users/` and
+/// registers itself, and the generated password lands in a `0o600` `.env`
+/// at the project root (with an empty `.env.example` key for sharing).
+/// Role and entity references are
 /// validated structurally against the generated layout — the same
 /// source-scanning contract mxrb applies to its Ruby projects.
 fn create_demo_user(
@@ -722,9 +717,16 @@ fn create_demo_user(
     if roles.is_empty() {
         roles.push("User".to_string());
     }
-    let security = root.join("src/domain/security/mod.rs");
-    let security_source = transaction
-        .content(&security)?
+    // The importer and `security init` both write `src/domain/security.rs`;
+    // a project scaffolded before they agreed keeps its `security/mod.rs`.
+    let mut security_source = None;
+    for relative in ["src/domain/security.rs", "src/domain/security/mod.rs"] {
+        if let Some(source) = transaction.content(&root.join(relative))? {
+            security_source = Some(source);
+            break;
+        }
+    }
+    let security_source = security_source
         .ok_or_else(|| ScaffoldError::SecurityNotInitialized(root.display().to_string()))?;
     let known_roles = declared_user_roles(&security_source);
     for role in &roles {
@@ -744,25 +746,19 @@ fn create_demo_user(
             .collect::<String>()
     );
 
-    let aggregator = root.join("src/domain/demo_users/mod.rs");
-    if transaction.content(&aggregator)?.is_none() {
-        transaction.create(&aggregator, templates::demo_users_aggregator())?;
+    // A demo user registers itself and joins the project security declared
+    // before it, so its folder is a list of files and nothing else.
+    let index = root.join("src/domain/demo_users/mod.rs");
+    if transaction.content(&index)?.is_none() {
+        transaction.create(&index, "//! Local demo users, one file each.\n".to_string())?;
         declare_child_module(transaction, &root.join("src/domain/mod.rs"), "demo_users")?;
-        connect_build(transaction, root, "demo_users::apply(&mut project);")?;
     }
     let stem = snake_case(name);
-    let file = aggregator.with_file_name(format!("{stem}.rs"));
     transaction.create(
-        &file,
+        index.with_file_name(format!("{stem}.rs")),
         templates::demo_user(name, &entity, &roles, &password_env),
     )?;
-    declare_child_module(transaction, &aggregator, &stem)?;
-    append_list_entry(
-        transaction,
-        &aggregator,
-        DECLARATIONS_LIST,
-        &format!("{}::{DECLARE}", rust_module_path(&stem)?),
-    )?;
+    declare_child_module(transaction, &index, &stem)?;
 
     if !options.dry_run {
         ensure_demo_user_secret(transaction, root, &password_env)?;
@@ -770,11 +766,9 @@ fn create_demo_user(
     Ok(())
 }
 
-/// User roles the generated security declaration names: every
-/// `security.role("Name", …)` (security-init template) or
-/// `UserRoleDecl { name: "Name".to_string(), … }` /
-/// `UserRoleDecl::new("Name")` (imported struct literal) occurrence under
-/// `src/domain/security/mod.rs`.
+/// User roles the project's security declaration names: every
+/// `security.role("Name", …)` — the form both `security init` and the
+/// importer write — and the struct-literal forms earlier imports used.
 fn declared_user_roles(source: &str) -> Vec<String> {
     let mut roles = Vec::new();
     for pattern in [
@@ -898,29 +892,33 @@ fn create_module_security(
     module_name: &str,
 ) -> Result<()> {
     require_module(root, module_name)?;
+    // One file per module, where the importer writes it too.
     create_concept_file(
         transaction,
         root,
         module_name,
         module_folder(ArtifactKind::Security),
-        "module_roles",
+        &snake_case(module_name),
         templates::module_roles(module_name),
     )?;
-    let security = root.join("src/domain/security/mod.rs");
-    if transaction.content(&security)?.is_none() {
+    let security = root.join("src/domain/security.rs");
+    if transaction.content(&security)?.is_none()
+        && transaction
+            .content(&root.join("src/domain/security/mod.rs"))?
+            .is_none()
+    {
         transaction.create(&security, templates::project_security(module_name))?;
         declare_child_module(transaction, &root.join("src/domain/mod.rs"), "security")?;
-        connect_build(transaction, root, "security::apply(&mut project);")?;
     }
     Ok(())
 }
 
 /// A `--template`/`--chain` page is not one file but a slice: optionally a
 /// backing entity and loader, the refresh flow(s) the chain names, and the
-/// page itself. Mirrors mxrb's `scaffold_templated_page`/`page_support_specs`
-/// with a generated navigation aggregator. Each templated/chain page gets a
-/// small typed entry which extends the existing Responsive profile rather than
-/// replacing its home page or any items the application already declared.
+/// page itself. Mirrors mxrb's `scaffold_templated_page`/`page_support_specs`.
+/// The page's own file also declares its navigation item, which extends the
+/// Responsive profile rather than replacing its home page or any items the
+/// application already declared.
 fn create_page_slice(
     transaction: &mut Transaction,
     root: &Path,
@@ -950,7 +948,7 @@ fn create_page_slice(
             root,
             module_name,
             module_folder(ArtifactKind::UseCase),
-            &format!("act_load_{stem}"),
+            &templates::service_stem(&format!("ACT_Load{artifact_name}")),
             templates::page_chain_loader(module_name, artifact_name),
         )?;
     }
@@ -960,7 +958,7 @@ fn create_page_slice(
             root,
             module_name,
             module_folder(ArtifactKind::UseCase),
-            &format!("act_refresh_{stem}"),
+            &templates::service_stem(&format!("ACT_Refresh{artifact_name}")),
             templates::page_chain_action(module_name, artifact_name),
         )?;
     }
@@ -970,7 +968,7 @@ fn create_page_slice(
             root,
             module_name,
             module_folder(ArtifactKind::Nanoflow),
-            &format!("nan_refresh_{stem}"),
+            &templates::nanoflow_stem(&format!("NAN_Refresh{artifact_name}")),
             templates::page_chain_nanoflow(module_name, artifact_name, chain.has_microflow()),
         )?;
     }
@@ -996,40 +994,6 @@ fn create_page_slice(
             refresh,
             &options.page_roles,
         ),
-    )?;
-    create_page_navigation(transaction, root, module_name, artifact_name)
-}
-
-fn create_page_navigation(
-    transaction: &mut Transaction,
-    root: &Path,
-    module_name: &str,
-    artifact_name: &str,
-) -> Result<()> {
-    let navigation = root.join("src/presentation/navigation/mod.rs");
-    if transaction.content(&navigation)?.is_none() {
-        transaction.create(&navigation, templates::page_navigation_aggregator())?;
-        let presentation = root.join("src/presentation/mod.rs");
-        declare_child_module(transaction, &presentation, "navigation")?;
-        connect_layer_apply(
-            transaction,
-            &presentation,
-            "navigation::apply(project);",
-            "\n}\n",
-        )?;
-    }
-    let stem = snake_case(artifact_name);
-    let entry = navigation.with_file_name(format!("{stem}.rs"));
-    transaction.create(
-        &entry,
-        templates::page_navigation_entry(module_name, artifact_name),
-    )?;
-    declare_child_module(transaction, &navigation, &stem)?;
-    connect_layer_apply(
-        transaction,
-        &navigation,
-        &format!("{stem}::apply(project);"),
-        "\n}\n",
     )
 }
 
@@ -1079,12 +1043,19 @@ fn create_artifact(
             unreachable!("handled by the caller")
         }
     };
+    // A service is named by what it does, so its file is the declaring
+    // function's — the same file the importer would have written.
+    let stem = match options.kind {
+        ArtifactKind::UseCase | ArtifactKind::Validation => templates::service_stem(artifact_name),
+        ArtifactKind::Nanoflow => templates::nanoflow_stem(artifact_name),
+        _ => snake_case(artifact_name),
+    };
     create_concept_file(
         transaction,
         root,
         module_name,
         module_folder(options.kind),
-        &snake_case(artifact_name),
+        &stem,
         source,
     )
 }
@@ -1185,7 +1156,7 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Entity => "domain/entities",
         ArtifactKind::Enumeration => "domain/enumerations",
         ArtifactKind::Constant | ArtifactKind::ScheduledEvent => "domain/documents",
-        ArtifactKind::UseCase | ArtifactKind::Validation => "application/use_cases",
+        ArtifactKind::UseCase | ArtifactKind::Validation => "application/services",
         ArtifactKind::Page => "presentation/pages",
         ArtifactKind::Nanoflow => "presentation/nanoflows",
         ArtifactKind::PublishedRest => "presentation/http",
@@ -1207,9 +1178,10 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
     }
 }
 
-/// Writes one artifact file into its module folder and registers it the way
-/// the importer does: `pub mod <stem>;` plus a `merge_module` call in the
-/// folder's `apply`.
+/// Writes one artifact file into its module folder and makes it a module of
+/// the crate. That is the whole connection: the declaration registers
+/// itself, so there is no aggregator to edit and no composition shape the
+/// scaffold has to recognize.
 fn create_concept_file(
     transaction: &mut Transaction,
     root: &Path,
@@ -1220,19 +1192,17 @@ fn create_concept_file(
 ) -> Result<()> {
     let index = connect_concept_folder(transaction, root, module_name, folder)?;
     let path = index.with_file_name(format!("{stem}.rs"));
-    let rust_path = rust_module_path(stem)?;
     transaction.create(&path, source)?;
-    declare_child_module(transaction, &index, stem)?;
-    connect_apply_call(
-        transaction,
-        &index,
-        &format!("project.merge_module({rust_path}::declaration());"),
-    )
+    declare_child_module(transaction, &index, stem)
 }
+
+/// Concepts that hold one file per Mendix module instead of a folder: a
+/// module's declaration, and its roles.
+const REGISTRY_CONCEPTS: &[&str] = &["domain/modules", "domain/module_security"];
 
 /// Creates the `mod.rs` chain from the crate root down to `folder`, and
 /// answers with the folder's own index. Every level is the shape the
-/// importer writes: a header, `pub mod` declarations, and one `apply`.
+/// importer writes: a header and `pub mod` declarations.
 fn connect_concept_folder(
     transaction: &mut Transaction,
     root: &Path,
@@ -1251,11 +1221,10 @@ fn connect_concept_folder(
     }
     let mut parent = library;
     let mut current = src.clone();
-    // `<layer>/<concept>`, then the Mendix module inside it. A registry
-    // concept — `domain/modules` — holds one file per module and no module
-    // folder, so it stops one level short.
+    // `<layer>/<concept>`, then the Mendix module inside it — except for a
+    // registry concept, which stops one level short.
     let module_directory = snake_case(module_name);
-    let registry = concept == "domain/modules";
+    let registry = REGISTRY_CONCEPTS.contains(&concept);
     let mut segments: Vec<&str> = concept.split('/').collect();
     if !registry {
         segments.push(&module_directory);
@@ -1264,167 +1233,24 @@ fn connect_concept_folder(
         current = current.join(segment);
         let index = current.join("mod.rs");
         if transaction.content(&index)?.is_none() {
-            let header = if depth + 1 == segments.len() && !registry {
-                templates::folder_index(module_name, segment)
-            } else {
-                templates::concept_index(segment)
+            let last = depth + 1 == segments.len();
+            let header = match (last, registry) {
+                (true, true) => templates::registry_index(segment),
+                (true, false) => {
+                    templates::empty_folder_index(module_name, segments[depth.saturating_sub(1)])
+                }
+                (false, _) => templates::empty_concept_index(segment),
             };
             transaction.create(&index, header)?;
-            declare_child_module(transaction, &parent, segment)?;
-            connect_child_apply(transaction, root, &parent, segment)?;
         }
+        // Declared at every level, not only where an index was just created:
+        // a `pub mod` line removed by hand would otherwise leave everything
+        // below it out of the crate, and its declarations out of the model
+        // without a word.
+        declare_child_module(transaction, &parent, segment)?;
         parent = index;
     }
     Ok(parent)
-}
-
-/// Wires `child::apply` into whichever composition shape `parent` actually
-/// has.
-///
-/// A layer index written by the importer exposes `apply`; the same file in a
-/// fresh `mxrs new` project is the composition root and exposes `build`. Both
-/// are shapes mxrs itself generates, so the scaffold reads the file rather
-/// than assuming one of them — and the crate root only ever has `build`.
-fn connect_child_apply(
-    transaction: &mut Transaction,
-    root: &Path,
-    parent: &Path,
-    child: &str,
-) -> Result<()> {
-    let path = rust_module_path(child)?;
-    let source = transaction
-        .content(parent)?
-        .ok_or_else(|| ScaffoldError::AggregatorNotFound(parent.display().to_string()))?;
-    if source
-        .lines()
-        .any(|line| line.trim_start().starts_with("pub fn apply("))
-    {
-        return connect_apply_call(transaction, parent, &format!("{path}::apply(project);"));
-    }
-    if parent.ends_with("src/application/mod.rs") {
-        return connect_application_build(
-            transaction,
-            parent,
-            &format!("{path}::apply(&mut project);"),
-        );
-    }
-    connect_build(transaction, root, &format!("{path}::apply(&mut project);"))
-}
-
-/// Adds an application concept to the compact `mxrs new` application root.
-/// Imported projects already expose `application::apply`; this compatibility
-/// path keeps fresh projects pointing inward to the domain while avoiding a
-/// domain-to-application dependency.
-fn connect_application_build(transaction: &mut Transaction, path: &Path, call: &str) -> Result<()> {
-    let source = transaction
-        .content(path)?
-        .ok_or_else(|| ScaffoldError::AggregatorNotFound(path.display().to_string()))?;
-    if source.contains(&format!("\n    {call}\n")) {
-        return Ok(());
-    }
-    let compact = "pub fn build() -> mxrs::ProjectDecl {\n    crate::domain::build()\n}\n";
-    if source.contains(compact) {
-        return transaction.write(
-            path,
-            source.replace(
-                compact,
-                &format!(
-                    "pub fn build() -> mxrs::ProjectDecl {{\n    let mut project = crate::domain::build();\n    {call}\n    project\n}}\n"
-                ),
-            ),
-        );
-    }
-    let Some(head) = source.strip_suffix("\n    project\n}\n") else {
-        return Err(ScaffoldError::UnrecognizedProjectBuild(
-            path.display().to_string(),
-        ));
-    };
-    transaction.write(path, format!("{head}\n    {call}\n    project\n}}\n"))
-}
-
-/// Inserts `call` as the last statement of the file's `apply` function.
-/// An index created empty takes `_project`; the first call renames it.
-fn connect_apply_call(transaction: &mut Transaction, path: &Path, call: &str) -> Result<()> {
-    let source = transaction
-        .content(path)?
-        .ok_or_else(|| ScaffoldError::AggregatorNotFound(path.display().to_string()))?;
-    if source.lines().any(|line| line.trim() == call) {
-        return Ok(());
-    }
-    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
-    let Some(start) = lines
-        .iter()
-        .position(|line| line.starts_with("pub fn apply("))
-    else {
-        return Err(ScaffoldError::UnrecognizedProjectBuild(
-            path.display().to_string(),
-        ));
-    };
-    lines[start] = lines[start].replace("_project:", "project:");
-    // An index with nothing registered yet carries an empty body on one
-    // line; the first call opens it into a block.
-    if let Some(head) = lines[start].strip_suffix("{}") {
-        let head = format!("{head}{{");
-        lines.splice(
-            start..=start,
-            [head, format!("    {call}"), "}".to_string()],
-        );
-        return transaction.write(path, join(&lines));
-    }
-    let Some(end) = lines[start..].iter().position(|line| line == "}") else {
-        return Err(ScaffoldError::UnrecognizedProjectBuild(
-            path.display().to_string(),
-        ));
-    };
-    lines.insert(start + end, format!("    {call}"));
-    transaction.write(path, join(&lines))
-}
-
-const IMPORTED_BUILD_TAIL: &str = "\n    project\n}\n";
-const FRESH_BUILD_TAIL: &str = "\n    project.build()\n}\n";
-
-/// Adds one `apply` call to `src/domain/mod.rs`'s `build()`. Both recognized
-/// tails are shapes mxrs itself generates; anything else is reported instead
-/// of being rewritten, because a wrong guess here silently changes what the
-/// next `cargo mxrs build` writes into the model.
-fn connect_build(transaction: &mut Transaction, root: &Path, call: &str) -> Result<()> {
-    let path = root.join("src/domain/mod.rs");
-    let source = transaction
-        .content(&path)?
-        .ok_or_else(|| ScaffoldError::ProjectNotFound(path.display().to_string()))?;
-    if source.contains(&format!("\n    {call}\n")) {
-        return Ok(());
-    }
-    let updated = if let Some(head) = source.strip_suffix(IMPORTED_BUILD_TAIL) {
-        format!("{head}\n    {call}{IMPORTED_BUILD_TAIL}")
-    } else if let Some(head) = source.strip_suffix(FRESH_BUILD_TAIL) {
-        format!("{head}\n    let mut project = project.build();\n    {call}{IMPORTED_BUILD_TAIL}")
-    } else {
-        return Err(ScaffoldError::UnrecognizedProjectBuild(
-            path.display().to_string(),
-        ));
-    };
-    transaction.write(&path, updated)
-}
-
-fn connect_layer_apply(
-    transaction: &mut Transaction,
-    path: &Path,
-    call: &str,
-    tail: &str,
-) -> Result<()> {
-    let source = transaction
-        .content(path)?
-        .ok_or_else(|| ScaffoldError::ProjectNotFound(path.display().to_string()))?;
-    if source.contains(&format!("\n    {call}\n")) {
-        return Ok(());
-    }
-    let Some(head) = source.strip_suffix(tail) else {
-        return Err(ScaffoldError::UnrecognizedProjectBuild(
-            path.display().to_string(),
-        ));
-    };
-    transaction.write(path, format!("{head}\n    {call}{tail}"))
 }
 
 fn declare_child_module(
@@ -1441,13 +1267,83 @@ fn declare_child_module(
     }
     let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
     match lines.iter().rposition(|line| line.starts_with("pub mod ")) {
-        Some(position) => lines.insert(position + 1, declaration),
+        Some(last) => {
+            // Into the block of declarations the file already has, at the
+            // place rustfmt would move it to: a scaffolded project stays
+            // formatted without anyone running the formatter.
+            let first = lines[..last]
+                .iter()
+                .rposition(|line| !line.starts_with("pub mod "))
+                .map_or(0, |position| position + 1);
+            let position = lines[first..=last]
+                .iter()
+                .position(|line| {
+                    version_order(module_order(line), module_order(&declaration)).is_gt()
+                })
+                .map_or(last + 1, |offset| first + offset);
+            lines.insert(position, declaration);
+        }
         None => {
             let position = header_end(&lines);
-            lines.splice(position..position, [declaration, String::new()]);
+            if position >= lines.len() {
+                // An index that is its header alone: the declaration is the
+                // file's last line, one blank line below the header.
+                if lines.last().is_some_and(|line| !line.is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push(declaration);
+            } else {
+                lines.splice(position..position, [declaration, String::new()]);
+            }
         }
     }
     transaction.write(aggregator, join(&lines))
+}
+
+/// What rustfmt orders a `pub mod` line by: the module's name, with a raw
+/// identifier sorted as the name it spells.
+fn module_order(declaration: &str) -> &str {
+    let name = declaration
+        .trim_start_matches("pub mod ")
+        .trim_end_matches(';');
+    name.strip_prefix("r#").unwrap_or(name)
+}
+
+/// rustfmt's version sort, for the names a module can have: runs of digits
+/// compare as numbers (`page2` before `page10`), everything else as text.
+fn version_order(left: &str, right: &str) -> std::cmp::Ordering {
+    fn chunk(text: &str) -> (&str, &str) {
+        let numeric = text.starts_with(|character: char| character.is_ascii_digit());
+        let end = text
+            .find(|character: char| character.is_ascii_digit() != numeric)
+            .unwrap_or(text.len());
+        text.split_at(end)
+    }
+    let (mut left, mut right) = (left, right);
+    loop {
+        if left.is_empty() || right.is_empty() {
+            return left.len().cmp(&right.len());
+        }
+        let (left_chunk, left_rest) = chunk(left);
+        let (right_chunk, right_rest) = chunk(right);
+        let numeric = |chunk: &str| chunk.starts_with(|character: char| character.is_ascii_digit());
+        let order = if numeric(left_chunk) && numeric(right_chunk) {
+            let (left_digits, right_digits) = (
+                left_chunk.trim_start_matches('0'),
+                right_chunk.trim_start_matches('0'),
+            );
+            left_digits
+                .len()
+                .cmp(&right_digits.len())
+                .then_with(|| left_digits.cmp(right_digits))
+        } else {
+            left_chunk.cmp(right_chunk)
+        };
+        if order.is_ne() {
+            return order;
+        }
+        (left, right) = (left_rest, right_rest);
+    }
 }
 
 /// The first line after the `//!` header and the blank line following it —
@@ -1464,51 +1360,6 @@ fn header_end(lines: &[String]) -> usize {
         position += 1;
     }
     position
-}
-
-/// Rewrites the whole table instead of splicing a line into an assumed shape.
-/// `cargo fmt` collapses a short slice onto one line, and a scaffold that only
-/// understood the shape it had originally emitted would start failing the
-/// first time a user formatted their project.
-fn append_list_entry(
-    transaction: &mut Transaction,
-    aggregator: &Path,
-    list: &str,
-    entry: &str,
-) -> Result<()> {
-    let missing = || ScaffoldError::AggregatorNotFound(aggregator.display().to_string());
-    let source = transaction.content(aggregator)?.ok_or_else(missing)?;
-    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
-    let start = lines
-        .iter()
-        .position(|line| line.starts_with(&format!("const {list}:")))
-        .ok_or_else(missing)?;
-    let end = lines
-        .iter()
-        .skip(start)
-        .position(|line| line.trim_end().ends_with("];"))
-        .map(|offset| start + offset)
-        .ok_or_else(missing)?;
-    let declaration = lines[start..=end].join("\n");
-    let (head, body) = declaration.split_once("= &[").ok_or_else(missing)?;
-    let mut entries = body
-        .trim_end()
-        .strip_suffix("];")
-        .ok_or_else(missing)?
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if entries.iter().any(|existing| existing == entry) {
-        return Ok(());
-    }
-    entries.push(entry.to_string());
-    let mut replacement = vec![format!("{head}= &[")];
-    replacement.extend(entries.into_iter().map(|entry| format!("    {entry},")));
-    replacement.push("];".to_string());
-    lines.splice(start..=end, replacement);
-    transaction.write(aggregator, join(&lines))
 }
 
 fn join(lines: &[String]) -> String {
@@ -1532,7 +1383,7 @@ fn require_module(root: &Path, module_name: &str) -> Result<()> {
         "src/domain/dtos",
         "src/domain/enumerations",
         "src/domain/documents",
-        "src/application/use_cases",
+        "src/application/services",
         "src/presentation/pages",
         "src/presentation/nanoflows",
     ]
@@ -1615,14 +1466,13 @@ fn initialize_presentation(
         return Err(ScaffoldError::FileExists(aggregator.display().to_string()));
     }
     require_module(root, module_name)?;
-    let layout_family = base.join("layouts/mod.rs");
     let layout_file = base
         .join("layouts")
         .join(&directory)
         .join("application_layout.rs");
-    if transaction.content(&layout_family)?.is_none()
-        && transaction.content(&layout_file)?.is_some()
-    {
+    // A layout file the module's own index does not know about was not put
+    // there by this scaffold; refuse rather than adopt or overwrite it.
+    if transaction.content(&aggregator)?.is_none() && transaction.content(&layout_file)?.is_some() {
         return Err(ScaffoldError::FileExists(layout_file.display().to_string()));
     }
     if transaction.content(&layout_file)?.is_none() {
@@ -1647,4 +1497,25 @@ fn initialize_presentation(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_order;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn modules_are_ordered_the_way_rustfmt_orders_them() {
+        assert_eq!(version_order("page2", "page10"), Ordering::Less);
+        assert_eq!(version_order("page10", "page2"), Ordering::Greater);
+        assert_eq!(version_order("page02", "page2"), Ordering::Equal);
+        assert_eq!(version_order("order", "order_line"), Ordering::Less);
+        assert_eq!(version_order("order2", "order_line"), Ordering::Less);
+        assert_eq!(version_order("billing", "main"), Ordering::Less);
+        assert_eq!(
+            version_order("v1_10_orders", "v1_9_orders"),
+            Ordering::Greater
+        );
+        assert_eq!(version_order("sales", "sales"), Ordering::Equal);
+    }
 }

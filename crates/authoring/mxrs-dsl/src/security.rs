@@ -86,13 +86,15 @@ pub struct DemoUserBuilder {
 }
 
 impl DemoUserBuilder {
-    fn new(name: impl Into<String>) -> Self {
+    /// Starts a demo user on its own, for one declared apart from the
+    /// project security it joins.
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             declaration: DemoUserDecl::new(name),
         }
     }
 
-    fn into_decl(self) -> DemoUserDecl {
+    pub fn into_decl(self) -> DemoUserDecl {
         self.declaration
     }
 
