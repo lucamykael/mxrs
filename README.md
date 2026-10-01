@@ -48,10 +48,14 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
                                           \-> cargo run -> new .mpr
 ```
 
-An import writes model declarations under `src/domain/`, server-side use cases
-and microflows under `src/application/`, pages, navigation, and client-side
-nanoflows under `src/presentation/`, and outbound/generated adapters under
-`src/infrastructure/`. A complete unit snapshot stays under `model/imported/`.
+An import writes model declarations under `src/domain/`, each module's
+microflows as services under `src/application/`, pages, navigation, and
+client-side nanoflows under `src/presentation/`, and outbound/generated adapters
+under `src/infrastructure/`. Every declaration is one annotated item in its own
+file — `#[entity]` on a struct, `#[microflow]` on the function that builds it —
+and registers itself, so adding one is the file plus its `pub mod` line; see
+[`docs/rust-project-architecture.md`](docs/rust-project-architecture.md). A
+complete unit snapshot stays under `model/imported/`.
 Stable identities and storage metadata remain data instead of noisy Rust
 constants. Mendix filesystem resources are copied into the editable `assets/`
 tree and materialized next to each built `.mpr`. The snapshot makes concepts
@@ -108,15 +112,17 @@ parameters, documentation, required flags, and typed defaults. Calls in one
 checks builder/IR calls against authored or existing native signatures before
 writing. Parameter and type IDs survive synchronization. Imported graph shapes
 not yet decompiled remain complete
-in the snapshot; new server flows live in
-`src/application/microflows/mod.rs`, while client flows live in
-`src/presentation/nanoflows/mod.rs`. Project/module security is imported into
-`src/domain/security/`, and modern navigation into
-`src/presentation/navigation/`. Their writers validate role and target
+in the snapshot, and are named in their module's `imported.rs` so the rest of
+the project can still call and bind them; server flows live in
+`src/application/services/<module>/`, while client flows live in
+`src/presentation/nanoflows/<module>/`. Project security is imported into
+`src/domain/security.rs`, each module's roles into
+`src/domain/module_security/<module>.rs`, and modern navigation into
+`src/presentation/navigation.rs`. Their writers validate role and target
 invariants, preserve native fields outside the typed surface, and keep
 existing identities. Unknown documents remain complete in the snapshot.
-Task queues import as editable declarations under
-`src/application/task_queues/`. `TaskQueueConfig` distinguishes legacy fixed
+Task queues import as editable declarations in
+`src/application/task_queues.rs`. `TaskQueueConfig` distinguishes legacy fixed
 parallelism from modern expressions with per-node or cluster-wide scope.
 Their metadata, queue/config identities, and folder placement survive sync;
 unknown native fields remain in the imported snapshot and block standalone
@@ -124,10 +130,14 @@ export when they cannot be expressed completely. This is document authoring;
 queue-backed flow execution remains part of the runtime backlog.
 Pages have a typed front end too — see below.
 
-Cargo-native domain code can use `#[derive(MxEntity)]` on structs and
-`#[derive(MxEnumeration)]` on enums. Scalar field kinds are inferred from
+Cargo-native domain code declares an entity with `#[entity]`, `#[dto]` or
+`#[view]` on a struct and an enumeration with `#[enumeration]` on an enum
+(`#[derive(MxEntity)]`/`#[derive(MxEnumeration)]` remain for code that
+registers by hand). Scalar field kinds are inferred from
 `MxString`, `MxDecimal`, `MxDateTime`, and the other Mendix value types;
-entity/attribute metadata uses `#[mxrs(...)]`. Enumeration references are
+entity/attribute metadata — length, defaults, indexes, event handlers — uses
+`#[mxrs(...)]`, `///` comments are the model's documentation, and every field
+has an accessor (`Order::number()`) that flows and pages name it by. Enumeration references are
 trait-checked rather than written as qualified-name strings, and enumeration
 documents and localized captions retain stable identities across rebuilds.
 Associations use `Reference<T>` or `ReferenceSet<T>` fields; their target and
@@ -168,13 +178,14 @@ builders: parameters, microflow calls, list creation, object create/change and
 commit/delete, decisions, list/while loops, loop break/continue and final returns.
 Branches and loop bodies can nest; variables remain local to their block.
 Conditions currently accept boolean literals, parameters/results and direct
-boolean attribute reads. Create/change assignments use typed attribute markers.
+boolean attribute reads. Create/change assignments go through the entity's
+accessors (`Order::number().set(...)`).
 Expressions cover typed variables, direct attribute reads and canonical string,
 boolean and numeric literals. Integer attribute reads can widen to Long through
 `into_long()`; narrowing is never inferred. Calculated/autonumber writes,
 associations, inherited or chained member paths and enum values remain outside
-this projection. Attribute markers describe the imported schema; when changing
-a domain attribute type, update the matching `TypedAttributeMarker::Value` too.
+this projection. An accessor is typed by its field, so changing a domain
+attribute's type is checked against every flow that reads or assigns it.
 A rebuild without edits preserves the original bytes; edits with the same activity structure retain node identities,
 layout and native metadata. Structural edits rebuild the activity graph while
 retaining the flow identity. Branch returns, rescue paths, other activities and
@@ -199,9 +210,9 @@ microflow/nanoflow-sourced DataViews, attribute-bound TextBox/CheckBox/
 DatePicker/DropDown widgets, and name/class authoring for Data Grid 2,
 Gallery, and ComboBox through `mxrs-pluggable`. All compile through
 `mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms codec.
-`mxrs import` detects the lossless structural subset, renders real builders
-into `src/presentation/pages/mod.rs`, and wires them into the composition root
-automatically.
+`mxrs import` detects the lossless structural subset and renders each page as
+a `#[page]` function in `src/presentation/pages/<module>/`, which registers
+itself.
 Data-bound widgets, flow-calling buttons, empty official pluggable shells,
 page metadata, object page parameters, and context-inherited DataViews import
 to typed builders when every reference can be proven. Configured pluggable

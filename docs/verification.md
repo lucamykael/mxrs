@@ -158,22 +158,19 @@ four audited patterns) and its `--template`/`--chain` vertical slices. What is
 proven is that every catalogued template compiles on its own, and that a
 `page:nanoflow:microflow` chain produces a slice — backing entity, loader,
 refresh microflow, refresh nanoflow and the page — that compiles with real
-Cargo and whose artifacts all reach the written `.mpr`. Three gaps are
+Cargo and whose artifacts all reach the written `.mpr`. Two gaps are
 deliberate:
 
-- MXRB also writes a navigation entry per generated page into
-  `app/navigation/responsive/`. MXRS has no navigation aggregator to write
-  into — `mxrs new` declares navigation inline in `build()` — so a chained
-  page is reachable by reference but is not linked into a menu.
 - MXRB's refresh microflow logs a message and its refresh nanoflow shows one.
   `mxrs_ir::Activity` has neither activity, so those bodies are generated
   empty rather than filled with an unrelated activity.
 - MXRB's `number_input` has no MXRS widget; a decimal attribute binds to a
   `text_box`, which is what Mendix itself renders for one.
 
-Because a generated slice needs marker *types* rather than MXRB's strings, the
-templates emit hand-written markers in the same `Entity_Attribute` shape
-`mxrs-typegen` produces from a manifest.
+The slice names its model the way any authored code does: the entity's
+accessors (`OrderOverview::total()`) and the types its flows' own declarations
+generate (`ACT_LoadOrderOverview`), imported from the files that declare them.
+The page also adds itself to the Responsive navigation, from its own file.
 
 Entity access rules now have an authoring surface
 (`EntityBuilder::access_rule`, with members named by attribute/association

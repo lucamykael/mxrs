@@ -124,7 +124,7 @@ mxrs::imported! {
     nanoflow NAN_Refresh;
 }
 
-mxrs::declare!(Document, |project| {
+mxrs::register!(Document, |project| {
     let mut module = ModuleBuilder::new("Sales");
     module.constant("Region", |constant| {
         constant.value("EU");
@@ -152,6 +152,46 @@ pub fn order_overview(page: &mut PageBuilder) {
         view.text_box(Order::number());
         view.check_box(Order::paid());
     });
+}
+
+#[module_roles(module = "Sales")]
+pub enum Role {
+    /// Runs the shop.
+    Administrator,
+    #[mxrs(name = "Sales_Clerk")]
+    Clerk,
+}
+
+#[declaration(module = "Sales")]
+pub fn order_number_format(module: &mut ModuleBuilder) {
+    module.regular_expression("OrderNumberFormat", "^A-[0-9]{4}$", |_| {});
+}
+
+#[security]
+pub fn security(security: &mut SecurityBuilder) {
+    security.level(SecurityLevel::CheckEverything);
+    security.clear_roles();
+    security.role("Manager", |role| {
+        role.module_role(Role::Administrator.qualified_name());
+    });
+}
+
+#[demo_user(name = "demo_manager")]
+pub fn manager(user: &mut DemoUserBuilder) {
+    user.role("Manager");
+    user.password_from_env("MXRS_DEMO_MANAGER_PASSWORD");
+}
+
+#[navigation]
+pub fn navigation(navigation: &mut NavigationBuilder) {
+    navigation.profile("Responsive", |profile| {
+        profile.home_page("Sales.Order_Overview");
+    });
+}
+
+#[navigation_item(profile = "Responsive", caption = "Orders")]
+pub fn orders_item(item: &mut NavigationItemBuilder) {
+    item.page("Sales.Order_Overview");
 }
 
 #[mxrs::application(version = "11.12.1")]
@@ -388,6 +428,38 @@ fn a_flow_is_named_by_its_prefix_and_function() {
     assert_eq!(sales.nanoflows.len(), 1);
     // A hand-written declaration registers like a generated one.
     assert_eq!(sales.constants[0].name, "Region");
+}
+
+#[test]
+fn security_and_navigation_are_declared_where_they_belong() {
+    let project = Application::build();
+    let sales = sales();
+    let roles = sales.roles.as_ref().unwrap();
+    assert_eq!(
+        roles
+            .iter()
+            .map(|role| (role.name.as_str(), role.description.as_str()))
+            .collect::<Vec<_>>(),
+        [("Administrator", "Runs the shop."), ("Sales_Clerk", "")]
+    );
+    assert_eq!(Role::Clerk.qualified_name(), "Sales.Sales_Clerk");
+    assert_eq!(sales.regular_expressions[0].name, "OrderNumberFormat");
+
+    let security = project.security.as_ref().unwrap();
+    assert_eq!(security.level, SecurityLevel::CheckEverything);
+    assert_eq!(security.user_roles[0].module_roles, ["Sales.Administrator"]);
+    // The demo user joins the security declared before it.
+    assert_eq!(security.demo_users[0].name, "demo_manager");
+    assert_eq!(security.demo_users[0].roles, ["Manager"]);
+
+    let profile = &project.navigation.as_ref().unwrap().profiles[0];
+    assert_eq!(profile.home_page.as_deref(), Some("Sales.Order_Overview"));
+    // The item declared apart from the profile is appended to it.
+    assert_eq!(profile.items.len(), 1);
+    assert_eq!(
+        profile.items[0].page.as_deref(),
+        Some("Sales.Order_Overview")
+    );
 }
 
 #[test]

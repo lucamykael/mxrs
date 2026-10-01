@@ -18,8 +18,9 @@ pub use mxrs_ir::*;
 #[doc(hidden)]
 pub use mxrs_macros::project_facade as __project;
 pub use mxrs_macros::{
-    MxEntity, MxEnumeration, application, constant, dto, entity, enumeration, layout, menu,
-    microflow, nanoflow, page, route, view,
+    MxEntity, MxEnumeration, application, constant, declaration, demo_user, dto, entity,
+    enumeration, layout, menu, microflow, module_roles, nanoflow, navigation, navigation_item,
+    page, route, security, view,
 };
 
 /// The collector declaration macros submit to. Re-exported so an application
@@ -74,14 +75,14 @@ pub mod mapping;
 pub mod ports;
 pub mod registry;
 
-/// Registers a declaration written by hand.
+/// Registers a declaration assembled by hand.
 ///
-/// The declaration macros cover what a model usually holds; this is the same
-/// registration for anything assembled with the builders directly. The first
-/// argument is the [`registry::Stage`] it belongs to.
+/// The declaration attributes cover what a model usually holds; this is the
+/// same registration for anything built directly against the project. The
+/// first argument is the [`registry::Stage`] it belongs to.
 ///
 /// ```
-/// mxrs::declare!(Document, |project| {
+/// mxrs::register!(Document, |project| {
 ///     let mut module = mxrs::ModuleBuilder::new("Sales");
 ///     module.constant("Region", |constant| {
 ///         constant.value("EU");
@@ -90,7 +91,7 @@ pub mod registry;
 /// });
 /// ```
 #[macro_export]
-macro_rules! declare {
+macro_rules! register {
     ($stage:ident, $apply:expr $(,)?) => {
         $crate::inventory::submit! {
             $crate::registry::Declaration::new(
@@ -181,7 +182,8 @@ pub mod prelude {
     };
     pub use crate::{
         AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, LayoutBuilder,
-        LifecycleEvent, MemberRights, MxBinary, MxList, MxObject, SystemMember, constant, dto,
-        entity, enumeration, layout, menu, microflow, nanoflow, page, route, view,
+        LifecycleEvent, MemberRights, MxBinary, MxList, MxObject, SystemMember, constant,
+        declaration, demo_user, dto, entity, enumeration, layout, menu, microflow, module_roles,
+        nanoflow, navigation, navigation_item, page, route, security, view,
     };
 }

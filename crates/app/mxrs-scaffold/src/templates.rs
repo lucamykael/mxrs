@@ -10,46 +10,74 @@
 //! surface mxrs lacks is not implemented at all rather than scaffolded into
 //! something that will not compile.
 
-/// Entry function every scaffolded artifact file exposes, and that the family
-/// aggregator's `DECLARATIONS` table points at.
-pub(crate) const DECLARE: &str = "declare";
-pub(crate) const DECLARATIONS_LIST: &str = "DECLARATIONS";
-
-pub(crate) fn application_layer() -> String {
-    "pub fn build() -> mxrs::ProjectDecl {\n    crate::domain::build()\n}\n".to_string()
-}
-
-pub(crate) fn empty_presentation_layer() -> String {
-    "pub fn apply(_project: &mut mxrs::ProjectDecl) {}\n".to_string()
-}
-
-pub(crate) fn page_navigation_aggregator() -> String {
-    "//! Navigation entries created by `mxrs page --template` or `--chain`.\n\n\
-     pub fn apply(project: &mut ::mxrs::ProjectDecl) {\n}\n"
+/// The domain layer of a fresh project: the modules it declares.
+pub(crate) fn domain_layer() -> String {
+    "//! Business data and rules that do not depend on delivery or infrastructure.\n\n\
+     pub mod modules;\n"
         .to_string()
 }
 
-/// The navigation entry a templated/chain page contributes.
-///
-/// `navigation_item` is a find-or-create accessor precisely so this generated
-/// body cannot panic: the profile it names is a default, not an invariant, and
-/// an application that declares only Phone/Tablet profiles — or that renames
-/// this one while editing its own generated Rust — must keep building.
-pub(crate) fn page_navigation_entry(module_name: &str, name: &str) -> String {
+pub(crate) fn application_layer() -> String {
+    "//! Application orchestration: each module's microflows as services.\n".to_string()
+}
+
+/// The presentation layer of a fresh project: the application layout, the
+/// home page that uses it, and the navigation that opens it.
+pub(crate) fn presentation_layer() -> String {
+    "//! Pages, layouts, nanoflows and navigation.\n\n\
+     pub mod layouts;\n\
+     pub mod navigation;\n\
+     pub mod pages;\n"
+        .to_string()
+}
+
+/// `src/domain/modules/mod.rs`: the Mendix modules the project declares, one
+/// file each.
+pub(crate) fn module_registry(first: &str) -> String {
+    format!("//! The Mendix modules this project declares, one file each.\n\npub mod {first};\n")
+}
+
+/// The home page `mxrs new` starts a project with. `title` is already
+/// escaped for a Rust string literal.
+pub(crate) fn home_page(title: &str) -> String {
+    format!(
+        "//! Page `Main.Home`.\n\
+         //!\n\
+         //! Widget vocabulary: `mxrs::PageBuilder`.\n\n\
+         use mxrs::prelude::*;\n\n\
+         #[page(module = \"Main\")]\n\
+         pub fn home(page: &mut PageBuilder) {{\n    \
+         page.layout(\"Main.ApplicationLayout\", \"Main\");\n    \
+         page.text(\"Welcome to {title}\");\n\
+         }}\n"
+    )
+}
+
+/// The navigation `mxrs new` starts a project with: one Responsive profile
+/// opening the home page.
+pub(crate) fn navigation() -> String {
+    "//! The project's navigation profiles.\n\n\
+     use mxrs::prelude::*;\n\n\
+     #[navigation]\n\
+     pub fn navigation(navigation: &mut NavigationBuilder) {\n    \
+     navigation.profile(\"Responsive\", |profile| {\n        \
+     profile.home_page(\"Main.Home\");\n    \
+     });\n\
+     }\n"
+    .to_string()
+}
+
+/// The navigation item a templated/chain page adds for itself, declared in
+/// the page's own file. `#[navigation_item]` appends to the profile it
+/// names — creating the profile if the application no longer declares it —
+/// so the generated item cannot break a build by assuming one.
+fn page_navigation_item(module_name: &str, name: &str, function: &str) -> String {
     let caption = humanize(name);
     format!(
-        "//! Navigation entry for `{module_name}.{name}`.\n\n\
-         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         project.navigation_item(\n        \
-         \"Responsive\",\n        \
-         ::mxrs::NavigationItemDecl {{\n            \
-         caption: ::std::collections::BTreeMap::from([(\"en_US\".to_string(), {caption:?}.to_string())]),\n            \
-         page: Some(\"{module_name}.{name}\".to_string()),\n            \
-         microflow: None,\n            \
-         icon: Some(::mxrs::NavigationIconDecl::Glyph(\"file\".to_string())),\n            \
-         items: vec![],\n        \
-         }},\n    \
-         );\n\
+        "\n#[navigation_item(profile = \"Responsive\", caption = {caption:?})]\n\
+         pub fn {function}_navigation(item: &mut NavigationItemBuilder) {{\n    \
+         item.page(\"{module_name}.{name}\");\n    \
+         item.icon(\"file\");\n\
          }}\n"
     )
 }
@@ -167,11 +195,10 @@ pub(crate) fn scheduled_event(module_name: &str, name: &str) -> String {
          use mxrs::prelude::*;\n\n\
          #[{attribute}]\n\
          pub fn {function}(_flow: &mut FlowBuilder) {{}}\n\n\
-         mxrs::declare!(Document, |project| {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.scheduled_event({name:?}, {name:?}, ScheduleUnit::Days, |_event| {{}});\n    \
-         project.merge_module(module.into_decl());\n\
-         }});\n",
+         #[declaration(module = {module_name:?})]\n\
+         pub fn {function}_event(module: &mut ModuleBuilder) {{\n    \
+         module.scheduled_event({name:?}, {name:?}, ScheduleUnit::Days, |_event| {{}});\n\
+         }}\n",
         attribute = flow.attribute,
         function = flow.function,
     )
@@ -437,56 +464,48 @@ pub(crate) fn module_roles(module_name: &str) -> String {
     format!(
         "//! Module roles for `{module_name}`.\n\
          //!\n\
-         //! Declaring roles here makes them authoritative for this module: the\n\
-         //! writer replaces the module's persisted role set rather than merging\n\
-         //! into it (see `mxrs_ir::ModuleDecl::roles`).\n\n\
+         //! The enum is authoritative for this module: the writer replaces the\n\
+         //! module's persisted role set with these rather than merging into it.\n\
+         //! A variant's comment is the role's description.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n    \
-         let mut module = ModuleBuilder::new({module_name:?});\n    \
-         module.role(\"User\", \"Application user\");\n    \
-         module.role(\"Administrator\", \"Module administrator\");\n    \
-         module.into_decl()\n\
+         #[module_roles(module = {module_name:?})]\n\
+         pub enum Role {{\n    \
+         /// Application user\n    \
+         User,\n    \
+         /// Module administrator\n    \
+         Administrator,\n\
          }}\n"
     )
 }
 
-/// Project security is declared as its own `apply` peer rather than inside a
-/// module, matching the layout `mxrs import` already generates. It returns
-/// early when security is already declared so re-running `security init` for a
-/// second module never silently replaces the first module's bindings.
+/// Project security, declared once: `security init` writes it for the first
+/// module and leaves it alone afterwards, so initializing a second module
+/// never replaces the first module's bindings.
 ///
-/// `clear_roles` comes first because `ProjectSecurityDecl::default` already
-/// carries an `Administrator` role: declaring one without clearing would hand
-/// the writer two roles of the same name, which it rejects. Clearing means
+/// `clear_roles` comes first because the builder already carries an
+/// `Administrator` role: declaring one without clearing would hand the
+/// writer two roles of the same name, which it rejects. Clearing means
 /// `System.Administrator` has to be restated, and it is — dropping it would
 /// silently unbind the platform's own administrator module role.
 pub(crate) fn project_security(module_name: &str) -> String {
     format!(
-        "//! Project-level security.\n\
-         //!\n\
-         //! `None` means \"preserve whatever the imported project already has\"\n\
-         //! (see `mxrs_ir::ProjectDecl::security`), so this only declares\n\
-         //! security when nothing else has.\n\n\
-         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         if project.security.is_some() {{\n        \
-         return;\n    \
-         }}\n    \
-         let mut builder = ::mxrs::ProjectBuilder::new(project.mendix_version.clone());\n    \
-         builder.security(|security| {{\n        \
-         security.level(::mxrs::SecurityLevel::CheckEverything);\n        \
-         security.clear_roles();\n        \
-         security.role(\"User\", |role| {{\n            \
-         role.description(\"Application user\");\n            \
-         role.module_role(\"{module_name}.User\");\n        \
-         }});\n        \
-         security.role(\"Administrator\", |role| {{\n            \
-         role.administrator(true);\n            \
-         role.description(\"Application administrator\");\n            \
-         role.module_role(\"System.Administrator\");\n            \
-         role.module_role(\"{module_name}.Administrator\");\n        \
+        "//! The project's security. Each module's own roles are declared in\n\
+         //! `crate::domain::module_security`.\n\n\
+         use mxrs::prelude::*;\n\n\
+         #[security]\n\
+         pub fn security(security: &mut SecurityBuilder) {{\n    \
+         security.level(SecurityLevel::CheckEverything);\n    \
+         security.clear_roles();\n    \
+         security.role(\"User\", |role| {{\n        \
+         role.description(\"Application user\");\n        \
+         role.module_role(\"{module_name}.User\");\n    \
          }});\n    \
-         }});\n    \
-         project.security = builder.build().security;\n\
+         security.role(\"Administrator\", |role| {{\n        \
+         role.administrator(true);\n        \
+         role.description(\"Application administrator\");\n        \
+         role.module_role(\"System.Administrator\");\n        \
+         role.module_role(\"{module_name}.Administrator\");\n    \
+         }});\n\
          }}\n"
     )
 }
@@ -514,87 +533,75 @@ pub(crate) fn theme_exclusion_variables() -> String {
         .to_string()
 }
 
-/// Aggregates demo-user declarations. The build wires this `apply` after
-/// `security::apply`, so project security is always present — declared by
-/// the security scaffold or carried by an imported model — when these run.
-pub(crate) fn demo_users_aggregator() -> String {
-    format!(
-        "//! Local demo user declarations.\n\n\
-         pub fn apply(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         for declare in {DECLARATIONS_LIST} {{\n        \
-         declare(project);\n    \
-         }}\n\
-         }}\n\n\
-         const {DECLARATIONS_LIST}: &[fn(&mut ::mxrs::ProjectDecl)] = &[];\n"
-    )
-}
-
 /// One demo-user declaration. The password never appears here: the writer
 /// resolves the named environment variable at write time, and an existing
 /// stored password is preserved when the variable is absent.
 pub(crate) fn demo_user(name: &str, entity: &str, roles: &[String], password_env: &str) -> String {
-    let roles = roles
-        .iter()
-        .map(|role| format!("{role:?}.to_string()"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut function = snake_case(name);
+    if crate::is_rust_keyword(&function) {
+        function.push('_');
+    }
+    let attribute = if function == name {
+        "#[demo_user]".to_string()
+    } else {
+        format!("#[demo_user(name = {name:?})]")
+    };
+    let mut lines = Vec::new();
+    if entity != "System.User" {
+        lines.push(format!("    user.entity({entity:?});\n"));
+    }
+    for role in roles {
+        lines.push(format!("    user.role({role:?});\n"));
+    }
+    lines.push(format!("    user.password_from_env({password_env:?});\n"));
     format!(
         "//! Demo user `{name}`.\n\n\
-         pub fn declare(project: &mut ::mxrs::ProjectDecl) {{\n    \
-         let security = project\n        \
-         .security\n        \
-         .as_mut()\n        \
-         .expect(\"project security must be declared before demo users\");\n    \
-         let mut user = ::mxrs::DemoUserDecl::new({name:?});\n    \
-         user.entity = {entity:?}.to_string();\n    \
-         user.roles = vec![{roles}];\n    \
-         user.password_env = Some({password_env:?}.to_string());\n    \
-         security.demo_users.push(user);\n\
-         }}\n"
-    )
-}
-
-/// One layer or concept index — `domain`, `entities`, `presentation`,
-/// `pages` — in the same shape the importer writes: a header, `pub mod`
-/// declarations, and one `apply`. A concept holds one folder per Mendix
-/// module, because entity names are unique per module and not across a
-/// project.
-pub(crate) fn concept_index(concept: &str) -> String {
-    format!(
-        "//! Every module's `{concept}`, one folder per Mendix module.\n\n\
-         pub fn apply(_project: &mut ::mxrs::ProjectDecl) {{}}\n"
+         use mxrs::prelude::*;\n\n\
+         {attribute}\n\
+         pub fn {function}(user: &mut DemoUserBuilder) {{\n{}}}\n",
+        lines.concat()
     )
 }
 
 /// The declaration `mxrs module new` writes into the module registry: a
 /// Mendix module exists as a named thing before it holds anything.
 pub(crate) fn module_declaration(module_name: &str) -> String {
+    let mut function = snake_case(module_name);
+    if crate::is_rust_keyword(&function) {
+        function.push('_');
+    }
     format!(
         "//! The {module_name} Mendix module.\n\n\
          use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n\
-         \x20   ModuleBuilder::new({module_name:?}).into_decl()\n\
-         }}\n"
+         #[declaration(module = {module_name:?})]\n\
+         pub fn {function}(_module: &mut ModuleBuilder) {{}}\n"
     )
 }
 
-/// One concept folder inside a module — `domain`, `entities`, `services` —
-/// in the same shape the importer writes.
-pub(crate) fn folder_index(module_name: &str, folder: &str) -> String {
-    format!(
-        "//! The {module_name} module's `{folder}`.\n\n\
-         pub fn apply(_project: &mut ::mxrs::ProjectDecl) {{}}\n"
-    )
+/// A concept index: the header and the first module folder it holds. Every
+/// declaration registers itself, so `pub mod` is all an index ever holds.
+pub(crate) fn registering_concept_index(concept: &str, first: &str) -> String {
+    format!("//! Every module's `{concept}`, one folder per Mendix module.\n\npub mod {first};\n")
 }
 
-/// A layer or concept index for declarations that register themselves: the
-/// header alone, since `pub mod` is all such an index ever holds.
-pub(crate) fn registering_concept_index(concept: &str) -> String {
+/// One module's folder inside a concept, holding its first file.
+pub(crate) fn registering_folder_index(module_name: &str, folder: &str, first: &str) -> String {
+    format!("//! The {module_name} module's `{folder}`.\n\npub mod {first};\n")
+}
+
+/// The index of a concept that holds one file per module rather than a
+/// folder: the module registry, module security.
+pub(crate) fn registry_index(concept: &str) -> String {
+    format!("//! Each Mendix module's `{concept}`, one file per module.\n")
+}
+
+/// An index created before it holds anything.
+pub(crate) fn empty_concept_index(concept: &str) -> String {
     format!("//! Every module's `{concept}`, one folder per Mendix module.\n")
 }
 
-/// One module's folder inside a self-registering concept.
-pub(crate) fn registering_folder_index(module_name: &str, folder: &str) -> String {
+/// A module folder index created before it holds anything.
+pub(crate) fn empty_folder_index(module_name: &str, folder: &str) -> String {
     format!("//! The {module_name} module's `{folder}`.\n")
 }
 
@@ -761,35 +768,60 @@ mod tests {
             ),
             "{page}"
         );
-        assert!(project_security("Sales").contains("pub fn apply(project"));
         // The flow a service file declares decides the file's name.
         assert_eq!(service_stem("ACT_CreateOrder"), "create_order_service");
         assert_eq!(service_stem("String"), "string_service");
         assert_eq!(nanoflow_stem("NAN_Refresh"), "refresh");
         assert_eq!(nanoflow_stem("Imported"), "imported_nanoflow");
-        // An index for self-registering declarations is its header alone;
-        // the ones still composed by hand keep an `apply`.
+        // Every index is its header and the modules it holds — nothing
+        // composes, so there is no `apply` anywhere.
         for index in [
-            registering_concept_index("entities"),
-            registering_folder_index("Sales", "entities"),
+            registering_concept_index("entities", "sales"),
+            registering_folder_index("Sales", "entities", "order"),
+            empty_concept_index("entities"),
+            empty_folder_index("Sales", "entities"),
+            registry_index("modules"),
+            module_registry("main"),
+            domain_layer(),
+            application_layer(),
+            presentation_layer(),
         ] {
             assert!(index.starts_with("//!"), "{index}");
-            assert!(!index.contains("apply"), "{index}");
+            assert!(!index.contains("fn "), "{index}");
         }
-        for index in [concept_index("domain"), folder_index("Sales", "pages")] {
-            assert!(
-                index.contains("pub fn apply(_project: &mut ::mxrs::ProjectDecl) {}"),
-                "{index}"
-            );
-        }
-        // A module is declared by a file of its own, so it carries a
-        // `declaration` rather than an `apply`.
-        let module = module_declaration("Sales");
+    }
+
+    /// What used to be composed by hand is declared like everything else.
+    #[test]
+    fn project_level_declarations_are_annotated_items() {
+        assert!(module_declaration("Sales").ends_with(
+            "#[declaration(module = \"Sales\")]\npub fn sales(_module: &mut ModuleBuilder) {}\n"
+        ));
         assert!(
-            module.contains("pub fn declaration() -> ModuleDecl"),
-            "{module}"
+            module_roles("Sales").ends_with(
+                "#[module_roles(module = \"Sales\")]\npub enum Role {\n    /// Application user\n    User,\n    /// Module administrator\n    Administrator,\n}\n"
+            )
         );
-        assert!(module.contains("ModuleBuilder::new(\"Sales\")"), "{module}");
+        let security = project_security("Sales");
+        assert!(
+            security.contains("#[security]\npub fn security(security: &mut SecurityBuilder) {\n"),
+            "{security}"
+        );
+        assert!(security.contains("role.module_role(\"Sales.Administrator\");"));
+        assert_eq!(
+            demo_user(
+                "demo_admin",
+                "System.User",
+                &["Administrator".to_string()],
+                "MXRS_DEMO_USER_DEMO_ADMIN_PASSWORD"
+            ),
+            "//! Demo user `demo_admin`.\n\nuse mxrs::prelude::*;\n\n#[demo_user]\npub fn demo_admin(user: &mut DemoUserBuilder) {\n    user.role(\"Administrator\");\n    user.password_from_env(\"MXRS_DEMO_USER_DEMO_ADMIN_PASSWORD\");\n}\n"
+        );
+        let named = demo_user("DemoAdmin", "Sales.Account", &[], "X");
+        assert!(named.contains("#[demo_user(name = \"DemoAdmin\")]\npub fn demo_admin("));
+        assert!(named.contains("    user.entity(\"Sales.Account\");\n"));
+        assert!(navigation().contains("#[navigation]\npub fn navigation("));
+        assert!(home_page("Shop").contains("#[page(module = \"Main\")]\npub fn home("));
     }
 
     /// A page slice names the model through the files that declare it.
@@ -831,6 +863,8 @@ mod tests {
             "    page.data_view_from_microflow(MicroflowRef::<ACT_LoadOrderOverview>::new(), |view| {\n",
             "        view.text_box(OrderOverview::reference());\n",
             "            b.call_nanoflow(NanoflowRef::<NAN_RefreshOrderOverview>::new());\n",
+            // The page adds itself to the navigation, from its own file.
+            "\n#[navigation_item(profile = \"Responsive\", caption = \"Order Overview\")]\npub fn order_overview_navigation(item: &mut NavigationItemBuilder) {\n    item.page(\"Sales.OrderOverview\");\n    item.icon(\"file\");\n}\n",
         ] {
             assert!(page.contains(expected), "{expected}\n{page}");
         }
@@ -1084,12 +1118,13 @@ pub(crate) fn page_from_template(
     } else {
         format!("{}\n\n", imports.join("\n"))
     };
+    let navigation = page_navigation_item(module_name, name, &function);
     format!(
         "//! Page `{module_name}.{name}` from the `{template}` template.\n\
          //!\n\
          //! Widget vocabulary: `mxrs::PageBuilder`.\n\n\
          use mxrs::prelude::*;\n\n\
-         {imports}{header}{body}}}\n"
+         {imports}{header}{body}}}\n{navigation}"
     )
 }
 

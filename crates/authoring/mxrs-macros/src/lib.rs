@@ -173,6 +173,95 @@ pub fn menu(attributes: TokenStream, item: TokenStream) -> TokenStream {
     expand_document(attributes, item, declare::DocumentKind::Menu)
 }
 
+/// Declares into one module through its `ModuleBuilder`: the general form
+/// for what the more specific attributes do not cover — a regular
+/// expression, a scheduled event, a task queue.
+///
+/// ```text
+/// #[declaration(module = "Sales")]
+/// pub fn order_number_format(module: &mut ModuleBuilder) {
+///     module.regular_expression("OrderNumberFormat", "^A-[0-9]{4}$", |_| {});
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn declaration(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attributes as declare::DeclarationArgs);
+    let item = parse_macro_input!(item as syn::ItemFn);
+    match declare::expand_declaration(&args, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Declares the project's security from a function taking the
+/// `SecurityBuilder`.
+#[proc_macro_attribute]
+pub fn security(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_project(attributes, item, declare::ProjectKind::Security)
+}
+
+/// Declares the project's navigation from a function taking the
+/// `NavigationBuilder`.
+#[proc_macro_attribute]
+pub fn navigation(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_project(attributes, item, declare::ProjectKind::Navigation)
+}
+
+fn expand_project(
+    attributes: TokenStream,
+    item: TokenStream,
+    kind: declare::ProjectKind,
+) -> TokenStream {
+    if !attributes.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "this attribute takes no options",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let item = parse_macro_input!(item as syn::ItemFn);
+    match declare::expand_project(kind, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Adds one item to a navigation profile from where the item belongs — next
+/// to the page it opens — instead of from the profile's own declaration.
+#[proc_macro_attribute]
+pub fn navigation_item(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attributes as declare::NavigationItemArgs);
+    let item = parse_macro_input!(item as syn::ItemFn);
+    match declare::expand_navigation_item(&args, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Declares a local demo user from a function taking the `DemoUserBuilder`.
+#[proc_macro_attribute]
+pub fn demo_user(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attributes as declare::DemoUserArgs);
+    let item = parse_macro_input!(item as syn::ItemFn);
+    match declare::expand_demo_user(&args, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Declares a module's roles as an enum: each variant a role, its `///`
+/// comment the description.
+#[proc_macro_attribute]
+pub fn module_roles(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attributes as declare::ModuleRolesArgs);
+    let item = parse_macro_input!(item as syn::ItemEnum);
+    match declare::expand_module_roles(&args, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
 fn expand_document(
     attributes: TokenStream,
     item: TokenStream,

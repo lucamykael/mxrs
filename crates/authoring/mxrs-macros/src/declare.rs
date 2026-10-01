@@ -356,6 +356,348 @@ pub fn expand_document(
     })
 }
 
+/// Checks the one shape every builder-taking declaration has.
+fn builder_function(item: &syn::ItemFn) -> syn::Result<&syn::Ident> {
+    let signature = &item.sig;
+    if signature.inputs.len() != 1
+        || matches!(signature.inputs[0], syn::FnArg::Receiver(_))
+        || !matches!(signature.output, syn::ReturnType::Default)
+        || !signature.generics.params.is_empty()
+        || signature.asyncness.is_some()
+    {
+        return Err(syn::Error::new_spanned(
+            signature,
+            "a declaration takes its builder alone and returns nothing: `fn name(builder: &mut Builder)`",
+        ));
+    }
+    Ok(&signature.ident)
+}
+
+fn registration(stage: TokenStream, apply: TokenStream) -> TokenStream {
+    quote! {
+        ::mxrs::inventory::submit! {
+            ::mxrs::registry::Declaration::new(
+                ::mxrs::registry::Stage::#stage,
+                ::core::module_path!(),
+                ::core::file!(),
+                ::core::line!(),
+                |project| { #apply },
+            )
+        }
+    }
+}
+
+/// `key = "value"` pairs, each key at most once and only from `allowed`.
+struct NamedStrings(Vec<(syn::Ident, syn::LitStr)>);
+
+impl NamedStrings {
+    fn parse(input: syn::parse::ParseStream<'_>, allowed: &[&str]) -> syn::Result<Self> {
+        let mut pairs: Vec<(syn::Ident, syn::LitStr)> = Vec::new();
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            if !allowed.iter().any(|name| key == name) {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!("unknown option; expected one of: {}", allowed.join(", ")),
+                ));
+            }
+            if pairs.iter().any(|(existing, _)| *existing == key) {
+                return Err(syn::Error::new(key.span(), format!("duplicate `{key}`")));
+            }
+            input.parse::<syn::Token![=]>()?;
+            pairs.push((key, input.parse()?));
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(Self(pairs))
+    }
+
+    fn get(&self, key: &str) -> Option<&syn::LitStr> {
+        self.0
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+
+    fn require(&self, key: &str) -> syn::Result<&syn::LitStr> {
+        self.get(key).ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("missing `{key} = \"...\"`"),
+            )
+        })
+    }
+}
+
+/// Arguments of `#[mxrs::declaration(module = "...")]`: the module the
+/// function declares into, and optionally the stage it is assembled at.
+pub struct DeclarationArgs {
+    module: syn::LitStr,
+    stage: Option<syn::Ident>,
+}
+
+impl syn::parse::Parse for DeclarationArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut module = None;
+        let mut stage = None;
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            input.parse::<syn::Token![=]>()?;
+            match key.to_string().as_str() {
+                "module" => module = Some(input.parse()?),
+                "stage" => stage = Some(input.parse()?),
+                _ => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "unknown option; expected `module` or `stage`",
+                    ));
+                }
+            }
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(Self {
+            module: module.ok_or_else(|| input.error("missing `module = \"ModuleName\"`"))?,
+            stage,
+        })
+    }
+}
+
+/// Expands `#[mxrs::declaration]`: a function that declares into one module
+/// through its `ModuleBuilder` — whatever the more specific attributes do
+/// not cover.
+pub fn expand_declaration(args: &DeclarationArgs, item: &syn::ItemFn) -> syn::Result<TokenStream> {
+    let ident = builder_function(item)?;
+    let module = &args.module;
+    let stage = match &args.stage {
+        Some(stage) => quote!(#stage),
+        None => quote!(Document),
+    };
+    let registration = registration(
+        stage,
+        quote! {
+            let mut module = ::mxrs::ModuleBuilder::new(#module);
+            #ident(&mut module);
+            project.merge_module(module.into_decl());
+        },
+    );
+    Ok(quote! {
+        #item
+        #registration
+    })
+}
+
+/// A declaration the project has one of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ProjectKind {
+    Security,
+    Navigation,
+}
+
+/// Expands `#[mxrs::security]` and `#[mxrs::navigation]`.
+pub fn expand_project(kind: ProjectKind, item: &syn::ItemFn) -> syn::Result<TokenStream> {
+    let ident = builder_function(item)?;
+    let (stage, method, field) = match kind {
+        ProjectKind::Security => (quote!(Security), quote!(security), quote!(security)),
+        ProjectKind::Navigation => (quote!(Navigation), quote!(navigation), quote!(navigation)),
+    };
+    let registration = registration(
+        stage,
+        quote! {
+            let mut builder = ::mxrs::ProjectBuilder::new(project.mendix_version.clone());
+            builder.#method(|__mxrs_builder| #ident(__mxrs_builder));
+            project.#field = builder.build().#field;
+        },
+    );
+    Ok(quote! {
+        #item
+        #registration
+    })
+}
+
+/// Arguments of `#[mxrs::navigation_item(profile = "...", caption = "...")]`.
+pub struct NavigationItemArgs(NamedStrings);
+
+impl syn::parse::Parse for NavigationItemArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        NamedStrings::parse(input, &["profile", "caption"]).map(Self)
+    }
+}
+
+/// Expands `#[mxrs::navigation_item]`: an item declared apart from the
+/// profile it joins, appended to that profile when the model is assembled.
+pub fn expand_navigation_item(
+    args: &NavigationItemArgs,
+    item: &syn::ItemFn,
+) -> syn::Result<TokenStream> {
+    let ident = builder_function(item)?;
+    let profile = args.0.require("profile")?;
+    let caption = args.0.require("caption")?;
+    let registration = registration(
+        quote!(NavigationItem),
+        quote! {
+            let mut item = ::mxrs::NavigationItemBuilder::new(#caption);
+            #ident(&mut item);
+            project.navigation_item(#profile, item.into_decl());
+        },
+    );
+    Ok(quote! {
+        #item
+        #registration
+    })
+}
+
+/// Arguments of `#[mxrs::demo_user(name = "...")]`.
+pub struct DemoUserArgs(NamedStrings);
+
+impl syn::parse::Parse for DemoUserArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        NamedStrings::parse(input, &["name"]).map(Self)
+    }
+}
+
+/// Expands `#[mxrs::demo_user]`: a demo account, named by its function
+/// unless `name = "..."` states otherwise. It joins the security the project
+/// declares; a project that declares none keeps its imported security as it
+/// is, demo users included.
+pub fn expand_demo_user(args: &DemoUserArgs, item: &syn::ItemFn) -> syn::Result<TokenStream> {
+    let ident = builder_function(item)?;
+    let name = match args.0.get("name") {
+        Some(name) => name.value(),
+        None => {
+            let function = ident.to_string();
+            function.strip_prefix("r#").unwrap_or(&function).to_string()
+        }
+    };
+    let registration = registration(
+        quote!(DemoUser),
+        quote! {
+            let mut user = ::mxrs::DemoUserBuilder::new(#name);
+            #ident(&mut user);
+            if let Some(security) = project.security.as_mut() {
+                security.demo_users.push(user.into_decl());
+            }
+        },
+    );
+    Ok(quote! {
+        #item
+        #registration
+    })
+}
+
+/// Arguments of `#[mxrs::module_roles(module = "...")]`.
+pub struct ModuleRolesArgs(NamedStrings);
+
+impl syn::parse::Parse for ModuleRolesArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        NamedStrings::parse(input, &["module"]).map(Self)
+    }
+}
+
+/// Expands `#[mxrs::module_roles]`: a module's roles as an enum. Each
+/// variant is a role, its `///` comment the role's description, and
+/// `#[mxrs(name = "...")]` a name the variant does not spell. The roles are
+/// authoritative — an enum with no variants declares that the module has
+/// none.
+pub fn expand_module_roles(
+    args: &ModuleRolesArgs,
+    item: &syn::ItemEnum,
+) -> syn::Result<TokenStream> {
+    if !item.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &item.generics,
+            "module roles cannot be generic",
+        ));
+    }
+    let module = args.0.require("module")?;
+    let ident = &item.ident;
+    let mut roles = Vec::new();
+    let mut names = Vec::new();
+    let mut variants = Vec::new();
+    for variant in &item.variants {
+        if !matches!(variant.fields, syn::Fields::Unit) {
+            return Err(syn::Error::new_spanned(
+                variant,
+                "a module role is a plain variant",
+            ));
+        }
+        let mut name = variant.ident.to_string();
+        let mut description = None;
+        for attribute in variant
+            .attrs
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("mxrs"))
+        {
+            attribute.parse_nested_meta(|meta| {
+                if meta.path.is_ident("name") {
+                    name = meta.value()?.parse::<syn::LitStr>()?.value();
+                    Ok(())
+                } else if meta.path.is_ident("description") {
+                    description = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                    Ok(())
+                } else {
+                    Err(meta.error("unknown module role option; expected `name` or `description`"))
+                }
+            })?;
+        }
+        let docs = variant
+            .attrs
+            .iter()
+            .filter(|attribute| attribute.path().is_ident("doc"))
+            .collect::<Vec<_>>();
+        let description = description.or_else(|| doc_text(&docs)).unwrap_or_default();
+        roles.push(quote! { module.role(#name, #description); });
+        let variant_ident = &variant.ident;
+        variants.push(variant_ident);
+        names.push(name);
+    }
+    let mut declaration = item.clone();
+    for variant in &mut declaration.variants {
+        variant
+            .attrs
+            .retain(|attribute| !attribute.path().is_ident("mxrs"));
+    }
+    let registration = registration(
+        quote!(ModuleSecurity),
+        quote! {
+            let mut module = ::mxrs::ModuleBuilder::new(#module);
+            module.clear_roles();
+            #(#roles)*
+            project.merge_module(module.into_decl());
+        },
+    );
+    let name_arms = if variants.is_empty() {
+        quote! { match *self {} }
+    } else {
+        quote! { match self { #(Self::#variants => #names,)* } }
+    };
+    Ok(quote! {
+        #[allow(dead_code)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #declaration
+
+        #[allow(dead_code)]
+        impl #ident {
+            /// The module the roles belong to.
+            pub const MODULE: &'static str = #module;
+
+            /// The role's name within its module.
+            pub fn name(&self) -> &'static str {
+                #name_arms
+            }
+
+            /// `Module.Role`: the form a user role or a page names it by.
+            pub fn qualified_name(&self) -> String {
+                format!("{}.{}", Self::MODULE, self.name())
+            }
+        }
+
+        #registration
+    })
+}
+
 /// `///` lines as Mendix documentation, each without the comment's own space.
 fn doc_text(attributes: &[&syn::Attribute]) -> Option<String> {
     let lines = attributes

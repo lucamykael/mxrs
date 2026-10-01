@@ -485,21 +485,7 @@ fn render_page_file(
     names: &crate::names::ModelNames<'_>,
 ) -> crate::Result<String> {
     let resolved = names.resolve(&render_page_function(page), &[])?;
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "//! Editable Mendix page `{}.{}`, reconstructed from mxrs-dsl's",
-        page.module_name, page.decl.name
-    );
-    let _ = writeln!(
-        out,
-        "//! native/structural widget vocabulary (see mxrs::page) and wired"
-    );
-    let _ = writeln!(
-        out,
-        "//! into `build()` by the module's presentation layer — edit freely."
-    );
-    out.push('\n');
+    let mut out = String::from("use mxrs::prelude::*;\n\n");
     for import in &resolved.imports {
         let _ = writeln!(out, "{import}");
     }
@@ -1011,20 +997,20 @@ fn string_option(document: &Document, key: &str) -> Option<String> {
 fn render_page_function(page: &ConvertedPage) -> String {
     let decl = &page.decl;
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "/// {:?}",
-        format!("{}.{}", page.module_name, decl.name)
-    );
-    let _ = writeln!(out, "pub fn declaration() -> ::mxrs::PageDecl {{");
-    let _ = writeln!(
-        out,
-        "    let mut p = ::mxrs::PageBuilder::new({:?});",
-        decl.name
-    );
-    if !decl.documentation.is_empty() {
-        let _ = writeln!(out, "    p.documentation({:?});", decl.documentation);
+    let mut lines = String::new();
+    match crate::entity_export::doc_comment(&decl.documentation, "") {
+        Some(comment) => out.push_str(&comment),
+        None => {
+            let _ = writeln!(lines, "    p.documentation({:?});", decl.documentation);
+        }
     }
+    let mut arguments = vec![format!("module = {:?}", page.module_name)];
+    if crate::derive_pascal_case(&page.function_name) != decl.name {
+        arguments.push(format!("name = {:?}", decl.name));
+    }
+    let _ = writeln!(out, "#[page({})]", arguments.join(", "));
+    let _ = writeln!(out, "pub fn {}(p: &mut PageBuilder) {{", page.function_name);
+    out.push_str(&lines);
     if !decl.url.is_empty() {
         let _ = writeln!(out, "    p.url({:?});", decl.url);
     }
@@ -1085,7 +1071,6 @@ fn render_page_function(page: &ConvertedPage) -> String {
             &page.flow_return_entities,
         ));
     }
-    let _ = writeln!(out, "    p.into_decl()");
     let _ = writeln!(out, "}}");
     out
 }
@@ -1193,14 +1178,14 @@ fn render_widget(
                     let marker = crate::names::microflow(target);
                     let _ = writeln!(
                         out,
-                        "{pad}    b.call_microflow(::mxrs::MicroflowRef::<{marker}>::new());"
+                        "{pad}    b.call_microflow(MicroflowRef::<{marker}>::new());"
                     );
                 }
                 ButtonAction::CallNanoflow(target) => {
                     let marker = crate::names::nanoflow(target);
                     let _ = writeln!(
                         out,
-                        "{pad}    b.call_nanoflow(::mxrs::NanoflowRef::<{marker}>::new());"
+                        "{pad}    b.call_nanoflow(NanoflowRef::<{marker}>::new());"
                     );
                 }
                 ButtonAction::SaveChanges => {
@@ -1256,7 +1241,7 @@ fn render_widget(
                 .expect("converted data-view flow has a validated return entity");
             let _ = writeln!(
                 out,
-                "{pad}{receiver}.{method}(::mxrs::{reference}::<{marker}>::new(), |w| {{"
+                "{pad}{receiver}.{method}({reference}::<{marker}>::new(), |w| {{"
             );
             if let Some(name) = name {
                 let _ = writeln!(out, "{pad}    w.name({name:?});");
@@ -2051,9 +2036,8 @@ mod tests {
         assert!(
             files[0]
                 .1
-                .contains("pub fn declaration() -> ::mxrs::PageDecl")
+                .contains("#[page(module = \"Sales\")]\npub fn simple(p: &mut PageBuilder) {")
         );
-        assert!(files[0].1.contains("Sales.Simple"));
         assert!(!files[0].1.contains("with_visibility"));
     }
 
@@ -2108,9 +2092,7 @@ mod tests {
             "{source}"
         );
         assert!(
-            source.contains(
-                "data_view_from_microflow(::mxrs::MicroflowRef::<ACT_GetOrder>::new(), |w| {"
-            ),
+            source.contains("data_view_from_microflow(MicroflowRef::<ACT_GetOrder>::new(), |w| {"),
             "{source}"
         );
         assert!(

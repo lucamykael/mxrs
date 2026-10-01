@@ -23,8 +23,10 @@ pub enum Stage {
     Enumeration,
     /// One module's roles.
     ModuleSecurity,
-    /// Project security: user roles, password policy, demo users.
+    /// Project security: user roles and the password policy.
     Security,
+    /// Demo users, which join the project security declared before them.
+    DemoUser,
     TaskQueue,
     Microflow,
     /// The OQL documents views read from.
@@ -32,6 +34,8 @@ pub enum Stage {
     Layout,
     Nanoflow,
     Navigation,
+    /// Items declared apart from the navigation profile they join.
+    NavigationItem,
     Page,
 }
 

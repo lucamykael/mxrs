@@ -72,6 +72,14 @@ impl Transaction {
         if self.changes.contains_key(&path) || path.symlink_metadata().is_ok() {
             return Err(ScaffoldError::FileExists(path.display().to_string()));
         }
+        // A file this scaffold creates is formatted the way rustfmt would
+        // leave it. Files it merely edits are the user's, and are not
+        // reformatted behind their back.
+        let content = if path.extension().is_some_and(|extension| extension == "rs") {
+            crate::format_rust(content)
+        } else {
+            content
+        };
         self.created.push(path.clone());
         self.changes.insert(
             path,

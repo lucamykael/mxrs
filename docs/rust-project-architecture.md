@@ -40,7 +40,6 @@ Dependencies point inward:
 presentation ─┐
               ├─> application ─> domain
 infrastructure┘
-composition imports every layer and wires implementations to ports
 ```
 
 - Domain owns business data, invariants, value objects and domain rules. It
@@ -52,8 +51,9 @@ composition imports every layer and wires implementations to ports
   into application calls. Framework request/response types stop at this edge.
 - Infrastructure implements ports for persistence, runtimes, queues and
   external services.
-- Composition is the one outward-looking module that assembles concrete
-  adapters. This avoids service locators and hidden global dependencies.
+- Composition of the *model* needs no module at all: declarations register
+  themselves. What assembles concrete runtime adapters stays explicit, in
+  `infrastructure`, which avoids service locators for behavior.
 
 ## Generated layout
 
@@ -61,12 +61,12 @@ composition imports every layer and wires implementations to ports
 src/
 ├── lib.rs
 ├── main.rs
-├── composition.rs
 ├── domain/
 │   ├── entities/<mendix_module>/<entity>.rs
 │   ├── dtos/<mendix_module>/<dto>.rs
 │   ├── enumerations/<mendix_module>/<enumeration>.rs
 │   ├── documents/<mendix_module>/<document>.rs
+│   ├── module_security/<mendix_module>.rs
 │   └── security.rs
 ├── application/
 │   ├── services/<mendix_module>/<microflow>_service.rs
@@ -125,6 +125,13 @@ pub struct Order {
 | `#[page(module = "...")]` | fn | a page |
 | `#[layout(module = "...")]` | fn | a page layout |
 | `#[constant(module = "...")]` | fn | a constant |
+| `#[menu(module = "...")]` | fn | a standalone menu |
+| `#[declaration(module = "...")]` | fn | anything else a module holds, through its `ModuleBuilder` |
+| `#[module_roles(module = "...")]` | enum | a module's roles; variants are the roles |
+| `#[security]` | fn | the project's security |
+| `#[navigation]` | fn | the project's navigation profiles |
+| `#[navigation_item(profile = "...", caption = "...")]` | fn | one item, declared next to the page it opens |
+| `#[demo_user]` | fn | a local demo user |
 
 The rules that keep these readable:
 
@@ -152,8 +159,26 @@ The rules that keep these readable:
 
 A flow the project keeps in its imported model without declaring it in Rust
 is named in its module's `imported.rs` (`mxrs::imported! { ... }`), so the
-rest of the project can still call and bind it. `mxrs::declare!` registers
-anything assembled directly with the builders.
+rest of the project can still call and bind it. `mxrs::register!` registers
+anything assembled directly against the project.
+
+The crate root is therefore the four layers and the application, and no
+file composes another:
+
+```rust
+pub mod application;
+pub mod domain;
+pub mod infrastructure;
+pub mod presentation;
+
+#[mxrs::application(version = "11.12.1")]
+pub struct Application;
+```
+
+A layer or concept `mod.rs` is a list of `pub mod` lines and nothing else.
+The order declarations are assembled in does not depend on the order they
+are linked or listed in: it is fixed by what each one declares and where it
+is written, so the same source builds the same model everywhere.
 
 ## Identity
 

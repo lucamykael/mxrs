@@ -106,6 +106,19 @@ impl NavigationProfileBuilder {
         self.declaration.items.push(builder.into_decl());
         self
     }
+
+    /// Adds an item that has no `en_US` caption: its captions are exactly
+    /// the ones the configuration states with
+    /// [`NavigationItemBuilder::caption`].
+    pub fn localized_item(
+        &mut self,
+        configure: impl FnOnce(&mut NavigationItemBuilder),
+    ) -> &mut Self {
+        let mut builder = NavigationItemBuilder::uncaptioned();
+        configure(&mut builder);
+        self.declaration.items.push(builder.into_decl());
+        self
+    }
 }
 
 pub struct NavigationItemBuilder {
@@ -113,7 +126,9 @@ pub struct NavigationItemBuilder {
 }
 
 impl NavigationItemBuilder {
-    fn new(caption: impl Into<String>) -> Self {
+    /// Starts an item on its own, for one declared apart from the profile
+    /// it joins — a page that adds itself to the navigation, say.
+    pub fn new(caption: impl Into<String>) -> Self {
         let mut declaration = NavigationItemDecl::default();
         declaration
             .caption
@@ -121,7 +136,14 @@ impl NavigationItemBuilder {
         Self { declaration }
     }
 
-    fn into_decl(self) -> NavigationItemDecl {
+    /// Starts an item with no caption in any language.
+    pub fn uncaptioned() -> Self {
+        Self {
+            declaration: NavigationItemDecl::default(),
+        }
+    }
+
+    pub fn into_decl(self) -> NavigationItemDecl {
         self.declaration
     }
     pub fn caption(&mut self, locale: impl Into<String>, text: impl Into<String>) -> &mut Self {
@@ -154,6 +176,19 @@ impl NavigationItemBuilder {
         configure: impl FnOnce(&mut NavigationItemBuilder),
     ) -> &mut Self {
         let mut builder = NavigationItemBuilder::new(caption);
+        configure(&mut builder);
+        self.declaration.items.push(builder.into_decl());
+        self
+    }
+
+    /// Adds an item that has no `en_US` caption: its captions are exactly
+    /// the ones the configuration states with
+    /// [`NavigationItemBuilder::caption`].
+    pub fn localized_item(
+        &mut self,
+        configure: impl FnOnce(&mut NavigationItemBuilder),
+    ) -> &mut Self {
+        let mut builder = NavigationItemBuilder::uncaptioned();
         configure(&mut builder);
         self.declaration.items.push(builder.into_decl());
         self
