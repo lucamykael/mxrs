@@ -470,14 +470,21 @@ fn preserves_value(original: &Bson, compiled: &Bson, identities: &IdentityMap) -
 /// nothing to show (no point writing an empty file).
 /// One page per file, each exposing `declaration()` like every other
 /// generated concept. Returns `(file stem, source)` pairs.
-pub fn render_page_files(pages: &[&ConvertedPage]) -> Vec<(String, String)> {
+pub(crate) fn render_page_files(
+    pages: &[&ConvertedPage],
+    names: &crate::names::ModelNames<'_>,
+) -> crate::Result<Vec<(String, String)>> {
     pages
         .iter()
-        .map(|page| (page.function_name.clone(), render_page_file(page)))
+        .map(|page| Ok((page.function_name.clone(), render_page_file(page, names)?)))
         .collect()
 }
 
-fn render_page_file(page: &ConvertedPage) -> String {
+fn render_page_file(
+    page: &ConvertedPage,
+    names: &crate::names::ModelNames<'_>,
+) -> crate::Result<String> {
+    let resolved = names.resolve(&render_page_function(page), &[])?;
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -486,15 +493,21 @@ fn render_page_file(page: &ConvertedPage) -> String {
     );
     let _ = writeln!(
         out,
-        "//! native/structural widget vocabulary (see mxrs_ir::page) and wired"
+        "//! native/structural widget vocabulary (see mxrs::page) and wired"
     );
     let _ = writeln!(
         out,
         "//! into `build()` by the module's presentation layer — edit freely."
     );
     out.push('\n');
-    out.push_str(&render_page_function(page));
-    out
+    for import in &resolved.imports {
+        let _ = writeln!(out, "{import}");
+    }
+    if !resolved.imports.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&resolved.source);
+    Ok(out)
 }
 
 fn try_convert_page(
@@ -1003,10 +1016,10 @@ fn render_page_function(page: &ConvertedPage) -> String {
         "/// {:?}",
         format!("{}.{}", page.module_name, decl.name)
     );
-    let _ = writeln!(out, "pub fn declaration() -> ::mxrs_ir::page::PageDecl {{");
+    let _ = writeln!(out, "pub fn declaration() -> ::mxrs::PageDecl {{");
     let _ = writeln!(
         out,
-        "    let mut p = ::mxrs_dsl::PageBuilder::new({:?});",
+        "    let mut p = ::mxrs::PageBuilder::new({:?});",
         decl.name
     );
     if !decl.documentation.is_empty() {
@@ -1041,7 +1054,7 @@ fn render_page_function(page: &ConvertedPage) -> String {
         let _ = writeln!(out, "    p.export_level({:?});", decl.export_level);
     }
     for parameter in &decl.parameters {
-        let marker = entity_marker_path(&parameter.entity);
+        let marker = crate::names::entity(&parameter.entity);
         if let Some(default_value) = &parameter.default_value {
             let _ = writeln!(
                 out,
@@ -1177,17 +1190,17 @@ fn render_widget(
                 }
                 ButtonAction::None => {}
                 ButtonAction::CallMicroflow(target) => {
-                    let marker = flow_marker_path(target);
+                    let marker = crate::names::microflow(target);
                     let _ = writeln!(
                         out,
-                        "{pad}    b.call_microflow(::mxrs_ir::markers::MicroflowRef::<{marker}>::new());"
+                        "{pad}    b.call_microflow(::mxrs::MicroflowRef::<{marker}>::new());"
                     );
                 }
                 ButtonAction::CallNanoflow(target) => {
-                    let marker = flow_marker_path(target);
+                    let marker = crate::names::nanoflow(target);
                     let _ = writeln!(
                         out,
-                        "{pad}    b.call_nanoflow(::mxrs_ir::markers::NanoflowRef::<{marker}>::new());"
+                        "{pad}    b.call_nanoflow(::mxrs::NanoflowRef::<{marker}>::new());"
                     );
                 }
                 ButtonAction::SaveChanges => {
@@ -1212,7 +1225,7 @@ fn render_widget(
                     ("data_view_from_nanoflow", "NanoflowRef", target.as_str())
                 }
                 DataSourceDecl::Context { parameter, entity } => {
-                    let marker = entity_marker_path(entity);
+                    let marker = crate::names::entity(entity);
                     let _ = writeln!(
                         out,
                         "{pad}{receiver}.data_view_from_context::<{marker}>({parameter:?}, |w| {{"
@@ -1233,13 +1246,17 @@ fn render_widget(
                     return out;
                 }
             };
-            let marker = flow_marker_path(target);
+            let marker = if reference == "NanoflowRef" {
+                crate::names::nanoflow(target)
+            } else {
+                crate::names::microflow(target)
+            };
             let entity = flow_return_entities
                 .get(target)
                 .expect("converted data-view flow has a validated return entity");
             let _ = writeln!(
                 out,
-                "{pad}{receiver}.{method}(::mxrs_ir::markers::{reference}::<{marker}>::new(), |w| {{"
+                "{pad}{receiver}.{method}(::mxrs::{reference}::<{marker}>::new(), |w| {{"
             );
             if let Some(name) = name {
                 let _ = writeln!(out, "{pad}    w.name({name:?});");
@@ -1282,11 +1299,11 @@ fn render_widget(
                 WidgetDecl::DropDown { .. } => "drop_down_with",
                 _ => unreachable!(),
             };
-            let marker = attribute_marker_path(
+            let accessor = crate::names::attribute(
                 data_view_entity.expect("converted attribute widget is inside a data view"),
                 attribute,
             );
-            let _ = writeln!(out, "{pad}{receiver}.{method}::<{marker}>(|w| {{");
+            let _ = writeln!(out, "{pad}{receiver}.{method}({accessor}, |w| {{");
             render_name_and_class(&mut out, indent + 1, "w", name, class);
             let _ = writeln!(out, "{pad}}});");
         }
@@ -1323,27 +1340,6 @@ fn render_name_and_class(
     }
 }
 
-fn flow_marker_path(qualified_name: &str) -> String {
-    let (module, name) = qualified_name
-        .split_once('.')
-        .expect("converted flow reference is qualified");
-    format!("crate::infrastructure::markers::{module}::{name}")
-}
-
-fn attribute_marker_path(entity: &str, attribute: &str) -> String {
-    let (module, entity) = entity
-        .split_once('.')
-        .expect("converted entity reference is qualified");
-    format!("crate::infrastructure::markers::{module}::{entity}_{attribute}")
-}
-
-fn entity_marker_path(entity: &str) -> String {
-    let (module, entity) = entity
-        .split_once('.')
-        .expect("converted entity reference is qualified");
-    format!("crate::infrastructure::markers::{module}::{entity}")
-}
-
 /// `OrderOverview` -> `order_overview`. A defensive, not exhaustive, name
 /// sanitizer mirroring `mxrs-exporter`'s own `sanitize_ident` for the
 /// domain-model renderer: non-alphanumeric characters become `_`.
@@ -1370,6 +1366,44 @@ fn to_snake_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `Sales.Order` entity as the importer would have placed it.
+    fn sales_entities() -> HashMap<String, crate::entity_export::TypedEntityTarget> {
+        HashMap::from([(
+            "Sales.Order".to_string(),
+            crate::entity_export::TypedEntityTarget {
+                root: crate::ModuleRoot::Authored,
+                module_stem: "sales".to_string(),
+                file_stem: "order".to_string(),
+                type_name: "Order".to_string(),
+                dto: false,
+                attributes: HashMap::from([("Number".to_string(), "number".to_string())]),
+            },
+        )])
+    }
+
+    /// Names for a `Sales` module whose flows all stay in the imported model.
+    fn sales_names(
+        entities: &HashMap<String, crate::entity_export::TypedEntityTarget>,
+    ) -> crate::names::ModelNames<'_> {
+        let flow = |name: &str, folder: &str| {
+            (
+                format!("Sales.{name}"),
+                crate::names::FlowTarget {
+                    module_path: format!("crate::{folder}::sales::imported"),
+                    marker: name.to_string(),
+                },
+            )
+        };
+        crate::names::ModelNames {
+            entities,
+            microflows: HashMap::from([
+                flow("ACT_GetOrder", "application::services"),
+                flow("ACT_Validate", "application::services"),
+            ]),
+            nanoflows: HashMap::from([flow("NF_Validate", "presentation::nanoflows")]),
+        }
+    }
     use mxrs_bson::Bson;
 
     fn compiled_page(name: &str) -> Page {
@@ -2010,13 +2044,14 @@ mod tests {
         assert_eq!(pages[0].function_name, "simple");
 
         let refs: Vec<&ConvertedPage> = pages.iter().collect();
-        let files = render_page_files(&refs);
+        let entities = HashMap::new();
+        let files = render_page_files(&refs, &sales_names(&entities)).unwrap();
         assert_eq!(files.len(), 1, "one convertible page should render");
         assert_eq!(files[0].0, "simple");
         assert!(
             files[0]
                 .1
-                .contains("pub fn declaration() -> ::mxrs_ir::page::PageDecl")
+                .contains("pub fn declaration() -> ::mxrs::PageDecl")
         );
         assert!(files[0].1.contains("Sales.Simple"));
         assert!(!files[0].1.contains("with_visibility"));
@@ -2064,11 +2099,23 @@ mod tests {
             )]),
             decl,
         };
-        let source = render_page_function(&converted);
-        assert!(source.contains("data_view_from_microflow"));
-        assert!(source.contains("markers::Sales::ACT_GetOrder"));
+        let entities = sales_entities();
+        let source = render_page_file(&converted, &sales_names(&entities)).unwrap();
         assert!(
-            source.contains("text_box_with::<crate::infrastructure::markers::Sales::Order_Number>")
+            source.contains(
+                "use crate::application::services::sales::imported::ACT_GetOrder;\nuse crate::domain::entities::sales::order::Order;\n"
+            ),
+            "{source}"
+        );
+        assert!(
+            source.contains(
+                "data_view_from_microflow(::mxrs::MicroflowRef::<ACT_GetOrder>::new(), |w| {"
+            ),
+            "{source}"
+        );
+        assert!(
+            source.contains("w.text_box_with(Order::number(), |w| {"),
+            "{source}"
         );
         assert!(source.contains("w.name(\"numberInput\")"));
     }
@@ -2106,21 +2153,29 @@ mod tests {
         });
         let decl = try_convert_page(&page, &bound_context(), "Sales")
             .expect("typed object parameter should make context resolvable");
-        let source = render_page_function(&ConvertedPage {
-            module_name: "Sales".into(),
-            function_name: "order_edit".into(),
-            source_type: "Forms$Page".into(),
-            flow_return_entities: HashMap::new(),
-            decl,
-        });
-        assert!(source.contains(
-            "p.object_parameter::<crate::infrastructure::markers::Sales::Order>(\"Order\", true)"
-        ));
-        assert!(source.contains(
-            "p.data_view_from_context::<crate::infrastructure::markers::Sales::Order>(\"Order\""
-        ));
+        let entities = sales_entities();
+        let source = render_page_file(
+            &ConvertedPage {
+                module_name: "Sales".into(),
+                function_name: "order_edit".into(),
+                source_type: "Forms$Page".into(),
+                flow_return_entities: HashMap::new(),
+                decl,
+            },
+            &sales_names(&entities),
+        )
+        .unwrap();
         assert!(
-            source.contains("text_box_with::<crate::infrastructure::markers::Sales::Order_Number>")
+            source.contains("p.object_parameter::<Order>(\"Order\", true)"),
+            "{source}"
+        );
+        assert!(
+            source.contains("p.data_view_from_context::<Order>(\"Order\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("text_box_with(Order::number(), |w| {"),
+            "{source}"
         );
     }
 

@@ -309,12 +309,15 @@ fn scaffolding_the_same_artifact_twice_changes_nothing_the_first_run_wrote() {
     ));
 
     scaffold(&root, ArtifactKind::Entity, "Sales.Invoice");
-    let after = std::fs::read_to_string(&aggregator).unwrap();
-    assert!(after.contains("pub mod order;\npub mod invoice;\n"));
-    assert!(
-        after.contains("    project.merge_module(order::declaration());\n")
-            && after.contains("    project.merge_module(invoice::declaration());\n"),
-        "{after}"
+    // An entity registers itself, so its folder's index is a list of
+    // modules and nothing else: there is no `apply` to keep in step.
+    assert_eq!(
+        std::fs::read_to_string(&aggregator).unwrap(),
+        "//! The Sales module's `entities`.\n\npub mod order;\npub mod invoice;\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/domain/entities/sales/order.rs")).unwrap(),
+        "//! Entity `Sales.Order`.\n//!\n//! Fields are attributes (`MxString`, `MxDecimal`, `MxBool`, ...) and\n//! associations (`Reference<T>`, `ReferenceSet<T>`); `#[mxrs(...)]`\n//! states what a type cannot: `length`, `required`, `default`, `index(...)`.\n\nuse mxrs::prelude::*;\n\n#[entity(module = \"Sales\")]\npub struct Order {}\n"
     );
     // The first entity creates the concept index and its module folder index
     // as well; the second reuses both.
@@ -378,14 +381,22 @@ fn a_formatted_project_can_still_be_scaffolded_into() {
     assert!(
         std::fs::read_to_string(&aggregator)
             .unwrap()
-            .contains("project.merge_module(order::declaration());")
+            .contains("pub mod order;")
     );
     scaffold(&root, ArtifactKind::Entity, "Sales.Invoice");
     let aggregator_source = std::fs::read_to_string(&aggregator).unwrap();
     assert!(
-        aggregator_source.contains("project.merge_module(order::declaration());")
-            && aggregator_source.contains("project.merge_module(invoice::declaration());"),
+        aggregator_source.contains("pub mod order;\npub mod invoice;\n"),
         "{aggregator_source}"
+    );
+    // The module registry is still composed by hand, and formatting must
+    // not stop the scaffold from finding its `apply`.
+    scaffold(&root, ArtifactKind::Module, "Billing");
+    let registry = std::fs::read_to_string(root.join("src/domain/modules/mod.rs")).unwrap();
+    assert!(
+        registry.contains("project.merge_module(sales::declaration());")
+            && registry.contains("project.merge_module(billing::declaration());"),
+        "{registry}"
     );
     let output = cargo(&root, &["build", "--offline", "--quiet"]);
     assert!(
@@ -665,18 +676,19 @@ fn a_hand_removed_layer_apply_call_is_spliced_back_instead_of_refused() {
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
 
     let source = std::fs::read_to_string(&domain).unwrap();
-    // Exactly one call per concept, not one per scaffolded artifact.
+    // Exactly one call for the registry that is still composed by hand —
+    // and none for entities, which register themselves.
     assert_eq!(
-        source.matches("entities::apply(&mut project);").count(),
+        source.matches("modules::apply(&mut project);").count(),
         1,
         "{source}"
     );
+    assert_eq!(source.matches("pub mod entities;").count(), 1, "{source}");
+    assert!(!source.contains("entities::apply"), "{source}");
     let entities = std::fs::read_to_string(root.join("src/domain/entities/mod.rs")).unwrap();
-    assert!(entities.contains("pub mod sales;"), "{entities}");
     assert_eq!(
-        entities.matches("sales::apply(project);").count(),
-        1,
-        "{entities}"
+        entities,
+        "//! Every module's `entities`, one folder per Mendix module.\n\npub mod sales;\n"
     );
 
     let output = cargo(

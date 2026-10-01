@@ -36,7 +36,8 @@
 //! whole crate follows for association/microflow targets.
 
 use mxrs_ir::markers::{
-    AttributeMarker, EntityMarker, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef,
+    AttributeMarker, AttributeRef, EntityMarker, MicroflowMarker, MicroflowRef, NanoflowMarker,
+    NanoflowRef,
 };
 use mxrs_ir::page::{
     ButtonAction, DataSourceDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutKind,
@@ -787,56 +788,61 @@ impl DataViewBuilder {
     }
 
     /// Renders the bound attribute's raw value as editable text — Mendix's
-    /// `Forms$TextBox`. `attribute` is relative to this data view's own
+    /// `Forms$TextBox`. `attribute` is the accessor its entity declares
+    /// (`Order::number()`), relative to this data view's own
     /// entity (`WidgetDecl::TextBox`'s doc comment) — see this module's
     /// doc comment for why nothing here cross-checks it against the
     /// microflow/nanoflow this data view was constructed from.
-    pub fn text_box<A: AttributeMarker>(&mut self) -> &mut Self {
-        self.text_box_with::<A>(|_| {});
+    pub fn text_box<A: AttributeMarker>(&mut self, attribute: AttributeRef<A>) -> &mut Self {
+        self.text_box_with(attribute, |_| {});
         self
     }
 
     pub fn text_box_with<A: AttributeMarker>(
         &mut self,
+        _attribute: AttributeRef<A>,
         configure: impl FnOnce(&mut AttributeWidgetBuilder),
     ) -> &mut Self {
         self.push_attribute_widget::<A>(AttributeWidgetKind::TextBox, configure);
         self
     }
 
-    pub fn check_box<A: AttributeMarker>(&mut self) -> &mut Self {
-        self.check_box_with::<A>(|_| {});
+    pub fn check_box<A: AttributeMarker>(&mut self, attribute: AttributeRef<A>) -> &mut Self {
+        self.check_box_with(attribute, |_| {});
         self
     }
 
     pub fn check_box_with<A: AttributeMarker>(
         &mut self,
+        _attribute: AttributeRef<A>,
         configure: impl FnOnce(&mut AttributeWidgetBuilder),
     ) -> &mut Self {
         self.push_attribute_widget::<A>(AttributeWidgetKind::CheckBox, configure);
         self
     }
 
-    pub fn date_picker<A: AttributeMarker>(&mut self) -> &mut Self {
-        self.date_picker_with::<A>(|_| {});
+    pub fn date_picker<A: AttributeMarker>(&mut self, attribute: AttributeRef<A>) -> &mut Self {
+        self.date_picker_with(attribute, |_| {});
         self
     }
 
     pub fn date_picker_with<A: AttributeMarker>(
         &mut self,
+        _attribute: AttributeRef<A>,
         configure: impl FnOnce(&mut AttributeWidgetBuilder),
     ) -> &mut Self {
         self.push_attribute_widget::<A>(AttributeWidgetKind::DatePicker, configure);
         self
     }
 
-    pub fn drop_down<A: AttributeMarker>(&mut self) -> &mut Self {
-        self.drop_down_with::<A>(|_| {});
+    pub fn drop_down<A: AttributeMarker>(&mut self, attribute: AttributeRef<A>) -> &mut Self {
+        self.drop_down_with(attribute, |_| {});
         self
     }
 
     pub fn drop_down_with<A: AttributeMarker>(
         &mut self,
+        _attribute: AttributeRef<A>,
         configure: impl FnOnce(&mut AttributeWidgetBuilder),
     ) -> &mut Self {
         self.push_attribute_widget::<A>(AttributeWidgetKind::DropDown, configure);
@@ -1193,11 +1199,11 @@ mod tests {
         let mut page = PageBuilder::new("OrderDetail");
         page.layout("Atlas_Core.ApplicationLayout", "Main");
         page.data_view_from_microflow(MicroflowRef::<ActGetOrder>::new(), |dv| {
-            dv.text_box_with::<OrderNumber>(|widget| {
+            dv.text_box_with(AttributeRef::<OrderNumber>::new(), |widget| {
                 widget.name("numberInput");
                 widget.class("form-control");
             });
-            dv.check_box::<OrderIsPaid>();
+            dv.check_box(AttributeRef::<OrderIsPaid>::new());
             dv.button("Submit", |b| {
                 b.call_microflow(MicroflowRef::<ActSubmitOrder>::new());
             });
@@ -1238,7 +1244,7 @@ mod tests {
         let mut page = PageBuilder::new("OrderEdit");
         page.object_parameter::<Order>("Order", true);
         page.data_view_from_context::<Order>("Order", |view| {
-            view.text_box::<OrderNumber>();
+            view.text_box(AttributeRef::<OrderNumber>::new());
         });
         let decl = page.into_decl();
         assert!(matches!(

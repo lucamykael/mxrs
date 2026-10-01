@@ -327,7 +327,7 @@ impl FlowBuilder {
     /// whose activities become the respective branch.
     pub fn decision(
         &mut self,
-        condition: Expr<MxBool>,
+        condition: impl IntoExpr<MxBool>,
         then: impl FnOnce(&mut FlowBuilder),
         otherwise: impl FnOnce(&mut FlowBuilder),
     ) -> &mut Self {
@@ -336,7 +336,7 @@ impl FlowBuilder {
         let mut false_builder = FlowBuilder::branch();
         otherwise(&mut false_builder);
         self.decl.activities.push(Activity::Decision {
-            condition: condition.render(),
+            condition: condition.into_expr().render(),
             true_branch: true_builder.decl.activities,
             false_branch: false_builder.decl.activities,
         });
@@ -362,13 +362,13 @@ impl FlowBuilder {
 
     pub fn while_loop(
         &mut self,
-        condition: Expr<MxBool>,
+        condition: impl IntoExpr<MxBool>,
         body: impl FnOnce(&mut FlowBuilder),
     ) -> &mut Self {
         let mut builder = FlowBuilder::branch();
         body(&mut builder);
         self.decl.activities.push(Activity::WhileLoop {
-            condition: condition.render(),
+            condition: condition.into_expr().render(),
             activities: builder.decl.activities,
         });
         self

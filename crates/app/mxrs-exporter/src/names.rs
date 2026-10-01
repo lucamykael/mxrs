@@ -1,0 +1,325 @@
+//! How generated source names the model.
+//!
+//! An entity is the struct that declares it, an attribute is that struct's
+//! accessor, and a flow is the unit type carrying its Mendix name — each
+//! declared in the file that owns it. A renderer therefore cannot know, while
+//! it walks one page or one flow, how the things it references will be
+//! spelled: that depends on every other file and on which short names are
+//! still free in this one. So renderers write *references* — opaque tokens
+//! naming a model element — and [`ModelNames::resolve`] turns a finished file
+//! body into source plus the `use` lines it needs.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use crate::entity_export::TypedEntityTarget;
+use crate::{ExportError, Result};
+
+/// Delimiters no rendered source can contain: every model string reaches the
+/// output through `{:?}`, which escapes control characters.
+const OPEN: char = '\u{1}';
+const CLOSE: char = '\u{2}';
+
+fn reference(kind: char, target: &str) -> String {
+    format!("{OPEN}{kind}{target}{CLOSE}")
+}
+
+/// The struct declaring entity `Module.Entity`.
+pub(crate) fn entity(qualified_name: &str) -> String {
+    reference('E', qualified_name)
+}
+
+/// The accessor for `attribute` of entity `Module.Entity`.
+pub(crate) fn attribute(entity: &str, attribute: &str) -> String {
+    reference('A', &format!("{entity}/{attribute}"))
+}
+
+/// The type naming microflow `Module.Flow`.
+pub(crate) fn microflow(qualified_name: &str) -> String {
+    reference('M', qualified_name)
+}
+
+/// The type naming nanoflow `Module.Flow`.
+pub(crate) fn nanoflow(qualified_name: &str) -> String {
+    reference('N', qualified_name)
+}
+
+/// Where a flow's naming type is declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FlowTarget {
+    /// The Rust module the type lives in.
+    pub(crate) module_path: String,
+    /// The type's identifier: the flow's Mendix name, spelled as one.
+    pub(crate) marker: String,
+}
+
+/// A flow's Mendix name as the identifier of the type that names it. Mirrors
+/// `marker_ident` in `mxrs-macros`, which declares that type.
+pub(crate) fn flow_marker(name: &str) -> String {
+    let mut ident: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if ident.starts_with(|character: char| character.is_ascii_digit()) {
+        ident.insert(0, '_');
+    }
+    if crate::rust_keyword(&ident) || ident == "_" {
+        ident.push('_');
+    }
+    ident
+}
+
+/// Every nameable element of the imported model.
+pub(crate) struct ModelNames<'a> {
+    pub(crate) entities: &'a HashMap<String, TypedEntityTarget>,
+    pub(crate) microflows: HashMap<String, FlowTarget>,
+    pub(crate) nanoflows: HashMap<String, FlowTarget>,
+}
+
+/// One file body with its references spelled, and the imports that spelling
+/// relies on.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Resolved {
+    pub(crate) source: String,
+    /// `use path::Name;` lines, sorted.
+    pub(crate) imports: Vec<String>,
+}
+
+impl ModelNames<'_> {
+    /// Spells every reference in `body`.
+    ///
+    /// A referenced type is imported by its short name when that name means
+    /// one thing in this file; a name two references share, one in `taken`
+    /// (the file's own items and the prelude types it writes), or a
+    /// lower-case one — which a `let` of the same name would otherwise be
+    /// read as matching against — is spelled by its full path instead.
+    pub(crate) fn resolve(&self, body: &str, taken: &[&str]) -> Result<Resolved> {
+        let mut requests: Vec<(String, String)> = Vec::new();
+        let mut segments: Vec<Segment> = Vec::new();
+        let mut rest = body;
+        while let Some(start) = rest.find(OPEN) {
+            segments.push(Segment::Text(rest[..start].to_string()));
+            let after = &rest[start + OPEN.len_utf8()..];
+            let end = after.find(CLOSE).ok_or_else(|| {
+                ExportError::MarkerLayout("unterminated model reference".to_string())
+            })?;
+            let token = &after[..end];
+            let (kind, target) = token.split_at(1);
+            let (module_path, name, accessor) = self.locate(kind, target)?;
+            requests.push((name.clone(), module_path.clone()));
+            segments.push(Segment::Reference {
+                module_path,
+                name,
+                accessor,
+            });
+            rest = &after[end + CLOSE.len_utf8()..];
+        }
+        segments.push(Segment::Text(rest.to_string()));
+
+        let mut imported: BTreeMap<&str, &str> = BTreeMap::new();
+        let mut colliding = HashSet::new();
+        for (name, path) in &requests {
+            if let Some(existing) = imported.insert(name, path)
+                && existing != path
+            {
+                colliding.insert(name.as_str());
+            }
+        }
+        imported.retain(|name, _| {
+            !colliding.contains(name)
+                && !taken.contains(name)
+                && !name.starts_with(|character: char| character.is_lowercase() || character == '_')
+        });
+
+        let mut source = String::with_capacity(body.len());
+        for segment in &segments {
+            match segment {
+                Segment::Text(text) => source.push_str(text),
+                Segment::Reference {
+                    module_path,
+                    name,
+                    accessor,
+                } => {
+                    if imported.get(name.as_str()) != Some(&module_path.as_str()) {
+                        source.push_str(module_path);
+                        source.push_str("::");
+                    }
+                    source.push_str(name);
+                    if let Some(accessor) = accessor {
+                        source.push_str("::");
+                        source.push_str(accessor);
+                        source.push_str("()");
+                    }
+                }
+            }
+        }
+        Ok(Resolved {
+            source,
+            imports: imported
+                .into_iter()
+                .map(|(name, path)| format!("use {path}::{name};"))
+                .collect(),
+        })
+    }
+
+    /// `(module path, type name, accessor)` for one reference.
+    fn locate(&self, kind: &str, target: &str) -> Result<(String, String, Option<String>)> {
+        let missing =
+            |what: &str| ExportError::MarkerLayout(format!("{what} {target:?} is not declared"));
+        match kind {
+            "E" => {
+                let entity = self.entities.get(target).ok_or_else(|| missing("entity"))?;
+                Ok((entity.module_path(), entity.type_name.clone(), None))
+            }
+            "A" => {
+                let (entity_name, attribute) =
+                    target.split_once('/').ok_or_else(|| missing("attribute"))?;
+                let entity = self
+                    .entities
+                    .get(entity_name)
+                    .ok_or_else(|| missing("entity"))?;
+                let accessor = entity
+                    .attributes
+                    .get(attribute)
+                    .ok_or_else(|| missing("attribute"))?;
+                Ok((
+                    entity.module_path(),
+                    entity.type_name.clone(),
+                    Some(accessor.clone()),
+                ))
+            }
+            "M" | "N" => {
+                let flows = if kind == "M" {
+                    &self.microflows
+                } else {
+                    &self.nanoflows
+                };
+                let flow = flows.get(target).ok_or_else(|| missing("flow"))?;
+                Ok((flow.module_path.clone(), flow.marker.clone(), None))
+            }
+            _ => Err(ExportError::MarkerLayout(format!(
+                "unknown model reference kind {kind:?}"
+            ))),
+        }
+    }
+}
+
+enum Segment {
+    Text(String),
+    Reference {
+        module_path: String,
+        name: String,
+        accessor: Option<String>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ModuleRoot;
+
+    fn target(module: &str, file: &str, type_name: &str) -> TypedEntityTarget {
+        TypedEntityTarget {
+            root: ModuleRoot::Authored,
+            module_stem: module.to_string(),
+            file_stem: file.to_string(),
+            type_name: type_name.to_string(),
+            dto: false,
+            attributes: HashMap::from([("Number".to_string(), "number".to_string())]),
+        }
+    }
+
+    #[test]
+    fn references_are_imported_once_and_spelled_short() {
+        let entities =
+            HashMap::from([("Sales.Order".to_string(), target("sales", "order", "Order"))]);
+        let names = ModelNames {
+            entities: &entities,
+            microflows: HashMap::from([(
+                "Sales.ACT_Ping".to_string(),
+                FlowTarget {
+                    module_path: "crate::application::services::sales::ping_service".to_string(),
+                    marker: "ACT_Ping".to_string(),
+                },
+            )]),
+            nanoflows: HashMap::new(),
+        };
+        let body = format!(
+            "Ref::<{}>::new(); {}.set(1); MicroflowRef::<{}>::new(); {}",
+            entity("Sales.Order"),
+            attribute("Sales.Order", "Number"),
+            microflow("Sales.ACT_Ping"),
+            entity("Sales.Order"),
+        );
+        let resolved = names.resolve(&body, &[]).unwrap();
+        assert_eq!(
+            resolved.source,
+            "Ref::<Order>::new(); Order::number().set(1); MicroflowRef::<ACT_Ping>::new(); Order"
+        );
+        assert_eq!(
+            resolved.imports,
+            [
+                "use crate::application::services::sales::ping_service::ACT_Ping;",
+                "use crate::domain::entities::sales::order::Order;",
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_taken_and_lower_case_names_are_spelled_by_path() {
+        let entities = HashMap::from([
+            ("Sales.Order".to_string(), target("sales", "order", "Order")),
+            ("Crm.Order".to_string(), target("crm", "order", "Order")),
+            ("Sales.Line".to_string(), target("sales", "line", "Line")),
+        ]);
+        let names = ModelNames {
+            entities: &entities,
+            microflows: HashMap::from([(
+                "Sales.cleanup".to_string(),
+                FlowTarget {
+                    module_path: "crate::application::services::sales::imported".to_string(),
+                    marker: "cleanup".to_string(),
+                },
+            )]),
+            nanoflows: HashMap::new(),
+        };
+        let body = format!(
+            "{} {} {} {}",
+            entity("Sales.Order"),
+            entity("Crm.Order"),
+            entity("Sales.Line"),
+            microflow("Sales.cleanup"),
+        );
+        let resolved = names.resolve(&body, &["Line"]).unwrap();
+        assert_eq!(
+            resolved.source,
+            "crate::domain::entities::sales::order::Order crate::domain::entities::crm::order::Order crate::domain::entities::sales::line::Line crate::application::services::sales::imported::cleanup"
+        );
+        assert!(resolved.imports.is_empty());
+    }
+
+    #[test]
+    fn a_reference_to_nothing_fails_loudly() {
+        let entities = HashMap::new();
+        let names = ModelNames {
+            entities: &entities,
+            microflows: HashMap::new(),
+            nanoflows: HashMap::new(),
+        };
+        let error = names.resolve(&entity("Sales.Missing"), &[]).unwrap_err();
+        assert!(error.to_string().contains("Sales.Missing"), "{error}");
+    }
+
+    #[test]
+    fn a_flow_is_named_by_its_mendix_name_spelled_as_an_identifier() {
+        assert_eq!(flow_marker("ACT_CreateOrder"), "ACT_CreateOrder");
+        assert_eq!(flow_marker("9Lives"), "_9Lives");
+        assert_eq!(flow_marker("return"), "return_");
+        assert_eq!(flow_marker("My Flow"), "My_Flow");
+    }
+}

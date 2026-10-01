@@ -33,8 +33,9 @@ pub use declaration::{
 pub use flow::{Activity, FlowParameterDecl, Member, MicroflowCallMapping, MicroflowDecl};
 pub use markers::system;
 pub use markers::{
-    AssociationMarker, AttributeMarker, EntityMarker, EnumerationMarker, MicroflowMarker,
-    MicroflowRef, NanoflowMarker, NanoflowRef, Ref, Reference, ReferenceSet,
+    AssociationMarker, AssociationRef, AttributeMarker, AttributeRef, EntityMarker,
+    EnumerationMarker, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef, Ref, Reference,
+    ReferenceSet,
 };
 pub use page::{
     ButtonAction, DataSourceDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutKind,

@@ -239,15 +239,15 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application validation microflow",
-        destination: "src/application/use_cases/<module>",
+        destination: "src/application/services/<module>",
         kind: ArtifactKind::Validation,
     },
     ScaffoldCommand {
         name: "use-case",
         action: "new",
         argument: "<Module.Flow>",
-        summary: "Create an application use-case microflow",
-        destination: "src/application/use_cases/<module>",
+        summary: "Create an application service microflow",
+        destination: "src/application/services/<module>",
         kind: ArtifactKind::UseCase,
     },
 ];
@@ -691,6 +691,7 @@ fn create_module_layer(
         module_folder(ArtifactKind::Module),
         &stem,
         templates::module_declaration(module_name),
+        Registration::Applied,
     )
 }
 
@@ -905,6 +906,7 @@ fn create_module_security(
         module_folder(ArtifactKind::Security),
         "module_roles",
         templates::module_roles(module_name),
+        Registration::Applied,
     )?;
     let security = root.join("src/domain/security/mod.rs");
     if transaction.content(&security)?.is_none() {
@@ -944,14 +946,16 @@ fn create_page_slice(
             module_folder(ArtifactKind::Entity),
             &stem,
             templates::page_chain_entity(module_name, artifact_name),
+            Registration::Itself,
         )?;
         create_concept_file(
             transaction,
             root,
             module_name,
             module_folder(ArtifactKind::UseCase),
-            &format!("act_load_{stem}"),
+            &templates::service_stem(&format!("ACT_Load{artifact_name}")),
             templates::page_chain_loader(module_name, artifact_name),
+            Registration::Itself,
         )?;
     }
     if chain.is_some_and(PageChain::has_microflow) {
@@ -960,8 +964,9 @@ fn create_page_slice(
             root,
             module_name,
             module_folder(ArtifactKind::UseCase),
-            &format!("act_refresh_{stem}"),
+            &templates::service_stem(&format!("ACT_Refresh{artifact_name}")),
             templates::page_chain_action(module_name, artifact_name),
+            Registration::Itself,
         )?;
     }
     if let Some(chain) = chain.filter(|chain| chain.has_nanoflow()) {
@@ -970,8 +975,9 @@ fn create_page_slice(
             root,
             module_name,
             module_folder(ArtifactKind::Nanoflow),
-            &format!("nan_refresh_{stem}"),
+            &templates::nanoflow_stem(&format!("NAN_Refresh{artifact_name}")),
             templates::page_chain_nanoflow(module_name, artifact_name, chain.has_microflow()),
+            Registration::Itself,
         )?;
     }
 
@@ -996,6 +1002,7 @@ fn create_page_slice(
             refresh,
             &options.page_roles,
         ),
+        Registration::Itself,
     )?;
     create_page_navigation(transaction, root, module_name, artifact_name)
 }
@@ -1079,13 +1086,21 @@ fn create_artifact(
             unreachable!("handled by the caller")
         }
     };
+    // A service is named by what it does, so its file is the declaring
+    // function's — the same file the importer would have written.
+    let stem = match options.kind {
+        ArtifactKind::UseCase | ArtifactKind::Validation => templates::service_stem(artifact_name),
+        ArtifactKind::Nanoflow => templates::nanoflow_stem(artifact_name),
+        _ => snake_case(artifact_name),
+    };
     create_concept_file(
         transaction,
         root,
         module_name,
         module_folder(options.kind),
-        &snake_case(artifact_name),
+        &stem,
         source,
+        Registration::Itself,
     )
 }
 
@@ -1173,6 +1188,7 @@ fn ensure_module_layout(
         "presentation/layouts",
         "application_layout",
         templates::layouts(module_name, LAYOUT_PARAMETER),
+        Registration::Itself,
     )
 }
 
@@ -1185,7 +1201,7 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Entity => "domain/entities",
         ArtifactKind::Enumeration => "domain/enumerations",
         ArtifactKind::Constant | ArtifactKind::ScheduledEvent => "domain/documents",
-        ArtifactKind::UseCase | ArtifactKind::Validation => "application/use_cases",
+        ArtifactKind::UseCase | ArtifactKind::Validation => "application/services",
         ArtifactKind::Page => "presentation/pages",
         ArtifactKind::Nanoflow => "presentation/nanoflows",
         ArtifactKind::PublishedRest => "presentation/http",
@@ -1207,9 +1223,20 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
     }
 }
 
-/// Writes one artifact file into its module folder and registers it the way
-/// the importer does: `pub mod <stem>;` plus a `merge_module` call in the
-/// folder's `apply`.
+/// How a scaffolded file's declaration reaches the application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Registration {
+    /// The declaration registers itself — `#[entity]`, `#[microflow]`,
+    /// `#[page]` — so the file only needs to be a module of the crate.
+    Itself,
+    /// The file exposes `declaration()` and its folder's `apply` merges it:
+    /// the shape of what no declaration macro covers yet.
+    Applied,
+}
+
+/// Writes one artifact file into its module folder and connects it the way
+/// the importer does: `pub mod <stem>;`, and for a declaration that does not
+/// register itself a `merge_module` call in the folder's `apply`.
 fn create_concept_file(
     transaction: &mut Transaction,
     root: &Path,
@@ -1217,27 +1244,33 @@ fn create_concept_file(
     folder: &str,
     stem: &str,
     source: String,
+    registration: Registration,
 ) -> Result<()> {
-    let index = connect_concept_folder(transaction, root, module_name, folder)?;
+    let index = connect_concept_folder(transaction, root, module_name, folder, registration)?;
     let path = index.with_file_name(format!("{stem}.rs"));
     let rust_path = rust_module_path(stem)?;
     transaction.create(&path, source)?;
     declare_child_module(transaction, &index, stem)?;
-    connect_apply_call(
-        transaction,
-        &index,
-        &format!("project.merge_module({rust_path}::declaration());"),
-    )
+    match registration {
+        Registration::Itself => Ok(()),
+        Registration::Applied => connect_apply_call(
+            transaction,
+            &index,
+            &format!("project.merge_module({rust_path}::declaration());"),
+        ),
+    }
 }
 
 /// Creates the `mod.rs` chain from the crate root down to `folder`, and
 /// answers with the folder's own index. Every level is the shape the
-/// importer writes: a header, `pub mod` declarations, and one `apply`.
+/// importer writes: a header and `pub mod` declarations — plus one `apply`
+/// where the folder's declarations do not register themselves.
 fn connect_concept_folder(
     transaction: &mut Transaction,
     root: &Path,
     module_name: &str,
     concept: &str,
+    registration: Registration,
 ) -> Result<PathBuf> {
     let src = root.join("src");
     let library = src.join("lib.rs");
@@ -1264,14 +1297,21 @@ fn connect_concept_folder(
         current = current.join(segment);
         let index = current.join("mod.rs");
         if transaction.content(&index)?.is_none() {
-            let header = if depth + 1 == segments.len() && !registry {
-                templates::folder_index(module_name, segment)
-            } else {
-                templates::concept_index(segment)
+            let module_folder = depth + 1 == segments.len() && !registry;
+            let header = match (registration, module_folder) {
+                (Registration::Itself, true) => templates::registering_folder_index(
+                    module_name,
+                    segments[depth.saturating_sub(1)],
+                ),
+                (Registration::Itself, false) => templates::registering_concept_index(segment),
+                (Registration::Applied, true) => templates::folder_index(module_name, segment),
+                (Registration::Applied, false) => templates::concept_index(segment),
             };
             transaction.create(&index, header)?;
             declare_child_module(transaction, &parent, segment)?;
-            connect_child_apply(transaction, root, &parent, segment)?;
+            if registration == Registration::Applied {
+                connect_child_apply(transaction, root, &parent, segment)?;
+            }
         }
         parent = index;
     }
@@ -1444,7 +1484,16 @@ fn declare_child_module(
         Some(position) => lines.insert(position + 1, declaration),
         None => {
             let position = header_end(&lines);
-            lines.splice(position..position, [declaration, String::new()]);
+            if position >= lines.len() {
+                // An index that is its header alone: the declaration is the
+                // file's last line, one blank line below the header.
+                if lines.last().is_some_and(|line| !line.is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push(declaration);
+            } else {
+                lines.splice(position..position, [declaration, String::new()]);
+            }
         }
     }
     transaction.write(aggregator, join(&lines))
@@ -1532,7 +1581,7 @@ fn require_module(root: &Path, module_name: &str) -> Result<()> {
         "src/domain/dtos",
         "src/domain/enumerations",
         "src/domain/documents",
-        "src/application/use_cases",
+        "src/application/services",
         "src/presentation/pages",
         "src/presentation/nanoflows",
     ]
@@ -1633,6 +1682,7 @@ fn initialize_presentation(
             "presentation/layouts",
             "application_layout",
             templates::presentation_layout(module_name),
+            Registration::Itself,
         )?;
     }
     for (family, keep) in ["pages", "snippets", "nanoflows"].iter().zip(keeps) {
@@ -1641,6 +1691,7 @@ fn initialize_presentation(
             root,
             module_name,
             &format!("presentation/{family}"),
+            Registration::Itself,
         )?;
         if transaction.content(&keep)?.is_none() {
             transaction.create(keep, String::new())?;

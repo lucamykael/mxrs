@@ -156,10 +156,11 @@ fn quality_integration_and_ci_scaffolds_emit_consumable_files() {
             .status
             .success()
     );
-    // Validations and integrations are server-side use cases, so they land in
-    // the application layer rather than next to the model declarations.
+    // A validation is a server-side service, so it lands in the application
+    // layer rather than next to the model declarations, in the file its
+    // declaring function names.
     assert!(
-        root.join("src/application/use_cases/sales/validate_order.rs")
+        root.join("src/application/services/sales/validate_order_service.rs")
             .is_file()
     );
     assert!(
@@ -483,7 +484,12 @@ fn the_constant_and_scheduled_event_generators_write_their_families_and_registry
     let path = root.join("src/domain/documents/sales/api_endpoint.rs");
     assert!(text(&constant).contains(&format!("  create  {}", path.display())));
     let source = std::fs::read_to_string(&path).unwrap();
-    assert!(source.contains("module.constant(\"ApiEndpoint\""));
+    assert!(
+        source.contains(
+            "#[constant(module = \"Sales\")]\npub fn api_endpoint(constant: &mut ConstantBuilder) {"
+        ),
+        "{source}"
+    );
 
     let event = scaffold(&root, &["scheduled-event", "new", "Sales.SE_ExpireCarts"]);
     assert!(event.status.success(), "{:?}", event.stderr);
@@ -492,7 +498,10 @@ fn the_constant_and_scheduled_event_generators_write_their_families_and_registry
     // Event and handler land in one file under one name, as in mxrb's
     // "scheduled event and handler" template.
     let source = std::fs::read_to_string(&path).unwrap();
-    assert!(source.contains("module.microflow(\"SE_ExpireCarts\""));
+    assert!(
+        source.contains("#[microflow(SE, module = \"Sales\")]\npub fn expire_carts("),
+        "{source}"
+    );
     assert!(source.contains("module.scheduled_event(\"SE_ExpireCarts\", \"SE_ExpireCarts\""));
 
     // Registry keys underscore the command name, so `scaffold destroy` takes
@@ -565,15 +574,15 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
         ("domain", "domain/entities/sales/order_overview.rs"),
         (
             "application",
-            "application/use_cases/sales/act_load_order_overview.rs",
+            "application/services/sales/load_order_overview_service.rs",
         ),
         (
-            "domain",
-            "application/use_cases/sales/act_refresh_order_overview.rs",
+            "application",
+            "application/services/sales/refresh_order_overview_service.rs",
         ),
         (
             "presentation",
-            "presentation/nanoflows/sales/nan_refresh_order_overview.rs",
+            "presentation/nanoflows/sales/refresh_order_overview.rs",
         ),
         ("presentation", "presentation/pages/sales/order_overview.rs"),
     ] {

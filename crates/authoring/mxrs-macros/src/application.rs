@@ -5,7 +5,7 @@ use syn::{Ident, ItemStruct, LitStr, Path, Result, Token};
 
 pub struct ApplicationArgs {
     version: LitStr,
-    project: Path,
+    project: Option<Path>,
 }
 
 impl Parse for ApplicationArgs {
@@ -31,7 +31,7 @@ impl Parse for ApplicationArgs {
         }
         Ok(Self {
             version: version.ok_or_else(|| input.error("missing `version = \"...\"`"))?,
-            project: project.unwrap_or_else(|| syn::parse_quote!(crate::domain::build)),
+            project,
         })
     }
 }
@@ -45,7 +45,13 @@ pub fn expand(args: &ApplicationArgs, item: &ItemStruct) -> Result<TokenStream> 
     }
     let ident = &item.ident;
     let version = &args.version;
-    let project = &args.project;
+    // An explicit entry point contributes whatever it builds by hand; the
+    // declarations the crate registered are folded in either way, so a
+    // project can move to self-registering declarations one file at a time.
+    let base = match &args.project {
+        Some(project) => quote! { (#project)() },
+        None => quote! { ::mxrs::ProjectBuilder::new(Self::MENDIX_VERSION).build() },
+    };
     Ok(quote! {
         #item
 
@@ -53,8 +59,12 @@ pub fn expand(args: &ApplicationArgs, item: &ItemStruct) -> Result<TokenStream> 
             const MENDIX_VERSION: &'static str = #version;
 
             fn declaration() -> ::mxrs::ProjectDecl {
-                let mut declaration = (#project)();
+                let mut declaration = #base;
                 declaration.mendix_version = Self::MENDIX_VERSION.to_string();
+                ::mxrs::registry::apply(
+                    ::mxrs::registry::crate_of(::core::module_path!()),
+                    &mut declaration,
+                );
                 declaration
             }
         }

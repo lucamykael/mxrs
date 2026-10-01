@@ -12,6 +12,7 @@ description = "Public facade for Cargo-native Mendix applications built with mxr
 workspace = true
 
 [dependencies]
+inventory = "0.3"
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
 mxrs-expr = { path = "../../authoring/mxrs-expr" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }

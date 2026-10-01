@@ -30,6 +30,7 @@
 //! same `mxrs-dsl` surface — see `derive`'s doc comment.
 
 mod application;
+mod declare;
 mod derive;
 mod derive_enumeration;
 mod expand;
@@ -43,9 +44,10 @@ use crate::parse::ProjectInput;
 
 /// Declares the root of a Cargo-native Mendix application.
 ///
-/// The default `project` function is `crate::domain::build`; applications
-/// with a different composition root can pass
-/// `project = crate::application_model` explicitly.
+/// The application's model is every declaration its crate registered —
+/// `#[mxrs::entity]`, `#[mxrs::microflow]` and the rest. A crate that also
+/// builds part of its model by hand passes that entry point as
+/// `project = crate::build`; registered declarations are folded in after it.
 #[proc_macro_attribute]
 pub fn application(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attributes as application::ApplicationArgs);
@@ -56,25 +58,141 @@ pub fn application(attributes: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Marks the Rust declaration that owns one Mendix entity.
+/// Declares a persistable Mendix entity.
 ///
-/// The attribute is intentionally metadata-only: the entity derive or the
-/// declaration function still builds the model. Validation makes generated
-/// source self-describing without accepting misspelled artifact kinds.
+/// The struct is the entity: its fields are the attributes and
+/// associations, `///` comments are the documentation, and `#[mxrs(...)]`
+/// carries what the types cannot say. The entity registers itself with the
+/// application and gets an accessor per field (`Order::number()`).
+///
+/// ```text
+/// /// A customer order.
+/// #[entity(module = "Sales")]
+/// #[mxrs(index(number), before_commit = validate_order)]
+/// pub struct Order {
+///     #[mxrs(length = 80, required)]
+///     pub number: MxString,
+///     pub total: MxDecimal,
+///     pub customer: Reference<Customer>,
+/// }
+/// ```
+///
+/// `imported` declares the type without registering it — for an entity an
+/// installed module owns, which the application names but does not define.
 #[proc_macro_attribute]
 pub fn entity(attributes: TokenStream, item: TokenStream) -> TokenStream {
-    artifact_annotation(attributes, item, "entity", &["ENTITY", "DTO", "VIEW"])
+    expand_entity(attributes, item, derive::EntityKind::Entity)
 }
 
-/// Marks the Rust declaration that owns one Mendix microflow or nanoflow.
+/// Declares a non-persistable Mendix entity: a data transfer object. Same
+/// shape as [`macro@entity`].
+#[proc_macro_attribute]
+pub fn dto(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_entity(attributes, item, derive::EntityKind::Dto)
+}
+
+/// Declares an entity backed by an OQL view: `#[view(module = "Sales",
+/// source = "Sales.OrderTotals")]`. Same shape as [`macro@entity`].
+#[proc_macro_attribute]
+pub fn view(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_entity(attributes, item, derive::EntityKind::View)
+}
+
+fn expand_entity(
+    attributes: TokenStream,
+    item: TokenStream,
+    kind: derive::EntityKind,
+) -> TokenStream {
+    let args = parse_macro_input!(attributes as derive::EntityArgs);
+    let item = parse_macro_input!(item as syn::ItemStruct);
+    match derive::expand_entity(&args, kind, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Declares a Mendix enumeration from a Rust enum. Variants are the values;
+/// `#[mxrs(caption = "...")]` captions one, and a value without a caption is
+/// captioned with its own name.
+#[proc_macro_attribute]
+pub fn enumeration(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attributes as derive_enumeration::EnumerationArgs);
+    let item = parse_macro_input!(item as syn::ItemEnum);
+    match derive_enumeration::expand_enumeration(&args, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Declares a server-side microflow as the function that builds it.
+///
+/// A naming prefix in capitals states the flow's kind and names it by
+/// convention: `#[microflow(ACT, module = "Sales")] fn create_order` is
+/// `Sales.ACT_CreateOrder`. `name = "..."` states the Mendix name outright
+/// when it does not follow the convention. The function becomes a unit type
+/// of the same name, so the flow is nameable wherever the model refers to
+/// one, and registers itself with the application.
 #[proc_macro_attribute]
 pub fn microflow(attributes: TokenStream, item: TokenStream) -> TokenStream {
-    artifact_annotation(
-        attributes,
-        item,
-        "microflow",
-        &["ACT", "SUB", "VAL", "QRY", "NAN", "OTHER"],
-    )
+    expand_flow(attributes, item, declare::FlowKind::Microflow)
+}
+
+/// Declares a client-side nanoflow. Same shape as [`macro@microflow`].
+#[proc_macro_attribute]
+pub fn nanoflow(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_flow(attributes, item, declare::FlowKind::Nanoflow)
+}
+
+/// Declares a page as the function that builds it: `#[page(module =
+/// "Sales")] fn order_overview(page: &mut PageBuilder)` is
+/// `Sales.OrderOverview`. `name = "..."` states a Mendix name the function
+/// does not spell, and `///` comments are the page's documentation.
+#[proc_macro_attribute]
+pub fn page(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_document(attributes, item, declare::DocumentKind::Page)
+}
+
+/// Declares a page layout. Same shape as [`macro@page`], with a
+/// `LayoutBuilder`.
+#[proc_macro_attribute]
+pub fn layout(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_document(attributes, item, declare::DocumentKind::Layout)
+}
+
+/// Declares a constant. Same shape as [`macro@page`], with a
+/// `ConstantBuilder`.
+#[proc_macro_attribute]
+pub fn constant(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_document(attributes, item, declare::DocumentKind::Constant)
+}
+
+/// Declares a standalone menu document. Same shape as [`macro@page`], with a
+/// `MenuBuilder`.
+#[proc_macro_attribute]
+pub fn menu(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_document(attributes, item, declare::DocumentKind::Menu)
+}
+
+fn expand_document(
+    attributes: TokenStream,
+    item: TokenStream,
+    kind: declare::DocumentKind,
+) -> TokenStream {
+    let args = parse_macro_input!(attributes as declare::DocumentArgs);
+    let item = parse_macro_input!(item as syn::ItemFn);
+    match declare::expand_document(&args, kind, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+fn expand_flow(attributes: TokenStream, item: TokenStream, kind: declare::FlowKind) -> TokenStream {
+    let args = parse_macro_input!(attributes as declare::FlowArgs);
+    let item = parse_macro_input!(item as syn::ItemFn);
+    match declare::expand_flow(&args, kind, &item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
 }
 
 /// Marks an HTTP controller operation generated from a Mendix Published REST
@@ -130,69 +248,6 @@ pub fn route(attributes: TokenStream, item: TokenStream) -> TokenStream {
         return syn::Error::new_spanned(method, "unsupported HTTP method")
             .to_compile_error()
             .into();
-    }
-    quote!(#item).into()
-}
-
-fn artifact_annotation(
-    attributes: TokenStream,
-    item: TokenStream,
-    annotation: &str,
-    kinds: &[&str],
-) -> TokenStream {
-    let parser =
-        syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
-    let attributes = parse_macro_input!(attributes with parser);
-    let item = proc_macro2::TokenStream::from(item);
-    let mut seen = std::collections::HashSet::new();
-    let mut kind = None;
-    for attribute in attributes {
-        let Some(name) = attribute.path.get_ident().map(ToString::to_string) else {
-            return syn::Error::new_spanned(attribute.path, "expected a simple metadata key")
-                .to_compile_error()
-                .into();
-        };
-        if !matches!(name.as_str(), "module" | "name" | "kind") {
-            return syn::Error::new_spanned(
-                attribute.path,
-                format!("unknown #[mxrs::{annotation}] key; expected `module`, `name`, or `kind`"),
-            )
-            .to_compile_error()
-            .into();
-        }
-        if !seen.insert(name.clone()) {
-            return syn::Error::new_spanned(attribute.path, format!("duplicate `{name}`"))
-                .to_compile_error()
-                .into();
-        }
-        let syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Str(value),
-            ..
-        }) = attribute.value
-        else {
-            return syn::Error::new_spanned(attribute.value, "metadata values must be strings")
-                .to_compile_error()
-                .into();
-        };
-        if name == "kind" {
-            kind = Some(value);
-        }
-    }
-    let Some(kind) = kind else {
-        return syn::Error::new(proc_macro2::Span::call_site(), "missing required `kind`")
-            .to_compile_error()
-            .into();
-    };
-    if !kinds.contains(&kind.value().as_str()) {
-        return syn::Error::new_spanned(
-            kind,
-            format!(
-                "unknown {annotation} kind; expected one of {}",
-                kinds.join(", ")
-            ),
-        )
-        .to_compile_error()
-        .into();
     }
     quote!(#item).into()
 }

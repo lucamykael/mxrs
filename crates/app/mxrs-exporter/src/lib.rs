@@ -64,7 +64,11 @@ use mxrs_model::attribute::AttributeType;
 use mxrs_model::entity::Entity;
 use mxrs_model::{Association, Module, Project};
 
+use entity_export::TypedEntityTarget;
+
+mod entity_export;
 mod flow_export;
+mod names;
 #[cfg(test)]
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
@@ -262,8 +266,6 @@ fn import_cargo_project_inner(
     let infrastructure_source = render_infrastructure_module();
     let persistence_source = render_persistence_module(&modules, &mendix_version);
     let converted_flows = flow_export::collect(&project, &modules)?;
-    let microflow_files = flow_export::render_files(&converted_flows, false);
-    let nanoflow_files = flow_export::render_files(&converted_flows, true);
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
         (document.get_str("$Type").ok() == Some("Security$ProjectSecurity")).then_some(document)
@@ -273,9 +275,6 @@ fn import_cargo_project_inner(
     let packages = package_stems_for_import(&modules, mpr_path);
     let documents_export = render_documents_module(&project, &packages)?;
     let task_queues_source = render_task_queues_module(&project, &mendix_version)?;
-    let marker_manifest = marker_manifest(&modules);
-    let markers_source = mxrs_typegen::generate(&marker_manifest)?;
-    let typed_markers_source = flow_export::typed_attribute_markers(&modules);
     let action_documents = collect_action_documents(&project)?;
     // The HTTP layer is generated for the axum adapter only; the other two
     // presets keep their server stub until their routers are ported.
@@ -320,12 +319,23 @@ fn import_cargo_project_inner(
 
     let mut generated_modules: std::collections::BTreeMap<String, GeneratedModule> =
         Default::default();
-    let typed_entities = collect_entity_layer(
+    let typed_entities = entity_export::collect_entity_layer(
         &modules,
         &packages,
         &documents_export.derived_enumerations,
         &mut generated_modules,
-    )?;
+    );
+    let flow_plans = flow_export::plan_files(&converted_flows);
+    let names = model_names(
+        &modules,
+        &packages,
+        &typed_entities,
+        &converted_flows,
+        &flow_plans,
+        &mut generated_modules,
+    );
+    let microflow_files = flow_export::render_files(&converted_flows, &flow_plans, false, &names)?;
+    let nanoflow_files = flow_export::render_files(&converted_flows, &flow_plans, true, &names)?;
     let service_ports = collect_service_ports(&modules, &packages, &typed_entities);
     let action_ports = assemble_action_ports(&action_documents, &packages, &typed_entities);
     for (module_name, stem, source) in &documents_export.enumeration_files {
@@ -356,6 +366,10 @@ fn import_cargo_project_inner(
             .nanoflows
             .push((flow.file_name.clone(), flow.source.clone()));
     }
+    for module in generated_modules.values_mut() {
+        module.services.sort();
+        module.nanoflows.sort();
+    }
     {
         let mut pages_by_module: std::collections::BTreeMap<
             String,
@@ -368,7 +382,7 @@ fn import_cargo_project_inner(
                 .push(page);
         }
         for (module_name, pages) in pages_by_module {
-            let files = page_export::render_page_files(&pages);
+            let files = page_export::render_page_files(&pages, &names)?;
             if !files.is_empty() {
                 generated_module(&mut generated_modules, &module_name).pages = files;
             }
@@ -439,12 +453,6 @@ fn import_cargo_project_inner(
                 .collect(),
         });
     }
-    collect_marker_sources(
-        &marker_manifest,
-        &markers_source,
-        &typed_markers_source,
-        &mut generated_modules,
-    )?;
     // Ownership combines the model's `FromAppStore` flag with any adjacent
     // MXRB authoring manifest discovered above.
     for module in &modules {
@@ -466,11 +474,6 @@ fn import_cargo_project_inner(
     let domain_source = render_domain_module(&authored_layers);
     let application_source = render_application_module(&authored_layers);
     let presentation_source = render_presentation_module(api_mode, &authored_layers);
-    write_text(
-        &destination.join("src/infrastructure/markers.rs"),
-        &render_markers_facade(&generated_modules),
-    )?;
-
     write_text(
         &destination.join("Cargo.toml"),
         &cargo_manifest(&package_name, mxrs_workspace, api_mode),
@@ -655,7 +658,7 @@ fn import_cargo_project_inner(
 /// application, infrastructure or UI.
 fn render_domain_module(layers: &AuthoredLayers) -> String {
     render_layer_module(
-        "//! Business data and rules that do not depend on delivery or infrastructure.\n//! Persisted entities, value-like DTOs, enumerations and model security stay here;\n//! server-side workflows are application use cases, not domain services.\n\n",
+        "//! Business data and rules that do not depend on delivery or infrastructure.\n//! Persisted entities, value-like DTOs, enumerations and model security stay here;\n//! server-side workflows are application services, not part of the domain.\n\n",
         "domain",
         layers,
         &["security"],
@@ -699,7 +702,7 @@ fn render_layer_module(
 
 fn render_application_module(layers: &AuthoredLayers) -> String {
     render_layer_module(
-        "//! Application orchestration: server-side use cases, boundary ports and\n//! project-level task queues. This layer coordinates the domain but knows no\n//! HTTP framework, database driver or other delivery mechanism.\n\n",
+        "//! Application orchestration: each module's microflows as services, boundary\n//! ports and project-level task queues. This layer coordinates the domain but\n//! knows no HTTP framework, database driver or other delivery mechanism.\n\n",
         "application",
         layers,
         &["task_queues"],
@@ -731,12 +734,10 @@ fn render_composition_module(mendix_version: &str) -> String {
 }
 
 fn render_infrastructure_module() -> String {
-    "//! Model adapters, compile-time markers and imported-model\n\
-     //! persistence. Hand-written repositories and database plumbing\n\
-     //! belong here too.\n\n\
+    "//! Model adapters and imported-model persistence. Hand-written\n\
+     //! repositories and database plumbing belong here too.\n\n\
      pub mod adapters;\n\
      pub mod generated;\n\
-     pub mod markers;\n\
      pub mod persistence;\n\n\
      pub fn apply(project: &mut ::mxrs_ir::ProjectDecl) {\n\
      \x20   persistence::apply(project);\n\
@@ -1010,96 +1011,6 @@ impl DerivedEnumeration {
     }
 }
 
-/// Where one entity's generated Rust lives and what the file declares, for
-/// entities currently assumed to render as `#[derive(MxEntity)]` structs.
-struct TypedEntityTarget {
-    root: ModuleRoot,
-    module_stem: String,
-    file_stem: String,
-    type_name: String,
-    dto: bool,
-}
-
-impl TypedEntityTarget {
-    /// The module the entity's struct is importable from — under `dto/` when
-    /// the entity is non-persistent, under `domain/entities/` otherwise, and
-    /// under whichever module tree owns it.
-    fn module_path(&self) -> String {
-        let (authored, package) = if self.dto {
-            ("domain::dtos", "dto")
-        } else {
-            ("domain::entities", "domain::entities")
-        };
-        format!(
-            "{}::{}",
-            self.root.path(&self.module_stem, authored, package),
-            self.file_stem,
-        )
-    }
-
-    /// The struct itself.
-    fn type_path(&self) -> String {
-        format!("{}::{}", self.module_path(), self.type_name)
-    }
-}
-
-/// Project-wide context the entity layer renders against: who owns which
-/// associations, how entity ids resolve to qualified names, which entities
-/// the project declares, and which of them render as typed structs.
-struct EntityLayerContext<'a> {
-    associations_by_entity: HashMap<&'a str, Vec<&'a Association>>,
-    qualified_by_id: HashMap<&'a str, String>,
-    declared: std::collections::HashSet<String>,
-    typed: HashMap<String, TypedEntityTarget>,
-}
-
-/// One association the entity's generated file must restate. The writer
-/// preserves only associations whose target lives outside the declared
-/// project; an association between declared entities that no entity file
-/// re-declares would silently disappear from the rebuilt model.
-struct DeclarableAssociation<'a> {
-    association: &'a Association,
-    name: &'a str,
-    /// Qualified `Module.Entity` the association points at.
-    target: String,
-}
-
-fn declarable_associations<'a>(
-    entity: &Entity,
-    ctx: &EntityLayerContext<'a>,
-) -> Vec<DeclarableAssociation<'a>> {
-    let Some(id) = entity.id.as_deref() else {
-        return Vec::new();
-    };
-    let mut list = Vec::new();
-    for association in ctx.associations_by_entity.get(id).into_iter().flatten() {
-        let Some(name) = association.name.as_deref() else {
-            continue;
-        };
-        let Some(raw_target) = association.to_entity_id.as_deref() else {
-            continue;
-        };
-        let Some(target) = ctx.qualified_by_id.get(raw_target).cloned().or_else(|| {
-            ctx.declared
-                .contains(raw_target)
-                .then(|| raw_target.to_string())
-        }) else {
-            continue;
-        };
-        if !ctx.declared.contains(&target) {
-            // The writer's own unmodeled-external rule keeps this one.
-            continue;
-        }
-        list.push(DeclarableAssociation {
-            association,
-            name,
-            target,
-        });
-    }
-    list.sort_by(|left, right| left.name.cmp(right.name));
-    list
-}
-
 fn render_documents_module(
     project: &Project,
     packages: &std::collections::BTreeSet<String>,
@@ -1134,19 +1045,23 @@ fn render_documents_module(
         } = declaration
         {
             let stem = inner_file_stem(&name);
-            let (source, derived_type) =
-                render_enumeration_file(&module, &name, &documentation, &values);
-            if let Some(type_name) = derived_type {
-                derived_enumerations.insert(
-                    format!("{module}.{name}"),
-                    DerivedEnumeration {
-                        root: module_root(&module_stem(&module), packages),
-                        module_stem: module_stem(&module),
-                        file_stem: stem.clone(),
-                        type_name,
-                    },
-                );
-            }
+            let root = module_root(&module_stem(&module), packages);
+            let (source, type_name) = render_enumeration_file(
+                &module,
+                &name,
+                &documentation,
+                &values,
+                root == ModuleRoot::Package,
+            );
+            derived_enumerations.insert(
+                format!("{module}.{name}"),
+                DerivedEnumeration {
+                    root,
+                    module_stem: module_stem(&module),
+                    file_stem: stem.clone(),
+                    type_name,
+                },
+            );
             enumeration_files.push((module, stem, source));
             continue;
         }
@@ -1192,79 +1107,71 @@ fn render_document_file(module_name: &str, document: EditableDocument) -> String
     source
 }
 
-/// One Mendix enumeration as `#[derive(MxEnumeration)]` — a real Rust enum —
-/// when the derive can express it: exactly one caption per value, and names
-/// that survive as identifiers. Anything else keeps the builder form in the
-/// same one-file-per-enumeration slot.
+/// One Mendix enumeration as the Rust enum that declares it. Values are
+/// variants; a value or type name Rust cannot spell is spelled differently
+/// and stated with `name = "..."`. An enumeration an installed module owns
+/// is `imported`: named here, declared there.
 fn render_enumeration_file(
     module_name: &str,
     name: &str,
     documentation: &str,
     values: &[(String, Vec<(String, String)>)],
-) -> (String, Option<String>) {
-    if let Some((source, type_name)) =
-        render_derived_enumeration(module_name, name, documentation, values)
-    {
-        return (source, Some(type_name));
-    }
-    let mut source = format!(
-        "//! Editable Mendix enumeration.\n\n\
-         use mxrs::prelude::*;\n\n\
-         pub fn declaration() -> ModuleDecl {{\n\
-             let mut module = ModuleBuilder::new({});\n",
-        rust_string(module_name),
-    );
-    render_editable_document_body(
-        &mut source,
-        EditableDocument::Enumeration {
-            module: module_name.to_string(),
-            name: name.to_string(),
-            documentation: documentation.to_string(),
-            values: values.to_vec(),
-        },
-    );
-    source.push_str("    module.into_decl()\n}\n");
-    (source, None)
-}
-
-fn render_derived_enumeration(
-    module_name: &str,
-    name: &str,
-    documentation: &str,
-    values: &[(String, Vec<(String, String)>)],
-) -> Option<(String, String)> {
+    imported: bool,
+) -> (String, String) {
     let mut type_name = derive_pascal_case(&sanitize_ident(name));
     if type_name.starts_with(|c: char| c.is_ascii_digit()) {
         type_name.insert(0, '_');
     }
     if type_name.is_empty() || rust_keyword(&type_name) {
-        return None;
+        type_name.push_str("Enumeration");
     }
 
     let mut seen = std::collections::HashSet::new();
     let mut variants = String::new();
     for (value, captions) in values {
-        // The derive writes exactly one caption per value; zero or several
-        // need the builder form.
-        let [(language, caption)] = captions.as_slice() else {
-            return None;
-        };
         let mut variant = derive_pascal_case(&sanitize_ident(value));
         if variant.starts_with(|c: char| c.is_ascii_digit()) {
             variant.insert(0, '_');
         }
-        if variant.is_empty() || rust_keyword(&variant) || !seen.insert(variant.clone()) {
-            return None;
+        if variant.is_empty() || rust_keyword(&variant) {
+            variant.push_str("Value");
+        }
+        if !seen.insert(variant.clone()) {
+            variant = (2..)
+                .map(|suffix| format!("{variant}{suffix}"))
+                .find(|candidate| seen.insert(candidate.clone()))
+                .expect("an unbounded suffix always finds a free name");
         }
         let mut options = Vec::new();
         if variant != *value {
             options.push(format!("name = {value:?}"));
         }
-        if caption != value {
-            options.push(format!("caption = {caption:?}"));
-        }
-        if language != "en_US" {
-            options.push(format!("language = {language:?}"));
+        // One caption in one language is the usual value; anything else —
+        // none, several, or a language code that is not an identifier —
+        // lists every caption.
+        match captions.as_slice() {
+            [(language, caption)] if mxrs_typegen::is_rust_identifier(language) => {
+                if caption != value {
+                    options.push(format!("caption = {caption:?}"));
+                }
+                if language != "en_US" {
+                    options.push(format!("language = {language:?}"));
+                }
+            }
+            captions => options.push(format!(
+                "captions({})",
+                captions
+                    .iter()
+                    .map(|(language, caption)| {
+                        if mxrs_typegen::is_rust_identifier(language) {
+                            format!("{language} = {caption:?}")
+                        } else {
+                            format!("{language:?} = {caption:?}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         }
         if !options.is_empty() {
             let _ = writeln!(variants, "    #[mxrs({})]", options.join(", "));
@@ -1272,27 +1179,29 @@ fn render_derived_enumeration(
         let _ = writeln!(variants, "    {variant},");
     }
 
-    let mut out = String::from("//! Editable Mendix enumeration.\n\nuse mxrs::prelude::*;\n\n");
-    out.push_str("#[derive(MxEnumeration)]\n");
-    let mut options = vec![format!("module = {module_name:?}")];
+    let mut out = String::from("use mxrs::prelude::*;\n\n");
+    let mut options = Vec::new();
+    match entity_export::doc_comment(documentation, "") {
+        Some(comment) => out.push_str(&comment),
+        None => options.push(format!("documentation = {documentation:?}")),
+    }
+    let mut arguments = vec![format!("module = {module_name:?}")];
     if type_name != name {
-        options.insert(0, format!("name = {name:?}"));
+        arguments.push(format!("name = {name:?}"));
     }
-    if !documentation.is_empty() {
-        options.push(format!("documentation = {documentation:?}"));
+    if imported {
+        arguments.push("imported".to_string());
     }
-    let _ = writeln!(out, "#[mxrs({})]", options.join(", "));
+    let _ = writeln!(out, "#[enumeration({})]", arguments.join(", "));
+    for option in options {
+        let _ = writeln!(out, "#[mxrs({option})]");
+    }
     if variants.is_empty() {
         let _ = writeln!(out, "pub enum {type_name} {{}}");
     } else {
         let _ = writeln!(out, "pub enum {type_name} {{\n{variants}}}");
     }
-    let _ = writeln!(
-        out,
-        "\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({});\n    {type_name}::mx_register(&mut module);\n    module.into_decl()\n}}",
-        rust_string(module_name),
-    );
-    Some((out, type_name))
+    (out, type_name)
 }
 
 fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>> {
@@ -2935,123 +2844,6 @@ fn rust_string_vec(values: &[String]) -> String {
 /// Builds the public marker surface directly from the imported model. Flow
 /// bodies may remain opaque while their names are still compile-time checked
 /// by pages and future Cargo-native flow authoring.
-fn marker_manifest(modules: &[Module]) -> mxrs_typegen::Manifest {
-    use mxrs_typegen::{AssociationManifest, EntityManifest, ModuleManifest};
-
-    let mut qualified_by_id = HashMap::<&str, String>::new();
-    let mut qualified_entities = std::collections::HashSet::new();
-    for module in modules {
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
-        for entity in module.entities() {
-            if let (Some(id), Some(name)) = (entity.id.as_deref(), entity.name.as_deref()) {
-                let qualified = format!("{module_name}.{name}");
-                qualified_entities.insert(qualified.clone());
-                qualified_by_id.insert(id, qualified);
-            }
-        }
-    }
-
-    let modules = modules
-        .iter()
-        .map(|module| {
-            let mut associations_by_entity = HashMap::<&str, Vec<AssociationManifest>>::new();
-            for association in module.associations() {
-                let (Some(from), Some(name), Some(target)) = (
-                    association.from_entity_id.as_deref(),
-                    association.name.as_deref(),
-                    association.to_entity_id.as_deref(),
-                ) else {
-                    continue;
-                };
-                let target = if target.contains('.') {
-                    Some(target.to_string())
-                } else {
-                    qualified_by_id.get(target).cloned()
-                };
-                let Some(target) = target.filter(|target| qualified_entities.contains(target))
-                else {
-                    continue;
-                };
-                associations_by_entity
-                    .entry(from)
-                    .or_default()
-                    .push(AssociationManifest {
-                        name: name.to_string(),
-                        target,
-                        association_type: match association.association_type {
-                            mxrs_model::association::AssociationType::Reference => {
-                                "Reference".to_string()
-                            }
-                            mxrs_model::association::AssociationType::ReferenceSet => {
-                                "ReferenceSet".to_string()
-                            }
-                        },
-                    });
-            }
-
-            let mut entities = module
-                .entities()
-                .iter()
-                .filter_map(|entity| {
-                    let name = entity.name.clone()?;
-                    let mut attributes = entity
-                        .attributes
-                        .iter()
-                        .filter_map(|attribute| attribute.name.clone())
-                        .collect::<Vec<_>>();
-                    attributes.sort();
-                    let mut associations = entity
-                        .id
-                        .as_deref()
-                        .and_then(|id| associations_by_entity.remove(id))
-                        .unwrap_or_default();
-                    associations.sort_by(|left, right| left.name.cmp(&right.name));
-                    associations.dedup_by(|left, right| left.name == right.name);
-                    associations.retain(|association| !attributes.contains(&association.name));
-                    Some(EntityManifest {
-                        name,
-                        attributes,
-                        associations,
-                    })
-                })
-                .collect::<Vec<_>>();
-            entities.sort_by(|left, right| left.name.cmp(&right.name));
-
-            let entity_names = entities
-                .iter()
-                .map(|entity| entity.name.as_str())
-                .collect::<std::collections::HashSet<_>>();
-
-            let mut microflows = module
-                .microflows
-                .iter()
-                .filter_map(|flow| flow.name.clone())
-                .collect::<Vec<_>>();
-            microflows.sort();
-            microflows.dedup();
-            microflows.retain(|name| !entity_names.contains(name.as_str()));
-            let mut nanoflows = module
-                .nanoflows
-                .iter()
-                .filter_map(|flow| flow.name.clone())
-                .collect::<Vec<_>>();
-            nanoflows.sort();
-            nanoflows.dedup();
-            nanoflows.retain(|name| {
-                !entity_names.contains(name.as_str()) && microflows.binary_search(name).is_err()
-            });
-
-            ModuleManifest {
-                name: module.name.clone().unwrap_or_else(|| "Unnamed".to_string()),
-                entities,
-                microflows,
-                nanoflows,
-            }
-        })
-        .collect();
-    mxrs_typegen::Manifest { modules }
-}
-
 fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>, api_mode: ApiMode) -> String {
     let dependency = match mxrs_workspace {
         Some(workspace) => format!(
@@ -3068,7 +2860,7 @@ fn cargo_manifest(package_name: &str, mxrs_workspace: Option<&Path>, api_mode: A
         ApiMode::Rocket => "rocket = \"0.5\"\n",
     };
     format!(
-        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.85\"\npublish = false\n\n[lints.rust]\nunsafe_code = \"forbid\"\n\n[lints.clippy]\nall = \"warn\"\n\n[dependencies]\nmxrs = {dependency}\n{api_dependencies}",
+        "[package]\nname = {package_name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.85\"\npublish = false\n\n[lints.rust]\nunsafe_code = \"forbid\"\n\n[lints.clippy]\nall = {{ level = \"warn\", priority = -1 }}\n# A Mendix module may hold an entity of its own name.\nmodule_inception = \"allow\"\n\n[dependencies]\nmxrs = {dependency}\n{api_dependencies}",
     )
 }
 
@@ -3122,7 +2914,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, model documents and security. It has no HTTP or database dependency.\n- `src/application/use_cases/`: one editable Rust file per supported server microflow.\n- `src/application/ports/`: framework-independent contracts implemented by infrastructure adapters.\n- `src/presentation/`: HTTP delivery, pages, nanoflows and navigation. Axum-specific types stay under `presentation/http`.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`.\n- `src/composition.rs`: the only place that assembles all architectural layers.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code. Entities whose features typed authoring does not cover yet fall back to an IR declaration in the same conceptual location.\n\nSupported server-side microflows are reconstructed as application use cases; client-side nanoflows stay in presentation. `mxrs run --frontend` supervises the Rust API and Vite client together. Other graphs remain exact in imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, model documents and security. It has no HTTP or database dependency.\n- `src/application/services/`: one editable Rust file per supported server microflow, plus `imported.rs` naming the ones that stay in the imported model.\n- `src/application/ports/`: framework-independent contracts implemented by infrastructure adapters.\n- `src/presentation/`: HTTP delivery, pages, nanoflows and navigation. Axum-specific types stay under `presentation/http`.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`.\n- `src/composition.rs`: the only place that assembles all architectural layers.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nSupported server-side microflows are reconstructed as application services; client-side nanoflows stay in presentation. `mxrs run --frontend` supervises the Rust API and Vite client together. Other graphs remain exact in imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -3167,113 +2959,139 @@ fn write_text(path: &Path, contents: &str) -> Result<()> {
 /// alongside. `src/infrastructure/markers.rs` stays the stable access path
 /// (`crate::infrastructure::markers::<Module>::…`) by re-exporting each
 /// module's markers under its Mendix name.
-fn collect_marker_sources(
-    manifest: &mxrs_typegen::Manifest,
-    generated: &str,
-    typed_markers: &str,
-    generated_modules: &mut std::collections::BTreeMap<String, GeneratedModule>,
-) -> Result<()> {
-    let mut file_names = std::collections::HashSet::new();
-
-    for module in &manifest.modules {
-        let declaration = format!("pub mod {} {{", module.name);
-        let module_start = generated.find(&declaration).ok_or_else(|| {
-            ExportError::MarkerLayout(format!("module {:?} was not generated", module.name))
-        })?;
-        let source_start = generated[..module_start].rfind("#[allow(").ok_or_else(|| {
-            ExportError::MarkerLayout(format!("module {:?} has no attribute", module.name))
-        })?;
-        let opening_brace = module_start
-            + generated[module_start..]
-                .find('{')
-                .expect("the module declaration contains an opening brace");
-        // Counting raw braces is only sound because everything typegen emits
-        // inside a module block is either a validated Rust identifier or a
-        // model name that `valid_ident` already accepted — and `{:?}` on a
-        // `str` does not escape braces, so a name containing one would close
-        // this module early and silently truncate the marker file. If
-        // `valid_ident` ever loosens, this needs a real lexer instead.
-        let mut depth = 0usize;
-        let mut source_end = None;
-        for (offset, byte) in generated.as_bytes()[opening_brace..].iter().enumerate() {
-            match byte {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        source_end = Some(opening_brace + offset + 1);
-                        break;
-                    }
+/// Decides how every flow is named in generated source, and writes the
+/// lists that name the ones Rust does not declare.
+///
+/// A converted flow is named by the type its own `#[microflow]` declares. A
+/// flow the project keeps in the imported model is named in its module's
+/// `imported.rs`, beside the converted ones — and an installed module's
+/// flows in that package's `markers.rs`, since a package declares nothing.
+fn model_names<'a>(
+    modules: &[Module],
+    packages: &std::collections::BTreeSet<String>,
+    entities: &'a HashMap<String, TypedEntityTarget>,
+    converted: &[flow_export::ConvertedFlow],
+    plans: &[flow_export::FlowFile],
+    generated: &mut std::collections::BTreeMap<String, GeneratedModule>,
+) -> names::ModelNames<'a> {
+    let converted_stems: HashMap<(&str, &str, bool), &str> = converted
+        .iter()
+        .zip(plans)
+        .map(|(flow, plan)| {
+            (
+                (
+                    flow.module.as_str(),
+                    flow.declaration.name.as_str(),
+                    flow.is_nanoflow(),
+                ),
+                plan.file_stem.as_str(),
+            )
+        })
+        .collect();
+    let mut microflows = HashMap::new();
+    let mut nanoflows = HashMap::new();
+    for module in modules {
+        let Some(module_name) = module.name.as_deref() else {
+            continue;
+        };
+        let stem = module_stem(module_name);
+        let root = module_root(&stem, packages);
+        // One package file names both kinds, so their identifiers share a
+        // namespace there; an authored module keeps them in separate files.
+        let mut package_markers = std::collections::HashSet::new();
+        let mut package_lines = Vec::new();
+        for (nanoflow, flows, targets) in [
+            (false, &module.microflows, &mut microflows),
+            (true, &module.nanoflows, &mut nanoflows),
+        ] {
+            let (keyword, authored) = if nanoflow {
+                ("nanoflow", "presentation::nanoflows")
+            } else {
+                ("microflow", "application::services")
+            };
+            let mut flow_names = flows
+                .iter()
+                .filter_map(|flow| flow.name.as_deref())
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>();
+            flow_names.sort_unstable();
+            flow_names.dedup();
+            let mut taken = std::collections::HashSet::new();
+            let mut imported_lines = Vec::new();
+            for name in flow_names {
+                let qualified = format!("{module_name}.{name}");
+                if root == ModuleRoot::Authored
+                    && let Some(file) = converted_stems.get(&(module_name, name, nanoflow))
+                {
+                    targets.insert(
+                        qualified,
+                        names::FlowTarget {
+                            module_path: format!("crate::{authored}::{stem}::{file}"),
+                            marker: names::flow_marker(name),
+                        },
+                    );
+                    continue;
                 }
-                _ => {}
+                let taken = match root {
+                    ModuleRoot::Authored => &mut taken,
+                    ModuleRoot::Package => &mut package_markers,
+                };
+                let mut marker = names::flow_marker(name);
+                if !taken.insert(marker.clone()) {
+                    marker = (2..)
+                        .map(|suffix| format!("{marker}_{suffix}"))
+                        .find(|candidate| taken.insert(candidate.clone()))
+                        .expect("an unbounded suffix always finds a free name");
+                }
+                let line = if marker == name {
+                    format!("    {keyword} {marker};")
+                } else {
+                    format!("    {keyword} {marker} = {name:?};")
+                };
+                let module_path = match root {
+                    ModuleRoot::Authored => {
+                        imported_lines.push(line);
+                        format!("crate::{authored}::{stem}::imported")
+                    }
+                    ModuleRoot::Package => {
+                        package_lines.push(line);
+                        format!("crate::packages::{stem}::markers")
+                    }
+                };
+                targets.insert(
+                    qualified,
+                    names::FlowTarget {
+                        module_path,
+                        marker,
+                    },
+                );
+            }
+            if !imported_lines.is_empty() {
+                let source = format!(
+                    "//! The {module_name} module's {keyword}s that stay in the imported model.\n//! They are named here so the rest of the project can call and bind\n//! them; each becomes editable Rust when it is declared with\n//! `#[{keyword}]` instead.\n\nmxrs::imported! {{\n    module = {module_name:?};\n{}\n}}\n",
+                    imported_lines.join("\n")
+                );
+                let module = generated_module(generated, module_name);
+                let files = if nanoflow {
+                    &mut module.nanoflows
+                } else {
+                    &mut module.services
+                };
+                files.push(("imported".to_string(), source));
             }
         }
-        let source_end = source_end.ok_or_else(|| {
-            ExportError::MarkerLayout(format!("module {:?} is not balanced", module.name))
-        })?;
-        // Unwrap the `#[allow(...)] pub mod <Name> { … }` block: the items
-        // live directly in the module folder's `markers.rs`, with the
-        // attributes as inner attributes.
-        let attributes = generated[source_start..module_start]
-            .trim()
-            .replace("#[", "#![");
-        let inner_start = opening_brace + 1;
-        let inner_end = source_end - 1;
-        let mut source = format!(
-            "//! Compile-time model markers for the {} module.\n{attributes}\n",
-            module.name
-        );
-        // Sibling-module references were `super::<Module>::…` when every
-        // marker module shared one parent; the stable spelling is now the
-        // `infrastructure::markers` facade.
-        source.push_str(
-            generated[inner_start..inner_end]
-                .trim_end()
-                .replace("super::", "crate::infrastructure::markers::")
-                .as_str(),
-        );
-        source.push('\n');
-        let marker_prefix = format!(" for {}::", module.name);
-        let strip = format!("{}::", module.name);
-        for line in typed_markers
-            .lines()
-            .filter(|line| line.contains(&marker_prefix))
-        {
-            source.push_str(&line.replace(&strip, ""));
-            source.push('\n');
-        }
-
-        let stem = module_stem(&module.name);
-        if !file_names.insert(stem.clone()) {
-            return Err(ExportError::MarkerLayout(format!(
-                "marker filename collision for module {:?}",
-                module.name
-            )));
-        }
-        generated_module(generated_modules, &module.name).markers = Some(source);
-    }
-    Ok(())
-}
-
-/// The stable access path for markers: every module's `markers.rs`
-/// re-exported under its Mendix module name.
-fn render_markers_facade(
-    generated_modules: &std::collections::BTreeMap<String, GeneratedModule>,
-) -> String {
-    let mut index = String::from(
-        "//! Compile-time model markers; each module's markers live in its own\n//! folder and are re-exported here under the Mendix module name.\n\n",
-    );
-    for (stem, module) in generated_modules {
-        if module.markers.is_some() {
-            let _ = writeln!(
-                index,
-                "pub use {} as {};",
-                module.root.path(stem, "domain::markers", "markers"),
-                sanitize_ident(&module.name)
-            );
+        if !package_lines.is_empty() {
+            generated_module(generated, module_name).markers = Some(format!(
+                "//! The flows the {module_name} module provides, named so this project can\n//! call and bind them.\n\nmxrs::imported! {{\n    module = {module_name:?};\n{}\n}}\n",
+                package_lines.join("\n")
+            ));
         }
     }
-    index
+    names::ModelNames {
+        entities,
+        microflows,
+        nanoflows,
+    }
 }
 
 fn format_generated_cargo_project(destination: &Path) -> Result<()> {
@@ -4156,250 +3974,6 @@ fn project_attr_keyword(attribute_type: AttributeType) -> Option<&'static str> {
     }
 }
 
-/// Emits one independently editable Rust source file for a Mendix entity.
-///
-/// The previous import shape placed the entire model in one `project!` macro.
-/// That was compact, but it gave a Cargo project the same ergonomics as a
-/// generated schema dump.  This renderer deliberately targets the public IR
-/// structures instead: each declaration can live in its architectural layer
-/// and composition merges its module into the project.  The IR is still the
-/// exact authoring boundary consumed by `mxrs-writer`.
-fn render_entity_file(
-    module_name: &str,
-    entity: &Entity,
-    known_microflows: &std::collections::HashSet<String>,
-    declarable: &[DeclarableAssociation<'_>],
-) -> String {
-    let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
-    let mut out = String::from("//! Editable Mendix entity declaration.\n\n");
-    let artifact_kind = if entity.oql_view() {
-        "VIEW"
-    } else if entity.persistable {
-        "ENTITY"
-    } else {
-        "DTO"
-    };
-    let _ = writeln!(
-        out,
-        "#[mxrs::entity(module = {module_name:?}, name = {entity_name:?}, kind = {artifact_kind:?})]"
-    );
-    let _ = writeln!(out, "pub fn declaration() -> ::mxrs_ir::ModuleDecl {{");
-    let _ = writeln!(
-        out,
-        "    let mut entity = ::mxrs_ir::EntityDecl::new({entity_name:?});"
-    );
-    if !entity.documentation.is_empty() {
-        let _ = writeln!(
-            out,
-            "    entity.documentation = {:?}.to_string();",
-            entity.documentation
-        );
-    }
-    let _ = writeln!(
-        out,
-        "    entity.persistable = {};",
-        entity.persistable && !entity.oql_view()
-    );
-    match entity.image.as_deref().filter(|image| !image.is_empty()) {
-        Some(image) => {
-            let _ = writeln!(
-                out,
-                "    entity.image = Some(::mxrs_ir::EntityImageDecl::Reference({image:?}.to_string()));"
-            );
-        }
-        None => out.push_str("    entity.image = Some(::mxrs_ir::EntityImageDecl::None);\n"),
-    }
-    if entity.oql_view() {
-        if let Some(source) = entity.oql_source_document() {
-            let _ = writeln!(
-                out,
-                "    entity.source = Some(::mxrs_ir::EntitySourceDecl::OqlView {{ source_document: {source:?}.to_string() }});"
-            );
-        }
-    } else {
-        out.push_str("    entity.source = Some(::mxrs_ir::EntitySourceDecl::Stored);\n");
-    }
-
-    let mut attributes = entity.attributes.clone();
-    attributes.sort_by(|left, right| left.name.cmp(&right.name));
-    for attribute in attributes {
-        let Some(attribute_type) = project_attr_keyword(attribute.attribute_type) else {
-            continue;
-        };
-        let attribute_name = attribute.name.as_deref().unwrap_or("Unnamed");
-        let _ = writeln!(
-            out,
-            "    entity.attributes.push(::mxrs_ir::AttributeDecl {{"
-        );
-        let _ = writeln!(out, "        name: {attribute_name:?}.to_string(),");
-        let _ = writeln!(
-            out,
-            "        documentation: {:?}.to_string(),",
-            attribute.documentation
-        );
-        let _ = writeln!(
-            out,
-            "        attribute_type: ::mxrs_ir::AttributeType::{},",
-            match attribute_type {
-                "string" => "String",
-                "integer" => "Integer",
-                "long" => "Long",
-                "float" => "Float",
-                "decimal" => "Decimal",
-                "boolean" => "Boolean",
-                "datetime" => "DateTime",
-                "autonumber" => "AutoNumber",
-                "hash_string" => "HashString",
-                "binary" => "Binary",
-                "enumeration" => "Enumeration",
-                _ => unreachable!("known attribute keyword"),
-            }
-        );
-        let _ = writeln!(
-            out,
-            "        default_value: {},",
-            rust_option_string(attribute.default_value.as_deref())
-        );
-        let _ = writeln!(out, "        length: {:?},", attribute.length);
-        let _ = writeln!(out, "        localize_date: {:?},", attribute.localize_date);
-        let _ = writeln!(
-            out,
-            "        enumeration: {},",
-            rust_option_string(attribute.enumeration.as_deref())
-        );
-        let _ = writeln!(out, "        required: {},", attribute.required);
-        let _ = writeln!(out, "        unique: {},", attribute.unique);
-        out.push_str("    });\n");
-    }
-
-    // Associations between declared entities must be restated — the writer
-    // preserves only associations whose target lives outside the project.
-    for declared in declarable {
-        let association = declared.association;
-        let _ = writeln!(
-            out,
-            "    entity.associations.push(::mxrs_ir::AssociationDecl {{"
-        );
-        let _ = writeln!(out, "        name: {:?}.to_string(),", declared.name);
-        let _ = writeln!(out, "        target: {:?}.to_string(),", declared.target);
-        let _ = writeln!(
-            out,
-            "        association_type: ::mxrs_ir::AssociationType::{},",
-            match association.association_type {
-                mxrs_model::association::AssociationType::Reference => "Reference",
-                mxrs_model::association::AssociationType::ReferenceSet => "ReferenceSet",
-            }
-        );
-        let _ = writeln!(
-            out,
-            "        owner: ::mxrs_ir::AssociationOwner::{},",
-            match association.owner {
-                mxrs_model::association::Owner::Default => "Default",
-                mxrs_model::association::Owner::Both => "Both",
-            }
-        );
-        let _ = writeln!(
-            out,
-            "        storage: ::mxrs_ir::AssociationStorage::{},",
-            match association.storage_format {
-                mxrs_model::association::StorageFormat::Column => "Column",
-                mxrs_model::association::StorageFormat::Table => "Table",
-            }
-        );
-        let _ = writeln!(
-            out,
-            "        documentation: {:?}.to_string(),",
-            association.documentation
-        );
-        out.push_str("    });\n");
-    }
-
-    if entity.indexes.is_empty() {
-        out.push_str("    entity.indexes = Some(vec![]);\n");
-    } else if entity.indexes.iter().all(|index| {
-        index.members.iter().all(|member| {
-            !matches!(
-                member.kind,
-                mxrs_model::entity::IndexMemberKind::Unresolved(_)
-            )
-        })
-    }) {
-        out.push_str("    entity.indexes = Some(vec![\n");
-        for index in &entity.indexes {
-            out.push_str("        ::mxrs_ir::EntityIndexDecl { members: vec![\n");
-            for member in &index.members {
-                match &member.kind {
-                    mxrs_model::entity::IndexMemberKind::Attribute(name) => {
-                        let name = name.rsplit('.').next().unwrap_or(name);
-                        let _ = writeln!(
-                            out,
-                            "            ::mxrs_ir::IndexMemberDecl::Attribute {{ name: {name:?}.to_string(), ascending: {} }},",
-                            member.ascending
-                        );
-                    }
-                    mxrs_model::entity::IndexMemberKind::System(system) => {
-                        let system = match system.native_name() {
-                            "CreatedDate" => "CreatedDate",
-                            "ChangedDate" => "ChangedDate",
-                            "Owner" => "Owner",
-                            "ChangedBy" => "ChangedBy",
-                            _ => unreachable!("known system member"),
-                        };
-                        let _ = writeln!(
-                            out,
-                            "            ::mxrs_ir::IndexMemberDecl::System {{ member: ::mxrs_ir::SystemMember::{system}, ascending: {} }},",
-                            member.ascending
-                        );
-                    }
-                    mxrs_model::entity::IndexMemberKind::Unresolved(_) => {
-                        unreachable!("checked above")
-                    }
-                }
-            }
-            let _ = writeln!(
-                out,
-                "        ], include_offline: {} }},",
-                index.include_offline
-            );
-        }
-        out.push_str("    ]);\n");
-    }
-
-    let lifecycle_complete = entity.lifecycle.iter().all(|callback| {
-        matches!(
-            callback.event.as_str(),
-            "before_commit" | "after_commit" | "before_delete" | "after_delete"
-        ) && known_microflows.contains(&callback.handler)
-    });
-    if entity.lifecycle.is_empty() {
-        out.push_str("    entity.lifecycle = Some(vec![]);\n");
-    } else if lifecycle_complete {
-        out.push_str("    entity.lifecycle = Some(vec![\n");
-        for callback in &entity.lifecycle {
-            let event = match callback.event.as_str() {
-                "before_commit" => "BeforeCommit",
-                "after_commit" => "AfterCommit",
-                "before_delete" => "BeforeDelete",
-                "after_delete" => "AfterDelete",
-                _ => unreachable!("checked above"),
-            };
-            let _ = writeln!(
-                out,
-                "        ::mxrs_ir::LifecycleDecl {{ event: ::mxrs_ir::LifecycleEvent::{event}, handler: {:?}.to_string(), pass_event_object: {}, raise_error_on_false: {} }},",
-                callback.handler, callback.pass_event_object, callback.raise_error_on_false
-            );
-        }
-        out.push_str("    ]);\n");
-    }
-
-    let _ = writeln!(
-        out,
-        "    let mut module = ::mxrs_ir::ModuleDecl {{ name: {module_name:?}.to_string(), ..Default::default() }};"
-    );
-    out.push_str("    module.entities.push(entity);\n    module\n}\n");
-    out
-}
-
 /// One generated service port: the `application/ports` trait for one Mendix
 /// module's runnable microflows, plus everything the runtime adapter impl
 /// needs to drive them through `FlowEngine::call`.
@@ -4562,6 +4136,10 @@ fn collect_service_ports(
     ports
 }
 
+/// Parameters, besides the receiver, at which Clippy's `too_many_arguments`
+/// fires on a port method: its limit is seven arguments in all.
+const TOO_MANY_PARAMETERS: usize = 7;
+
 fn render_service_port(port: &ServicePort) -> String {
     let handles = port
         .methods
@@ -4579,6 +4157,11 @@ fn render_service_port(port: &ServicePort) -> String {
             "    /// Drives the `{}.{}` microflow.",
             port.module_name, method.flow_name
         );
+        // The port mirrors its microflow's parameters one for one, however
+        // many the model declares.
+        if method.parameters.len() >= TOO_MANY_PARAMETERS {
+            out.push_str("    #[allow(clippy::too_many_arguments)]\n");
+        }
         let _ = writeln!(
             out,
             "    fn {}(&mut self{}) -> Result<{}, ServiceError>;",
@@ -6436,10 +6019,15 @@ fn render_action_port_file(module: &ActionPortModule) -> String {
     for action in &module.actions {
         let _ = writeln!(
             out,
-            "\n/// Contract of the `{}.{}` Java action.\npub trait {} {{\n    fn call(&self{}) -> Result<{}, ServiceError>;\n}}",
+            "\n/// Contract of the `{}.{}` Java action.\npub trait {} {{\n{}    fn call(&self{}) -> Result<{}, ServiceError>;\n}}",
             module.module_name,
             action.action_name,
             action.trait_name,
+            if action.parameters.len() >= TOO_MANY_PARAMETERS {
+                "    #[allow(clippy::too_many_arguments)]\n"
+            } else {
+                ""
+            },
             action
                 .parameters
                 .iter()
@@ -6512,297 +6100,6 @@ fn render_action_registry_file(module: &ActionPortModule) -> String {
         );
     }
     out
-}
-
-/// Renders a Mendix entity as a typed `#[derive(MxEntity)]` struct — the
-/// same authoring surface a hand author uses — instead of an imperative IR
-/// dump. Returns `None` when the entity carries something the derive cannot
-/// yet express (an image, an OQL view source, indexes, lifecycle callbacks,
-/// or names that do not survive as Rust identifiers); those fall back to
-/// [`render_entity_file`], so nothing is lost, only less eloquent.
-///
-/// Equivalence with the IR renderer is deliberate, not incidental: the
-/// derive lowers to the same `mxrs-dsl` builder calls, attribute defaults
-/// (`None`, `false`) match [`::mxrs_ir::AttributeDecl::new`], and the
-/// eligibility gate excludes exactly the fields where "preserve imported"
-/// and "explicitly empty" could diverge.
-fn render_typed_entity_file(
-    module_name: &str,
-    entity: &Entity,
-    derived_enums: &HashMap<String, DerivedEnumeration>,
-    ctx: &EntityLayerContext<'_>,
-) -> Option<String> {
-    let entity_name = entity.name.as_deref().filter(|name| !name.is_empty())?;
-    if entity.oql_view()
-        || entity
-            .image
-            .as_deref()
-            .is_some_and(|image| !image.is_empty())
-        || !entity.indexes.is_empty()
-        || !entity.lifecycle.is_empty()
-    {
-        return None;
-    }
-    // The struct is UpperCamelCase like any Rust type; when Mendix's own
-    // name differs (`Custom_FormData`), `name = "..."` keeps the model's.
-    let mut type_name = derive_pascal_case(&sanitize_ident(entity_name));
-    if type_name.starts_with(|c: char| c.is_ascii_digit()) {
-        type_name.insert(0, '_');
-    }
-    if type_name.is_empty() || rust_keyword(&type_name) {
-        return None;
-    }
-
-    let mut attributes = entity.attributes.clone();
-    attributes.sort_by(|left, right| left.name.cmp(&right.name));
-
-    // Associations between declared entities become Reference<T> fields on
-    // this struct; every target must itself be a typed struct this file can
-    // name, and a domain entity cannot reach into the application layer.
-    let own_qualified = format!("{module_name}.{entity_name}");
-    let own_dto = !entity.persistable;
-    let declarable = declarable_associations(entity, ctx);
-    for declared in &declarable {
-        if declared.target == own_qualified {
-            continue;
-        }
-        let target = ctx.typed.get(&declared.target)?;
-        if !own_dto && target.dto {
-            return None;
-        }
-    }
-
-    // A referenced Rust type — a derived enum, or the target struct of an
-    // association — is imported once by its short name; a name that
-    // collides with another import, this entity, or an item `declaration()`
-    // needs from the prelude is spelled by its full path instead.
-    let mut requests: Vec<(&str, String)> = Vec::new();
-    for attribute in &attributes {
-        let Some(derived) = attribute
-            .enumeration
-            .as_deref()
-            .and_then(|qualified| derived_enums.get(qualified))
-        else {
-            continue;
-        };
-        if enum_type_shadows_scalar(&derived.type_name) {
-            continue;
-        }
-        requests.push((&derived.type_name, derived.module_path()));
-    }
-    for declared in &declarable {
-        if declared.target == own_qualified {
-            continue;
-        }
-        let target = ctx.typed.get(&declared.target)?;
-        if enum_type_shadows_scalar(&target.type_name) {
-            // The full path is unambiguous for an association target; only
-            // the bare import would shadow a prelude scalar.
-            continue;
-        }
-        requests.push((&target.type_name, typed_entity_module_path(target)));
-    }
-    let mut imported: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
-    let mut colliding = std::collections::HashSet::new();
-    for (name, path) in &requests {
-        if let Some(existing) = imported.insert(name, path.as_str())
-            && existing != path.as_str()
-        {
-            colliding.insert(*name);
-        }
-    }
-    imported.retain(|name, _| {
-        !colliding.contains(name)
-            && *name != type_name
-            && !matches!(
-                *name,
-                "ModuleBuilder" | "ModuleDecl" | "MxEntity" | "Reference" | "ReferenceSet"
-            )
-    });
-    let spell = |name: &str, path: &str| -> String {
-        if imported.get(name).is_some_and(|found| *found == path) {
-            name.to_string()
-        } else {
-            format!("{path}::{name}")
-        }
-    };
-    let enum_spellings: HashMap<&str, String> = attributes
-        .iter()
-        .filter_map(|attribute| {
-            let qualified = attribute.enumeration.as_deref()?;
-            let derived = derived_enums.get(qualified)?;
-            if enum_type_shadows_scalar(&derived.type_name) {
-                return None;
-            }
-            Some((qualified, spell(&derived.type_name, &derived.module_path())))
-        })
-        .collect();
-
-    let mut seen = std::collections::HashSet::new();
-    let mut fields = String::new();
-    for attribute in &attributes {
-        let kind = project_attr_keyword(attribute.attribute_type)?;
-        let mendix_name = attribute.name.as_deref().filter(|name| !name.is_empty())?;
-        let field = snake_ident(mendix_name);
-        if rust_keyword(&field) || !seen.insert(field.clone()) {
-            return None;
-        }
-        let mut options = Vec::new();
-        if derive_pascal_case(&field) != mendix_name {
-            options.push(format!("name = {mendix_name:?}"));
-        }
-        // The kinds the derive infers from the field type stay implicit.
-        let (scalar_type, explicit_kind) = match kind {
-            "string" => ("MxString", false),
-            "integer" => ("MxInteger", false),
-            "long" => ("MxLong", false),
-            "float" => ("MxFloat", false),
-            "decimal" => ("MxDecimal", false),
-            "boolean" => ("MxBool", false),
-            "datetime" => ("MxDateTime", false),
-            "autonumber" => ("MxLong", true),
-            "hash_string" => ("MxString", true),
-            "binary" => ("Vec<u8>", true),
-            "enumeration" => ("MxString", true),
-            _ => return None,
-        };
-        let mut field_type = scalar_type.to_string();
-        if kind == "enumeration" {
-            let enumeration = attribute
-                .enumeration
-                .as_deref()
-                .filter(|name| !name.is_empty())?;
-            match enum_spellings.get(enumeration) {
-                Some(spelling) => field_type = spelling.clone(),
-                None => {
-                    options.push(format!("kind = {kind:?}"));
-                    options.push(format!("enumeration = {enumeration:?}"));
-                }
-            }
-        } else if explicit_kind {
-            options.push(format!("kind = {kind:?}"));
-        }
-        if let Some(default) = attribute.default_value.as_deref() {
-            options.push(format!("default = {default:?}"));
-        }
-        if !attribute.documentation.is_empty() {
-            options.push(format!("documentation = {:?}", attribute.documentation));
-        }
-        if let Some(length) = attribute.length {
-            options.push(format!("length = {length}"));
-        }
-        if let Some(localize_date) = attribute.localize_date {
-            options.push(format!("localize_date = {localize_date}"));
-        }
-        if attribute.required {
-            options.push("required".to_string());
-        }
-        if attribute.unique {
-            options.push("unique".to_string());
-        }
-        if !options.is_empty() {
-            let _ = writeln!(fields, "    #[mxrs({})]", options.join(", "));
-        }
-        let _ = writeln!(fields, "    pub {field}: {field_type},");
-    }
-
-    for declared in &declarable {
-        // The derive names an association `{Entity}_{PascalField}` by
-        // default; a name of that shape round-trips from the field alone.
-        let (field, explicit_name) = match declared
-            .name
-            .strip_prefix(&format!("{entity_name}_"))
-            .filter(|rest| !rest.is_empty())
-        {
-            Some(rest) => {
-                let field = snake_ident(rest);
-                let explicit = derive_pascal_case(&field) != rest;
-                (field, explicit)
-            }
-            None => (snake_ident(declared.name), true),
-        };
-        if field.is_empty() || rust_keyword(&field) || !seen.insert(field.clone()) {
-            return None;
-        }
-        let spelling = if declared.target == own_qualified {
-            type_name.clone()
-        } else {
-            let target = ctx.typed.get(&declared.target)?;
-            spell(&target.type_name, &typed_entity_module_path(target))
-        };
-        let container = match declared.association.association_type {
-            mxrs_model::association::AssociationType::Reference => "Reference",
-            mxrs_model::association::AssociationType::ReferenceSet => "ReferenceSet",
-        };
-        let mut options = Vec::new();
-        if explicit_name {
-            options.push(format!("association = {:?}", declared.name));
-        }
-        if !declared.association.documentation.is_empty() {
-            options.push(format!(
-                "documentation = {:?}",
-                declared.association.documentation
-            ));
-        }
-        if matches!(
-            declared.association.owner,
-            mxrs_model::association::Owner::Both
-        ) {
-            options.push("owner = \"Both\"".to_string());
-        }
-        if matches!(
-            declared.association.storage_format,
-            mxrs_model::association::StorageFormat::Table
-        ) {
-            options.push("storage = \"Table\"".to_string());
-        }
-        if !options.is_empty() {
-            let _ = writeln!(fields, "    #[mxrs({})]", options.join(", "));
-        }
-        let _ = writeln!(fields, "    pub {field}: {container}<{spelling}>,");
-    }
-
-    let mut out =
-        String::from("//! Editable Mendix entity declaration.\n\nuse mxrs::prelude::*;\n");
-    if !imported.is_empty() {
-        out.push('\n');
-        for (name, path) in &imported {
-            let _ = writeln!(out, "use {path}::{name};");
-        }
-    }
-    out.push('\n');
-    let artifact_kind = if entity.persistable { "ENTITY" } else { "DTO" };
-    let _ = writeln!(
-        out,
-        "#[mxrs::entity(module = {module_name:?}, name = {entity_name:?}, kind = {artifact_kind:?})]"
-    );
-    out.push_str("#[derive(MxEntity)]\n");
-    let mut entity_options = vec![format!("module = {module_name:?}")];
-    if type_name != entity_name {
-        entity_options.insert(0, format!("name = {entity_name:?}"));
-    }
-    if !entity.documentation.is_empty() {
-        entity_options.push(format!("documentation = {:?}", entity.documentation));
-    }
-    if !entity.persistable {
-        entity_options.push("persistable = false".to_string());
-    }
-    let _ = writeln!(out, "#[mxrs({})]", entity_options.join(", "));
-    if fields.is_empty() {
-        let _ = writeln!(out, "pub struct {type_name} {{}}");
-    } else {
-        let _ = writeln!(out, "pub struct {type_name} {{\n{fields}}}");
-    }
-    let _ = writeln!(
-        out,
-        "\npub fn declaration() -> ModuleDecl {{\n    let mut module = ModuleBuilder::new({module_name:?});\n    {type_name}::mx_register(&mut module);\n    module.into_decl()\n}}"
-    );
-    Some(out)
-}
-
-/// The module path a typed entity's struct is importable from.
-fn typed_entity_module_path(target: &TypedEntityTarget) -> String {
-    target.module_path()
 }
 
 /// Enum type names the entity derive would mistake for a scalar kind when
@@ -7099,19 +6396,19 @@ fn write_authored_layers(
             folder: "domain/entities",
             subject: "persisted entities",
             modules: files(|module| &module.entities),
-            apply: Some("project.merge_module({stem}::declaration());"),
+            apply: None,
         },
         AuthoredConcept {
             folder: "domain/dtos",
             subject: "non-persistable and view entities",
             modules: files(|module| &module.dtos),
-            apply: Some("project.merge_module({stem}::declaration());"),
+            apply: None,
         },
         AuthoredConcept {
             folder: "domain/enumerations",
             subject: "enumerations",
             modules: files(|module| &module.enumerations),
-            apply: Some("project.merge_module({stem}::declaration());"),
+            apply: None,
         },
         AuthoredConcept {
             folder: "domain/documents",
@@ -7120,16 +6417,16 @@ fn write_authored_layers(
             apply: Some("project.merge_module({stem}::declaration());"),
         },
         AuthoredConcept {
-            folder: "application/use_cases",
-            subject: "server-side microflows as application use cases",
+            folder: "application/services",
+            subject: "server-side microflows as application services",
             modules: files(|module| &module.services),
-            apply: Some("project.merge_module({stem}::declaration());"),
+            apply: None,
         },
         AuthoredConcept {
             folder: "presentation/nanoflows",
             subject: "nanoflows",
             modules: files(|module| &module.nanoflows),
-            apply: Some("project.merge_module({stem}::declaration());"),
+            apply: None,
         },
     ];
     let mut applied_layers: AuthoredLayers = Default::default();
@@ -7143,7 +6440,6 @@ fn write_authored_layers(
     }
     write_authored_pages(destination, modules, &mut applied_layers)?;
     write_authored_module_security(destination, modules, &mut applied_layers)?;
-    write_authored_markers(destination, modules, &mut applied_layers)?;
     write_authored_ports(destination, modules, &mut applied_layers)?;
     write_authored_http(destination, modules)?;
     Ok(applied_layers)
@@ -7281,36 +6577,6 @@ fn write_authored_module_security(
         write_text(&directory.join(format!("{stem}.rs")), source)?;
     }
     record_concept(applied, "domain", "module_security", true);
-    Ok(())
-}
-
-/// Compile-time markers, one file per module. They declare nothing — they are
-/// the type identity every marker-checked reference resolves through.
-fn write_authored_markers(
-    destination: &Path,
-    modules: &[(&String, &GeneratedModule)],
-    declared: &mut AuthoredLayers,
-) -> Result<()> {
-    let owned: Vec<_> = modules
-        .iter()
-        .filter_map(|(stem, module)| module.markers.as_ref().map(|source| (stem, source)))
-        .collect();
-    if owned.is_empty() {
-        return Ok(());
-    }
-    let directory = destination.join("src/domain/markers");
-    std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
-    let mut index = String::from(
-        "//! Compile-time model markers, one file per Mendix module. The facade\n//! that re-exports them under their Mendix names is\n//! `crate::infrastructure::markers`.\n\n",
-    );
-    for (stem, _) in &owned {
-        let _ = writeln!(index, "pub mod {stem};");
-    }
-    write_text(&directory.join("mod.rs"), &index)?;
-    for (stem, source) in owned {
-        write_text(&directory.join(format!("{stem}.rs")), source)?;
-    }
-    record_concept(declared, "domain", "markers", false);
     Ok(())
 }
 
@@ -7686,121 +6952,6 @@ fn write_concept_files(
     Ok(())
 }
 
-/// Collects each module's entity declarations: persisted entities into the
-/// module's `domain/entities`, everything non-persistent (including OQL
-/// view entities) into its `dto/` folder.
-fn collect_entity_layer(
-    modules: &[Module],
-    packages: &std::collections::BTreeSet<String>,
-    derived_enums: &HashMap<String, DerivedEnumeration>,
-    generated: &mut std::collections::BTreeMap<String, GeneratedModule>,
-) -> Result<HashMap<String, TypedEntityTarget>> {
-    let microflows = known_microflows(modules);
-
-    let mut ctx = EntityLayerContext {
-        associations_by_entity: HashMap::new(),
-        qualified_by_id: HashMap::new(),
-        declared: std::collections::HashSet::new(),
-        typed: HashMap::new(),
-    };
-    for module in modules {
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
-        for entity in module.entities() {
-            let Some(entity_name) = entity.name.as_deref().filter(|name| !name.is_empty()) else {
-                continue;
-            };
-            let qualified = format!("{module_name}.{entity_name}");
-            ctx.declared.insert(qualified.clone());
-            if let Some(id) = entity.id.as_deref() {
-                ctx.qualified_by_id.insert(id, qualified.clone());
-            }
-            let mut type_name = derive_pascal_case(&sanitize_ident(entity_name));
-            if type_name.starts_with(|c: char| c.is_ascii_digit()) {
-                type_name.insert(0, '_');
-            }
-            if type_name.is_empty() || rust_keyword(&type_name) {
-                continue;
-            }
-            let dto = !entity.persistable || entity.oql_view();
-            ctx.typed.insert(
-                qualified,
-                TypedEntityTarget {
-                    root: module_root(&module_stem(module_name), packages),
-                    module_stem: module_stem(module_name),
-                    file_stem: inner_file_stem(entity_name),
-                    type_name,
-                    dto,
-                },
-            );
-        }
-        for association in module.associations() {
-            if let Some(from) = association.from_entity_id.as_deref() {
-                ctx.associations_by_entity
-                    .entry(from)
-                    .or_default()
-                    .push(association);
-            }
-        }
-    }
-    // Typed eligibility is mutual: a Reference<T> field needs its target to
-    // render as a struct too, so entities that fall back to the IR form
-    // demote their referrers until the set is stable.
-    loop {
-        let mut demoted = Vec::new();
-        for module in modules {
-            let module_name = module.name.as_deref().unwrap_or("Unnamed");
-            for entity in module.entities() {
-                let Some(entity_name) = entity.name.as_deref() else {
-                    continue;
-                };
-                let qualified = format!("{module_name}.{entity_name}");
-                if !ctx.typed.contains_key(&qualified) {
-                    continue;
-                }
-                if render_typed_entity_file(module_name, entity, derived_enums, &ctx).is_none() {
-                    demoted.push(qualified);
-                }
-            }
-        }
-        if demoted.is_empty() {
-            break;
-        }
-        for qualified in demoted {
-            ctx.typed.remove(&qualified);
-        }
-    }
-
-    for module in modules {
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
-        let mut module_entities = module.entities().iter().collect::<Vec<_>>();
-        module_entities.sort_by(|left, right| left.name.cmp(&right.name));
-        for entity in module_entities {
-            let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
-            let dto = !entity.persistable || entity.oql_view();
-            let stem = inner_file_stem(entity_name);
-            let qualified = format!("{module_name}.{entity_name}");
-            let source = if ctx.typed.contains_key(&qualified) {
-                render_typed_entity_file(module_name, entity, derived_enums, &ctx)
-                    .expect("the fixed point above only keeps renderable entities")
-            } else {
-                render_entity_file(
-                    module_name,
-                    entity,
-                    &microflows,
-                    &declarable_associations(entity, &ctx),
-                )
-            };
-            let target = generated_module(generated, module_name);
-            if dto {
-                target.dtos.push((stem, source));
-            } else {
-                target.entities.push((stem, source));
-            }
-        }
-    }
-    Ok(ctx.typed)
-}
-
 /// File stem for one concept inside its module folder: snake_case, like
 /// any other Rust module file. A Mendix name that already separates words
 /// with underscores (`Jabil_User__EU__Location`) must not turn into a
@@ -8018,235 +7169,6 @@ mod tests {
         assert_eq!(sanitize_ident("2FA"), "_2FA");
         assert_eq!(sanitize_ident(""), "_");
         assert_eq!(sanitize_ident("Order"), "Order");
-    }
-
-    fn bare_entity(name: &str) -> Entity {
-        use mxrs_model::entity::{Location, SystemMembers};
-        Entity {
-            id: None,
-            name: Some(name.to_string()),
-            qualified_name: None,
-            documentation: String::new(),
-            persistable: true,
-            location: Location { x: 0, y: 0 },
-            data_storage_guid: None,
-            image: None,
-            export_level: String::new(),
-            generalization: None,
-            access_rules: Vec::new(),
-            indexes: Vec::new(),
-            system_members: SystemMembers::default(),
-            lifecycle: Vec::new(),
-            validation_rules: Vec::new(),
-            source: None,
-            oql_query: None,
-            native_type: None,
-            attributes: Vec::new(),
-        }
-    }
-
-    fn attribute(name: &str, attribute_type: AttributeType) -> mxrs_model::attribute::Attribute {
-        mxrs_model::attribute::Attribute {
-            id: None,
-            name: Some(name.to_string()),
-            documentation: String::new(),
-            attribute_type,
-            default_value: None,
-            data_storage_guid: None,
-            export_level: String::new(),
-            raw_type_doc: None,
-            raw_value_doc: None,
-            length: None,
-            localize_date: None,
-            enumeration: None,
-            required: false,
-            unique: false,
-        }
-    }
-
-    fn empty_layer_context() -> EntityLayerContext<'static> {
-        EntityLayerContext {
-            associations_by_entity: HashMap::new(),
-            qualified_by_id: HashMap::new(),
-            declared: std::collections::HashSet::new(),
-            typed: HashMap::new(),
-        }
-    }
-
-    /// The typed renderer is the authoring surface a hand author uses: the
-    /// whole file is pinned so a regression in eloquence — a stray absolute
-    /// path, a lost option, a broken field name — fails loudly.
-    #[test]
-    fn typed_entity_files_are_derive_structs_pinned_whole() {
-        let mut entity = bare_entity("Parameter");
-        entity.documentation = "Catalog parameter.".to_string();
-        let mut limit = attribute("Limit", AttributeType::Enum);
-        limit.enumeration = Some("Catalogs.ENUM_Limit".to_string());
-        limit.default_value = Some(String::new());
-        entity.attributes.push(limit);
-        let mut measure = attribute("ParameterToMeasure", AttributeType::String);
-        measure.length = Some(50);
-        measure.required = true;
-        entity.attributes.push(measure);
-        let mut sequence = attribute("APIKey", AttributeType::AutoNumber);
-        sequence.unique = true;
-        entity.attributes.push(sequence);
-        let mut updated = attribute("UpdatedAt", AttributeType::DateTime);
-        updated.localize_date = Some(false);
-        entity.attributes.push(updated);
-
-        let rendered =
-            render_typed_entity_file("Catalogs", &entity, &HashMap::new(), &empty_layer_context())
-                .expect("typed-eligible");
-        assert_eq!(
-            rendered,
-            r#"//! Editable Mendix entity declaration.
-
-use mxrs::prelude::*;
-
-#[mxrs::entity(module = "Catalogs", name = "Parameter", kind = "ENTITY")]
-#[derive(MxEntity)]
-#[mxrs(module = "Catalogs", documentation = "Catalog parameter.")]
-pub struct Parameter {
-    #[mxrs(name = "APIKey", kind = "autonumber", unique)]
-    pub api_key: MxLong,
-    #[mxrs(kind = "enumeration", enumeration = "Catalogs.ENUM_Limit", default = "")]
-    pub limit: MxString,
-    #[mxrs(length = 50, required)]
-    pub parameter_to_measure: MxString,
-    #[mxrs(localize_date = false)]
-    pub updated_at: MxDateTime,
-}
-
-pub fn declaration() -> ModuleDecl {
-    let mut module = ModuleBuilder::new("Catalogs");
-    Parameter::mx_register(&mut module);
-    module.into_decl()
-}
-"#
-        );
-
-        // A non-persistable Mendix object says so once, at the entity level.
-        let mut dto = bare_entity("AccountPasswordData");
-        dto.persistable = false;
-        let rendered = render_typed_entity_file(
-            "Administration",
-            &dto,
-            &HashMap::new(),
-            &empty_layer_context(),
-        )
-        .expect("typed-eligible");
-        assert!(
-            rendered.contains("#[mxrs(module = \"Administration\", persistable = false)]"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("pub struct AccountPasswordData {}"),
-            "{rendered}"
-        );
-    }
-
-    /// Associations between declared entities become Reference<T> fields: a
-    /// self-reference names the entity's own struct, a default-shaped name
-    /// needs no restatement, and non-default name/owner/storage/
-    /// documentation are restated as field options.
-    #[test]
-    fn entity_association_fields_reference_the_typed_targets() {
-        use mxrs_model::association::{Association, AssociationType, Owner, StorageFormat};
-
-        let association =
-            |name: &str, to: &str, set: bool, owner, storage, docs: &str| Association {
-                id: None,
-                name: Some(name.to_string()),
-                documentation: docs.to_string(),
-                from_entity_id: Some("t1".to_string()),
-                to_entity_id: Some(to.to_string()),
-                association_type: if set {
-                    AssociationType::ReferenceSet
-                } else {
-                    AssociationType::Reference
-                },
-                owner,
-                storage_format: storage,
-                source: None,
-                guid: None,
-                delete_behavior: None,
-                export_level: "Hidden".to_string(),
-            };
-        let owned = [
-            association(
-                "Ticket_Parent",
-                "t1",
-                false,
-                Owner::Default,
-                StorageFormat::Column,
-                "",
-            ),
-            association(
-                "Assigned",
-                "o1",
-                true,
-                Owner::Both,
-                StorageFormat::Table,
-                "Who.",
-            ),
-        ];
-
-        let mut ctx = empty_layer_context();
-        ctx.associations_by_entity
-            .insert("t1", owned.iter().collect());
-        ctx.qualified_by_id.insert("t1", "Sales.Ticket".to_string());
-        ctx.qualified_by_id.insert("o1", "Sales.Order".to_string());
-        ctx.declared.insert("Sales.Ticket".to_string());
-        ctx.declared.insert("Sales.Order".to_string());
-        ctx.typed.insert(
-            "Sales.Ticket".to_string(),
-            TypedEntityTarget {
-                root: ModuleRoot::Authored,
-                module_stem: "sales".to_string(),
-                file_stem: "ticket".to_string(),
-                type_name: "Ticket".to_string(),
-                dto: false,
-            },
-        );
-        ctx.typed.insert(
-            "Sales.Order".to_string(),
-            TypedEntityTarget {
-                root: ModuleRoot::Authored,
-                module_stem: "sales".to_string(),
-                file_stem: "order".to_string(),
-                type_name: "Order".to_string(),
-                dto: false,
-            },
-        );
-
-        let mut entity = bare_entity("Ticket");
-        entity.id = Some("t1".to_string());
-        let rendered = render_typed_entity_file("Sales", &entity, &HashMap::new(), &ctx)
-            .expect("typed-eligible");
-        assert!(
-            rendered.contains("use crate::domain::entities::sales::order::Order;"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("pub parent: Reference<Ticket>,"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains(
-                "#[mxrs(association = \"Assigned\", documentation = \"Who.\", owner = \"Both\", storage = \"Table\")]"
-            ),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("pub assigned: ReferenceSet<Order>,"),
-            "{rendered}"
-        );
-
-        // A target that keeps the IR form demotes the referrer too — the
-        // struct cannot name a type that does not exist.
-        ctx.typed.remove("Sales.Order");
-        assert!(render_typed_entity_file("Sales", &entity, &HashMap::new(), &ctx).is_none());
     }
 
     /// A published REST service becomes an axum router: the model's own
@@ -8577,9 +7499,8 @@ pub fn declaration() -> ModuleDecl {
         let authored = GeneratedModule {
             name: "Sales".to_string(),
             entities: vec![("order".to_string(), "// order\n".to_string())],
-            services: vec![("act_ping".to_string(), "// ping\n".to_string())],
+            services: vec![("ping_service".to_string(), "// ping\n".to_string())],
             security: Some("// roles\n".to_string()),
-            markers: Some("// markers\n".to_string()),
             ..GeneratedModule::default()
         };
         let installed = GeneratedModule {
@@ -8609,9 +7530,13 @@ pub fn declaration() -> ModuleDecl {
             "{authored_index}"
         );
         assert!(!authored_index.contains("sweet_alert2"), "{authored_index}");
-        assert!(
-            authored_index.contains("    sales::apply(project);"),
-            "{authored_index}"
+        // An authored concept is a list of modules and nothing else: each
+        // declaration registers itself, so there is no `apply` to keep in
+        // step with the files.
+        assert!(!authored_index.contains("apply"), "{authored_index}");
+        assert_eq!(
+            read("src/domain/entities/sales/mod.rs"),
+            "//! The sales module's entities.\n\npub mod order;\n"
         );
         let package_index = read("src/packages/mod.rs");
         assert!(
@@ -8667,10 +7592,15 @@ pub fn declaration() -> ModuleDecl {
                 "a package must not carry {declaration}",
             );
         }
-        // The authored module keeps all of it, applies included.
-        assert!(
-            read("src/application/use_cases/mod.rs").contains("    sales::apply(project);"),
+        // The authored module keeps all of it.
+        assert_eq!(
+            read("src/application/services/sales/mod.rs"),
+            "//! The sales module's services.\n\npub mod ping_service;\n",
             "an authored module still declares its microflows",
+        );
+        assert!(
+            !generated.path().join("src/domain/markers").exists(),
+            "an authored module's names live in the files that declare them",
         );
         assert!(
             generated
@@ -8896,6 +7826,7 @@ pub fn declaration() -> ModuleDecl {
                 file_stem: "order".to_string(),
                 type_name: "Order".to_string(),
                 dto: false,
+                attributes: HashMap::new(),
             },
         );
         let action = mxrs_bson::doc! {
@@ -8969,129 +7900,10 @@ pub fn declaration() -> ModuleDecl {
         );
     }
 
-    /// An enumeration that rendered as a real Rust enum becomes the field's
-    /// type — imported once when the short name is free, spelled by its full
-    /// path on a collision, and left as the string form when the enum never
-    /// derived.
+    /// An enumeration is the Rust enum that declares it; the whole file is
+    /// pinned like the entity render.
     #[test]
-    fn entity_enumeration_fields_reference_the_derived_enum_types() {
-        let mut derived = HashMap::new();
-        derived.insert(
-            "Catalogs.ENUM_Limit".to_string(),
-            DerivedEnumeration {
-                root: ModuleRoot::Authored,
-                module_stem: "catalogs".into(),
-                file_stem: "enum_limit".into(),
-                type_name: "ENUMLimit".into(),
-            },
-        );
-        derived.insert(
-            "Sales.Status".to_string(),
-            DerivedEnumeration {
-                root: ModuleRoot::Authored,
-                module_stem: "sales".into(),
-                file_stem: "status".into(),
-                type_name: "Status".into(),
-            },
-        );
-        derived.insert(
-            "Support.Status".to_string(),
-            DerivedEnumeration {
-                root: ModuleRoot::Authored,
-                module_stem: "support".into(),
-                file_stem: "status".into(),
-                type_name: "Status".into(),
-            },
-        );
-
-        let mut entity = bare_entity("Parameter");
-        let mut limit = attribute("Limit", AttributeType::Enum);
-        limit.enumeration = Some("Catalogs.ENUM_Limit".to_string());
-        limit.default_value = Some("Ten".to_string());
-        entity.attributes.push(limit);
-        let mut sales = attribute("SalesStatus", AttributeType::Enum);
-        sales.enumeration = Some("Sales.Status".to_string());
-        entity.attributes.push(sales);
-        let mut support = attribute("SupportStatus", AttributeType::Enum);
-        support.enumeration = Some("Support.Status".to_string());
-        entity.attributes.push(support);
-        let mut opaque = attribute("Opaque", AttributeType::Enum);
-        opaque.enumeration = Some("Catalogs.Unknown".to_string());
-        entity.attributes.push(opaque);
-
-        let rendered =
-            render_typed_entity_file("Catalogs", &entity, &derived, &empty_layer_context())
-                .expect("typed-eligible");
-        assert_eq!(
-            rendered,
-            r#"//! Editable Mendix entity declaration.
-
-use mxrs::prelude::*;
-
-use crate::domain::enumerations::catalogs::enum_limit::ENUMLimit;
-
-#[mxrs::entity(module = "Catalogs", name = "Parameter", kind = "ENTITY")]
-#[derive(MxEntity)]
-#[mxrs(module = "Catalogs")]
-pub struct Parameter {
-    #[mxrs(default = "Ten")]
-    pub limit: ENUMLimit,
-    #[mxrs(kind = "enumeration", enumeration = "Catalogs.Unknown")]
-    pub opaque: MxString,
-    pub sales_status: crate::domain::enumerations::sales::status::Status,
-    pub support_status: crate::domain::enumerations::support::status::Status,
-}
-
-pub fn declaration() -> ModuleDecl {
-    let mut module = ModuleBuilder::new("Catalogs");
-    Parameter::mx_register(&mut module);
-    module.into_decl()
-}
-"#
-        );
-
-        // An enum sharing the entity's own type name keeps its full path.
-        let mut status = bare_entity("Status");
-        let mut current = attribute("Current", AttributeType::Enum);
-        current.enumeration = Some("Sales.Status".to_string());
-        status.attributes.push(current);
-        let rendered = render_typed_entity_file("Sales", &status, &derived, &empty_layer_context())
-            .expect("typed-eligible");
-        assert!(
-            rendered.contains("pub current: crate::domain::enumerations::sales::status::Status,"),
-            "{rendered}"
-        );
-        assert!(!rendered.contains("use crate::"), "{rendered}");
-
-        // An enum whose Rust name the derive would read as a scalar kind
-        // keeps the explicit string form.
-        let mut shadowing = HashMap::new();
-        shadowing.insert(
-            "Sales.MxString".to_string(),
-            DerivedEnumeration {
-                root: ModuleRoot::Authored,
-                module_stem: "sales".into(),
-                file_stem: "mx_string".into(),
-                type_name: "MxString".into(),
-            },
-        );
-        let mut wrapper = bare_entity("Wrapper");
-        let mut value = attribute("Value", AttributeType::Enum);
-        value.enumeration = Some("Sales.MxString".to_string());
-        wrapper.attributes.push(value);
-        let rendered =
-            render_typed_entity_file("Sales", &wrapper, &shadowing, &empty_layer_context())
-                .expect("typed-eligible");
-        assert!(
-            rendered.contains(r#"#[mxrs(kind = "enumeration", enumeration = "Sales.MxString")]"#),
-            "{rendered}"
-        );
-    }
-
-    /// Enumerations with one caption per value become real Rust enums; the
-    /// whole file is pinned like the entity render.
-    #[test]
-    fn single_caption_enumerations_are_derived_rust_enums_pinned_whole() {
+    fn an_enumeration_file_is_its_enum_pinned_whole() {
         let values = vec![
             (
                 "Open".to_string(),
@@ -9101,101 +7913,49 @@ pub fn declaration() -> ModuleDecl {
                 "_10_Minutes".to_string(),
                 vec![("pt_BR".to_string(), "Dez minutos".to_string())],
             ),
+            (
+                "Closed".to_string(),
+                vec![
+                    ("en_US".to_string(), "Closed".to_string()),
+                    ("pt_BR".to_string(), "Fechado".to_string()),
+                ],
+            ),
+            ("Silent".to_string(), vec![]),
+            (
+                "closed".to_string(),
+                vec![("zh-Hans".to_string(), "关闭".to_string())],
+            ),
         ];
-        let (rendered, derived_type) =
-            render_enumeration_file("Sales", "ENUM_Status", "Lifecycle.", &values);
-        assert_eq!(derived_type.as_deref(), Some("ENUMStatus"));
+        let (rendered, type_name) =
+            render_enumeration_file("Sales", "ENUM_Status", "Lifecycle.", &values, false);
+        assert_eq!(type_name, "ENUMStatus");
         assert_eq!(
             rendered,
-            r#"//! Editable Mendix enumeration.
+            r#"use mxrs::prelude::*;
 
-use mxrs::prelude::*;
-
-#[derive(MxEnumeration)]
-#[mxrs(name = "ENUM_Status", module = "Sales", documentation = "Lifecycle.")]
+/// Lifecycle.
+#[enumeration(module = "Sales", name = "ENUM_Status")]
 pub enum ENUMStatus {
     Open,
     #[mxrs(name = "_10_Minutes", caption = "Dez minutos", language = "pt_BR")]
     _10Minutes,
-}
-
-pub fn declaration() -> ModuleDecl {
-    let mut module = ModuleBuilder::new("Sales");
-    ENUMStatus::mx_register(&mut module);
-    module.into_decl()
+    #[mxrs(captions(en_US = "Closed", pt_BR = "Fechado"))]
+    Closed,
+    #[mxrs(captions())]
+    Silent,
+    #[mxrs(name = "closed", captions("zh-Hans" = "关闭"))]
+    Closed2,
 }
 "#
         );
 
-        // Multi-language captions keep the builder form, still one file.
-        let multi = vec![(
-            "Open".to_string(),
-            vec![
-                ("en_US".to_string(), "Open".to_string()),
-                ("pt_BR".to_string(), "Aberto".to_string()),
-            ],
-        )];
-        let (rendered, derived_type) = render_enumeration_file("Sales", "Status", "", &multi);
-        assert_eq!(derived_type, None);
-        assert!(
-            rendered.contains("module.enumeration(\"Status\""),
-            "{rendered}"
-        );
-        assert!(rendered.contains("use mxrs::prelude::*;"));
-        assert!(!rendered.contains("derive(MxEnumeration)"));
-    }
-
-    /// What the derive cannot yet express falls back to the IR renderer —
-    /// less eloquent, never lost.
-    #[test]
-    fn entities_beyond_the_derive_surface_fall_back_to_the_ir_renderer() {
-        use mxrs_model::entity::EntityIndex;
-
-        let mut indexed = bare_entity("Order");
-        indexed
-            .attributes
-            .push(attribute("Number", AttributeType::String));
-        indexed.indexes.push(EntityIndex {
-            id: None,
-            guid: None,
-            include_offline: false,
-            members: Vec::new(),
-            raw: mxrs_bson::Document::new(),
-        });
-        assert!(
-            render_typed_entity_file("Sales", &indexed, &HashMap::new(), &empty_layer_context())
-                .is_none()
-        );
-
-        let mut pictured = bare_entity("Asset");
-        pictured.image = Some("Assets.Image".to_string());
-        assert!(
-            render_typed_entity_file("Assets", &pictured, &HashMap::new(), &empty_layer_context())
-                .is_none()
-        );
-
-        // Attribute names that collide once snake_cased cannot become two
-        // struct fields.
-        let mut colliding = bare_entity("Pair");
-        colliding
-            .attributes
-            .push(attribute("FooBar", AttributeType::String));
-        colliding
-            .attributes
-            .push(attribute("Foo_Bar", AttributeType::String));
-        assert!(
-            render_typed_entity_file("Sales", &colliding, &HashMap::new(), &empty_layer_context())
-                .is_none()
-        );
-
-        // A keyword survives as neither a field nor a struct name.
-        let mut keyword = bare_entity("Order");
-        keyword
-            .attributes
-            .push(attribute("Type", AttributeType::String));
-        assert!(
-            render_typed_entity_file("Sales", &keyword, &HashMap::new(), &empty_layer_context())
-                .is_none()
+        // An installed module's enumeration is named, not declared, and
+        // documentation a comment would change is stated as an option.
+        let (rendered, type_name) = render_enumeration_file("Atlas", "Self", "- a list", &[], true);
+        assert_eq!(type_name, "SelfEnumeration");
+        assert_eq!(
+            rendered,
+            "use mxrs::prelude::*;\n\n#[enumeration(module = \"Atlas\", name = \"Self\", imported)]\n#[mxrs(documentation = \"- a list\")]\npub enum SelfEnumeration {}\n"
         );
     }
 
@@ -9780,10 +8540,13 @@ pub fn declaration() -> ModuleDecl {
                     mxrs_ir::MicroflowRef::<sales_markers::ACT_GetOrder>::new(),
                     |view| {
                         view.name("orderView");
-                        view.text_box_with::<sales_markers::Order_Number>(|input| {
-                            input.name("numberInput");
-                            input.class("form-control");
-                        });
+                        view.text_box_with(
+                            mxrs_ir::AttributeRef::<sales_markers::Order_Number>::new(),
+                            |input| {
+                                input.name("numberInput");
+                                input.class("form-control");
+                            },
+                        );
                         view.button("Validate", |button| {
                             button.name("validateButton");
                             button.call_nanoflow(
@@ -10024,7 +8787,7 @@ pub fn declaration() -> ModuleDecl {
         assert!(generated.join("src/domain/dtos/sales/mod.rs").is_file());
         assert!(
             generated
-                .join("src/application/use_cases/sales/mod.rs")
+                .join("src/application/services/sales/mod.rs")
                 .is_file()
         );
         assert!(generated.join("src/presentation/mod.rs").is_file());
@@ -10044,7 +8807,7 @@ pub fn declaration() -> ModuleDecl {
         // contributes to the output `.mpr`, not just that it parses.
         let home = std::fs::read_to_string(generated.join("src/presentation/pages/sales/home.rs"))
             .unwrap();
-        assert!(home.contains("pub fn declaration() -> ::mxrs_ir::page::PageDecl"));
+        assert!(home.contains("pub fn declaration() -> ::mxrs::PageDecl"));
         assert!(home.contains("w.text_with(\"Welcome\""));
         assert!(home.contains("w.name("));
         assert!(home.contains("b.close_page()"));
@@ -10052,7 +8815,24 @@ pub fn declaration() -> ModuleDecl {
             std::fs::read_to_string(generated.join("src/presentation/pages/sales/order_detail.rs"))
                 .unwrap();
         assert!(detail.contains("data_view_from_microflow"));
-        assert!(detail.contains("Order_Number"));
+        // The page names the model through the files that declare it: the
+        // entity's own accessor, and the flows by their Mendix names.
+        assert!(
+            detail.contains("use crate::domain::entities::sales::order::Order;"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("w.text_box_with(Order::number(), |w| {"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("::mxrs::MicroflowRef::<ACT_GetOrder>::new()"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("::mxrs::NanoflowRef::<NF_Validate>::new()"),
+            "{detail}"
+        );
         assert!(detail.contains("b.call_nanoflow"));
         assert!(detail.contains("p.data_grid_2"));
         assert!(detail.contains("p.gallery"));
@@ -10075,27 +8855,50 @@ pub fn declaration() -> ModuleDecl {
             std::fs::read_to_string(generated.join("src/presentation/mod.rs")).unwrap();
         assert!(presentation_source.contains("navigation::apply(project);"));
         assert!(presentation_source.contains("pub mod http;"));
-        let entities_source =
+        // The entity is its struct, whole: documentation as comments,
+        // the image, index and event handler as options, the association as
+        // a field typed by its target. Nothing is restated that the builder
+        // already assumes.
+        let order_source =
             std::fs::read_to_string(generated.join("src/domain/entities/sales/order.rs")).unwrap();
-        assert!(
-            entities_source.contains("External order number"),
-            "{entities_source}"
+        assert_eq!(
+            order_source,
+            r#"use mxrs::prelude::*;
+
+use crate::domain::entities::sales::customer::Customer;
+
+#[entity(module = "Sales")]
+#[mxrs(image = "Sales.OrderIcon")]
+#[mxrs(index(number, desc(system(CreatedDate)), include_offline))]
+#[mxrs(before_commit("Sales.ACT_Ping", pass_event_object = false))]
+pub struct Order {
+    /// External order number
+    #[mxrs(length = 80, required, unique)]
+    pub number: MxString,
+    #[mxrs(localize_date = false)]
+    pub submitted_at: MxDateTime,
+    pub customer: Reference<Customer>,
+}
+"#
         );
-        assert!(entities_source.contains("length: Some(80)"));
-        assert!(entities_source.contains("required: true"));
-        assert!(entities_source.contains("unique: true"));
-        assert!(entities_source.contains("localize_date: Some(false)"));
-        assert!(entities_source.contains("IndexMemberDecl::Attribute"));
-        assert!(entities_source.contains("SystemMember::CreatedDate"));
-        assert!(entities_source.contains("include_offline: true"));
-        assert!(entities_source.contains("LifecycleEvent::BeforeCommit"));
-        assert!(entities_source.contains("pass_event_object: false"));
-        assert!(entities_source.contains("Sales.OrderIcon"));
         let report_dto =
             std::fs::read_to_string(generated.join("src/domain/dtos/sales/order_report.rs"))
                 .unwrap();
-        assert!(report_dto.contains("OqlView"));
-        assert!(report_dto.contains("Sales.OrderSource"));
+        assert_eq!(
+            report_dto,
+            r#"use mxrs::prelude::*;
+
+#[view(module = "Sales", source = "Sales.OrderSource")]
+pub struct OrderReport {
+    pub number: MxString,
+}
+"#
+        );
+        // A concept index lists its files and nothing else.
+        assert_eq!(
+            std::fs::read_to_string(generated.join("src/domain/dtos/sales/mod.rs")).unwrap(),
+            "//! The sales module's dtos.\n\npub mod order_report;\n"
+        );
         let persistence =
             std::fs::read_to_string(generated.join("src/infrastructure/persistence.rs")).unwrap();
         assert!(persistence.contains("oql_view_source(\"OrderSource\""));
@@ -10113,18 +8916,31 @@ pub fn declaration() -> ModuleDecl {
             std::fs::read_to_string(generated.join("src/domain/enumerations/sales/mod.rs"))
                 .unwrap();
         assert!(enumerations_index.contains("pub mod status;"));
+        // Every enumeration is a Rust enum, whatever its captions, and the
+        // entity referencing one uses the type itself — no embedded
+        // qualified-name string.
         let status =
             std::fs::read_to_string(generated.join("src/domain/enumerations/sales/status.rs"))
                 .unwrap();
-        assert!(status.contains("module.enumeration(\"Status\""), "{status}");
-        assert!(status.contains("(\"pt_BR\".to_string(), \"Aberto\".to_string())"));
-        assert!(!status.contains("derive(MxEnumeration)"), "{status}");
-        // The single-caption enumeration derives, and the entity referencing
-        // it uses the Rust type itself — no embedded qualified-name string.
+        assert_eq!(
+            status,
+            r#"use mxrs::prelude::*;
+
+/// Order lifecycle
+#[enumeration(module = "Sales")]
+pub enum Status {
+    #[mxrs(captions(en_US = "Open", pt_BR = "Aberto"))]
+    Open,
+}
+"#
+        );
         let priority =
             std::fs::read_to_string(generated.join("src/domain/enumerations/sales/priority.rs"))
                 .unwrap();
-        assert!(priority.contains("derive(MxEnumeration)"), "{priority}");
+        assert_eq!(
+            priority,
+            "use mxrs::prelude::*;\n\n#[enumeration(module = \"Sales\")]\npub enum Priority {\n    Low,\n    High,\n}\n"
+        );
         let ticket =
             std::fs::read_to_string(generated.join("src/domain/entities/sales/ticket.rs")).unwrap();
         assert!(
@@ -10146,22 +8962,6 @@ pub fn declaration() -> ModuleDecl {
             "{ticket}"
         );
         assert!(!ticket.contains("association = "), "{ticket}");
-        // Order keeps the IR form (image + index), so its association is
-        // restated as an AssociationDecl rather than silently dropped.
-        let order_source =
-            std::fs::read_to_string(generated.join("src/domain/entities/sales/order.rs")).unwrap();
-        assert!(
-            order_source.contains("entity.associations.push(::mxrs_ir::AssociationDecl {"),
-            "{order_source}"
-        );
-        assert!(
-            order_source.contains("name: \"Order_Customer\".to_string(),"),
-            "{order_source}"
-        );
-        assert!(
-            order_source.contains("target: \"Sales.Customer\".to_string(),"),
-            "{order_source}"
-        );
         // One file per document, each with the same `declaration()` shape
         // every other generated concept has.
         let maximum_orders =
@@ -10187,29 +8987,55 @@ pub fn declaration() -> ModuleDecl {
         );
         assert!(!generated.join("src/infrastructure/ids.rs").exists());
         assert!(!generated.join("src/infrastructure/imported.rs").exists());
-        let markers =
-            std::fs::read_to_string(generated.join("src/domain/markers/sales.rs")).unwrap();
-        assert!(markers.contains("pub struct Order;"));
-        assert!(markers.contains("pub struct Order_Number;"));
-        assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_Ping"));
-        assert!(markers.contains("impl mxrs_ir::MicroflowMarker for ACT_GetOrder"));
-        assert!(markers.contains("impl mxrs_ir::NanoflowMarker for NF_Validate"));
+        // No marker file: an entity is named by its struct, a flow by the
+        // type its declaration generates, and a flow that stays in the
+        // imported model by its module's `imported.rs`.
+        assert!(!generated.join("src/domain/markers").exists());
+        assert!(!generated.join("src/infrastructure/markers.rs").exists());
         let microflows =
-            std::fs::read_to_string(generated.join("src/application/use_cases/sales/mod.rs"))
+            std::fs::read_to_string(generated.join("src/application/services/sales/mod.rs"))
                 .unwrap();
-        assert!(!microflows.contains("snapshot-backed"));
-        assert!(microflows.contains("pub mod act_ping;"));
-        assert!(microflows.contains("project.merge_module(act_ping::declaration());"));
-        assert!(!microflows.contains("nanoflow"));
+        assert!(!microflows.contains("apply"), "{microflows}");
+        assert!(microflows.contains("pub mod ping_service;"), "{microflows}");
+        assert_eq!(
+            std::fs::read_to_string(
+                generated.join("src/application/services/sales/ping_service.rs")
+            )
+            .unwrap(),
+            "use mxrs::prelude::*;\n\n#[microflow(ACT, module = \"Sales\")]\npub fn ping(_flow: &mut FlowBuilder) {}\n"
+        );
+        let get_order = std::fs::read_to_string(
+            generated.join("src/application/services/sales/get_order_service.rs"),
+        )
+        .unwrap();
+        assert_eq!(
+            get_order,
+            r#"use mxrs::prelude::*;
+
+use crate::domain::entities::sales::order::Order;
+
+#[microflow(ACT, module = "Sales")]
+pub fn get_order(flow: &mut FlowBuilder) {
+    let value_order = flow.create_object("order", Ref::<Order>::new(), vec![], false);
+    flow.return_value(&value_order);
+}
+"#
+        );
         let nanoflows =
             std::fs::read_to_string(generated.join("src/presentation/nanoflows/sales/mod.rs"))
                 .unwrap();
-        assert!(nanoflows.contains("pub mod nf_validate;"));
-        assert!(nanoflows.contains("project.merge_module(nf_validate::declaration());"));
-        assert!(!nanoflows.contains("microflow"));
+        assert_eq!(
+            nanoflows,
+            "//! The sales module's nanoflows.\n\npub mod validate;\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(generated.join("src/presentation/nanoflows/sales/validate.rs"))
+                .unwrap(),
+            "use mxrs::prelude::*;\n\n#[nanoflow(NF, module = \"Sales\")]\npub fn validate(_flow: &mut FlowBuilder) {}\n"
+        );
         // Runnable microflows surface as a typed service port plus the
-        // runtime adapter that implements it. ACT_GetOrder returns the
-        // IR-form Order entity, so it stays off the typed surface.
+        // runtime adapter that implements it. Every entity is a struct now,
+        // so a flow returning one is on the typed surface too.
         let ports_index =
             std::fs::read_to_string(generated.join("src/application/ports/sales/mod.rs")).unwrap();
         assert!(ports_index.contains("pub mod services;"), "{ports_index}");
@@ -10224,7 +9050,12 @@ pub fn declaration() -> ModuleDecl {
             sales_port.contains("fn act_ping(&mut self) -> Result<(), ServiceError>;"),
             "{sales_port}"
         );
-        assert!(!sales_port.contains("act_get_order"), "{sales_port}");
+        assert!(
+            sales_port.contains(
+                "Result<Option<ObjectHandle<crate::domain::entities::sales::order::Order>>, ServiceError>;"
+            ),
+            "{sales_port}"
+        );
         let adapter = std::fs::read_to_string(
             generated.join("src/infrastructure/generated/runtime_services.rs"),
         )

@@ -1103,10 +1103,21 @@ fn reconcile_attribute_doc(
     if matches!(decl.attribute_type, AttributeType::DateTime)
         && let Some(localize_date) = decl.localize_date
     {
-        let localize_key = previous_type.map_or("LocalizeDate", |doc| {
-            native_key(doc, "localizeDate", "LocalizeDate")
+        // A document that leaves the key out already means "localized": the
+        // platform's default. Declaring that default must not rewrite the
+        // implicit form into an explicit one, or a model that only restates
+        // what it imported would no longer rebuild to the same bytes.
+        let implicit = previous_type.is_some_and(|doc| {
+            doc.get_str("$Type").ok() == Some(storage_type)
+                && !doc.contains_key("localizeDate")
+                && !doc.contains_key("LocalizeDate")
         });
-        type_doc.insert(localize_key, localize_date);
+        if !(implicit && localize_date) {
+            let localize_key = previous_type.map_or("LocalizeDate", |doc| {
+                native_key(doc, "localizeDate", "LocalizeDate")
+            });
+            type_doc.insert(localize_key, localize_date);
+        }
     }
     output.insert(type_key, type_doc);
 
@@ -1735,6 +1746,53 @@ mod tests {
                 .unwrap()
                 .contains_key("defaultValue")
         );
+    }
+
+    /// A document that leaves `localizeDate` out already means "localized".
+    /// Restating that default keeps the implicit form; anything else — a
+    /// stated key, the non-default value, a changed type — is written.
+    #[test]
+    fn a_restated_localized_date_default_keeps_the_imported_form() {
+        let identity = ProjectIdentity::for_project("Defaults");
+        let mut declaration = AttributeDecl::new("SubmittedAt", AttributeType::DateTime);
+        declaration.localize_date = Some(true);
+        let reconcile = |declaration: &AttributeDecl, previous: &Document| {
+            reconcile_attribute_doc(
+                declaration,
+                Some(previous),
+                "Sales.Order.SubmittedAt",
+                identity,
+            )
+        };
+        let stated = model_attribute(&declaration, None, None).to_bson();
+        let mut implicit = stated.clone();
+        implicit
+            .get_document_mut("type")
+            .unwrap()
+            .remove("localizeDate");
+
+        assert_eq!(reconcile(&declaration, &implicit), implicit);
+        assert_eq!(reconcile(&declaration, &stated), stated);
+
+        declaration.localize_date = Some(false);
+        let localized = |document: &Document| {
+            document
+                .get_document("type")
+                .unwrap()
+                .get_bool("localizeDate")
+                .ok()
+        };
+        assert_eq!(localized(&reconcile(&declaration, &implicit)), Some(false));
+
+        // A type that changed is a new type document, written in full.
+        let text = model_attribute(
+            &AttributeDecl::new("SubmittedAt", AttributeType::String),
+            None,
+            None,
+        )
+        .to_bson();
+        declaration.localize_date = Some(true);
+        assert_eq!(localized(&reconcile(&declaration, &text)), Some(true));
     }
 
     #[test]

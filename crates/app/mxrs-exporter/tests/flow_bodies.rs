@@ -9,11 +9,11 @@ use std::process::Command;
 #[path = "../../../../xtask/support/nested_cargo.rs"]
 mod nested_cargo;
 
-/// Every module's server-side use cases. The authored tree is layer-first, so
-/// `application/use_cases/` holds one folder per Mendix module.
+/// Every module's microflow services. The authored tree is layer-first, so
+/// `application/services/` holds one folder per Mendix module.
 fn service_files(generated: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let services = generated.join("src/application/use_cases");
+    let services = generated.join("src/application/services");
     if !services.is_dir() {
         return paths;
     }
@@ -41,14 +41,13 @@ fn flow_sources(generated: &Path) -> String {
         .join("\n")
 }
 
+/// The file declaring `flow_name`: a flow is named by what it does, so
+/// `Structured` lives in `structured_service.rs`.
 fn flow_source_path(generated: &Path, flow_name: &str) -> PathBuf {
-    let needle = format!("module.microflow({flow_name:?}");
+    let file = format!("{}_service.rs", flow_name.to_lowercase());
     service_files(generated)
         .into_iter()
-        .find(|path| {
-            path.file_name().is_some_and(|name| name != "mod.rs")
-                && std::fs::read_to_string(path).is_ok_and(|source| source.contains(&needle))
-        })
+        .find(|path| path.file_name().is_some_and(|name| name == file.as_str()))
         .unwrap_or_else(|| panic!("generated source for flow {flow_name:?} not found"))
 }
 
@@ -164,7 +163,7 @@ fn nested_decisions_and_loops_rebuild_exactly_and_edit_in_place() {
         "flow.while_loop(",
         "flow.break_loop()",
         "flow.continue_loop()",
-        "Record_Active",
+        "Record::active()",
     ] {
         assert!(source.contains(token), "{token}\n{source}");
     }
@@ -183,11 +182,11 @@ fn nested_decisions_and_loops_rebuild_exactly_and_edit_in_place() {
     std::fs::remove_dir_all(source_dir).unwrap();
     run(&generated, &rebuilt);
     assert_eq!(flows(&rebuilt), before);
-    // Plain literals: rustfmt may split `mxrs::string("before")` across
-    // lines in the fmt-cleaned project, so edit the string itself.
+    // Plain literals: rustfmt may split `string("before")` across lines in
+    // the fmt-cleaned project, so edit the string itself.
     let edited = source
         .replace("\"before\"", "\"after\"")
-        .replace("value_flag.clone(),", "mxrs::boolean(false),");
+        .replace("&value_flag,", "boolean(false),");
     assert_ne!(source, edited);
     std::fs::write(&editable, edited).unwrap();
     run(&generated, &rebuilt);
@@ -327,7 +326,7 @@ fn unsupported_control_semantics_and_out_of_scope_variables_stay_preserved() {
         let generated = dir.path().join("generated");
         mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
         assert!(
-            !flow_sources(&generated).contains("\"Structured\""),
+            !flow_sources(&generated).contains("pub fn structured("),
             "{mutation}"
         );
     }
@@ -524,11 +523,11 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
         "flow.delete_object(",
         "flow.create_list(",
         "flow.return_value(",
-        "mxrs::string(\"before\")",
+        "string(\"before\")",
     ] {
         assert!(source.contains(token), "{token}\n{source}");
     }
-    assert!(source.contains("\"Branch\""));
+    assert!(source.contains("pub fn branch("), "{source}");
     for forbidden in ["$ID", "Bson", "Expr::new", ".activities.push(", "777;333"] {
         assert!(!source.contains(forbidden));
     }
@@ -544,7 +543,7 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
     std::fs::remove_dir_all(source_dir).unwrap();
     run(&generated, &rebuilt);
     assert_eq!(flows(&rebuilt), before);
-    let edited = editable_source.replace("mxrs::string(\"before\")", "mxrs::string(\"after\")");
+    let edited = editable_source.replace("string(\"before\")", "string(\"after\")");
     assert_ne!(edited, editable_source);
     std::fs::write(&editable, edited).unwrap();
     run(&generated, &rebuilt);
@@ -717,10 +716,10 @@ fn scalar_object_and_list_parameters_and_canonical_literals_rebuild_without_warn
     mxrs_exporter::import_cargo_project(&original, &generated, Some(&workspace())).unwrap();
     let source = flow_sources(&generated);
     for index in 0..10 {
-        assert!(source.contains(&format!("\"Parameter{index}\"")));
+        assert!(source.contains(&format!("pub fn parameter{index}(")));
     }
     for index in 0..5 {
-        assert!(source.contains(&format!("\"Literal{index}\"")));
+        assert!(source.contains(&format!("pub fn literal{index}(")));
     }
     run(&generated, &rebuilt);
     assert_eq!(flows(&rebuilt), before);
@@ -741,9 +740,12 @@ fn malformed_target_parameters_keep_both_target_and_caller_out_of_the_projection
     let generated = dir.path().join("generated");
     mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
     let source = flow_sources(&generated);
-    assert!(!source.contains("\"Caller\""));
-    assert!(!source.contains("\"Echo\""));
-    assert!(source.contains("\"Object\""));
+    // Neither is declared in Rust; both stay nameable from the imported model.
+    assert!(!source.contains("pub fn caller("), "{source}");
+    assert!(!source.contains("pub fn echo("), "{source}");
+    assert!(source.contains("microflow Caller;"), "{source}");
+    assert!(source.contains("microflow Echo;"), "{source}");
+    assert!(source.contains("pub fn object("), "{source}");
 }
 
 #[test]
@@ -762,8 +764,8 @@ fn duplicate_flow_names_do_not_choose_an_arbitrary_call_signature() {
     let generated = dir.path().join("generated");
     mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
     let source = flow_sources(&generated);
-    assert!(!source.contains("\"Echo\""));
-    assert!(!source.contains("\"Caller\""));
+    assert!(!source.contains("pub fn echo("), "{source}");
+    assert!(!source.contains("pub fn caller("), "{source}");
 }
 
 fn member_fixture() -> mxrs_ir::ProjectDecl {
@@ -872,8 +874,8 @@ fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_nat
     for needle in [
         "flow.create_object(",
         "flow.change_object(",
-        "mxrs::attribute::<model::Calls::Record_Name>",
-        "attribute::<model::Calls::Record_Count>().into_long()",
+        "Record::name().set(",
+        ".get(Record::count()).into_long()",
     ] {
         assert!(
             source
@@ -883,16 +885,23 @@ fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_nat
             "{needle}\n{source}"
         );
     }
-    let markers = std::fs::read_to_string(generated.join("src/domain/markers/calls.rs")).unwrap();
-    for name in [
-        "Name", "Count", "Serial", "Weight", "Amount", "Active", "When", "Data",
+    // Every attribute is named through the struct that declares it; there
+    // is no marker file to keep in step.
+    assert!(!generated.join("src/domain/markers").exists());
+    let record =
+        std::fs::read_to_string(generated.join("src/domain/entities/calls/record.rs")).unwrap();
+    for field in [
+        "name", "count", "serial", "weight", "amount", "active", "when", "data",
     ] {
-        assert!(markers.contains(&format!("TypedAttributeMarker for Record_{name}")));
+        assert!(
+            record.contains(&format!("pub {field}: ")),
+            "{field}\n{record}"
+        );
     }
     std::fs::remove_dir_all(source_dir).unwrap();
     run(&generated, &rebuilt);
     assert_eq!(flows(&rebuilt), before);
-    let invalid = source.replace("mxrs::integer(1)", "mxrs::boolean(true)");
+    let invalid = source.replace("integer(1)", "boolean(true)");
     assert_ne!(invalid, source);
     std::fs::write(&editable, invalid).unwrap();
     let bytes = std::fs::read(&rebuilt).unwrap();
@@ -914,7 +923,7 @@ fn create_change_and_member_reads_are_generated_typed_and_edit_without_other_nat
         "{error}"
     );
     assert_eq!(std::fs::read(&rebuilt).unwrap(), bytes);
-    let edited = source.replace("mxrs::string(\"before\")", "mxrs::string(\"after\")");
+    let edited = source.replace("string(\"before\")", "string(\"after\")");
     assert_ne!(edited, source);
     std::fs::write(&editable, edited).unwrap();
     run(&generated, &rebuilt);
