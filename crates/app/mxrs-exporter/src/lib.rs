@@ -69,6 +69,7 @@ use entity_export::TypedEntityTarget;
 mod entity_export;
 mod flow_export;
 mod flow_general;
+mod frontend_export;
 mod layout;
 mod names;
 #[cfg(test)]
@@ -295,7 +296,7 @@ fn import_cargo_project_inner(
                                 "{}::actions",
                                 module.root.path(&module.module_stem, "ports", "ports")
                             ),
-                            marker: java_action_macro_name(&action.action_name),
+                            marker: action.macro_name.clone(),
                         },
                     )
                 })
@@ -310,7 +311,15 @@ fn import_cargo_project_inner(
         (document.get_str("$Type").ok() == Some("Security$ProjectSecurity")).then_some(document)
     });
     let security_source = render_project_security_module(security_document.as_ref());
-    let navigation_source = render_navigation_module(&project.navigation()?);
+    // The navigation belongs to the frontend: it is declared there, in
+    // TypeScript, whenever the builder can restate it exactly.
+    let navigation = project.navigation()?;
+    let navigation_in_frontend = navigation_is_buildable(&navigation);
+    let navigation_source = if navigation_in_frontend {
+        frontend_export::render_navigation(&navigation)
+    } else {
+        render_navigation_module(&navigation)
+    };
     let task_queues_source = render_task_queue_declarations(&project)?;
     // The HTTP layer is generated for the axum adapter only; the other two
     // presets keep their server stub until their routers are ported.
@@ -401,10 +410,16 @@ fn import_cargo_project_inner(
             .join(module.module_name.to_lowercase())
             .join("actions");
         for action in &mut module.actions {
-            action.java =
-                std::fs::read_to_string(folder.join(format!("{}.java", action.action_name)))
-                    .ok()
-                    .and_then(|source| java_user_code(&source));
+            // Java sources are often ISO-8859-1, which reads byte for byte
+            // where the text is not UTF-8.
+            action.java = std::fs::read(folder.join(format!("{}.java", action.action_name)))
+                .ok()
+                .map(|bytes| {
+                    String::from_utf8(bytes).unwrap_or_else(|error| {
+                        error.into_bytes().into_iter().map(char::from).collect()
+                    })
+                })
+                .and_then(|source| java_user_code(&source));
         }
     }
     for (module_name, stem, source) in &documents_export.enumeration_files {
@@ -570,7 +585,7 @@ fn import_cargo_project_inner(
         write_text(&directory.join("mod.rs"), &render_services_index(&[]))?;
     }
     let domain_source = render_domain_module(&authored_layers, security_source.is_some());
-    let ui_source = render_ui_module(&authored_layers);
+    let ui_source = render_ui_module(&authored_layers, !navigation_in_frontend);
     write_text(
         &destination.join("Cargo.toml"),
         &cargo_manifest(&package_name, mxrs_workspace, api_mode),
@@ -620,10 +635,16 @@ fn import_cargo_project_inner(
     if let Some(security) = &security_source {
         write_text(&destination.join("src/domain/security.rs"), security)?;
     }
-    write_text(
-        &destination.join("src/ui/navigation.rs"),
-        &navigation_source,
-    )?;
+    if navigation_in_frontend {
+        let folder = destination.join("frontend/src/navigation");
+        std::fs::create_dir_all(&folder).map_err(|source| io_error(&folder, source))?;
+        write_text(&folder.join("index.ts"), &navigation_source)?;
+    } else {
+        write_text(
+            &destination.join("src/ui/navigation.rs"),
+            &navigation_source,
+        )?;
+    }
     match api_mode {
         ApiMode::Axum => {
             write_text(
@@ -820,12 +841,12 @@ fn render_services_index(modules: &[&str]) -> String {
 /// The user interface the model declares: navigation, and every module's
 /// pages, layouts and nanoflows. What the application serves over HTTP is
 /// not here — that is `controllers`.
-fn render_ui_module(layers: &AuthoredLayers) -> String {
+fn render_ui_module(layers: &AuthoredLayers, navigation: bool) -> String {
     render_layer_module(
-        "//! The project's user interface: navigation, and every module's pages,\n//! layouts and nanoflows, one folder per Mendix module inside each concept.\n\n",
+        "//! Every module's pages, layouts and nanoflows, one folder per Mendix\n//! module inside each concept. The navigation is declared in the frontend.\n\n",
         "ui",
         layers,
-        &["navigation"],
+        if navigation { &["navigation"] } else { &[] },
     )
 }
 
@@ -3284,7 +3305,7 @@ fn build_binary_source(crate_name: &str, project_name: &str, api_mode: ApiMode) 
         ),
     };
     format!(
-        "fn build() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let root = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"));\n    mxrs::replace_imported_project(root.join(\"model/imported\"), &output, &{crate_name}::Application::build())?;\n    mxrs::materialize_project_assets(root.join(\"assets\"), &output)?;\n    mxrs::materialize_java_sources(root.join(\"java\"), &output)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n\n{serve}",
+        "fn build() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let root = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"));\n    let mut project = {crate_name}::Application::build();\n    mxrs::merge_frontend(&mut project, root.join(\"frontend\"))?;\n    mxrs::replace_imported_project(root.join(\"model/imported\"), &output, &project)?;\n    mxrs::materialize_project_assets(root.join(\"assets\"), &output)?;\n    mxrs::materialize_java_sources(root.join(\"java\"), &output)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n\n{serve}",
         serde_json::to_string(&default_output).expect("a string always serializes"),
     )
 }
@@ -3309,7 +3330,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the user interface the model declares — pages, layouts, nanoflows and navigation.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `pages/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`.\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; client-side nanoflows stay in `ui`. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the pages, layouts and nanoflows the model declares, until each moves to the frontend.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. The user interface is the frontend's: `src/navigation/index.ts` declares the navigation, and every build reads it into the model.\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; client-side nanoflows stay in `ui`. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -4764,15 +4785,8 @@ fn render_flow_runtime() -> String {
      \x20               .with_policy(booted.security.clone())\n\
      \x20               .with_marketplace_java_actions(),\n\
      \x20       );\n\
-     \x20       let missing = engine.unregistered_java_actions();\n\
-     \x20       if !missing.is_empty() {\n\
-     \x20           eprintln!(\n\
-     \x20               \"[mxrs] warning: {} Java action(s) have no Rust implementation; a flow that calls one fails there:\",\n\
-     \x20               missing.len()\n\
-     \x20           );\n\
-     \x20           for (action, flows) in &missing {\n\
-     \x20               eprintln!(\"  {action} (called by {})\", flows.join(\", \"));\n\
-     \x20           }\n\
+     \x20       if let Some(report) = engine.unregistered_java_actions_report() {\n\
+     \x20           eprintln!(\"[mxrs] warning: {report}\");\n\
      \x20       }\n\
      \x20       Self::new(engine, Store::new(booted.schema.clone()))\n\
      \x20   }\n\n\
@@ -5889,6 +5903,8 @@ struct ActionPort {
     action_name: String,
     trait_name: String,
     register_fn: String,
+    /// The macro a flow calls the action by, unique in its module.
+    macro_name: String,
     /// `(mendix name, argument ident, marker type, runtime type)` per
     /// parameter, in declaration order.
     parameters: Vec<(String, String, String, String)>,
@@ -5911,9 +5927,6 @@ impl ActionPort {
     }
 }
 
-/// The `(marker, runtime)` port pair for one `CodeActions$*` type document.
-/// `None` when the type has no port representation (enumerations, generic
-/// entity types, or an entity that keeps the IR form).
 /// The `(marker, runtime type)` a Java action's parameter or result has in
 /// its contract. A type a struct cannot name is still a value the contract
 /// carries: an object or list of an open entity, or the engine's own value.
@@ -6715,10 +6728,9 @@ fn collect_action_documents(project: &Project) -> Result<Vec<(String, mxrs_bson:
     Ok(documents)
 }
 
-/// Assembles the Java actions each module declares with a fully port-typed
-/// signature: basic parameters and a concrete return type only. Actions
-/// with string templates, generics, microflow parameters, enumerations or
-/// unresolvable entities stay on the engine's string-keyed registration.
+/// Assembles every Java action each module declares, a package's included:
+/// its contract, registration and macro. A type no struct names is still
+/// carried, as `MxAnyObject`/`MxAnyList`, `MxEntityName` or `MxValue`.
 fn assemble_action_ports(
     documents: &[(String, mxrs_bson::Document)],
     packages: &std::collections::BTreeSet<String>,
@@ -6740,9 +6752,24 @@ fn assemble_action_ports(
             }
             // A package's actions are contracts too: in Mendix their Java
             // runs, and in mxrs a Rust implementation registered for them.
+            // Names Rust derives can coincide (`GetURL`, `Get_URL`); each
+            // later one is numbered rather than dropped.
             actions.sort_by(|left, right| left.action_name.cmp(&right.action_name));
-            let mut seen = std::collections::HashSet::new();
-            actions.retain(|action| seen.insert(action.trait_name.clone()));
+            let mut taken = std::collections::HashSet::new();
+            for action in &mut actions {
+                for (name, separator) in [
+                    (&mut action.trait_name, ""),
+                    (&mut action.register_fn, "_"),
+                    (&mut action.macro_name, "_"),
+                ] {
+                    if !taken.insert(name.clone()) {
+                        *name = (2..)
+                            .map(|suffix| format!("{name}{separator}{suffix}"))
+                            .find(|candidate| taken.insert(candidate.clone()))
+                            .expect("an unbounded suffix always finds a free name");
+                    }
+                }
+            }
             Some(ActionPortModule {
                 module_name,
                 root: module_root(&stem, packages),
@@ -6831,15 +6858,18 @@ fn action_port(
         register_fn,
         parameters,
         result,
+        macro_name: java_action_macro_name(action_name),
         java: None,
     })
 }
 
 /// The macro a flow calls Java action `action` by: its name in snake case,
-/// unless that is a word Rust keeps or an activity macro's name, which
-/// would be hidden where the action's macro is imported.
+/// unless that is a word Rust keeps or the name of a macro a flow's file
+/// uses — mxrs's own or the standard library's — which the action's macro
+/// would hide where it is imported.
 fn java_action_macro_name(action: &str) -> String {
-    const ACTIVITY_MACROS: [&str; 15] = [
+    const IN_USE: [&str; 69] = [
+        // The activity macros.
         "aggregate_list",
         "call_java_action",
         "call_microflow",
@@ -6855,12 +6885,68 @@ fn java_action_macro_name(action: &str) -> String {
         "retrieve",
         "rollback_object",
         "mx",
+        // The declaration attributes.
+        "application",
+        "constant",
+        "declaration",
+        "demo_user",
+        "dto",
+        "entity",
+        "enumeration",
+        "layout",
+        "menu",
+        "microflow",
+        "module_roles",
+        "nanoflow",
+        "navigation",
+        "navigation_item",
+        "page",
+        "project",
+        "project_facade",
+        "route",
+        "security",
+        "service",
+        "view",
+        // The standard library's.
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "cfg",
+        "column",
+        "compile_error",
+        "concat",
+        "dbg",
+        "debug_assert",
+        "debug_assert_eq",
+        "env",
+        "eprint",
+        "eprintln",
+        "file",
+        "format",
+        "format_args",
+        "include",
+        "include_bytes",
+        "include_str",
+        "line",
+        "matches",
+        "module_path",
+        "option_env",
+        "panic",
+        "print",
+        "println",
+        "stringify",
+        "todo",
+        "unimplemented",
+        "unreachable",
+        "vec",
+        "write",
+        "writeln",
     ];
     let mut name = snake_ident(action);
     if name.is_empty()
         || name.starts_with(|c: char| c.is_ascii_digit())
         || rust_keyword(&name)
-        || ACTIVITY_MACROS.contains(&name.as_str())
+        || IN_USE.contains(&name.as_str())
     {
         name.push_str("_action");
     }
@@ -6942,7 +7028,7 @@ fn render_action_port_file(module: &ActionPortModule) -> String {
             })
             .unwrap_or_default();
         let qualified = format!("{}.{}", module.module_name, action.action_name);
-        let macro_name = java_action_macro_name(&action.action_name);
+        let macro_name = &action.macro_name;
         let _ = writeln!(
             out,
             "\n/// Calls the `{qualified}` Java action from a flow, its result kept in the\n/// variable named first when it is: `{macro_name}!(flow, \"Result\", parameter = value, ...)`.\n#[allow(unused_macros)]\nmacro_rules! {macro_name} {{\n    ($flow:expr $(, $($arguments:tt)*)?) => {{\n        ::mxrs::call_java_action!($flow, {qualified:?} $(, $($arguments)*)?)\n    }};\n}}\n#[allow(unused_imports)]\npub(crate) use {macro_name};"
@@ -7740,12 +7826,15 @@ mod tests {
         );
         // Neither services nor ports are concepts of the domain or of the
         // user interface.
-        for layer in [render_domain_module(&full, true), render_ui_module(&full)] {
+        for layer in [
+            render_domain_module(&full, true),
+            render_ui_module(&full, true),
+        ] {
             assert!(!layer.contains("pub mod services;"), "{layer}");
             assert!(!layer.contains("pub mod ports;"), "{layer}");
         }
 
-        let ui = render_ui_module(&full);
+        let ui = render_ui_module(&full, true);
         // Nanoflows are the frontend's services, so they are a user-interface
         // concept — declared when the import produced any.
         for held in [
@@ -7755,13 +7844,15 @@ mod tests {
         ] {
             assert!(ui.contains(held), "{held}\n{ui}");
         }
+        // A navigation the frontend declares is not a module of the layer.
+        assert!(!render_ui_module(&full, false).contains("pub mod navigation;"));
         // What the application serves over HTTP is not user interface: it
         // has a layer of its own.
         assert!(!ui.contains("pub mod http;"), "{ui}");
         assert!(!ui.contains("controllers"), "{ui}");
         // No page module is written when the import found nothing buildable,
         // so the layer must not declare one either.
-        let bare_ui = render_ui_module(&empty);
+        let bare_ui = render_ui_module(&empty, true);
         assert!(!bare_ui.contains("pub mod pages;"), "{bare_ui}");
         assert!(!bare_ui.contains("pub mod nanoflows;"), "{bare_ui}");
 
@@ -8650,9 +8741,9 @@ mod tests {
         assert!(export_mapping(&mapping(disagreeing), "Sales").is_none());
     }
 
-    /// A declared Java action with a fully port-typed signature becomes an
-    /// action port trait plus registration glue; generics and untypable
-    /// shapes stay on the engine's string-keyed registration.
+    /// Every declared Java action becomes a contract, its registration and
+    /// the macro flows call it by — a generic one too, its type parameters
+    /// open entities — each named uniquely in its module.
     #[test]
     fn every_java_action_has_a_contract_and_a_macro() {
         let mut typed = HashMap::new();
@@ -8701,18 +8792,58 @@ mod tests {
                 "$Type": "CodeActions$TypeParameter", "Name": "T",
             })], 2),
         };
+        let named = |name: &str| {
+            mxrs_bson::doc! {
+                "$Type": "JavaActions$JavaAction",
+                "Name": name,
+                "JavaReturnType": { "$Type": "CodeActions$VoidType" },
+            }
+        };
         let modules = assemble_action_ports(
             &[
                 ("Sales".to_string(), action),
                 ("Sales".to_string(), generic),
+                // Names Rust spells alike, and names a flow's file already
+                // uses for a macro.
+                ("Sales".to_string(), named("GetURL")),
+                ("Sales".to_string(), named("Get_URL")),
+                ("Sales".to_string(), named("Log")),
+                ("Sales".to_string(), named("LogAction")),
+                ("Sales".to_string(), named("Format")),
+                ("Sales".to_string(), named("Page")),
             ],
             &std::collections::BTreeSet::new(),
             &typed,
         );
-        // A generic action is a contract too: its type parameters are open
-        // entities.
         assert_eq!(modules.len(), 1);
-        assert_eq!(modules[0].actions.len(), 2);
+        assert_eq!(modules[0].actions.len(), 8);
+        let names: Vec<_> = modules[0]
+            .actions
+            .iter()
+            .map(|action| {
+                (
+                    action.action_name.as_str(),
+                    action.trait_name.as_str(),
+                    action.register_fn.as_str(),
+                    action.macro_name.as_str(),
+                )
+            })
+            .collect();
+        for expected in [
+            ("Format", "Format", "register_format", "format_action"),
+            ("GetURL", "GetURL", "register_get_url", "get_url"),
+            ("Get_URL", "GetURL2", "register_get_url_2", "get_url_2"),
+            ("Log", "Log", "register_log", "log_action"),
+            (
+                "LogAction",
+                "LogAction",
+                "register_log_action",
+                "log_action_2",
+            ),
+            ("Page", "Page", "register_page", "page_action"),
+        ] {
+            assert!(names.contains(&expected), "{expected:?} in {names:?}");
+        }
 
         let port = render_action_port_file(&modules[0]);
         assert!(port.contains("pub trait CommitInBatches"), "{port}");
@@ -8804,6 +8935,27 @@ pub enum ENUMStatus {
         assert_eq!(
             rendered,
             "use mxrs::prelude::*;\n\n#[enumeration(module = \"Atlas\", name = \"Self\", imported)]\n#[mxrs(documentation = \"- a list\")]\npub enum SelfEnumeration {}\n"
+        );
+    }
+
+    /// A contract shows the Java its action runs in Mendix: the user code
+    /// of `executeAction`, out of its indentation.
+    #[test]
+    fn a_contract_shows_the_user_code_of_its_java() {
+        let java = "package sales.actions;\r\n\r\npublic class Pad extends CustomJavaAction<String>\r\n{\r\n\t@java.lang.Override\r\n\tpublic java.lang.String executeAction() throws Exception\r\n\t{\r\n\t\t// BEGIN USER CODE\r\n\r\n\t\tif (value == null)\r\n\t\t\treturn \"\";\r\n\t\treturn value.trim();\r\n\t\t// END USER CODE\r\n\t}\r\n\r\n\t// BEGIN EXTRA CODE\r\n\t// END EXTRA CODE\r\n}\r\n";
+        assert_eq!(
+            java_user_code(java).as_deref(),
+            Some("if (value == null)\n    return \"\";\nreturn value.trim();")
+        );
+        // Without user code, or outside `executeAction`, there is nothing
+        // to show.
+        assert_eq!(
+            java_user_code("{\n\t\t// BEGIN USER CODE\n\t\t// END USER CODE\n}"),
+            None
+        );
+        assert_eq!(
+            java_user_code("// BEGIN USER CODE\nx();\n// END USER CODE"),
+            None
         );
     }
 
@@ -9637,7 +9789,10 @@ pub enum ENUMStatus {
         assert!(generated.join("src/services/sales/mod.rs").is_file());
         assert!(generated.join("src/ui/mod.rs").is_file());
         assert!(generated.join("src/ui/nanoflows/sales/mod.rs").is_file());
-        assert!(generated.join("src/ui/navigation.rs").is_file());
+        // The navigation is the frontend's.
+        assert!(!generated.join("src/ui/navigation.rs").exists());
+        assert!(generated.join("frontend/src/navigation/index.ts").is_file());
+        assert!(generated.join("frontend/src/types/navigation.ts").is_file());
         assert!(generated.join("src/infrastructure/mod.rs").is_file());
         assert!(!generated.join("src/generated").exists());
         assert!(generated.join("model/imported/manifest.json").is_file());
@@ -9689,7 +9844,7 @@ pub enum ENUMStatus {
         let services_source =
             std::fs::read_to_string(generated.join("src/services/mod.rs")).unwrap();
         let ui_source = std::fs::read_to_string(generated.join("src/ui/mod.rs")).unwrap();
-        assert!(ui_source.contains("pub mod navigation;"));
+        assert!(!ui_source.contains("pub mod navigation;"), "{ui_source}");
         // What the application serves over HTTP is a layer of its own.
         assert!(!ui_source.contains("pub mod http;"), "{ui_source}");
         assert!(!generated.join("src/presentation").exists());
@@ -9701,8 +9856,9 @@ pub enum ENUMStatus {
         // The model declares no task queue, so there is no file for them.
         assert!(!generated.join("src/services/task_queues.rs").exists());
         assert!(!services_source.contains("task_queues"));
-        // Project security and navigation are the functions that build them,
-        // stating only what differs from the builder's own defaults.
+        // Project security is the function that builds it, and the
+        // navigation the frontend's data; each states only what differs
+        // from the defaults.
         assert_eq!(
             std::fs::read_to_string(generated.join("src/domain/security.rs")).unwrap(),
             r#"//! The project's security. Each module's own roles are declared in
@@ -9726,21 +9882,28 @@ pub fn security(security: &mut SecurityBuilder) {
 "#
         );
         assert_eq!(
-            std::fs::read_to_string(generated.join("src/ui/navigation.rs")).unwrap(),
-            r#"//! The project's navigation profiles.
+            std::fs::read_to_string(generated.join("frontend/src/navigation/index.ts")).unwrap(),
+            r#"// The project's navigation profiles. mxrs reads this file into the model
+// on every build: edit it as the application's navigation.
+import type { Navigation } from "@/types/navigation";
 
-use mxrs::prelude::*;
-
-#[navigation]
-pub fn navigation(navigation: &mut NavigationBuilder) {
-    navigation.profile("Responsive", |profile| {
-        profile.home_microflow("Sales.ACT_Ping");
-        profile.item("Orders", |item| {
-            item.microflow("Sales.ACT_Ping");
-            item.icon_code(57369);
-        });
-    });
-}
+export default {
+  profiles: [
+    {
+      name: "Responsive",
+      homeMicroflow: "Sales.ACT_Ping",
+      items: [
+        {
+          caption: "Orders",
+          microflow: "Sales.ACT_Ping",
+          icon: {
+            code: 57369,
+          },
+        },
+      ],
+    },
+  ],
+} satisfies Navigation;
 "#
         );
         assert_eq!(

@@ -20,6 +20,7 @@ pub use mxrs_dsl::{
     TaskQueueBuilder, UserRoleBuilder,
 };
 pub use mxrs_expr::*;
+pub use mxrs_frontend::{FrontendDecl, FrontendError, merge_frontend, read_frontend};
 pub use mxrs_ir::*;
 #[doc(hidden)]
 pub use mxrs_macros::project_facade as __project;

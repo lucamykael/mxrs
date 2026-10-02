@@ -57,8 +57,11 @@ infrastructure┘   (ports)
 - Controllers translate HTTP — or desktop commands, or another delivery
   protocol — into service calls. Framework request/response types stop at
   this edge.
-- UI is the user interface the model declares: pages, layouts, nanoflows and
-  navigation. It is not where the application's HTTP surface lives.
+- UI is the user interface the model declares, and it belongs to the
+  frontend: its TypeScript is the source every build reads into the model.
+  The navigation is already there; pages, layouts and nanoflows stay in
+  `src/ui/` until they move. It is not where the application's HTTP surface
+  lives.
 - Infrastructure implements ports for persistence, runtimes, queues and
   external services.
 - Composition of the *model* needs no module at all: declarations register
@@ -93,8 +96,7 @@ src/
 ├── ui/
 │   ├── pages/<mendix_module>/<page>.rs
 │   ├── layouts/<mendix_module>/<layout>.rs
-│   ├── nanoflows/<mendix_module>/<nanoflow>.rs
-│   └── navigation.rs
+│   └── nanoflows/<mendix_module>/<nanoflow>.rs
 ├── infrastructure/
 │   ├── adapters/
 │   └── persistence.rs
@@ -268,8 +270,10 @@ frontend/
     │   ├── layout/              header and navigation
     │   └── widgets/             one renderer per widget of the model
     ├── hooks/                   the loaded model, the hash route
+    ├── navigation/index.ts      the project's navigation, read by every build
     ├── pages/                   what a route shows
-    ├── types/                   the model as the runtime publishes it
+    ├── types/                   the model as the runtime publishes it, and
+    │                            the shapes the declarations are checked against
     ├── utils/                   pure helpers
     └── styles/                  base, layout and widget CSS
 ```
@@ -277,6 +281,34 @@ frontend/
 Imports name `src/` as `@/` (`tsconfig.json` declares it and Vite reads it
 from there). The production bundle `mxrs` ships is built from exactly these
 files, and its hash is pinned against them.
+
+The user interface the model declares is written here, in TypeScript, and
+every build reads it into the model — mxrs parses it and never runs it. A
+declaration file exports data the frontend's own types check:
+
+```ts
+// frontend/src/navigation/index.ts
+import type { Navigation } from "@/types/navigation";
+
+export default {
+  profiles: [
+    {
+      name: "Responsive",
+      homePage: "Main.Home",
+      homes: [{ role: "Anonymous", page: "Main.Login" }],
+      items: [
+        { caption: "Orders", page: "Sales.Orders", icon: { glyph: "list" } },
+        { caption: { en_US: "Admin", nl_NL: "Beheer" }, items: [] },
+      ],
+    },
+  ],
+} satisfies Navigation;
+```
+
+A variable, call or spread would need running, so it is refused with its
+line. A page that still lives in Rust adds itself to a profile with
+`#[navigation_item]`, and a navigation declared both here and with
+`#[navigation]` is refused.
 
 ## Declaring the model
 
@@ -317,7 +349,7 @@ pub struct Order {
 | `#[declaration(module = "...")]` | fn | anything else a module holds, through its `ModuleBuilder` |
 | `#[module_roles(module = "...")]` | enum | a module's roles; variants are the roles |
 | `#[security]` | fn | the project's security |
-| `#[navigation]` | fn | the project's navigation profiles |
+| `#[navigation]` | fn | the project's navigation profiles, when the frontend's `src/navigation/index.ts` cannot restate them |
 | `#[navigation_item(profile = "...", caption = "...")]` | fn | one item, declared next to the page it opens |
 | `#[demo_user]` | fn | a local demo user |
 

@@ -1,0 +1,211 @@
+//! The data a frontend file declares: `export default { ... } satisfies T;`
+//! read as the JSON value it is.
+//!
+//! A declaration file is TypeScript that the frontend's own build checks
+//! against its types, and that mxrs reads without running it. So what it
+//! exports is data, written the way TypeScript writes data — objects,
+//! arrays, strings, numbers, booleans, `null` — and anything that would
+//! need running (a variable, a call, a spread) is refused with where it is.
+
+use std::path::Path;
+
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{ArrayExpressionElement, Expression, ObjectPropertyKind, Statement};
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType, Span};
+use serde_json::{Map, Number, Value};
+
+use crate::FrontendError;
+
+/// What the file at `path` exports by default, as data.
+pub(crate) fn read_default_export(path: &Path) -> Result<Value, FrontendError> {
+    let source = std::fs::read_to_string(path).map_err(|source| FrontendError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::ts());
+    let parsed = Parser::new(&allocator, &source, source_type).parse();
+    if let Some(error) = parsed.diagnostics.first() {
+        return Err(FrontendError::Syntax {
+            path: path.display().to_string(),
+            detail: error.to_string(),
+        });
+    }
+    let at = |span: Span| Located {
+        path,
+        source: &source,
+        span,
+    };
+    for statement in &parsed.program.body {
+        let Statement::ExportDefaultDeclaration(export) = statement else {
+            continue;
+        };
+        let Some(expression) = export.declaration.as_expression() else {
+            return Err(at(export.span).refuse("a default export that declares data"));
+        };
+        return value(expression, &at);
+    }
+    Err(FrontendError::Syntax {
+        path: path.display().to_string(),
+        detail: "it has no `export default` declaring data".to_string(),
+    })
+}
+
+/// Where a construct is: the file and, counted from its text, the line.
+struct Located<'a> {
+    path: &'a Path,
+    source: &'a str,
+    span: Span,
+}
+
+impl Located<'_> {
+    fn refuse(&self, expected: &str) -> FrontendError {
+        let start = (self.span.start as usize).min(self.source.len());
+        let line = self.source[..start].matches('\n').count() + 1;
+        let end = (self.span.end as usize).clamp(start, self.source.len());
+        let found: String = self.source[start..end].chars().take(60).collect();
+        FrontendError::Unsupported {
+            path: self.path.display().to_string(),
+            line,
+            expected: expected.to_string(),
+            found,
+        }
+    }
+}
+
+fn value<'a>(
+    expression: &Expression<'_>,
+    at: &dyn Fn(Span) -> Located<'a>,
+) -> Result<Value, FrontendError> {
+    Ok(match expression.without_parentheses() {
+        Expression::StringLiteral(text) => Value::String(text.value.to_string()),
+        Expression::TemplateLiteral(template) if template.expressions.is_empty() => Value::String(
+            template
+                .quasis
+                .iter()
+                .map(|quasi| {
+                    quasi
+                        .value
+                        .cooked
+                        .as_ref()
+                        .map_or_else(|| quasi.value.raw.to_string(), ToString::to_string)
+                })
+                .collect(),
+        ),
+        Expression::NumericLiteral(number) => number_value(number.value, at(number.span))?,
+        Expression::UnaryExpression(unary)
+            if unary.operator == oxc_ast::ast::UnaryOperator::UnaryNegation =>
+        {
+            match unary.argument.without_parentheses() {
+                Expression::NumericLiteral(number) => number_value(-number.value, at(number.span))?,
+                other => return Err(at(other.span()).refuse("a number")),
+            }
+        }
+        Expression::BooleanLiteral(flag) => Value::Bool(flag.value),
+        Expression::NullLiteral(_) => Value::Null,
+        Expression::ArrayExpression(array) => Value::Array(
+            array
+                .elements
+                .iter()
+                .map(|element| match element {
+                    ArrayExpressionElement::SpreadElement(spread) => {
+                        Err(at(spread.span).refuse("a value, not a spread"))
+                    }
+                    ArrayExpressionElement::Elision(hole) => {
+                        Err(at(hole.span).refuse("a value, not a hole"))
+                    }
+                    other => value(
+                        other
+                            .as_expression()
+                            .expect("an element that is neither a spread nor a hole"),
+                        at,
+                    ),
+                })
+                .collect::<Result<_, _>>()?,
+        ),
+        Expression::ObjectExpression(object) => {
+            let mut map = Map::new();
+            for property in &object.properties {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    return Err(at(property.span()).refuse("a property, not a spread"));
+                };
+                if property.computed || property.method || property.shorthand {
+                    return Err(at(property.span).refuse("`key: value`"));
+                }
+                let Some(key) = property.key.static_name() else {
+                    return Err(at(property.key.span()).refuse("a property name"));
+                };
+                if map
+                    .insert(key.to_string(), value(&property.value, at)?)
+                    .is_some()
+                {
+                    return Err(at(property.key.span()).refuse("each property once"));
+                }
+            }
+            Value::Object(map)
+        }
+        // `as const` and `satisfies T` say something to TypeScript only.
+        Expression::TSAsExpression(cast) => value(&cast.expression, at)?,
+        Expression::TSSatisfiesExpression(check) => value(&check.expression, at)?,
+        other => {
+            return Err(
+                at(other.span()).refuse("data: a string, number, boolean, null, array or object")
+            );
+        }
+    })
+}
+
+fn number_value(number: f64, at: Located<'_>) -> Result<Value, FrontendError> {
+    if number.fract() == 0.0 && number.abs() < 9.007_199_254_740_992e15 {
+        // A whole number within f64's exact range is the integer it reads as.
+        #[allow(clippy::cast_possible_truncation)]
+        return Ok(Value::Number(Number::from(number as i64)));
+    }
+    Number::from_f64(number)
+        .map(Value::Number)
+        .ok_or_else(|| at.refuse("a finite number"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(source: &str) -> Result<Value, FrontendError> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.ts");
+        std::fs::write(&path, source).unwrap();
+        read_default_export(&path)
+    }
+
+    #[test]
+    fn a_default_export_is_read_as_the_data_it_declares() {
+        let declared = read(
+            "import type { Navigation } from \"@/types/navigation\";\n\nexport default {\n  profiles: [{ name: \"Responsive\", count: 3, ratio: -0.5, on: true, none: null, text: `a` }],\n} as const satisfies Navigation;\n",
+        )
+        .unwrap();
+        assert_eq!(
+            declared,
+            serde_json::json!({
+                "profiles": [{ "name": "Responsive", "count": 3, "ratio": -0.5, "on": true, "none": null, "text": "a" }]
+            })
+        );
+    }
+
+    #[test]
+    fn what_would_need_running_is_refused_with_where_it_is() {
+        let error = read("export default {\n  profiles: [title()],\n};\n")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains(":2:") && error.contains("title()"),
+            "{error}"
+        );
+        let error = read("export default { a: 1, a: 2 };\n")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("each property once"), "{error}");
+    }
+}

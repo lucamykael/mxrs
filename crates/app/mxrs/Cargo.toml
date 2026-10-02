@@ -15,6 +15,7 @@ workspace = true
 inventory = "0.3"
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
 mxrs-expr = { path = "../../authoring/mxrs-expr" }
+mxrs-frontend = { path = "../../authoring/mxrs-frontend" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-macros = { path = "../../authoring/mxrs-macros" }
 mxrs-materializers = { path = "../../compiler/mxrs-materializers" }

@@ -21,12 +21,11 @@ pub(crate) fn services_layer() -> String {
     "//! What the application does: every module's microflows as services, one\n//! folder per Mendix module and one service per subject.\n".to_string()
 }
 
-/// The user-interface layer of a fresh project: the application layout,
-/// the home page that uses it, and the navigation that opens it.
+/// The user-interface layer of a fresh project: the application layout and
+/// the home page that uses it.
 pub(crate) fn ui_layer() -> String {
-    "//! The user interface: pages, layouts, nanoflows and navigation.\n\n\
+    "//! Every module's pages and layouts. The navigation is declared in the\n//! frontend.\n\n\
      pub mod layouts;\n\
-     pub mod navigation;\n\
      pub mod pages;\n"
         .to_string()
 }
@@ -53,18 +52,21 @@ pub(crate) fn home_page(title: &str) -> String {
     )
 }
 
-/// The navigation `mxrs new` starts a project with: one Responsive profile
-/// opening the home page.
+/// `frontend/src/navigation/index.ts` of a fresh project: one Responsive
+/// profile opening the home page.
 pub(crate) fn navigation() -> String {
-    "//! The project's navigation profiles.\n\n\
-     use mxrs::prelude::*;\n\n\
-     #[navigation]\n\
-     pub fn navigation(navigation: &mut NavigationBuilder) {\n    \
-     navigation.profile(\"Responsive\", |profile| {\n        \
-     profile.home_page(\"Main.Home\");\n    \
-     });\n\
-     }\n"
-    .to_string()
+    "// The project's navigation profiles. mxrs reads this file into the model\n\
+     // on every build: edit it as the application's navigation.\n\
+     import type { Navigation } from \"@/types/navigation\";\n\n\
+     export default {\n  \
+     profiles: [\n    \
+     {\n      \
+     name: \"Responsive\",\n      \
+     homePage: \"Main.Home\",\n    \
+     },\n  \
+     ],\n\
+     } satisfies Navigation;\n"
+        .to_string()
 }
 
 /// The navigation item a templated/chain page adds for itself, declared in
@@ -825,7 +827,7 @@ mod tests {
         let named = demo_user("DemoAdmin", "Sales.Account", &[], "X");
         assert!(named.contains("#[demo_user(name = \"DemoAdmin\")]\npub fn demo_admin("));
         assert!(named.contains("    user.entity(\"Sales.Account\");\n"));
-        assert!(navigation().contains("#[navigation]\npub fn navigation("));
+        assert!(navigation().contains("homePage: \"Main.Home\""));
         assert!(home_page("Shop").contains("#[page(module = \"Main\")]\npub fn home("));
     }
 

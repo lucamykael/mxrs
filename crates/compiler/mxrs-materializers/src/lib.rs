@@ -39,7 +39,7 @@ const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "86cbbe7beab65a4c11d2070af81a726e2a4eb97abaae6ba253c62f3c39aeddbf",
+    "2c58f7e97d9438b76b396596baba53a00bcc0111ae6c21f41106b9f79e95bbee",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -140,6 +140,10 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     (
         "src/types/model.ts",
         include_bytes!("../frontend/src/types/model.ts"),
+    ),
+    (
+        "src/types/navigation.ts",
+        include_bytes!("../frontend/src/types/navigation.ts"),
     ),
     (
         "src/utils/widgets.ts",
@@ -249,6 +253,12 @@ pub fn materialize_manifest(
     inventory.push(b'\n');
     write_if_changed(inventory_path, &inventory, &mut report)?;
     Ok(report)
+}
+
+/// The pinned Vite/TypeScript sources of a project's frontend, by their
+/// path inside `frontend/`.
+pub fn frontend_source_files() -> &'static [(&'static str, &'static [u8])] {
+    SOURCE_FILES
 }
 
 /// Emits the pinned Vite/TypeScript sources for deliberate frontend work.

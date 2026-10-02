@@ -50,8 +50,9 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
 
 An import writes model declarations under `src/domain/`, every microflow as a
 service under `src/services/<module>/`, published REST services as
-route tables and controllers under `src/controllers/`, pages, navigation, and
-client-side nanoflows under `src/ui/`, and outbound/generated adapters under
+route tables and controllers under `src/controllers/`, the navigation in the
+frontend (`frontend/src/navigation/index.ts`), pages and client-side nanoflows
+under `src/ui/`, and outbound/generated adapters under
 `src/infrastructure/`. Every declaration is one annotated item in its own
 file — `#[entity]` on a struct, `#[microflow]` on the function that builds it —
 and registers itself, so adding one is the file plus its `pub mod` line; see
@@ -121,8 +122,10 @@ uses and is used by. A flow that cannot be declared yet is named where its
 declaration would be, so the rest of the project can still call and bind it,
 with a comment saying why it stayed in the snapshot. Project security is imported into
 `src/domain/security.rs`, each module's roles into
-`src/domain/module_security/<module>.rs`, and modern navigation into
-`src/ui/navigation.rs`. Their writers validate role and target
+`src/domain/module_security/<module>.rs`, and modern navigation into the
+frontend's `src/navigation/index.ts` — TypeScript data, checked by the
+frontend's build and read by mxrs's (a navigation the TypeScript cannot
+restate exactly stays a Rust `#[navigation]` declaration). Their writers validate role and target
 invariants, preserve native fields outside the typed surface, and keep
 existing identities. Unknown documents remain complete in the snapshot.
 Task queues import as editable declarations in

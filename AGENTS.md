@@ -65,9 +65,23 @@ read-only behavioral oracle; never edit it.
   one `<resource>_controller.rs` per resource with a function per
   operation, named by what it does to the resource (`index`, `show`,
   `create`, `update`, `destroy`) when that tells the operations apart and
-  after the microflow each calls when it does not. `src/ui/` holds pages,
-  layouts, nanoflows and navigation. Export mappings are part of the
-  domain: `src/domain/mappings/<module>/`.
+  after the microflow each calls when it does not. Export mappings are
+  part of the domain: `src/domain/mappings/<module>/`.
+- The user interface is the frontend's (user directive, 2026-10-02):
+  everything a user sees and runs in the browser lives in `frontend/`, a
+  React + TypeScript project organized the way one is, and its TypeScript
+  is the source a build reads into the model — mxrs parses it (oxc) and
+  never runs it. Nanoflows are the frontend's services
+  (`frontend/src/services/<module>/<subject>Service.ts`), pages are TSX
+  (`frontend/src/pages/<module>/`), layouts are components
+  (`frontend/src/components/layout/`), and the navigation is
+  `frontend/src/navigation/index.ts`: `export default { profiles: [...] }
+  satisfies Navigation;`, checked against `src/types/navigation.ts`. A
+  declaration file is data — what would need running is refused with its
+  line. The importer, `mxrs new` and the scaffolds write these files; what
+  has not moved yet (pages, layouts, nanoflows) stays in `src/ui/` until
+  it does, and a page's `#[navigation_item]` joins the frontend's profile.
+  The backend keeps no user-interface folder once the move is complete.
 - A declaration is one annotated item in its own file, and it registers
   itself (user directive, 2026-10-01). `#[entity]`/`#[dto]`/`#[view]` on a
   struct, `#[enumeration]`/`#[module_roles]` on an enum, and `#[microflow]`/
@@ -119,11 +133,12 @@ read-only behavioral oracle; never edit it.
   `call_java_action!`). An entity an action takes is its struct. A type no
   struct names is still carried: `MxAnyObject`/`ObjectRef`,
   `MxEntityName`, `MxValue`. mxrs implements some Marketplace actions itself
-  (`FlowEngine::with_marketplace_java_actions`, each following its Java
-  exactly); the project registers its own in
-  `infrastructure::adapters::java_actions`, which replace mxrs's; and the
-  booted runtime lists every action still without a Rust implementation,
-  with the flows that call it.
+  (`FlowEngine::with_marketplace_java_actions`, each following its Java —
+  its edge cases included, tested against what the Java returns); the
+  project registers its own in `infrastructure::adapters::java_actions`,
+  which replace mxrs's; and every runtime that boots flows (the generated
+  one, `mxrs run`) names, by module, each action still without a Rust
+  implementation.
 - Generated Rust reads in paragraphs (user directive, 2026-10-02): a
   declaration's attributes sit directly above its `pub fn`; a flow's
   parameters, return type and one-line `let`s are stacked; every other

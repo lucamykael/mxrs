@@ -621,6 +621,8 @@ fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
     let domain = std::fs::read(root.join("src/domain/mod.rs")).unwrap();
     std::fs::remove_dir_all(root.join("src/services")).unwrap();
     std::fs::remove_dir_all(root.join("src/ui")).unwrap();
+    // Nor has it a frontend declaring the navigation.
+    std::fs::remove_dir_all(root.join("frontend")).unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
         concat!(
