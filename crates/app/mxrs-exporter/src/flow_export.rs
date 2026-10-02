@@ -1338,6 +1338,27 @@ pub(crate) fn plan_services(
         })
         .collect();
     subjects.sort_by(|a, b| a.0.cmp(b.0));
+    // Subjects spelled differently but filed alike (`ORDER` and `Order`)
+    // are one service: an entity's spelling wins, and a flow named the other
+    // way states its name.
+    let mut canonical: HashMap<String, ServiceSubject> = HashMap::new();
+    for (_, subject, _) in &subjects {
+        if let Some(subject) = subject {
+            let stem = crate::inner_file_stem(subject.text());
+            match canonical.get(&stem) {
+                Some(ServiceSubject::Entity(_)) => {}
+                Some(ServiceSubject::Name(_)) if matches!(subject, ServiceSubject::Name(_)) => {}
+                _ => {
+                    canonical.insert(stem, subject.clone());
+                }
+            }
+        }
+    }
+    for (_, subject, _) in &mut subjects {
+        if let Some(current) = subject {
+            *current = canonical[&crate::inner_file_stem(current.text())].clone();
+        }
+    }
     // A subject spelled like the module would share the module's service:
     // what no subject gathers joins that service instead.
     let module_subject = subjects
@@ -1756,7 +1777,14 @@ pub(crate) fn render_files(
         let mut taken = vec![slot.service.clone()];
         let mut body = String::new();
         let subject = match &slot.subject {
-            Some(ServiceSubject::Entity(qualified)) if names.entities.contains_key(qualified) => {
+            // The macro names flows by the struct's identifier: the struct
+            // stands for the subject only when it is spelled the model's way.
+            Some(subject @ ServiceSubject::Entity(qualified))
+                if names
+                    .entities
+                    .get(qualified)
+                    .is_some_and(|entity| entity.type_name == subject.text()) =>
+            {
                 format!(", subject = {}", names::entity(qualified))
             }
             Some(subject) => format!(", subject = {}", rust_string(subject.text())),

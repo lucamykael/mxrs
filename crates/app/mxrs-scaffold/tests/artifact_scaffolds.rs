@@ -933,3 +933,53 @@ fn presentation_initialization_previews_compiles_and_recovers_missing_directorie
             && unit.containment_name == "Documents"
     }));
 }
+
+/// A scaffolded microflow joins the service its subject names, under the
+/// name the service's own attribute gives it; the same flow twice is
+/// refused rather than declared again.
+#[test]
+fn a_scaffolded_flow_is_named_by_the_service_it_joins() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    let service = root.join("src/services/main/main_service.rs");
+
+    scaffold(&root, ArtifactKind::UseCase, "Main.ACT_Main_Report");
+    // `Main_Export` opens with the word of an existing service, the module's
+    // own, which states no subject: the flow's name is stated.
+    scaffold_artifact(&ArtifactScaffold::new(
+        ArtifactKind::UseCase,
+        "Main.ACT_Main_Export",
+        &root,
+    ))
+    .unwrap();
+    let source = std::fs::read_to_string(&service).unwrap();
+    assert!(
+        source.contains("#[microflow(ACT, name = \"ACT_Main_Export\")]\n    pub fn export("),
+        "{source}"
+    );
+    assert_eq!(source.matches("#[service(").count(), 1, "{source}");
+    let again = scaffold_artifact(&ArtifactScaffold::new(
+        ArtifactKind::UseCase,
+        "Main.ACT_Main_Export",
+        &root,
+    ));
+    assert!(
+        matches!(&again, Err(mxrs_scaffold::ScaffoldError::FileExists(_))),
+        "{again:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&service).unwrap(), source);
+
+    // A subject declared by a DTO is imported from where the DTO lives.
+    let dtos = root.join("src/domain/dtos/main");
+    std::fs::create_dir_all(&dtos).unwrap();
+    std::fs::write(dtos.join("order_request.rs"), "pub struct OrderRequest;\n").unwrap();
+    scaffold(&root, ArtifactKind::UseCase, "Main.ACT_OrderRequest_Send");
+    let request =
+        std::fs::read_to_string(root.join("src/services/main/order_request_service.rs")).unwrap();
+    assert!(
+        request.contains("use crate::domain::dtos::main::order_request::OrderRequest;")
+            && request.contains("#[service(module = \"Main\", subject = OrderRequest)]")
+            && request.contains("#[microflow(ACT)]\n    pub fn send("),
+        "{request}"
+    );
+}

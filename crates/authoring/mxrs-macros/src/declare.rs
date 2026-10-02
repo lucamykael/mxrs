@@ -233,6 +233,7 @@ pub fn expand_flow(
         visibility: &item.vis,
         attributes: &item.attrs,
         call: quote!(#ident),
+        doc_target: ident.to_string(),
     })?;
     Ok(quote! {
         #item
@@ -252,6 +253,8 @@ struct FlowDeclaration<'a> {
     attributes: &'a [syn::Attribute],
     /// How the registration calls the function that builds the flow.
     call: TokenStream,
+    /// How the generated type's documentation links to that function.
+    doc_target: String,
 }
 
 /// The unit type naming the flow, and its registration with the
@@ -266,6 +269,7 @@ fn flow_declaration(declaration: FlowDeclaration<'_>) -> syn::Result<TokenStream
         visibility,
         attributes,
         call,
+        doc_target,
     } = declaration;
     let marker = marker_ident(&name, ident.span());
     if marker == *ident {
@@ -323,9 +327,8 @@ fn flow_declaration(declaration: FlowDeclaration<'_>) -> syn::Result<TokenStream
         ),
     };
     let summary = format!(
-        "The `{}.{name}` {noun}, declared by [`{}`].",
-        module.value(),
-        call.to_string().replace(' ', "")
+        "The `{}.{name}` {noun}, declared by [`{doc_target}`].",
+        module.value()
     );
 
     Ok(quote! {
@@ -401,18 +404,34 @@ impl syn::parse::Parse for ServiceArgs {
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
-            match key.to_string().as_str() {
-                "module" => module = Some(input.parse()?),
+            let repeated = match key.to_string().as_str() {
+                "module" => module.replace(input.parse()?).is_some(),
                 "subject" if input.peek(syn::LitStr) => {
-                    subject = Some(Subject::Name(input.parse()?));
+                    let name: syn::LitStr = input.parse()?;
+                    let text = name.value();
+                    if text.is_empty()
+                        || !text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        return Err(syn::Error::new(
+                            name.span(),
+                            "a subject is a word of the flows' names: letters, digits and underscores",
+                        ));
+                    }
+                    subject.replace(Subject::Name(name)).is_some()
                 }
-                "subject" => subject = Some(Subject::Item(input.parse()?)),
+                "subject" => subject.replace(Subject::Item(input.parse()?)).is_some(),
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
                         "unknown service option; expected `module` or `subject`",
                     ));
                 }
+            };
+            if repeated {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!("`{key}` is stated once"),
+                ));
             }
             if input.peek(syn::Token![,]) {
                 input.parse::<syn::Token![,]>()?;
@@ -457,7 +476,14 @@ pub fn expand_service(args: &ServiceArgs, mut item: syn::ItemImpl) -> syn::Resul
         }),
         _ => None,
     };
+    if !item.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &item.generics,
+            "a service is not generic: its flows are declared once",
+        ));
+    }
     let self_ty = item.self_ty.clone();
+    let service_name = quote!(#self_ty).to_string().replace(' ', "");
     let mut flows = Vec::new();
     for member in &mut item.items {
         let syn::ImplItem::Fn(method) = member else {
@@ -519,6 +545,7 @@ pub fn expand_service(args: &ServiceArgs, mut item: syn::ItemImpl) -> syn::Resul
                 visibility: &flow.visibility,
                 attributes: &flow.attributes,
                 call: quote!(<#self_ty>::#ident),
+                doc_target: format!("{service_name}::{ident}"),
             })
         })
         .collect::<syn::Result<Vec<_>>>()?;

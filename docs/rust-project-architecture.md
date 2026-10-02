@@ -44,9 +44,13 @@ infrastructure┘   (ports)
 
 - Domain owns business data, invariants, value objects and domain rules. It
   must not import Axum, a database driver or desktop framework.
-- Services are what the application does. Every Mendix microflow is a
-  service: a layer of its own beside the domain, one folder per module and
-  one file per microflow. There is no `application` folder wrapping it.
+- Services are what the application does: a layer of its own beside the
+  domain, one folder per module and one service per subject, whose methods
+  are the module's microflows. There is no `application` folder wrapping
+  it. Text a flow holds that is data rather than code (more than 60 lines
+  or 4,000 characters) is kept beside its service under
+  `data/<service>/` and included; `.gitattributes` keeps git from touching
+  its line endings.
 - Ports are the contracts between the model and hand-written code: what a
   module's services offer to callers, and what its actions need an adapter
   to provide.

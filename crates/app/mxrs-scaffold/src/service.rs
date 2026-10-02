@@ -47,19 +47,28 @@ pub(crate) fn add_service_method(
     let module_stem = snake_case(module_name);
     let folder = root.join("src/services").join(&module_stem);
     let mut known = declared_entities(root, &module_stem);
-    known.extend(entities.iter().cloned());
+    known.extend(entities.iter().map(|entity| {
+        (
+            entity.clone(),
+            format!(
+                "crate::domain::entities::{module_stem}::{}::{entity}",
+                snake_case(entity)
+            ),
+        )
+    }));
+    let names: Vec<String> = known.iter().map(|(name, _)| name.clone()).collect();
     let (prefix, core) = split_prefix(&method.name);
     let first_word = core.split('_').next().unwrap_or(core);
-    let subject = entity_subject(core, &known, first_word.len())
+    let subject = entity_subject(core, &names, first_word.len())
         .map(|(entity, action)| (Subject::Entity(entity), action))
         .or_else(|| {
             let (word, action) = core.split_once('_')?;
             let stem = format!("{}_service", snake_case(word));
-            (!action.is_empty() && !is_verb(word) && (folder.join(format!("{stem}.rs")).is_file()))
+            (!action.is_empty() && !is_verb(word) && folder.join(format!("{stem}.rs")).is_file())
                 .then(|| (Subject::Word(word.to_string()), action.to_string()))
         })
         .or_else(|| {
-            entity_subject(core, &known, core.len())
+            entity_subject(core, &names, core.len())
                 .map(|(entity, action)| (Subject::Entity(entity), action))
         });
     let (subject, action) = match subject {
@@ -86,24 +95,51 @@ pub(crate) fn add_service_method(
     };
     let path = folder.join(format!("{file_stem}.rs"));
     let existing = transaction.content(&path)?;
+    // A file that already declares a service names its flows by the subject
+    // its own attribute states, whatever this scaffold would have chosen.
+    let declared = existing.as_deref().and_then(service_declaration);
+    let (service, subject_text) = match &declared {
+        Some(declared) => (declared.service.clone(), declared.subject.clone()),
+        None => (
+            service,
+            subject.as_ref().map(|subject| subject.text().to_string()),
+        ),
+    };
+    let derive = |function: &str| {
+        prefix
+            .map(str::to_string)
+            .into_iter()
+            .chain(subject_text.clone())
+            .chain([pascal_case(function)])
+            .collect::<Vec<_>>()
+            .join("_")
+    };
     let mut function = method_name(&action, &method.name);
-    if let Some(existing) = &existing
-        && existing.contains(&format!("pub fn {function}("))
-    {
-        function = match prefix {
-            Some(prefix) => format!("{}_{function}", prefix.to_ascii_lowercase()),
-            None => format!("{function}_flow"),
-        };
+    if let Some(existing) = &existing {
+        let methods = declared_methods(existing, &derive);
+        if methods.iter().any(|(_, flow)| *flow == method.name) {
+            return Err(ScaffoldError::FileExists(format!(
+                "{} already declares {module_name}.{}",
+                path.display(),
+                method.name
+            )));
+        }
+        let taken = |candidate: &str| methods.iter().any(|(name, _)| name == candidate);
+        if taken(&function) {
+            // Two flows of one subject doing the same: the kind tells them
+            // apart, and failing that a number — the importer's rule.
+            let kinded = prefix.map(|prefix| format!("{}_{function}", prefix.to_ascii_lowercase()));
+            function = match kinded {
+                Some(kinded) if !taken(&kinded) => kinded,
+                _ => (2..)
+                    .map(|suffix| format!("{function}_{suffix}"))
+                    .find(|candidate| !taken(candidate))
+                    .expect("an unbounded suffix always finds a free name"),
+            };
+        }
     }
-    let derived = prefix
-        .map(str::to_string)
-        .into_iter()
-        .chain(subject.as_ref().map(|subject| subject.text().to_string()))
-        .chain([pascal_case(&function)])
-        .collect::<Vec<_>>()
-        .join("_");
     let mut arguments = prefix.map(str::to_string).into_iter().collect::<Vec<_>>();
-    if derived != method.name {
+    if derive(&function) != method.name {
         arguments.push(format!("name = {:?}", method.name));
     }
     let attribute = if arguments.is_empty() {
@@ -123,78 +159,112 @@ pub(crate) fn add_service_method(
         ));
     } else {
         method_lines.push(format!("    pub fn {function}(flow: &mut FlowBuilder) {{"));
-        method_lines.extend(method.body.iter().map(|line| format!("        {line}")));
+        method_lines.extend(method.body.iter().map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("        {line}")
+            }
+        }));
         method_lines.push("    }".to_string());
     }
+    let mut imports = method.imports.clone();
+    if let Some(Subject::Entity(entity)) = &subject
+        && declared.is_none()
+        && let Some((_, path)) = known.iter().find(|(name, _)| name == entity)
+    {
+        imports.push(format!("use {path};"));
+    }
+    imports.sort();
+    imports.dedup();
+    let service_block = |service: &str| {
+        let subject_argument = match &subject {
+            Some(Subject::Entity(entity)) => format!(", subject = {entity}"),
+            Some(Subject::Word(word)) => format!(", subject = {word:?}"),
+            None => String::new(),
+        };
+        let what = match &subject {
+            Some(subject) => format!(
+                "What the {module_name} module does with {}.",
+                subject.text()
+            ),
+            None => format!("What the {module_name} module does that no one subject gathers."),
+        };
+        let mut block = format!(
+            "/// {what}\npub struct {service};\n\n#[service(module = {module_name:?}{subject_argument})]\nimpl {service} {{\n"
+        );
+        for line in &method_lines {
+            block.push_str(line);
+            block.push('\n');
+        }
+        block.push_str("}\n");
+        block
+    };
     let module_path = format!("crate::services::{module_stem}::{file_stem}");
     match existing {
         Some(existing) => {
-            let opening = format!("impl {service} {{");
-            let start = existing
-                .lines()
-                .position(|line| line == opening)
-                .ok_or_else(|| {
-                    ScaffoldError::UnsupportedLayerMigration(path.display().to_string())
-                })?;
+            let newline = if existing.contains("\r\n") {
+                "\r\n"
+            } else {
+                "\n"
+            };
             let lines: Vec<&str> = existing.lines().collect();
-            let closing = lines[start..]
+            let new_imports: Vec<String> = imports
                 .iter()
-                .position(|line| *line == "}")
-                .map(|offset| start + offset)
-                .ok_or_else(|| {
-                    ScaffoldError::UnsupportedLayerMigration(path.display().to_string())
-                })?;
-            let mut updated: Vec<String> = Vec::with_capacity(lines.len() + method_lines.len() + 4);
-            // New imports join the file's own, after its last `use`.
-            let last_use = lines[..start]
-                .iter()
-                .rposition(|line| line.starts_with("use "));
-            for (index, line) in lines.iter().enumerate() {
-                if index == closing {
-                    updated.push(String::new());
-                    updated.extend(method_lines.iter().cloned());
+                .filter(|import| !existing.contains(import.as_str()))
+                .cloned()
+                .collect();
+            let last_use = lines.iter().rposition(|line| line.starts_with("use "));
+            let mut updated: Vec<String> = Vec::with_capacity(lines.len() + method_lines.len() + 8);
+            match &declared {
+                Some(declared) => {
+                    // The method joins the `impl` the attribute stands on.
+                    let closing = lines[declared.impl_line..]
+                        .iter()
+                        .position(|line| *line == "}")
+                        .map(|offset| declared.impl_line + offset)
+                        .ok_or_else(|| ScaffoldError::InvalidProjectSource {
+                            path: path.display().to_string(),
+                            reason: format!("the `impl {service}` block does not close"),
+                        })?;
+                    for (index, line) in lines.iter().enumerate() {
+                        if index == closing {
+                            updated.push(String::new());
+                            updated.extend(method_lines.iter().cloned());
+                        }
+                        updated.push(line.to_string());
+                        if Some(index) == last_use {
+                            updated.extend(new_imports.iter().cloned());
+                        }
+                    }
                 }
-                updated.push(line.to_string());
-                if Some(index) == last_use {
-                    updated.extend(
-                        method
-                            .imports
-                            .iter()
-                            .filter(|import| !existing.contains(import.as_str()))
-                            .cloned(),
-                    );
+                // The file names only flows that stay in the imported model:
+                // the service the new flow belongs to starts after them.
+                None if !existing.lines().any(|line| line.starts_with("impl ")) => {
+                    updated.extend(lines.iter().map(|line| line.to_string()));
+                    if !new_imports.is_empty() {
+                        updated.insert(0, String::new());
+                        for import in new_imports.iter().rev() {
+                            updated.insert(0, import.clone());
+                        }
+                        updated.insert(0, "use mxrs::prelude::*;".to_string());
+                    }
+                    updated.push(String::new());
+                    updated.extend(service_block(&service).lines().map(str::to_string));
+                }
+                None => {
+                    return Err(ScaffoldError::InvalidProjectSource {
+                        path: path.display().to_string(),
+                        reason: "it holds code but no `#[service(...)] impl` to add the flow to"
+                            .to_string(),
+                    });
                 }
             }
-            let mut source = updated.join("\n");
-            source.push('\n');
+            let mut source = updated.join(newline);
+            source.push_str(newline);
             transaction.write(&path, source)?;
         }
         None => {
-            let subject_argument = match &subject {
-                Some(Subject::Entity(entity)) => format!(", subject = {entity}"),
-                Some(Subject::Word(word)) => format!(", subject = {word:?}"),
-                None => String::new(),
-            };
-            let what = match &subject {
-                Some(subject) => format!(
-                    "What the {module_name} module does with {}.",
-                    subject.text()
-                ),
-                None => format!("What the {module_name} module does that no one subject gathers."),
-            };
-            let mut imports = method.imports.clone();
-            if let Some(Subject::Entity(entity)) = &subject
-                && !imports
-                    .iter()
-                    .any(|import| import.ends_with(&format!("::{entity};")))
-            {
-                imports.push(format!(
-                    "use crate::domain::entities::{module_stem}::{}::{entity};",
-                    snake_case(entity)
-                ));
-            }
-            imports.sort();
-            imports.dedup();
             let mut source = String::from("use mxrs::prelude::*;\n\n");
             for import in &imports {
                 source.push_str(import);
@@ -203,18 +273,90 @@ pub(crate) fn add_service_method(
             if !imports.is_empty() {
                 source.push('\n');
             }
-            source.push_str(&format!(
-                "/// {what}\npub struct {service};\n\n#[service(module = {module_name:?}{subject_argument})]\nimpl {service} {{\n"
-            ));
-            for line in &method_lines {
-                source.push_str(line);
-                source.push('\n');
-            }
-            source.push_str("}\n");
+            source.push_str(&service_block(&service));
             create_file(transaction, &file_stem, source)?;
         }
     }
     Ok(Placed { module_path })
+}
+
+/// The `#[service(...)]` a file declares: the struct its `impl` is for,
+/// the subject its flows are named by, and the line the `impl` opens on.
+struct ServiceDeclaration {
+    service: String,
+    subject: Option<String>,
+    impl_line: usize,
+}
+
+fn service_declaration(source: &str) -> Option<ServiceDeclaration> {
+    let lines: Vec<&str> = source.lines().collect();
+    let attribute = lines
+        .iter()
+        .position(|line| line.starts_with("#[service("))?;
+    let impl_line = attribute
+        + lines[attribute..]
+            .iter()
+            .position(|line| line.starts_with("impl "))?;
+    let arguments = lines[attribute..impl_line].join(" ");
+    let subject = arguments.split_once("subject = ").map(|(_, rest)| {
+        let rest = rest.trim_start();
+        match rest.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next().unwrap_or_default().to_string(),
+            None => rest
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+                .next()
+                .unwrap_or_default()
+                .rsplit("::")
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        }
+    });
+    let service = lines[impl_line]
+        .strip_prefix("impl ")?
+        .trim_end_matches('{')
+        .trim()
+        .to_string();
+    Some(ServiceDeclaration {
+        service,
+        subject,
+        impl_line,
+    })
+}
+
+/// `(method, flow name)` of every flow method a service file declares: the
+/// name stated with `name = "..."`, or the one `derive` gives the method.
+fn declared_methods(source: &str, derive: &dyn Fn(&str) -> String) -> Vec<(String, String)> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut methods = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix("pub fn ") else {
+            continue;
+        };
+        let Some(function) = rest.split('(').next() else {
+            continue;
+        };
+        // The attribute is the lines between the previous item and this one.
+        let attribute = lines[..index]
+            .iter()
+            .rev()
+            .take_while(|line| {
+                let line = line.trim_start();
+                !(line.is_empty() || line.starts_with('}') || line.ends_with(';'))
+            })
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !attribute.contains("#[microflow") && !attribute.contains("#[nanoflow") {
+            continue;
+        }
+        let flow = attribute
+            .split_once("name = \"")
+            .and_then(|(_, rest)| rest.split('"').next())
+            .map_or_else(|| derive(function), str::to_string);
+        methods.push((function.to_string(), flow));
+    }
+    methods
 }
 
 enum Subject {
@@ -232,20 +374,33 @@ impl Subject {
 
 /// The entities the project already declares for the module: the structs
 /// of its entity and DTO files.
-fn declared_entities(root: &Path, module_stem: &str) -> Vec<String> {
+fn declared_entities(root: &Path, module_stem: &str) -> Vec<(String, String)> {
     let mut entities = Vec::new();
-    for concept in ["domain/entities", "domain/dtos"] {
-        let Ok(files) = std::fs::read_dir(root.join("src").join(concept).join(module_stem)) else {
+    for concept in ["entities", "dtos"] {
+        let Ok(files) = std::fs::read_dir(root.join("src/domain").join(concept).join(module_stem))
+        else {
             continue;
         };
         for file in files.flatten() {
-            let Ok(source) = std::fs::read_to_string(file.path()) else {
+            let path = file.path();
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if stem == "mod" {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else {
                 continue;
             };
             entities.extend(source.lines().filter_map(|line| {
                 let name = line.strip_prefix("pub struct ")?;
                 let name = name.split([' ', '{', ';', '(']).next()?;
-                (!name.is_empty()).then(|| name.to_string())
+                (!name.is_empty()).then(|| {
+                    (
+                        name.to_string(),
+                        format!("crate::domain::{concept}::{module_stem}::{stem}::{name}"),
+                    )
+                })
             }));
         }
     }

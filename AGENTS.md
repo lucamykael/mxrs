@@ -40,8 +40,10 @@ read-only behavioral oracle; never edit it.
   `AssetTypeService::edit`. The subject is the module's entity a flow's
   name names (its first word first; a verb such as `List` is what the flow
   does, not what it is about), else the word several flow names open with,
-  else the module's own `<module>_service.rs`; the importer and the
-  scaffold place a flow the same way. There is no `imported.rs` listing
+  else the module's own `<module>_service.rs`. The scaffold places a new
+  flow where the importer would, from the entities and services the project
+  already has, and names it by the subject the service's own attribute
+  states; scaffolding a flow the service already declares is refused. There is no `imported.rs` listing
   leftovers. Every
   microflow body is editable Rust: what a typed builder cannot check is
   stated as Mendix writes it (`mx("...")`), and an activity no builder

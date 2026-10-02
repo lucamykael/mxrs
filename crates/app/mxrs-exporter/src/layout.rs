@@ -415,7 +415,7 @@ pub(crate) fn space_statements(source: &str) -> String {
             continue;
         };
         let body = &lines[index..index + length];
-        if body.iter().any(|line| line.matches('"').count() % 2 == 1) {
+        if body.iter().any(|line| opens_string(line)) {
             out.extend(body.iter().map(|line| line.to_string()));
         } else {
             out.extend(space_block(body, indent + 4));
@@ -427,6 +427,24 @@ pub(crate) fn space_statements(source: &str) -> String {
         spaced.push('\n');
     }
     spaced
+}
+
+/// Whether a string literal starts on `line` and goes on past its end:
+/// the line's unescaped quotes are odd in number.
+fn opens_string(line: &str) -> bool {
+    let mut open = false;
+    let mut escaped = false;
+    for c in line.chars() {
+        match c {
+            '\\' if open && !escaped => escaped = true,
+            '"' if !escaped => open = !open,
+            _ => escaped = false,
+        }
+        if c != '\\' {
+            escaped = false;
+        }
+    }
+    open
 }
 
 fn indent_of(line: &str) -> usize {

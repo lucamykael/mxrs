@@ -1429,3 +1429,37 @@ fn readonly_and_unknown_attribute_shapes_do_not_produce_writable_members() {
         assert!(report.passed, "{shape}: {:?}", report.failures);
     }
 }
+
+/// A flow keeps its name through a service whatever the service's subject
+/// looks like in Rust: an entity whose struct is spelled differently from
+/// the model (`Asset_Type` → `AssetType`), or a word filed like an entity
+/// (`ORDER` beside `Order`).
+#[test]
+fn every_flow_keeps_its_name_through_its_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_dir = dir.path().join("source");
+    std::fs::create_dir(&source_dir).unwrap();
+    let path = source_dir.join("Named.mpr");
+    let generated = dir.path().join("generated");
+    let rebuilt = dir.path().join("Rebuilt.mpr");
+    let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+    builder.module("Main", |m| {
+        m.entity("Asset_Type", |_| {});
+        m.entity("Order", |_| {});
+    });
+    let mut project = builder.build();
+    for name in [
+        "ACT_Asset_Type_Edit",
+        "ACT_ORDER_Import",
+        "ACT_ORDER_Export",
+        "ACT_Order_Edit",
+    ] {
+        project.modules[0].microflows.push(MicroflowDecl::new(name));
+    }
+    mxrs_writer::write_project(&path, &project).unwrap();
+    let before: Vec<String> = flows(&path).into_keys().collect();
+    mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
+    std::fs::remove_dir_all(source_dir).unwrap();
+    run(&generated, &rebuilt);
+    assert_eq!(flows(&rebuilt).into_keys().collect::<Vec<_>>(), before);
+}

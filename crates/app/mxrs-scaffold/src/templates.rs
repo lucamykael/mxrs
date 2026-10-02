@@ -18,7 +18,7 @@ pub(crate) fn domain_layer() -> String {
 }
 
 pub(crate) fn services_layer() -> String {
-    "//! What the application does: every module's microflows as services, one\n//! folder per Mendix module and one file per microflow.\n".to_string()
+    "//! What the application does: every module's microflows as services, one\n//! folder per Mendix module and one service per subject.\n".to_string()
 }
 
 /// The user-interface layer of a fresh project: the application layout,

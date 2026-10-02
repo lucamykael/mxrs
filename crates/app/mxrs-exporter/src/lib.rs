@@ -673,6 +673,12 @@ fn import_cargo_project_inner(
     format_generated_cargo_project(destination)?;
     space_generated_sources(&destination.join("src"))?;
     write_text(
+        &destination.join(".gitattributes"),
+        // Text a flow keeps beside its service is the model's value, byte
+        // for byte: git must not convert its line endings.
+        "src/**/data/** -text\n",
+    )?;
+    write_text(
         &destination.join(".gitignore"),
         "/build\n/target\n/frontend/node_modules\n/frontend/dist\n",
     )?;
@@ -740,7 +746,7 @@ fn render_layer_module(
 /// project's task queues, when it declares any, are added by the caller.
 fn render_services_index(modules: &[&str]) -> String {
     let mut out = String::from(
-        "//! What the application does: every module's microflows as services, one\n//! folder per Mendix module and one file per microflow, and the task queues\n//! they run on. A service coordinates the domain and knows no HTTP\n//! framework, database driver or other delivery mechanism.\n\n",
+        "//! What the application does: every module's microflows as services, one\n//! folder per Mendix module and one service per subject, and the task queues\n//! they run on. A service coordinates the domain and knows no HTTP\n//! framework, database driver or other delivery mechanism.\n\n",
     );
     for module in modules {
         let _ = writeln!(out, "pub mod {module};");
