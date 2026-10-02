@@ -39,6 +39,11 @@ pub(crate) fn field(entity: &str, attribute: &str) -> String {
     reference('F', &format!("{entity}/{attribute}"))
 }
 
+/// The variant naming value `Module.Enumeration.Value`.
+pub(crate) fn enumeration_value(qualified_value: &str) -> String {
+    reference('V', qualified_value)
+}
+
 /// The type naming microflow `Module.Flow`.
 pub(crate) fn microflow(qualified_name: &str) -> String {
     reference('M', qualified_name)
@@ -103,6 +108,9 @@ pub(crate) struct ModelNames<'a> {
     pub(crate) nanoflows: HashMap<String, FlowTarget>,
     /// The module roles a Rust enum declares, by `Module.Role`.
     pub(crate) roles: HashMap<String, RoleTarget>,
+    /// `Module.Enumeration.Value` → the enum declaring it and the variant
+    /// that is that value.
+    pub(crate) enumeration_values: HashMap<String, RoleTarget>,
 }
 
 /// One file body with its references spelled, and the imports that spelling
@@ -261,6 +269,21 @@ impl ModelNames<'_> {
                 };
                 let flow = flows.get(target).ok_or_else(|| missing("flow"))?;
                 Ok((flow.module_path.clone(), flow.marker.clone(), Member::None))
+            }
+            "V" => {
+                let value = self
+                    .enumeration_values
+                    .get(target)
+                    .ok_or_else(|| missing("enumeration value"))?;
+                let (path, type_name) = value
+                    .module_path
+                    .rsplit_once("::")
+                    .ok_or_else(|| missing("enumeration"))?;
+                Ok((
+                    path.to_string(),
+                    type_name.to_string(),
+                    Member::Variant(value.variant.clone()),
+                ))
             }
             "R" => {
                 let role = self.roles.get(target).ok_or_else(|| missing("role"))?;
@@ -462,6 +485,7 @@ mod tests {
         let entities =
             HashMap::from([("Sales.Order".to_string(), target("sales", "order", "Order"))]);
         let names = ModelNames {
+            enumeration_values: HashMap::new(),
             entities: &entities,
             microflows: HashMap::from([(
                 "Sales.ACT_Ping".to_string(),
@@ -502,6 +526,7 @@ mod tests {
             ("Sales.Line".to_string(), target("sales", "line", "Line")),
         ]);
         let names = ModelNames {
+            enumeration_values: HashMap::new(),
             entities: &entities,
             microflows: HashMap::from([(
                 "Sales.cleanup".to_string(),
@@ -532,6 +557,7 @@ mod tests {
     fn a_name_the_preludes_already_mean_is_never_imported_over_them() {
         let entities = HashMap::from([("Sales.Ref".to_string(), target("sales", "ref_", "Ref"))]);
         let names = ModelNames {
+            enumeration_values: HashMap::new(),
             entities: &entities,
             microflows: HashMap::from([(
                 "Sales.None".to_string(),
@@ -591,6 +617,7 @@ mod tests {
             microflows: HashMap::new(),
             nanoflows: HashMap::new(),
             roles: HashMap::new(),
+            enumeration_values: HashMap::new(),
         };
         let error = names.resolve(&entity("Sales.Missing"), &[]).unwrap_err();
         assert!(error.to_string().contains("Sales.Missing"), "{error}");

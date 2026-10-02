@@ -311,14 +311,18 @@ fn signature(flow: &Microflow) -> Option<Vec<(String, Ty)>> {
 pub(crate) type KeptFlows = HashMap<(String, String, bool), String>;
 
 pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<ConvertedFlow>> {
-    Ok(collect_all(project, modules)?.0)
+    Ok(collect_all(project, modules, &HashSet::new())?.0)
 }
 
 /// Every flow that can be declared in Rust, and for each one that cannot,
 /// why not.
+///
+/// `enumeration_values` are the `Module.Enumeration.Value`s a variant
+/// declares, which a flow names by that variant.
 pub(crate) fn collect_all(
     project: &Project,
     modules: &[Module],
+    enumeration_values: &HashSet<String>,
 ) -> Result<(Vec<ConvertedFlow>, KeptFlows)> {
     let mut kept = KeptFlows::new();
     let attributes = attributes(modules);
@@ -359,6 +363,43 @@ pub(crate) fn collect_all(
             })
         })
         .collect();
+    // The associations an entity's struct declares a field for: the ones
+    // from it to another entity a struct declares — the entity layer's rule.
+    let mut accessors = accessors;
+    let qualified_by_id: HashMap<&str, String> = modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_default();
+            module.entities().iter().filter_map(move |entity| {
+                Some((
+                    entity.id.as_deref()?,
+                    format!("{module_name}.{}", entity.name.as_deref()?),
+                ))
+            })
+        })
+        .collect();
+    for module in modules {
+        let module_name = module.name.clone().unwrap_or_default();
+        for association in module.associations() {
+            let (Some(name), Some(from), Some(to)) = (
+                association.name.as_deref(),
+                association.from_entity_id.as_deref(),
+                association.to_entity_id.as_deref(),
+            ) else {
+                continue;
+            };
+            let Some(from) = qualified_by_id.get(from) else {
+                continue;
+            };
+            let target = qualified_by_id
+                .get(to)
+                .cloned()
+                .unwrap_or_else(|| to.to_string());
+            if entities.contains(from) && entities.contains(&target) {
+                accessors.insert((from.clone(), format!("{module_name}.{name}")));
+            }
+        }
+    }
     let microflows: HashSet<String> = modules
         .iter()
         .flat_map(|module| {
@@ -373,6 +414,7 @@ pub(crate) fn collect_all(
         entities: &entities,
         attributes: &accessors,
         microflows: &microflows,
+        enumeration_values,
     };
     // `MXRS_EXPLAIN_FLOWS=1` says why each flow that stays in the imported
     // model does.

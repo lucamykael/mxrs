@@ -217,6 +217,9 @@ fn unique(name: String, taken: &mut HashSet<String>) -> String {
 /// member a change sets, the value a flow returns.
 fn constant_name(lines: &[String], index: usize, before: &str) -> String {
     let line = &lines[index];
+    if let Some(name) = macro_constant_name(line, before) {
+        return name;
+    }
     let subject = subject(lines, index);
     let joined = |parts: &[&str]| {
         parts
@@ -267,6 +270,72 @@ fn constant_name(lines: &[String], index: usize, before: &str) -> String {
         return joined(&[&subject, "condition"]);
     }
     joined(&[&subject, "expression"])
+}
+
+/// A name for a literal an activity macro takes, from what the macro
+/// declares (its `name = "..."`, or the name Studio Pro would give) and what
+/// the literal is to it: `ORDER_LIST_XPATH`, `NEW_ORDER_NUMBER`,
+/// `PAID_ORDERS_CONDITION`.
+fn macro_constant_name(line: &str, before: &str) -> Option<String> {
+    let call = line
+        .trim_start()
+        .strip_prefix("let ")
+        .and_then(|rest| rest.split_once(" = "))
+        .map_or(line.trim_start(), |(_, call)| call);
+    let (macro_name, arguments) = call.split_once("!(")?;
+    if !macro_name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c == '_')
+    {
+        return None;
+    }
+    let arguments = arguments.strip_prefix("flow, ").unwrap_or(arguments);
+    let named = line
+        .split_once("name = \"")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .map(str::to_string);
+    let first: String = arguments
+        .trim_start_matches('&')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let subject = named.unwrap_or_else(|| match macro_name {
+        "create_object" => format!("New{first}"),
+        "retrieve" if line.contains(", first") => first.clone(),
+        "retrieve" | "create_list" => format!("{first}List"),
+        "log" => "log".to_string(),
+        _ => first.strip_prefix("value_").unwrap_or(&first).to_string(),
+    });
+    let tail = before.trim_end();
+    let role = if tail.ends_with("xpath =") {
+        "xpath".to_string()
+    } else if tail.ends_with("find_by =") || tail.ends_with("filter_by =") {
+        "condition".to_string()
+    } else if let Some(key) = tail
+        .strip_suffix(':')
+        .or_else(|| tail.strip_suffix('='))
+        .map(|rest| {
+            rest.trim_end()
+                .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .filter(|key| !key.is_empty())
+    {
+        key
+    } else if macro_name == "log" {
+        "message".to_string()
+    } else {
+        String::new()
+    };
+    let name = [subject.as_str(), role.as_str()]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .map(|part| crate::snake_ident(part).to_ascii_uppercase())
+        .collect::<Vec<_>>()
+        .join("_");
+    (!name.is_empty()).then_some(name)
 }
 
 /// The variable the statement around line `index` makes or changes: the

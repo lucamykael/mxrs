@@ -1369,6 +1369,7 @@ mod tests {
             ]),
             nanoflows: HashMap::from([flow("NF_Validate", "ui::nanoflows")]),
             roles: HashMap::new(),
+            enumeration_values: HashMap::new(),
         }
     }
     use mxrs_bson::Bson;

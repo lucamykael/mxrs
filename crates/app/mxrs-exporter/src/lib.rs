@@ -266,7 +266,22 @@ fn import_cargo_project_inner(
     )?;
     let persistence_source = render_persistence_module(&modules);
     let infrastructure_source = render_infrastructure_module(persistence_source.is_some());
-    let (converted_flows, kept_flows) = flow_export::collect_all(&project, &modules)?;
+    let packages = package_stems_for_import(&modules, mpr_path);
+    let documents_export = render_documents_module(&project, &packages)?;
+    // A flow names an enumeration's value by its variant where the value has
+    // one.
+    let enumeration_values: std::collections::HashSet<String> = documents_export
+        .derived_enumerations
+        .iter()
+        .flat_map(|(qualified, enumeration)| {
+            enumeration
+                .variants
+                .keys()
+                .map(move |value| format!("{qualified}.{value}"))
+        })
+        .collect();
+    let (converted_flows, kept_flows) =
+        flow_export::collect_all(&project, &modules, &enumeration_values)?;
     let flow_relations = mxrs_model::relations::flow_relations(&project)?;
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
@@ -274,8 +289,6 @@ fn import_cargo_project_inner(
     });
     let security_source = render_project_security_module(security_document.as_ref());
     let navigation_source = render_navigation_module(&project.navigation()?);
-    let packages = package_stems_for_import(&modules, mpr_path);
-    let documents_export = render_documents_module(&project, &packages)?;
     let task_queues_source = render_task_queue_declarations(&project)?;
     let action_documents = collect_action_documents(&project)?;
     // The HTTP layer is generated for the axum adapter only; the other two
@@ -337,6 +350,7 @@ fn import_cargo_project_inner(
         &flow_plans,
         &kept_flows,
         &service_plans,
+        &documents_export.derived_enumerations,
         &mut generated_modules,
     );
     let microflow_files = flow_export::render_files(
@@ -1021,6 +1035,8 @@ struct DerivedEnumeration {
     module_stem: String,
     file_stem: String,
     type_name: String,
+    /// Mendix value name → the variant that declares it.
+    variants: HashMap<String, String>,
 }
 
 impl DerivedEnumeration {
@@ -1072,7 +1088,7 @@ fn render_documents_module(
         {
             let stem = inner_file_stem(&name);
             let root = module_root(&module_stem(&module), packages);
-            let (source, type_name) = render_enumeration_file(
+            let (source, type_name, variants) = render_enumeration_file(
                 &module,
                 &name,
                 &documentation,
@@ -1086,6 +1102,7 @@ fn render_documents_module(
                     module_stem: module_stem(&module),
                     file_stem: stem.clone(),
                     type_name,
+                    variants,
                 },
             );
             enumeration_files.push((module, stem, source));
@@ -1184,8 +1201,9 @@ fn render_enumeration_file(
     documentation: &str,
     values: &[(String, Vec<(String, String)>)],
     imported: bool,
-) -> (String, String) {
+) -> (String, String, HashMap<String, String>) {
     let mut type_name = derive_pascal_case(&sanitize_ident(name));
+    let mut declared = HashMap::new();
     if type_name.starts_with(|c: char| c.is_ascii_digit()) {
         type_name.insert(0, '_');
     }
@@ -1209,6 +1227,7 @@ fn render_enumeration_file(
                 .find(|candidate| seen.insert(candidate.clone()))
                 .expect("an unbounded suffix always finds a free name");
         }
+        declared.insert(value.clone(), variant.clone());
         let mut options = Vec::new();
         if variant != *value {
             options.push(format!("name = {value:?}"));
@@ -1268,7 +1287,7 @@ fn render_enumeration_file(
     } else {
         let _ = writeln!(out, "pub enum {type_name} {{\n{variants}}}");
     }
-    (out, type_name)
+    (out, type_name, declared)
 }
 
 fn collect_editable_documents(project: &Project) -> Result<Vec<EditableDocument>> {
@@ -3306,6 +3325,7 @@ fn model_names<'a>(
     plans: &[flow_export::FlowFile],
     kept: &flow_export::KeptFlows,
     services: &HashMap<(String, String), flow_export::ServiceSlot>,
+    enumerations: &HashMap<String, DerivedEnumeration>,
     generated: &mut std::collections::BTreeMap<String, GeneratedModule>,
 ) -> names::ModelNames<'a> {
     let converted_stems: HashMap<(&str, &str, bool), &str> = converted
@@ -3481,11 +3501,27 @@ fn model_names<'a>(
             );
         }
     }
+    let enumeration_values = enumerations
+        .iter()
+        .flat_map(|(qualified, enumeration)| {
+            let module_path = format!("{}::{}", enumeration.module_path(), enumeration.type_name);
+            enumeration.variants.iter().map(move |(value, variant)| {
+                (
+                    format!("{qualified}.{value}"),
+                    names::RoleTarget {
+                        module_path: module_path.clone(),
+                        variant: variant.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
     names::ModelNames {
         entities,
         microflows,
         nanoflows,
         roles,
+        enumeration_values,
     }
 }
 
@@ -8522,7 +8558,7 @@ mod tests {
                 vec![("zh-Hans".to_string(), "关闭".to_string())],
             ),
         ];
-        let (rendered, type_name) =
+        let (rendered, type_name, _) =
             render_enumeration_file("Sales", "ENUM_Status", "Lifecycle.", &values, false);
         assert_eq!(type_name, "ENUMStatus");
         assert_eq!(
@@ -8547,7 +8583,8 @@ pub enum ENUMStatus {
 
         // An installed module's enumeration is named, not declared, and
         // documentation a comment would change is stated as an option.
-        let (rendered, type_name) = render_enumeration_file("Atlas", "Self", "- a list", &[], true);
+        let (rendered, type_name, _) =
+            render_enumeration_file("Atlas", "Self", "- a list", &[], true);
         assert_eq!(type_name, "SelfEnumeration");
         assert_eq!(
             rendered,

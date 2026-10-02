@@ -409,8 +409,25 @@ fn retrieve(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
     let options = Options::parse(
         &arguments[1..],
         &["first"],
-        &["xpath", "sort", "range", "name"],
+        &["xpath", "sort", "range", "name", "by"],
     )?;
+    // `retrieve!(flow, &order, by = Order::customer(), name = "...")`: what
+    // an object is associated with, rather than what the database holds.
+    if let Some(association) = options.get("by") {
+        if options.words.len() + options.pairs.len() != 2 {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "a retrieve over an association takes `by` and `name` alone",
+            ));
+        }
+        let name = options.get("name").ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                "name what it retrieves with `name = \"...\"`",
+            )
+        })?;
+        return Ok(quote! { (#flow).retrieve_associated(#name, #entity, #association) });
+    }
     let default = if options.has("first") {
         quote! { ::std::string::String::from(<#entity as ::mxrs::EntityMarker>::NAME) }
     } else {

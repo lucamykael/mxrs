@@ -69,6 +69,8 @@ pub fn with_macros(flow: &mut FlowBuilder) {
 
     retrieve!(flow, Order, first);
 
+    retrieve!(flow, &order, by = Order::customer(), name = "Buyer");
+
     let list = create_list!(flow, Order);
 
     change_list!(flow, &list, add = order);
@@ -163,6 +165,7 @@ pub fn with_builders(flow: &mut FlowBuilder) {
     flow.retrieve("Order", Ref::<Order>::new(), |retrieve| {
         retrieve.first();
     });
+    flow.retrieve_associated("Buyer", &order, Order::customer());
     let list = flow.create_list_of("OrderList", Ref::<Order>::new());
     flow.change_list(&list, ListChange::Add, mx("$NewOrder"));
     flow.change_list(&list, ListChange::Clear, mx(""));

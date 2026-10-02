@@ -39,6 +39,8 @@ pub(crate) struct Model<'a> {
     pub(crate) attributes: &'a HashSet<(String, String)>,
     /// Qualified names of the microflows a type names.
     pub(crate) microflows: &'a HashSet<String>,
+    /// `Module.Enumeration.Value`s an enum's variant names.
+    pub(crate) enumeration_values: &'a HashSet<String>,
 }
 
 /// Reads one stored document, and notices the fields nobody asked for.
@@ -2165,7 +2167,10 @@ impl Converter<'_> {
     /// What a macro writes for Mendix expression `text`: a Rust literal or a
     /// variable's binding when that reads back as exactly `text`, and
     /// `mx("...")` otherwise.
-    fn macro_value(text: &str, scope: &Scope) -> String {
+    fn macro_value(&self, text: &str, scope: &Scope) -> String {
+        if self.model.enumeration_values.contains(text) {
+            return names::enumeration_value(text);
+        }
         if let Some(inner) = text
             .strip_prefix('\'')
             .and_then(|rest| rest.strip_suffix('\''))
@@ -2184,29 +2189,30 @@ impl Converter<'_> {
     }
 
     /// `Entity { field: value, ... }` for the items of a create or change,
-    /// when every one sets an attribute `entity` declares itself.
+    /// when every one sets a member `entity`'s struct declares a field for.
     fn macro_members(&self, action: &Document, entity: &str, scope: &Scope) -> Option<String> {
         let items = action
             .get("Items")
             .and_then(mxrs_writer::flow_graph::documents)?;
         let mut fields = Vec::new();
         for item in items {
-            if item.get_str("Type").ok()? != "Set" || !item.get_str("Association").ok()?.is_empty()
-            {
+            if item.get_str("Type").ok()? != "Set" {
                 return None;
             }
-            let attribute = item.get_str("Attribute").ok()?;
-            let (owner, name) = attribute.rsplit_once('.')?;
-            if owner != entity
-                || !self
-                    .model
-                    .attributes
-                    .contains(&(owner.to_string(), name.to_string()))
-            {
+            // An attribute by its name on its entity; an association by its
+            // qualified name, on the entity whose struct declares it.
+            let association = item.get_str("Association").ok()?;
+            let (owner, member) = if association.is_empty() {
+                let (owner, name) = item.get_str("Attribute").ok()?.rsplit_once('.')?;
+                (owner.to_string(), name.to_string())
+            } else {
+                (entity.to_string(), association.to_string())
+            };
+            if owner != entity || !self.model.attributes.contains(&(owner, member.clone())) {
                 return None;
             }
-            let value = Self::macro_value(item.get_str("Value").ok()?, scope);
-            fields.push(format!("{}: {value}", names::field(owner, name)));
+            let value = self.macro_value(item.get_str("Value").ok()?, scope);
+            fields.push(format!("{}: {value}", names::field(entity, &member)));
         }
         let marker = self.typed_entity(entity)?;
         Some(if fields.is_empty() {
@@ -2296,13 +2302,21 @@ impl Converter<'_> {
                 let items = action
                     .get("Items")
                     .and_then(mxrs_writer::flow_graph::documents)?;
-                let entity = items
-                    .first()?
-                    .get_str("Attribute")
-                    .ok()?
-                    .rsplit_once('.')?
-                    .0
-                    .to_string();
+                // The entity changed: the owner of an attribute it sets, or
+                // the entity declaring an association it sets.
+                let first = items.first()?;
+                let entity = match first.get_str("Attribute").ok()?.rsplit_once('.') {
+                    Some((owner, _)) => owner.to_string(),
+                    None => {
+                        let association = first.get_str("Association").ok()?;
+                        self.model
+                            .attributes
+                            .iter()
+                            .find(|(_, member)| member == association)?
+                            .0
+                            .clone()
+                    }
+                };
                 format!(
                     "change_object!(flow, {}, {}{});",
                     Self::variable(scope, text("ChangeVariableName")?),
@@ -2342,6 +2356,25 @@ impl Converter<'_> {
             "Microflows$RetrieveAction" => {
                 let name = text("ResultVariableName")?;
                 let source = action.get_document("RetrieveSource").ok()?;
+                if source.get_str("$Type").ok()? == "Microflows$AssociationRetrieveSource" {
+                    // The association by the field that declares it, where an
+                    // entity's struct does.
+                    let association = source.get_str("AssociationId").ok()?;
+                    let by = self
+                        .model
+                        .attributes
+                        .iter()
+                        .find(|(_, member)| member == association)
+                        .map_or_else(
+                            || rust_string(association),
+                            |(owner, _)| names::attribute(owner, association),
+                        );
+                    return Some(vec![format!(
+                        "retrieve!(flow, {}, by = {by}, name = {});",
+                        Self::variable(scope, source.get_str("StartVariableName").ok()?),
+                        rust_string(name)
+                    )]);
+                }
                 if source.get_str("$Type").ok()? != "Microflows$DatabaseRetrieveSource" {
                     return None;
                 }
@@ -2366,8 +2399,8 @@ impl Converter<'_> {
                     "Microflows$CustomRange" => {
                         options.push_str(&format!(
                             ", range = ({}, {})",
-                            Self::macro_value(range.get_str("LimitExpression").ok()?, scope),
-                            Self::macro_value(range.get_str("OffsetExpression").ok()?, scope)
+                            self.macro_value(range.get_str("LimitExpression").ok()?, scope),
+                            self.macro_value(range.get_str("OffsetExpression").ok()?, scope)
                         ));
                         false
                     }
@@ -2401,17 +2434,17 @@ impl Converter<'_> {
                     "Clear" if value.is_empty() => format!("change_list!(flow, {list}, clear);"),
                     "Add" => format!(
                         "change_list!(flow, {list}, add = {});",
-                        Self::macro_value(value, scope)
+                        self.macro_value(value, scope)
                     ),
                     "Remove" => {
                         format!(
                             "change_list!(flow, {list}, remove = {});",
-                            Self::macro_value(value, scope)
+                            self.macro_value(value, scope)
                         )
                     }
                     "Set" => format!(
                         "change_list!(flow, {list}, replace = {});",
-                        Self::macro_value(value, scope)
+                        self.macro_value(value, scope)
                     ),
                     _ => return None,
                 }
@@ -2441,7 +2474,7 @@ impl Converter<'_> {
                             "{} = ({}, {})",
                             kind.to_ascii_lowercase(),
                             self.attribute(operation_text("Attribute")?),
-                            Self::macro_value(operation_text("Expression")?, scope)
+                            self.macro_value(operation_text("Expression")?, scope)
                         )
                     }
                     kind @ ("FindByExpression" | "FilterByExpression") => format!(
@@ -2451,14 +2484,14 @@ impl Converter<'_> {
                         } else {
                             "filter_by"
                         },
-                        Self::macro_value(operation_text("Expression")?, scope)
+                        self.macro_value(operation_text("Expression")?, scope)
                     ),
                     "ListRange" => {
                         let range = operation.get_document("CustomRange").ok()?;
                         format!(
                             "range = ({}, {})",
-                            Self::macro_value(range.get_str("LimitExpression").ok()?, scope),
-                            Self::macro_value(range.get_str("OffsetExpression").ok()?, scope)
+                            self.macro_value(range.get_str("LimitExpression").ok()?, scope),
+                            self.macro_value(range.get_str("OffsetExpression").ok()?, scope)
                         )
                     }
                     "Sort" => format!(
@@ -2490,7 +2523,7 @@ impl Converter<'_> {
                     (_, true, Some(expression)) => format!(
                         "{}_of = {}",
                         function.to_ascii_lowercase(),
-                        Self::macro_value(expression, scope)
+                        self.macro_value(expression, scope)
                     ),
                     _ => return None,
                 };
@@ -2501,14 +2534,14 @@ impl Converter<'_> {
                 format!(
                     "create_variable!(flow, {}, {}, name = {});",
                     self.data_type_source(&ty),
-                    Self::macro_value(text("InitialValue")?, scope),
+                    self.macro_value(text("InitialValue")?, scope),
                     rust_string(text("VariableName")?)
                 )
             }
             "Microflows$ChangeVariableAction" => format!(
                 "change_variable!(flow, {}, {});",
                 Self::variable(scope, text("ChangeVariableName")?),
-                Self::macro_value(text("Value")?, scope)
+                self.macro_value(text("Value")?, scope)
             ),
             "Microflows$MicroflowCallAction" => {
                 let result = text("ResultVariableName")?;
@@ -2540,7 +2573,7 @@ impl Converter<'_> {
                     }
                     arguments.push(format!(
                         "{short}: {}",
-                        Self::macro_value(mapping.get_str("Argument").ok()?, scope)
+                        self.macro_value(mapping.get_str("Argument").ok()?, scope)
                     ));
                 }
                 let call = if arguments.is_empty() {
@@ -2567,7 +2600,7 @@ impl Converter<'_> {
                         parameter
                             .get_str("Expression")
                             .ok()
-                            .map(|value| Self::macro_value(value, scope))
+                            .map(|value| self.macro_value(value, scope))
                     })
                     .collect::<Option<Vec<_>>>()?;
                 let mut options = String::new();
@@ -2579,7 +2612,7 @@ impl Converter<'_> {
                 }
                 format!(
                     "log!(flow, {level}, {}, {}{options});",
-                    Self::macro_value(text("Node")?, scope),
+                    self.macro_value(text("Node")?, scope),
                     rust_string(template.get_str("Text").ok()?)
                 )
             }

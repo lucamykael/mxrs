@@ -782,12 +782,22 @@ pub(crate) fn collect_entity_layer(
             );
             let declarable = declarable_associations(entity, &ctx);
             let fields = plan_fields(entity_name, entity, &declarable);
+            // A member is found by its Mendix name: an attribute by its own,
+            // an association by its qualified one (`Sales.Order_Customer`).
             let attributes = sorted_attributes(entity)
                 .into_iter()
                 .zip(&fields.attributes)
                 .map(|(attribute, field)| {
                     (attribute.name.clone().unwrap_or_default(), field.clone())
                 })
+                .chain(
+                    declarable
+                        .iter()
+                        .zip(&fields.associations)
+                        .map(|(declared, field)| {
+                            (format!("{module_name}.{}", declared.name), field.clone())
+                        }),
+                )
                 .collect();
             typed.insert(
                 qualified.clone(),
@@ -926,6 +936,7 @@ mod tests {
             module_stem: module.to_string(),
             file_stem: file.to_string(),
             type_name: type_name.to_string(),
+            variants: HashMap::new(),
         }
     }
 
