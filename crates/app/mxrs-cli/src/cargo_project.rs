@@ -42,6 +42,7 @@ pub fn diff(
 
     mxrs_project::restore_imported_project(&snapshot, &baseline)?;
     mxrs_project::materialize_project_assets(project_root.join("assets"), &baseline)?;
+    mxrs_project::materialize_java_sources(project_root.join("java"), &baseline)?;
     build(&manifest, &current, release, offline)?;
     Ok(crate::compare::compare(baseline, current)?)
 }

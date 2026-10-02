@@ -200,6 +200,19 @@ pub fn capture_project_assets(
     Ok(copied)
 }
 
+/// Materializes a Cargo project's Java — the source of its Java actions,
+/// kept in `java/` with Mendix's own layout — as the `javasource/` a built
+/// `.mpr` runs it from.
+pub fn materialize_java_sources(
+    java: impl AsRef<Path>,
+    output_mpr: impl AsRef<Path>,
+) -> Result<usize> {
+    let output = std::path::absolute(output_mpr.as_ref())
+        .map_err(|error| io_error(output_mpr.as_ref(), error))?;
+    let output_root = output.parent().unwrap_or_else(|| Path::new("."));
+    copy_regular_tree(java.as_ref(), &output_root.join("javasource"))
+}
+
 /// Materializes editable Cargo-project assets next to a built `.mpr`.
 pub fn materialize_project_assets(
     assets: impl AsRef<Path>,

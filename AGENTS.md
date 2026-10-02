@@ -107,7 +107,9 @@ read-only behavioral oracle; never edit it.
   every part of the activity reads back exactly, the builder call
   otherwise.
 - A Java action runs its Java in Mendix and Rust in mxrs (user directive,
-  2026-10-02); mxrs embeds no JVM and translates no Java. Every Java action
+  2026-10-02); mxrs embeds no JVM and translates no Java. The Java is the
+  project's own code, editable in `java/` with Mendix's layout, and every
+  build ships it as the `.mpr`'s `javasource/`. Every Java action
   of the model, a package's included, has a contract in its module's
   `ports::actions` — a trait whose documentation shows the Java the action
   runs in Mendix — a `register_*` function in

@@ -59,9 +59,9 @@ pub use mxrs_packager::{
 };
 pub use mxrs_project::{
     ImportedProjectManifest, ImportedUnit, PROJECT_ASSET_DIRECTORIES, ProjectError,
-    capture_imported_project, capture_project_assets, materialize_project_assets,
-    read_imported_manifest, rebuild_imported_project, replace_imported_project,
-    restore_imported_project,
+    capture_imported_project, capture_project_assets, materialize_java_sources,
+    materialize_project_assets, read_imported_manifest, rebuild_imported_project,
+    replace_imported_project, restore_imported_project,
 };
 pub use mxrs_runtime::{
     Action, EntityAction, EntityRule, MemberRight, ObjectValue, Runtime, RuntimeError,
