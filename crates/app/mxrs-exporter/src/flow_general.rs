@@ -1212,6 +1212,10 @@ impl Converter<'_> {
             }
         };
         fields.finish()?;
+        let mut statement = statement;
+        if let Some(lines) = self.activity_macro(kind, action, scope) {
+            statement.lines = lines;
+        }
         Ok(statement)
     }
 
@@ -1584,11 +1588,7 @@ impl Converter<'_> {
                         }
                         let mut activity = Activity::Action(statement.document);
                         if disabled {
-                            let first = &mut statement_lines[0];
-                            let call = first
-                                .find("flow.")
-                                .ok_or("a statement that is not a builder call")?;
-                            first.insert_str(call + "flow.".len(), "disabled().");
+                            modify(&mut statement_lines, vec!["disabled()".to_string()])?;
                             activity = Activity::Disabled(Box::new(activity));
                         }
                         lines.extend(statement_lines);
@@ -1883,6 +1883,21 @@ fn native_value_source(value: &NativeValue) -> Vec<String> {
     }
 }
 
+/// Whether a statement's first line is an activity macro (`let order =
+/// create_object!(...`), not a builder call.
+fn is_activity_macro(line: &str) -> bool {
+    let call = line
+        .trim_start()
+        .strip_prefix("let ")
+        .and_then(|rest| rest.split_once(" = "))
+        .map_or(line.trim_start(), |(_, call)| call);
+    call.find("!(").is_some_and(|bang| {
+        call[..bang]
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '_')
+    })
+}
+
 /// Puts a modifier between `flow` and the builder call a statement makes:
 /// `flow.call(..)` becomes `flow.<modifier>.call(..)`. The modifier may span
 /// lines; the statement keeps whatever it binds.
@@ -1891,6 +1906,16 @@ fn modify(statement: &mut Vec<String>, modifier: Vec<String>) -> Outcome<()> {
         .first()
         .ok_or("an activity without a statement")?
         .clone();
+    // An activity written as its macro is told about itself by the
+    // statement before it: the builder applies the modifier to the next
+    // activity it declares.
+    if is_activity_macro(&first) {
+        let mut lines = modifier;
+        lines[0] = format!("flow.{}", lines[0]);
+        lines.last_mut().expect("a modifier has a line").push(';');
+        statement.splice(0..0, lines);
+        return Ok(());
+    }
     let at = first
         .find("flow.")
         .ok_or("a statement that is not a builder call")?
@@ -2121,6 +2146,447 @@ pub(crate) fn polish(mut lines: Vec<String>) -> Vec<String> {
         }
     }
     lines
+}
+
+/// A Mendix number literal Rust writes the same way.
+fn is_number_literal(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    !whole.is_empty()
+        && whole.chars().all(|c| c.is_ascii_digit())
+        && (whole == "0" || !whole.starts_with('0'))
+        && (digits.len() == whole.len()
+            || (!fraction.is_empty() && fraction.chars().all(|c| c.is_ascii_digit())))
+}
+
+/// An activity written as the macro that declares it, when every part of it
+/// reads back exactly; the builder call stands otherwise.
+impl Converter<'_> {
+    /// What a macro writes for Mendix expression `text`: a Rust literal or a
+    /// variable's binding when that reads back as exactly `text`, and
+    /// `mx("...")` otherwise.
+    fn macro_value(text: &str, scope: &Scope) -> String {
+        if let Some(inner) = text
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+            && text.len() >= 2
+            && !inner.replace("''", "").contains('\'')
+        {
+            return rust_string(&inner.replace("''", "'"));
+        }
+        if is_number_literal(text) || text == "true" || text == "false" {
+            return text.to_string();
+        }
+        if let Some(binding) = text.strip_prefix('$').and_then(|name| scope.get(name)) {
+            return binding.clone();
+        }
+        expression(text)
+    }
+
+    /// `Entity { field: value, ... }` for the items of a create or change,
+    /// when every one sets an attribute `entity` declares itself.
+    fn macro_members(&self, action: &Document, entity: &str, scope: &Scope) -> Option<String> {
+        let items = action
+            .get("Items")
+            .and_then(mxrs_writer::flow_graph::documents)?;
+        let mut fields = Vec::new();
+        for item in items {
+            if item.get_str("Type").ok()? != "Set" || !item.get_str("Association").ok()?.is_empty()
+            {
+                return None;
+            }
+            let attribute = item.get_str("Attribute").ok()?;
+            let (owner, name) = attribute.rsplit_once('.')?;
+            if owner != entity
+                || !self
+                    .model
+                    .attributes
+                    .contains(&(owner.to_string(), name.to_string()))
+            {
+                return None;
+            }
+            let value = Self::macro_value(item.get_str("Value").ok()?, scope);
+            fields.push(format!("{}: {value}", names::field(owner, name)));
+        }
+        let marker = self.typed_entity(entity)?;
+        Some(if fields.is_empty() {
+            format!("{marker} {{}}")
+        } else {
+            format!("{marker} {{ {} }}", fields.join(", "))
+        })
+    }
+
+    /// The `commit`/`refresh` words of a create or change.
+    fn macro_change_options(action: &Document) -> Option<String> {
+        let mut words = String::new();
+        match action.get_str("Commit").ok()? {
+            "No" => {}
+            "Yes" => words.push_str(", commit"),
+            "YesWithoutEvents" => words.push_str(", commit_without_events"),
+            _ => return None,
+        }
+        if action.get_bool("RefreshInClient").ok()? {
+            words.push_str(", refresh");
+        }
+        Some(words)
+    }
+
+    fn typed_entity(&self, entity: &str) -> Option<String> {
+        self.model
+            .entities
+            .contains(entity)
+            .then(|| crate::flow_export::marker(entity))
+            .flatten()
+    }
+
+    /// `, name = "..."` unless `name` is the one Studio Pro gives by default.
+    fn macro_name(name: &str, default: &str) -> String {
+        if name == default {
+            String::new()
+        } else {
+            format!(", name = {}", rust_string(name))
+        }
+    }
+
+    /// `[(member, Ascending), ...]` of a list of sortings.
+    fn macro_sortings(&self, sortings: &Document) -> Option<String> {
+        let mut pairs = Vec::new();
+        for sorting in sortings
+            .get("Sortings")
+            .and_then(mxrs_writer::flow_graph::documents)?
+        {
+            let attribute = sorting
+                .get_document("AttributeRef")
+                .ok()?
+                .get_str("Attribute")
+                .ok()?;
+            let order = match sorting.get_str("SortOrder").ok()? {
+                "Ascending" => "Ascending",
+                "Descending" => "Descending",
+                _ => return None,
+            };
+            pairs.push(format!("({}, {order})", self.attribute(attribute)));
+        }
+        Some(format!("[{}]", pairs.join(", ")))
+    }
+
+    /// The lines of `kind`'s macro, for an action the builder has already
+    /// read and checked.
+    fn activity_macro(&self, kind: &str, action: &Document, scope: &Scope) -> Option<Vec<String>> {
+        let text = |key: &str| action.get_str(key).ok();
+        let short = |qualified: &str| {
+            qualified
+                .rsplit('.')
+                .next()
+                .unwrap_or(qualified)
+                .to_string()
+        };
+        let line = match kind {
+            "Microflows$CreateChangeAction" => {
+                let entity = text("Entity")?;
+                let name = text("VariableName")?;
+                format!(
+                    "create_object!(flow, {}{}{});",
+                    self.macro_members(action, entity, scope)?,
+                    Self::macro_name(name, &format!("New{}", short(entity))),
+                    Self::macro_change_options(action)?
+                )
+            }
+            "Microflows$ChangeAction" => {
+                let items = action
+                    .get("Items")
+                    .and_then(mxrs_writer::flow_graph::documents)?;
+                let entity = items
+                    .first()?
+                    .get_str("Attribute")
+                    .ok()?
+                    .rsplit_once('.')?
+                    .0
+                    .to_string();
+                format!(
+                    "change_object!(flow, {}, {}{});",
+                    Self::variable(scope, text("ChangeVariableName")?),
+                    self.macro_members(action, &entity, scope)?,
+                    Self::macro_change_options(action)?
+                )
+            }
+            "Microflows$CommitAction" => {
+                let mut words = String::new();
+                if !action.get_bool("WithEvents").unwrap_or(true) {
+                    words.push_str(", without_events");
+                }
+                if action.get_bool("RefreshInClient").unwrap_or(false) {
+                    words.push_str(", refresh");
+                }
+                format!(
+                    "commit_object!(flow, {}{words});",
+                    Self::variable(scope, text("CommitVariableName")?)
+                )
+            }
+            "Microflows$DeleteAction" | "Microflows$RollbackAction" => {
+                let (macro_name, key) = if kind == "Microflows$DeleteAction" {
+                    ("delete_object", "DeleteVariableName")
+                } else {
+                    ("rollback_object", "RollbackVariableName")
+                };
+                let refresh = if action.get_bool("RefreshInClient").unwrap_or(false) {
+                    ", refresh"
+                } else {
+                    ""
+                };
+                format!(
+                    "{macro_name}!(flow, {}{refresh});",
+                    Self::variable(scope, text(key)?)
+                )
+            }
+            "Microflows$RetrieveAction" => {
+                let name = text("ResultVariableName")?;
+                let source = action.get_document("RetrieveSource").ok()?;
+                if source.get_str("$Type").ok()? != "Microflows$DatabaseRetrieveSource" {
+                    return None;
+                }
+                let entity = source.get_str("Entity").ok()?;
+                let marker = self.typed_entity(entity)?;
+                let mut options = String::new();
+                let xpath = source.get_str("XpathConstraint").ok()?;
+                if !xpath.is_empty() {
+                    options.push_str(&format!(", xpath = {}", rust_string(xpath)));
+                }
+                let sortings = source.get_document("NewSortings").ok()?;
+                if sortings
+                    .get("Sortings")
+                    .and_then(mxrs_writer::flow_graph::documents)
+                    .is_some_and(|list| !list.is_empty())
+                {
+                    options.push_str(&format!(", sort = {}", self.macro_sortings(sortings)?));
+                }
+                let range = source.get_document("Range").ok()?;
+                let first = match range.get_str("$Type").ok()? {
+                    "Microflows$ConstantRange" => range.get_bool("SingleObject").ok()?,
+                    "Microflows$CustomRange" => {
+                        options.push_str(&format!(
+                            ", range = ({}, {})",
+                            Self::macro_value(range.get_str("LimitExpression").ok()?, scope),
+                            Self::macro_value(range.get_str("OffsetExpression").ok()?, scope)
+                        ));
+                        false
+                    }
+                    _ => return None,
+                };
+                if first {
+                    options.push_str(", first");
+                }
+                let default = if first {
+                    short(entity)
+                } else {
+                    format!("{}List", short(entity))
+                };
+                format!(
+                    "retrieve!(flow, {marker}{options}{});",
+                    Self::macro_name(name, &default)
+                )
+            }
+            "Microflows$CreateListAction" => {
+                let entity = text("Entity")?;
+                format!(
+                    "create_list!(flow, {}{});",
+                    self.typed_entity(entity)?,
+                    Self::macro_name(text("VariableName")?, &format!("{}List", short(entity)))
+                )
+            }
+            "Microflows$ChangeListAction" => {
+                let list = Self::variable(scope, text("ChangeVariableName")?);
+                let value = text("Value")?;
+                match text("Type")? {
+                    "Clear" if value.is_empty() => format!("change_list!(flow, {list}, clear);"),
+                    "Add" => format!(
+                        "change_list!(flow, {list}, add = {});",
+                        Self::macro_value(value, scope)
+                    ),
+                    "Remove" => {
+                        format!(
+                            "change_list!(flow, {list}, remove = {});",
+                            Self::macro_value(value, scope)
+                        )
+                    }
+                    "Set" => format!(
+                        "change_list!(flow, {list}, replace = {});",
+                        Self::macro_value(value, scope)
+                    ),
+                    _ => return None,
+                }
+            }
+            "Microflows$ListOperationsAction" => {
+                let name = rust_string(text("ResultVariableName")?);
+                let operation = action.get_document("NewOperation").ok()?;
+                let list = Self::variable(scope, operation.get_str("ListName").ok()?);
+                let operation_text = |key: &str| operation.get_str(key).ok();
+                let argument = match operation
+                    .get_str("$Type")
+                    .ok()?
+                    .strip_prefix("Microflows$")?
+                {
+                    "Head" => "head".to_string(),
+                    "Tail" => "tail".to_string(),
+                    kind @ ("Union" | "Intersect" | "Subtract" | "Contains" | "Equals") => format!(
+                        "{} = {}",
+                        kind.to_ascii_lowercase(),
+                        Self::variable(scope, operation_text("SecondListOrObjectName")?)
+                    ),
+                    kind @ ("Find" | "Filter") => {
+                        if !operation_text("Association")?.is_empty() {
+                            return None;
+                        }
+                        format!(
+                            "{} = ({}, {})",
+                            kind.to_ascii_lowercase(),
+                            self.attribute(operation_text("Attribute")?),
+                            Self::macro_value(operation_text("Expression")?, scope)
+                        )
+                    }
+                    kind @ ("FindByExpression" | "FilterByExpression") => format!(
+                        "{} = {}",
+                        if kind == "FindByExpression" {
+                            "find_by"
+                        } else {
+                            "filter_by"
+                        },
+                        Self::macro_value(operation_text("Expression")?, scope)
+                    ),
+                    "ListRange" => {
+                        let range = operation.get_document("CustomRange").ok()?;
+                        format!(
+                            "range = ({}, {})",
+                            Self::macro_value(range.get_str("LimitExpression").ok()?, scope),
+                            Self::macro_value(range.get_str("OffsetExpression").ok()?, scope)
+                        )
+                    }
+                    "Sort" => format!(
+                        "sort = {}",
+                        self.macro_sortings(operation.get_document("Sortings").ok()?)?
+                    ),
+                    _ => return None,
+                };
+                format!("change_list!(flow, {list}, {argument}, name = {name});")
+            }
+            "Microflows$AggregateAction" => {
+                let name = rust_string(text("VariableName")?);
+                let list = Self::variable(scope, text("AggregateVariableName")?);
+                let function = text("AggregateFunction")?;
+                let attribute = text("Attribute")?;
+                let expression = action
+                    .get_bool("UseExpression")
+                    .unwrap_or(false)
+                    .then(|| text("Expression"))
+                    .flatten();
+                let over = match (function, attribute.is_empty(), expression) {
+                    ("Count", true, None) => "count".to_string(),
+                    ("Reduce" | "Count", _, _) => return None,
+                    (_, false, None) => format!(
+                        "{} = {}",
+                        function.to_ascii_lowercase(),
+                        self.attribute(attribute)
+                    ),
+                    (_, true, Some(expression)) => format!(
+                        "{}_of = {}",
+                        function.to_ascii_lowercase(),
+                        Self::macro_value(expression, scope)
+                    ),
+                    _ => return None,
+                };
+                format!("aggregate_list!(flow, {list}, {over}, name = {name});")
+            }
+            "Microflows$CreateVariableAction" => {
+                let ty = Self::data_type(action.get_document("VariableType").ok()?).ok()?;
+                format!(
+                    "create_variable!(flow, {}, {}, name = {});",
+                    self.data_type_source(&ty),
+                    Self::macro_value(text("InitialValue")?, scope),
+                    rust_string(text("VariableName")?)
+                )
+            }
+            "Microflows$ChangeVariableAction" => format!(
+                "change_variable!(flow, {}, {});",
+                Self::variable(scope, text("ChangeVariableName")?),
+                Self::macro_value(text("Value")?, scope)
+            ),
+            "Microflows$MicroflowCallAction" => {
+                let result = text("ResultVariableName")?;
+                let uses_result = action.get_bool("UseReturnVariable").ok()?;
+                if !uses_result && !result.is_empty() {
+                    return None;
+                }
+                let call = action.get_document("MicroflowCall").ok()?;
+                if matches!(call.get("QueueSettings"), Some(Bson::Document(_))) {
+                    return None;
+                }
+                let target = call.get_str("Microflow").ok()?;
+                if !self.model.microflows.contains(target) {
+                    return None;
+                }
+                let marker = crate::flow_export::flow_marker(target)?;
+                let mut arguments = Vec::new();
+                for mapping in call
+                    .get("ParameterMappings")
+                    .and_then(mxrs_writer::flow_graph::documents)?
+                {
+                    let parameter = mapping.get_str("Parameter").ok()?;
+                    let short = parameter
+                        .strip_prefix(target)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .filter(|name| !name.contains('.'))?;
+                    if !mxrs_typegen::is_rust_identifier(short) || crate::rust_keyword(short) {
+                        return None;
+                    }
+                    arguments.push(format!(
+                        "{short}: {}",
+                        Self::macro_value(mapping.get_str("Argument").ok()?, scope)
+                    ));
+                }
+                let call = if arguments.is_empty() {
+                    marker
+                } else {
+                    format!("{marker} {{ {} }}", arguments.join(", "))
+                };
+                let name = if uses_result && !result.is_empty() {
+                    format!(", name = {}", rust_string(result))
+                } else {
+                    String::new()
+                };
+                format!("call_microflow!(flow, {call}{name});")
+            }
+            "Microflows$LogMessageAction" => {
+                let level = LogSeverity::from_native(text("Level")?)?;
+                let level = format!("{level:?}");
+                let template = action.get_document("MessageTemplate").ok()?;
+                let parameters = template
+                    .get("Parameters")
+                    .and_then(mxrs_writer::flow_graph::documents)?
+                    .into_iter()
+                    .map(|parameter| {
+                        parameter
+                            .get_str("Expression")
+                            .ok()
+                            .map(|value| Self::macro_value(value, scope))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let mut options = String::new();
+                if !parameters.is_empty() {
+                    options.push_str(&format!(", parameters = [{}]", parameters.join(", ")));
+                }
+                if action.get_bool("IncludeLatestStackTrace").unwrap_or(false) {
+                    options.push_str(", stack_trace");
+                }
+                format!(
+                    "log!(flow, {level}, {}, {}{options});",
+                    Self::macro_value(text("Node")?, scope),
+                    rust_string(template.get_str("Text").ok()?)
+                )
+            }
+            _ => return None,
+        };
+        Some(vec![line])
+    }
 }
 
 #[cfg(test)]

@@ -89,6 +89,55 @@ impl Variable for FlowVar {
     }
 }
 
+/// What a name stands for where an activity macro takes a value: a
+/// variable is `$` and its name, text (a `&str` constant) is a Mendix
+/// string, and an expression is itself.
+pub trait ActivityValue {
+    fn activity_value(&self) -> Mx;
+}
+
+impl ActivityValue for &str {
+    fn activity_value(&self) -> Mx {
+        Mx::from(mxrs_expr::string(*self))
+    }
+}
+
+impl ActivityValue for String {
+    fn activity_value(&self) -> Mx {
+        Mx::from(mxrs_expr::string(self))
+    }
+}
+
+impl ActivityValue for FlowVar {
+    fn activity_value(&self) -> Mx {
+        Mx::from(self)
+    }
+}
+
+impl<M: EntityMarker> ActivityValue for Var<M> {
+    fn activity_value(&self) -> Mx {
+        Mx::from(self)
+    }
+}
+
+impl<M: EntityMarker> ActivityValue for ListVar<M> {
+    fn activity_value(&self) -> Mx {
+        Mx::from(self)
+    }
+}
+
+impl<T: mxrs_expr::MendixType> ActivityValue for mxrs_expr::Expr<T> {
+    fn activity_value(&self) -> Mx {
+        Mx::from(self)
+    }
+}
+
+impl ActivityValue for Mx {
+    fn activity_value(&self) -> Mx {
+        self.clone()
+    }
+}
+
 impl From<&FlowVar> for Mx {
     fn from(variable: &FlowVar) -> Self {
         mxrs_expr::mx(format!("${}", variable.0))

@@ -75,8 +75,9 @@ pub use flow::{
     CallArgument, FlowBuilder, FlowParameterBuilder, MicroflowModuleBuilder, NanoflowModuleBuilder,
 };
 pub use flow_actions::{
-    AggregateFunction, AssociationName, AttributeName, ChangeKind, Commit, EntityName, FlowVar,
-    ListChange, LogSeverity, MemberName, MessageKind, MicroflowName, SortOrder, Variable, var,
+    ActivityValue, AggregateFunction, AssociationName, AttributeName, ChangeKind, Commit,
+    EntityName, FlowVar, ListChange, LogSeverity, MemberName, MessageKind, MicroflowName,
+    SortOrder, Variable, var,
 };
 pub use menu::{MenuBuilder, MenuItemBuilder};
 pub use module::{ModuleBuilder, OqlViewSourceBuilder};

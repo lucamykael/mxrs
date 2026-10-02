@@ -1007,7 +1007,7 @@ fn malformed_target_parameters_keep_both_target_and_caller_out_of_the_projection
     assert!(source.contains("pub fn caller("), "{source}");
     assert!(!source.contains("call_microflow_result"), "{source}");
     assert!(
-        source.contains("flow.call_into(") && source.contains("MicroflowRef::<Echo>::new()"),
+        source.contains("call_microflow!(") && source.contains("Echo {"),
         "{source}"
     );
     assert!(source.contains("pub fn object("), "{source}");

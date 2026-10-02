@@ -33,6 +33,12 @@ pub(crate) fn attribute(entity: &str, attribute: &str) -> String {
     reference('A', &format!("{entity}/{attribute}"))
 }
 
+/// The field of entity `Module.Entity` that declares `attribute`, as a
+/// struct literal names it: the accessor's name alone.
+pub(crate) fn field(entity: &str, attribute: &str) -> String {
+    reference('F', &format!("{entity}/{attribute}"))
+}
+
 /// The type naming microflow `Module.Flow`.
 pub(crate) fn microflow(qualified_name: &str) -> String {
     reference('M', qualified_name)
@@ -131,7 +137,11 @@ impl ModelNames<'_> {
             let token = &after[..end];
             let (kind, target) = token.split_at(1);
             let (module_path, name, member) = self.locate(kind, target)?;
-            requests.push((name.clone(), module_path.clone()));
+            // A field is named inside its entity's own struct literal: it
+            // needs nothing imported.
+            if !matches!(member, Member::Field(_)) {
+                requests.push((name.clone(), module_path.clone()));
+            }
             segments.push(Segment::Reference {
                 module_path,
                 name,
@@ -162,6 +172,10 @@ impl ModelNames<'_> {
             match segment {
                 Segment::Text(text) => source.push_str(text),
                 Segment::Reference {
+                    member: Member::Field(field),
+                    ..
+                } => source.push_str(field),
+                Segment::Reference {
                     module_path,
                     name,
                     member,
@@ -182,6 +196,7 @@ impl ModelNames<'_> {
                             source.push_str("::");
                             source.push_str(variant);
                         }
+                        Member::Field(_) => unreachable!("written above"),
                     }
                 }
             }
@@ -219,6 +234,23 @@ impl ModelNames<'_> {
                     entity.module_path(),
                     entity.type_name.clone(),
                     Member::Accessor(accessor.clone()),
+                ))
+            }
+            "F" => {
+                let (entity_name, attribute) =
+                    target.split_once('/').ok_or_else(|| missing("attribute"))?;
+                let entity = self
+                    .entities
+                    .get(entity_name)
+                    .ok_or_else(|| missing("entity"))?;
+                let accessor = entity
+                    .attributes
+                    .get(attribute)
+                    .ok_or_else(|| missing("attribute"))?;
+                Ok((
+                    entity.module_path(),
+                    entity.type_name.clone(),
+                    Member::Field(accessor.clone()),
                 ))
             }
             "M" | "N" => {
@@ -405,6 +437,8 @@ enum Member {
     Accessor(String),
     /// An enum variant: `Role::Administrator`.
     Variant(String),
+    /// A struct field, named alone: `number` in `Order { number: ... }`.
+    Field(String),
 }
 
 #[cfg(test)]

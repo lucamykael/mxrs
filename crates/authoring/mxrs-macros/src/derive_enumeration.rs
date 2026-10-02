@@ -183,7 +183,42 @@ fn expand(
         })
         .collect::<syn::Result<Vec<_>>>()?;
 
+    // A value is the Mendix expression naming it, wherever a flow sets or
+    // compares one: `OrderStatus::Open` → `Sales.OrderStatus.Open`.
+    let names = variants
+        .iter()
+        .map(|variant| {
+            let ident = &variant.ident;
+            let value_name = parse_value(&variant.attrs, ident)?.name;
+            Ok(quote! { #enum_ident::#ident => #value_name, })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    // An enumeration without values has nothing to name.
+    let conversions = (!names.is_empty()).then(|| {
+        quote! {
+            impl ::core::convert::From<&#enum_ident> for #dsl::Mx {
+                fn from(value: &#enum_ident) -> Self {
+                    let name = match value {
+                        #(#names)*
+                    };
+                    #dsl::mx(::std::format!(
+                        "{}.{}",
+                        <#enum_ident as #ir::EnumerationMarker>::qualified_name(),
+                        name
+                    ))
+                }
+            }
+
+            impl ::core::convert::From<#enum_ident> for #dsl::Mx {
+                fn from(value: #enum_ident) -> Self {
+                    <#dsl::Mx as ::core::convert::From<&#enum_ident>>::from(&value)
+                }
+            }
+        }
+    });
     Ok(quote! {
+        #conversions
+
         impl #enum_ident {
             pub fn mx_register(module: &mut #dsl::ModuleBuilder) {
                 module.enumeration(#name, |enumeration| {

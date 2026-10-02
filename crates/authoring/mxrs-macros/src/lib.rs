@@ -29,6 +29,7 @@
 //! `#[derive(MxEntity)]` (M8.3) is a second, independent front end onto the
 //! same `mxrs-dsl` surface — see `derive`'s doc comment.
 
+mod activity;
 mod application;
 mod declare;
 mod derive;
@@ -135,6 +136,149 @@ pub fn enumeration(attributes: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn microflow(attributes: TokenStream, item: TokenStream) -> TokenStream {
     expand_flow(attributes, item, declare::FlowKind::Microflow)
+}
+
+/// Creates an object: `create_object!(flow, Order { number: "A-1" }, commit)`, named `New<Entity>` unless `name = "..."` says otherwise.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn create_object(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::CreateObject, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Changes an object: `change_object!(flow, &order, Order { total: 10.5 }, commit, refresh)`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn change_object(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::ChangeObject, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Commits an object: `commit_object!(flow, &order, without_events, refresh)`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn commit_object(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::CommitObject, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Deletes an object: `delete_object!(flow, &order, refresh)`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn delete_object(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::DeleteObject, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Rolls an object back: `rollback_object!(flow, &order, refresh)`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn rollback_object(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::RollbackObject, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Retrieves objects from the database: `retrieve!(flow, Order, xpath = "[Open]", sort = [(Order::number(), Ascending)], first)`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn retrieve(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::Retrieve, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Creates a list: `create_list!(flow, Order)`, named `<Entity>List` unless `name = "..."` says otherwise.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn create_list(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::CreateList, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Changes a list (`add = value`, `remove = value`, `replace = value`, `clear`) or makes another of it (`sort = [...]`, `filter = (member, value)`, `find_by = expression`, `head`, `union = &other`, ... with `name = "..."`).
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn change_list(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::ChangeList, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Aggregates a list: `aggregate_list!(flow, &orders, count, name = "Total")`, `sum = Order::total()`, `sum_of = mx("...")`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn aggregate_list(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::AggregateList, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Creates a variable: `create_variable!(flow, DataType::Long, 0, name = "Count")`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn create_variable(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::CreateVariable, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Changes a variable: `change_variable!(flow, &count, mx("$Count + 1"))`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn change_variable(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::ChangeVariable, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Calls a microflow by the type its declaration generates, with its arguments by parameter name: `call_microflow!(flow, ACT_Order_Ship { Order: order }, name = "Shipped")`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn call_microflow(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::CallMicroflow, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Writes a log line: `log!(flow, Info, "Orders", "{1} shipped", parameters = [number])`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn log(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::Log, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
 }
 
 /// Declares a service: an `impl` block whose methods marked

@@ -715,7 +715,10 @@ pub(crate) fn find_identifier(line: &str, name: &str) -> Option<usize> {
                 {
                     index += 1;
                 }
-                let qualified = line[..start].trim_end().ends_with([':', '.']);
+                // `Order::name` and `.name` are paths; the `name` after a
+                // single colon is a struct field's value: `number: name`.
+                let before = line[..start].trim_end();
+                let qualified = before.ends_with("::") || before.ends_with('.');
                 if &line[start..index] == name && !qualified {
                     return Some(start);
                 }

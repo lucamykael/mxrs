@@ -82,6 +82,23 @@ read-only behavioral oracle; never edit it.
   names an artifact lives with it — an attribute is its entity's accessor
   (`Order::number()`), a flow is the type its declaration generates — so
   authored modules have no separate marker file.
+- An activity of a flow is the macro named for it (user directive,
+  2026-10-02): `create_object!`, `change_object!`, `commit_object!`,
+  `delete_object!`, `rollback_object!`, `retrieve!`, `create_list!`,
+  `change_list!` (the list itself — `add`, `remove`, `replace`, `clear` —
+  or another made from it — `sort`, `filter`, `find_by`, `head`, `union`,
+  ... with its `name`), `aggregate_list!`, `create_variable!`,
+  `change_variable!`, `call_microflow!`, `log!`. Their arguments are Rust
+  expressions, so rustfmt lays them out: `create_object!(flow, Order {
+  number: "A-1", status: OrderStatus::Open, customer: customer }, commit)`.
+  A value is the Mendix expression it reads as — a string literal or `&str`
+  constant a Mendix string, a number or boolean itself, a variable `$` and
+  its name, an enumeration variant its qualified value — and `mx("...")` is
+  what Rust cannot check. A name Studio Pro would give by default
+  (`New<Entity>`, `<Entity>List`) is not stated. Each macro expands to the
+  builder call the activity is, and the importer writes a macro wherever
+  every part of the activity reads back exactly, the builder call
+  otherwise.
 - Generated Rust reads in paragraphs (user directive, 2026-10-02): a
   declaration's attributes sit directly above its `pub fn`; a flow's
   parameters, return type and one-line `let`s are stacked; every other
