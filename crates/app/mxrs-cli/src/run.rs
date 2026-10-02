@@ -304,11 +304,16 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
         .load(&mut store)
         .map_err(RunError::Persistence)?;
     let mut runtime = Runtime::new(store, boot.security.clone());
-    let engine = Arc::new(
-        mxrs_runtime_flows::FlowEngine::from_modules(&boot.modules)
-            .with_policy(boot.security.clone())
-            .with_http(UreqHttp),
-    );
+    let engine = mxrs_runtime_flows::FlowEngine::from_modules(&boot.modules)
+        .with_policy(boot.security.clone())
+        .with_http(UreqHttp)
+        .with_marketplace_java_actions();
+    // A project's own Java action implementations are Rust it compiles, so
+    // only its generated runtime (`cargo run -- serve`) registers them.
+    if let Some(report) = engine.unregistered_java_actions_report() {
+        eprintln!("[mxrs] warning: {report}");
+    }
+    let engine = Arc::new(engine);
     let flow_names: Vec<String> = engine.flow_names().map(str::to_string).collect();
     for name in &flow_names {
         runtime.register_action(

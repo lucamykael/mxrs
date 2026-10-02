@@ -270,6 +270,29 @@ impl FlowEngine {
         missing
     }
 
+    /// What a booted runtime says about [`Self::unregistered_java_actions`]:
+    /// how many actions have no implementation, by module, one line each —
+    /// `None` when every action the flows call has one.
+    pub fn unregistered_java_actions_report(&self) -> Option<String> {
+        let missing = self.unregistered_java_actions();
+        if missing.is_empty() {
+            return None;
+        }
+        let mut by_module: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for action in missing.keys() {
+            let (module, name) = action.split_once('.').unwrap_or(("", action));
+            by_module.entry(module).or_default().push(name);
+        }
+        let mut report = format!(
+            "{} Java action(s) have no Rust implementation yet; a flow fails where it calls one:",
+            missing.len()
+        );
+        for (module, names) in by_module {
+            report.push_str(&format!("\n  {module}: {}", names.join(", ")));
+        }
+        Some(report)
+    }
+
     pub fn with_java_action(
         mut self,
         name: impl Into<String>,

@@ -616,6 +616,18 @@ fn java_actions_require_an_explicit_registration() {
     )];
     let module = module_with(flows);
     let engine = FlowEngine::from_modules(std::slice::from_ref(&module));
+    // A booted runtime names the actions it cannot run, before a flow
+    // reaches one.
+    assert_eq!(
+        engine.unregistered_java_actions(),
+        BTreeMap::from([("App.Hasher".to_string(), vec!["App.Uses".to_string()])])
+    );
+    assert_eq!(
+        engine.unregistered_java_actions_report().as_deref(),
+        Some(
+            "1 Java action(s) have no Rust implementation yet; a flow fails where it calls one:\n  App: Hasher"
+        )
+    );
     let mut store = store_with_order();
     let error = engine
         .call(&mut store, "App.Uses", Variables::new(), None)
@@ -636,6 +648,7 @@ fn java_actions_require_an_explicit_registration() {
         }
     }
     let engine = FlowEngine::from_modules(&[module]).with_java_action("App.Hasher", Upper);
+    assert!(engine.unregistered_java_actions_report().is_none());
     let (result, _) = call(&engine, &mut store, "App.Uses", Variables::new());
     assert_eq!(result, FlowValue::String("ABC".into()));
 }

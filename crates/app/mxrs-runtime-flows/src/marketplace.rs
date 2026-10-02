@@ -2,9 +2,12 @@
 //! does in Mendix.
 //!
 //! A flow that calls a Java action needs a Rust implementation to run in
-//! mxrs. These are the ones whose Java is plain enough to restate exactly;
-//! each says which Java it follows. An application registers its own after
-//! these and replaces any of them by registering the same name.
+//! mxrs. These are the ones whose Java is plain enough to restate; each says
+//! which Java it follows and where it cannot. An application registers its
+//! own after these and replaces any of them by registering the same name.
+//!
+//! Text is read as UTF-8 where the Java calls `getBytes()`: the platform
+//! charset, which is UTF-8 from Java 18 on.
 
 use std::collections::BTreeMap;
 
@@ -36,17 +39,28 @@ fn text(arguments: &BTreeMap<String, FlowValue>, name: &str) -> Option<String> {
     }
 }
 
+/// A whole-number argument as the Java reads it: `Long.intValue()`, which
+/// keeps the low 32 bits.
 fn whole(
     arguments: &BTreeMap<String, FlowValue>,
     action: &str,
     name: &str,
-) -> Result<i64, FlowError> {
+) -> Result<i32, FlowError> {
     match arguments.get(name) {
-        Some(FlowValue::Int(value)) => Ok(*value),
+        #[allow(clippy::cast_possible_truncation)]
+        Some(FlowValue::Int(value)) => Ok(*value as i32),
         _ => Err(FlowError::native(format!(
             "{action} needs a number for `{name}`"
         ))),
     }
+}
+
+/// Room for `count` more elements, or the flow error Java's
+/// `OutOfMemoryError` would be — never an aborted process.
+fn reserve<T>(vector: &mut Vec<T>, count: usize, action: &str) -> Result<(), FlowError> {
+    vector
+        .try_reserve_exact(count)
+        .map_err(|_| FlowError::native(format!("{action}: out of memory for {count} characters")))
 }
 
 enum Side {
@@ -56,8 +70,9 @@ enum Side {
 
 /// `CommunityCommons.StringLeftPad` / `StringRightPad`: commons-lang3's
 /// `leftPad`/`rightPad` — `value` padded to `amount` UTF-16 units with
-/// `fillCharacter` repeated (a space when it is empty), `value` itself when
-/// already that long, and empty for an empty `value`.
+/// `fillCharacter` repeated (a space when it is empty), and `value` itself
+/// when already that long. Without a value there is nothing to pad: the
+/// result is empty, while an empty text is padded like any other.
 struct Pad(Side);
 
 impl JavaAction for Pad {
@@ -75,17 +90,26 @@ impl JavaAction for Pad {
             .unwrap_or_else(|| " ".to_string());
         let value_units: Vec<u16> = value.encode_utf16().collect();
         let fill_units: Vec<u16> = fill.encode_utf16().collect();
-        let pads = amount - value_units.len() as i64;
-        if pads <= 0 {
+        let Some(pads) = usize::try_from(amount)
+            .ok()
+            .and_then(|amount| amount.checked_sub(value_units.len()))
+            .filter(|pads| *pads > 0)
+        else {
             return Ok(FlowValue::String(value));
-        }
-        let padding: Vec<u16> = (0..pads as usize)
-            .map(|index| fill_units[index % fill_units.len()])
-            .collect();
-        let units = match self.0 {
-            Side::Left => [padding, value_units].concat(),
-            Side::Right => [value_units, padding].concat(),
         };
+        let mut units = Vec::new();
+        reserve(&mut units, pads + value_units.len(), action)?;
+        let padding = (0..pads).map(|index| fill_units[index % fill_units.len()]);
+        match self.0 {
+            Side::Left => {
+                units.extend(padding);
+                units.extend(value_units);
+            }
+            Side::Right => {
+                units.extend(value_units);
+                units.extend(padding);
+            }
+        }
         Ok(FlowValue::String(String::from_utf16_lossy(&units)))
     }
 }
@@ -108,26 +132,33 @@ impl JavaAction for Hash {
 }
 
 /// `CommunityCommons.RandomString`: `length` characters drawn uniformly from
-/// `A-Z`, `a-z` and `0-9` by a cryptographic generator.
+/// `A-Z`, `a-z` and `0-9` by a cryptographic generator. A negative length
+/// fails, as Java's `IllegalArgumentException` does.
 struct RandomString;
 
 const ALPHANUMERIC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 impl JavaAction for RandomString {
     fn call(&self, arguments: &BTreeMap<String, FlowValue>) -> Result<FlowValue, FlowError> {
-        let length = whole(arguments, "CommunityCommons.RandomString", "length")?;
-        let mut out = String::new();
-        while (out.len() as i64) < length {
-            // A v4 UUID is 122 bits from the system's secure generator;
-            // bytes past the largest multiple of 62 are dropped so every
-            // character is equally likely.
-            for byte in uuid::Uuid::new_v4().into_bytes() {
-                if byte < 248 && (out.len() as i64) < length {
-                    out.push(ALPHANUMERIC[usize::from(byte) % ALPHANUMERIC.len()] as char);
+        const ACTION: &str = "CommunityCommons.RandomString";
+        let length = usize::try_from(whole(arguments, ACTION, "length")?)
+            .map_err(|_| FlowError::native(format!("{ACTION}: the length must not be negative")))?;
+        let mut out = Vec::new();
+        reserve(&mut out, length, ACTION)?;
+        while out.len() < length {
+            // A v4 UUID is 122 bits from the system's secure generator. Its
+            // version (byte 6) and variant (byte 8) bits are fixed, so those
+            // two bytes are skipped; bytes past the largest multiple of 62
+            // are dropped, so every character is equally likely.
+            for (index, byte) in uuid::Uuid::new_v4().into_bytes().into_iter().enumerate() {
+                if index != 6 && index != 8 && byte < 248 && out.len() < length {
+                    out.push(ALPHANUMERIC[usize::from(byte) % ALPHANUMERIC.len()]);
                 }
             }
         }
-        Ok(FlowValue::String(out))
+        Ok(FlowValue::String(
+            String::from_utf8(out).expect("alphanumeric bytes are UTF-8"),
+        ))
     }
 }
 
@@ -147,8 +178,9 @@ impl JavaAction for Base64Encode {
     }
 }
 
-/// `CommunityCommons.Base64Decode`: `Base64.getDecoder()`, read as UTF-8;
-/// text that is not base64 fails, as the Java throws.
+/// `CommunityCommons.Base64Decode`: `Base64.getDecoder()`, read as UTF-8.
+/// Like the Java, it accepts text without its padding and stray bits in the
+/// last character; text that is not base64 fails, as the Java throws.
 struct Base64Decode;
 
 impl JavaAction for Base64Decode {
@@ -157,11 +189,15 @@ impl JavaAction for Base64Decode {
         let Some(encoded) = text(arguments, "encoded") else {
             return Ok(FlowValue::Empty);
         };
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(|error| {
-                FlowError::native(format!("CommunityCommons.Base64Decode: {error}"))
-            })?;
+        const LENIENT: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new()
+                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+                .with_decode_allow_trailing_bits(true),
+        );
+        let bytes = LENIENT.decode(encoded).map_err(|error| {
+            FlowError::native(format!("CommunityCommons.Base64Decode: {error}"))
+        })?;
         Ok(FlowValue::String(
             String::from_utf8_lossy(&bytes).into_owned(),
         ))
@@ -242,6 +278,10 @@ mod tests {
             .call(&arguments(&[("amount", FlowValue::Int(3))]))
             .unwrap();
         assert!(matches!(empty, FlowValue::Empty));
+        // An empty text is padded; an amount past an `int` wraps as Java's
+        // `intValue()` does, here to a negative and so to no padding.
+        assert_eq!(pad(Side::Left, "", 3, "0"), "000");
+        assert_eq!(pad(Side::Left, "bat", 3_000_000_000, "0"), "bat");
     }
 
     #[test]
@@ -258,6 +298,13 @@ mod tests {
             "Mendix ü"
         );
         assert!(call(&Base64Decode, "encoded", "not base64!").is_err());
+        // Java's decoder needs no padding and ignores stray trailing bits.
+        for (encoded, decoded) in [("TWE", "Ma"), ("TQ", "M"), ("TWF=", "Ma")] {
+            assert_eq!(
+                string(call(&Base64Decode, "encoded", encoded).unwrap()),
+                decoded
+            );
+        }
         assert_eq!(
             string(call(&StringTrim, "value", "\t a b \n").unwrap()),
             "a b"
@@ -301,5 +348,33 @@ mod tests {
                 .unwrap(),
         );
         assert!(none.is_empty());
+        assert!(
+            RandomString
+                .call(&arguments(&[("length", FlowValue::Int(-1))]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn every_position_of_a_random_string_is_uniform() {
+        // Fixed UUID bits once made one position favour 16 letters.
+        let mut counts = vec![[0u32; 62]; 16];
+        for _ in 0..4_000 {
+            let value = string(
+                RandomString
+                    .call(&arguments(&[("length", FlowValue::Int(16))]))
+                    .unwrap(),
+            );
+            for (position, byte) in value.bytes().enumerate() {
+                let index = ALPHANUMERIC.iter().position(|c| *c == byte).unwrap();
+                counts[position][index] += 1;
+            }
+        }
+        // 4000 draws over 62 characters is about 65 each; a biased
+        // position would put some letter near 250.
+        for (position, counts) in counts.iter().enumerate() {
+            let most = counts.iter().max().unwrap();
+            assert!(*most < 130, "position {position}: {counts:?}");
+        }
     }
 }
