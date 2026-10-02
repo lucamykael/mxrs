@@ -17,6 +17,10 @@
 //! | `MxDateTime` | `f64` seconds since the Unix epoch, UTC |
 //! | `MxObject<M>` | [`ObjectHandle<M>`] |
 //! | `MxList<M>` | `Vec<ObjectHandle<M>>` |
+//! | [`MxAnyObject`] | [`ObjectRef`]: an object of an entity the contract leaves open |
+//! | [`MxAnyList`] | `Vec<ObjectRef>` |
+//! | [`MxEntityName`] | `String`: an entity passed as an argument (`Module.Entity`) |
+//! | [`MxValue`] | [`FlowValue`]: what no other marker types |
 //!
 //! `MxBinary` and the bare `MxEnumeration` marker have no port
 //! representation yet: binaries do not travel through microflow variables,
@@ -364,6 +368,89 @@ impl<M: EntityMarker> PortValue for MxList<M> {
                 &other,
             )),
         }
+    }
+}
+
+/// An object of an entity a contract leaves open: a generic Java action's
+/// type parameter, or an entity no struct declares.
+#[derive(Debug, Clone, Copy)]
+pub struct MxAnyObject;
+impl MendixType for MxAnyObject {}
+
+impl PortValue for MxAnyObject {
+    type Runtime = ObjectRef;
+
+    fn to_flow(value: Self::Runtime) -> FlowValue {
+        FlowValue::Object(value)
+    }
+
+    fn from_flow(value: FlowValue) -> Result<Self::Runtime, PortValueError> {
+        match value {
+            FlowValue::Object(reference) => Ok(reference),
+            other => Err(PortValueError::mismatch("object", &other)),
+        }
+    }
+}
+
+/// A list of objects of an entity a contract leaves open.
+#[derive(Debug, Clone, Copy)]
+pub struct MxAnyList;
+impl MendixType for MxAnyList {}
+
+impl PortValue for MxAnyList {
+    type Runtime = Vec<ObjectRef>;
+
+    fn to_flow(value: Self::Runtime) -> FlowValue {
+        FlowValue::List(value.into_iter().map(FlowValue::Object).collect())
+    }
+
+    fn from_flow(value: FlowValue) -> Result<Self::Runtime, PortValueError> {
+        match value {
+            FlowValue::List(values) => values
+                .into_iter()
+                .map(<MxAnyObject as PortValue>::from_flow)
+                .collect(),
+            other => Err(PortValueError::mismatch("list", &other)),
+        }
+    }
+}
+
+/// An entity passed as an argument — what a generic Java action is told to
+/// work with — by its qualified `Module.Entity` name.
+#[derive(Debug, Clone, Copy)]
+pub struct MxEntityName;
+impl MendixType for MxEntityName {}
+
+impl PortValue for MxEntityName {
+    type Runtime = String;
+
+    fn to_flow(value: Self::Runtime) -> FlowValue {
+        FlowValue::String(value)
+    }
+
+    fn from_flow(value: FlowValue) -> Result<Self::Runtime, PortValueError> {
+        match value {
+            FlowValue::String(name) => Ok(name),
+            other => Err(PortValueError::mismatch("entity name", &other)),
+        }
+    }
+}
+
+/// Any value no other marker types — a microflow, a mapping, an
+/// enumeration value — as the engine holds it.
+#[derive(Debug, Clone, Copy)]
+pub struct MxValue;
+impl MendixType for MxValue {}
+
+impl PortValue for MxValue {
+    type Runtime = FlowValue;
+
+    fn to_flow(value: Self::Runtime) -> FlowValue {
+        value
+    }
+
+    fn from_flow(value: FlowValue) -> Result<Self::Runtime, PortValueError> {
+        Ok(value)
     }
 }
 

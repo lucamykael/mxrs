@@ -281,6 +281,16 @@ pub fn log(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Calls a Java action: `call_java_action!(flow, "OQL.ExecuteOQLStatement",
+/// "Result", statement = "...", returnEntity = SPCProgramView)`. A module's
+/// generated `<action>!` macro names the action for you.
+#[proc_macro]
+pub fn call_java_action(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::CallJavaAction, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
 /// Declares a service: an `impl` block whose methods marked
 /// `#[microflow(...)]` are the flows of one subject.
 ///

@@ -39,6 +39,11 @@ pub(crate) fn field(entity: &str, attribute: &str) -> String {
     reference('F', &format!("{entity}/{attribute}"))
 }
 
+/// The macro calling Java action `Module.Action`.
+pub(crate) fn java_action(qualified_name: &str) -> String {
+    reference('J', qualified_name)
+}
+
 /// The variant naming value `Module.Enumeration.Value`.
 pub(crate) fn enumeration_value(qualified_value: &str) -> String {
     reference('V', qualified_value)
@@ -111,6 +116,9 @@ pub(crate) struct ModelNames<'a> {
     /// `Module.Enumeration.Value` → the enum declaring it and the variant
     /// that is that value.
     pub(crate) enumeration_values: HashMap<String, RoleTarget>,
+    /// `Module.Action` → the macro that calls the Java action, and the
+    /// module of contracts it is declared in.
+    pub(crate) java_actions: HashMap<String, FlowTarget>,
 }
 
 /// One file body with its references spelled, and the imports that spelling
@@ -134,6 +142,9 @@ impl ModelNames<'_> {
     /// path instead.
     pub(crate) fn resolve(&self, body: &str, taken: &[&str]) -> Result<Resolved> {
         let mut requests: Vec<(String, String)> = Vec::new();
+        // A macro lives in a namespace of its own: importing one by its
+        // lower-case name cannot change what a `let` matches.
+        let mut macros: HashSet<String> = HashSet::new();
         let mut segments: Vec<Segment> = Vec::new();
         let mut rest = body;
         while let Some(start) = rest.find(OPEN) {
@@ -145,6 +156,9 @@ impl ModelNames<'_> {
             let token = &after[..end];
             let (kind, target) = token.split_at(1);
             let (module_path, name, member) = self.locate(kind, target)?;
+            if kind == "J" {
+                macros.insert(name.clone());
+            }
             // A field is named inside its entity's own struct literal: it
             // needs nothing imported.
             if !matches!(member, Member::Field(_)) {
@@ -172,7 +186,10 @@ impl ModelNames<'_> {
             !colliding.contains(name)
                 && !taken.contains(name)
                 && !prelude_name(name)
-                && !name.starts_with(|character: char| character.is_lowercase() || character == '_')
+                && (macros.contains(*name)
+                    || !name.starts_with(|character: char| {
+                        character.is_lowercase() || character == '_'
+                    }))
         });
 
         let mut source = String::with_capacity(body.len());
@@ -269,6 +286,17 @@ impl ModelNames<'_> {
                 };
                 let flow = flows.get(target).ok_or_else(|| missing("flow"))?;
                 Ok((flow.module_path.clone(), flow.marker.clone(), Member::None))
+            }
+            "J" => {
+                let action = self
+                    .java_actions
+                    .get(target)
+                    .ok_or_else(|| missing("Java action"))?;
+                Ok((
+                    action.module_path.clone(),
+                    action.marker.clone(),
+                    Member::None,
+                ))
             }
             "V" => {
                 let value = self
@@ -486,6 +514,7 @@ mod tests {
             HashMap::from([("Sales.Order".to_string(), target("sales", "order", "Order"))]);
         let names = ModelNames {
             enumeration_values: HashMap::new(),
+            java_actions: HashMap::new(),
             entities: &entities,
             microflows: HashMap::from([(
                 "Sales.ACT_Ping".to_string(),
@@ -527,6 +556,7 @@ mod tests {
         ]);
         let names = ModelNames {
             enumeration_values: HashMap::new(),
+            java_actions: HashMap::new(),
             entities: &entities,
             microflows: HashMap::from([(
                 "Sales.cleanup".to_string(),
@@ -558,6 +588,7 @@ mod tests {
         let entities = HashMap::from([("Sales.Ref".to_string(), target("sales", "ref_", "Ref"))]);
         let names = ModelNames {
             enumeration_values: HashMap::new(),
+            java_actions: HashMap::new(),
             entities: &entities,
             microflows: HashMap::from([(
                 "Sales.None".to_string(),
@@ -618,6 +649,7 @@ mod tests {
             nanoflows: HashMap::new(),
             roles: HashMap::new(),
             enumeration_values: HashMap::new(),
+            java_actions: HashMap::new(),
         };
         let error = names.resolve(&entity("Sales.Missing"), &[]).unwrap_err();
         assert!(error.to_string().contains("Sales.Missing"), "{error}");

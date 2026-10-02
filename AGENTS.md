@@ -103,6 +103,22 @@ read-only behavioral oracle; never edit it.
   builder call the activity is, and the importer writes a macro wherever
   every part of the activity reads back exactly, the builder call
   otherwise.
+- A Java action runs its Java in Mendix and Rust in mxrs (user directive,
+  2026-10-02); mxrs embeds no JVM and translates no Java. Every Java action
+  of the model, a package's included, has a contract in its module's
+  `ports::actions` — a trait whose documentation shows the Java the action
+  runs in Mendix — a `register_*` function in
+  `infrastructure::generated::<module>_actions`, and a macro named for it
+  that flows call it by: `execute_oql_statement!(flow, "Result", statement
+  = ..., returnEntity = SPCProgramView)` (the generic form is
+  `call_java_action!`). An entity an action takes is its struct. A type no
+  struct names is still carried: `MxAnyObject`/`ObjectRef`,
+  `MxEntityName`, `MxValue`. mxrs implements some Marketplace actions itself
+  (`FlowEngine::with_marketplace_java_actions`, each following its Java
+  exactly); the project registers its own in
+  `infrastructure::adapters::java_actions`, which replace mxrs's; and the
+  booted runtime lists every action still without a Rust implementation,
+  with the flows that call it.
 - Generated Rust reads in paragraphs (user directive, 2026-10-02): a
   declaration's attributes sit directly above its `pub fn`; a flow's
   parameters, return type and one-line `let`s are stacked; every other

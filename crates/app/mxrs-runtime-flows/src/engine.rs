@@ -229,6 +229,47 @@ impl FlowEngine {
         self
     }
 
+    /// The Java actions the flows call that have no implementation
+    /// registered, each with the flows that call it: what fails the moment
+    /// one of those flows reaches the call.
+    pub fn unregistered_java_actions(&self) -> BTreeMap<String, Vec<String>> {
+        fn calls(objects: &[Document], found: &mut Vec<String>) {
+            for object in objects {
+                if let Ok(action) = object.get_document("Action")
+                    && action.get_str("$Type").ok() == Some("Microflows$JavaActionCallAction")
+                    && let Ok(name) = action.get_str("JavaAction")
+                {
+                    found.push(name.to_string());
+                }
+                // A loop's body holds activities of its own.
+                if let Ok(collection) = object.get_document("ObjectCollection") {
+                    let inner: Vec<Document> = bson_items(collection.get("Objects"))
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            Bson::Document(document) => Some(document),
+                            _ => None,
+                        })
+                        .collect();
+                    calls(&inner, found);
+                }
+            }
+        }
+        let mut missing: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (qualified, flow) in &self.flows {
+            let mut found = Vec::new();
+            calls(&flow.objects, &mut found);
+            for name in found {
+                if !self.java_actions.contains_key(&name) {
+                    let users = missing.entry(name).or_default();
+                    if !users.contains(qualified) {
+                        users.push(qualified.clone());
+                    }
+                }
+            }
+        }
+        missing
+    }
+
     pub fn with_java_action(
         mut self,
         name: impl Into<String>,

@@ -1182,10 +1182,12 @@ dependencies = [
 name = "mxrs-runtime-flows"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "mxrs-bson",
  "mxrs-model",
  "mxrs-runtime",
  "serde_json",
+ "sha2",
  "thiserror",
  "uuid",
 ]

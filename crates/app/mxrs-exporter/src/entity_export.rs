@@ -118,7 +118,7 @@ fn declarable_associations<'a>(
 /// name that would be empty, a keyword, or one of the types the struct's own
 /// fields are written with gets an `Entity` suffix instead of a second
 /// rendering form.
-fn entity_type_name(entity_name: &str) -> String {
+pub(crate) fn entity_type_name(entity_name: &str) -> String {
     let mut type_name = derive_pascal_case(&sanitize_ident(entity_name));
     if type_name.starts_with(|c: char| c.is_ascii_digit()) {
         type_name.insert(0, '_');

@@ -38,6 +38,7 @@ pub enum Activity {
     CreateVariable,
     ChangeVariable,
     CallMicroflow,
+    CallJavaAction,
     Log,
 }
 
@@ -64,6 +65,7 @@ pub fn expand(activity: Activity, input: TokenStream) -> syn::Result<TokenStream
         Activity::CreateVariable => create_variable(&flow, &rest),
         Activity::ChangeVariable => change_variable(&flow, &rest),
         Activity::CallMicroflow => call_microflow(&flow, &rest),
+        Activity::CallJavaAction => call_java_action(&flow, &rest),
         Activity::Log => log(&flow, &rest),
     }
 }
@@ -744,6 +746,101 @@ fn call_microflow(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
             })
         },
     })
+}
+
+/// `call_java_action!(flow, "OQL.ExecuteOQLStatement", "Result", statement
+/// = "...", returnEntity = SPCProgramView)`: the action by its qualified
+/// name, the variable its result is kept in (when it is), and its
+/// arguments by parameter name. An entity a parameter takes is its struct
+/// (`SPCProgramView`, or `CRD {}` for a name in capitals); every other
+/// argument is a value. A module's generated `<action>!` macro writes the
+/// action's name for it.
+fn call_java_action(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
+    let action = first(arguments, "the Java action it calls")?;
+    let (result, rest) = match arguments.get(1) {
+        Some(Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(name),
+            ..
+        })) => (Some(name), &arguments[2..]),
+        _ => (None, &arguments[1..]),
+    };
+    let mappings = rest
+        .iter()
+        .map(|argument| {
+            let Expr::Assign(assign) = argument else {
+                return Err(syn::Error::new_spanned(
+                    argument,
+                    "expected an argument by its parameter's name: `statement = ...`",
+                ));
+            };
+            let Expr::Path(path) = &*assign.left else {
+                return Err(syn::Error::new_spanned(
+                    &assign.left,
+                    "expected a parameter's name",
+                ));
+            };
+            let Some(parameter) = path.path.get_ident() else {
+                return Err(syn::Error::new_spanned(
+                    &assign.left,
+                    "expected a parameter's name",
+                ));
+            };
+            let parameter = parameter.to_string();
+            let parameter = parameter
+                .strip_prefix("r#")
+                .unwrap_or(&parameter)
+                .to_string();
+            Ok(match entity_type(&assign.right) {
+                Some(entity) => quote! {
+                    __mxrs_call.entity_argument(#parameter, ::mxrs::Ref::<#entity>::new());
+                },
+                None => {
+                    let value = value(&assign.right);
+                    quote! { __mxrs_call.argument(#parameter, #value); }
+                }
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    Ok(match result {
+        Some(name) => quote! {
+            (#flow).call_java_into(#name, #action, |__mxrs_call| {
+                #(#mappings)*
+            })
+        },
+        None => quote! {
+            (#flow).call_java(#action, |__mxrs_call| {
+                #(#mappings)*
+            })
+        },
+    })
+}
+
+/// The entity an argument names, when it is a struct: a type in
+/// UpperCamelCase (`SPCProgramView`, `crate::domain::entities::sales::Order`
+/// — not a variant, `Status::Open`), or one written as an empty struct
+/// literal (`CRD {}`).
+fn entity_type(argument: &Expr) -> Option<syn::Path> {
+    match argument {
+        Expr::Struct(literal) if literal.fields.is_empty() && literal.rest.is_none() => {
+            Some(literal.path.clone())
+        }
+        Expr::Path(path) if path.qself.is_none() => {
+            let segments: Vec<String> = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            let last = segments.last()?;
+            let camel = last.starts_with(|c: char| c.is_ascii_uppercase())
+                && last.chars().any(|c| c.is_ascii_lowercase());
+            // `Type::Variant` is a value; `module::Type` is a type.
+            let in_a_type = segments.len() > 1
+                && segments[segments.len() - 2].starts_with(|c: char| c.is_ascii_uppercase());
+            (camel && !in_a_type).then(|| path.path.clone())
+        }
+        _ => None,
+    }
 }
 
 /// `log!(flow, Info, "Node", "{1} shipped", parameters = [order_number],

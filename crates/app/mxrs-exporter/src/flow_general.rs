@@ -41,6 +41,8 @@ pub(crate) struct Model<'a> {
     pub(crate) microflows: &'a HashSet<String>,
     /// `Module.Enumeration.Value`s an enum's variant names.
     pub(crate) enumeration_values: &'a HashSet<String>,
+    /// Java actions a generated macro calls, by qualified name.
+    pub(crate) java_actions: &'a HashSet<String>,
 }
 
 /// Reads one stored document, and notices the fields nobody asked for.
@@ -2150,6 +2152,15 @@ pub(crate) fn polish(mut lines: Vec<String>) -> Vec<String> {
     lines
 }
 
+/// Whether the struct declaring `Module.Entity` has a lower-case letter in
+/// its name, which is how an activity macro reads it as a type.
+fn entity_type_has_lowercase(qualified: &str) -> bool {
+    let name = qualified.rsplit('.').next().unwrap_or(qualified);
+    crate::entity_export::entity_type_name(name)
+        .chars()
+        .any(|c| c.is_ascii_lowercase())
+}
+
 /// A Mendix number literal Rust writes the same way.
 fn is_number_literal(text: &str) -> bool {
     let digits = text.strip_prefix('-').unwrap_or(text);
@@ -2587,6 +2598,62 @@ impl Converter<'_> {
                     String::new()
                 };
                 format!("call_microflow!(flow, {call}{name});")
+            }
+            "Microflows$JavaActionCallAction" => {
+                let action_name = text("JavaAction")?;
+                if !self.model.java_actions.contains(action_name)
+                    || matches!(action.get("QueueSettings"), Some(Bson::Document(_)))
+                {
+                    return None;
+                }
+                let result = text("ResultVariableName")?;
+                let uses_result = action.get_bool("UseReturnVariable").ok()?;
+                if !uses_result && !result.is_empty() {
+                    return None;
+                }
+                let mut arguments = Vec::new();
+                if uses_result && !result.is_empty() {
+                    arguments.push(rust_string(result));
+                }
+                for mapping in action
+                    .get("ParameterMappings")
+                    .and_then(mxrs_writer::flow_graph::documents)?
+                {
+                    let parameter = mapping.get_str("Parameter").ok()?;
+                    let short = parameter
+                        .strip_prefix(action_name)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .filter(|name| !name.contains('.'))?;
+                    if !mxrs_typegen::is_rust_identifier(short) || crate::rust_keyword(short) {
+                        return None;
+                    }
+                    let value = mapping.get_document("Value").ok()?;
+                    let argument = match value.get_str("$Type").ok()? {
+                        "Microflows$BasicCodeActionParameterValue" => {
+                            self.macro_value(value.get_str("Argument").ok()?, scope)
+                        }
+                        "Microflows$EntityTypeCodeActionParameterValue" => {
+                            let entity = value.get_str("Entity").ok()?;
+                            let marker = self.typed_entity(entity)?;
+                            // A struct is read as an entity by its lower-case
+                            // letters; one in capitals says so with `{}`.
+                            if entity_type_has_lowercase(entity) {
+                                marker
+                            } else {
+                                format!("{marker} {{}}")
+                            }
+                        }
+                        _ => return None,
+                    };
+                    arguments.push(format!("{short} = {argument}"));
+                }
+                let mut line = format!("{}!(flow", names::java_action(action_name));
+                for argument in &arguments {
+                    line.push_str(", ");
+                    line.push_str(argument);
+                }
+                line.push_str(");");
+                line
             }
             "Microflows$LogMessageAction" => {
                 let level = LogSeverity::from_native(text("Level")?)?;

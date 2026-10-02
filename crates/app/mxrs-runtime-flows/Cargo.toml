@@ -11,9 +11,11 @@ description = "Native microflow/nanoflow interpreter for the MXRS runtime: expre
 workspace = true
 
 [dependencies]
+base64 = "0.22"
 mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-runtime = { path = "../mxrs-runtime" }
 serde_json.workspace = true
+sha2 = "0.10"
 thiserror.workspace = true
 uuid = { version = "1", features = ["v4"] }

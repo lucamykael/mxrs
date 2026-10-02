@@ -280,8 +280,30 @@ fn import_cargo_project_inner(
                 .map(move |value| format!("{qualified}.{value}"))
         })
         .collect();
+    // Every Java action has a contract, and the macro that calls it is
+    // declared beside it: a flow calls an action by that macro.
+    let action_documents = collect_action_documents(&project)?;
+    let java_macros: HashMap<String, names::FlowTarget> =
+        assemble_action_ports(&action_documents, &packages, &HashMap::new())
+            .iter()
+            .flat_map(|module| {
+                module.actions.iter().map(move |action| {
+                    (
+                        format!("{}.{}", module.module_name, action.action_name),
+                        names::FlowTarget {
+                            module_path: format!(
+                                "{}::actions",
+                                module.root.path(&module.module_stem, "ports", "ports")
+                            ),
+                            marker: java_action_macro_name(&action.action_name),
+                        },
+                    )
+                })
+            })
+            .collect();
+    let java_actions: std::collections::HashSet<String> = java_macros.keys().cloned().collect();
     let (converted_flows, kept_flows) =
-        flow_export::collect_all(&project, &modules, &enumeration_values)?;
+        flow_export::collect_all(&project, &modules, &enumeration_values, &java_actions)?;
     let flow_relations = mxrs_model::relations::flow_relations(&project)?;
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
@@ -290,7 +312,6 @@ fn import_cargo_project_inner(
     let security_source = render_project_security_module(security_document.as_ref());
     let navigation_source = render_navigation_module(&project.navigation()?);
     let task_queues_source = render_task_queue_declarations(&project)?;
-    let action_documents = collect_action_documents(&project)?;
     // The HTTP layer is generated for the axum adapter only; the other two
     // presets keep their server stub until their routers are ported.
     let published_services = match api_mode {
@@ -351,6 +372,7 @@ fn import_cargo_project_inner(
         &kept_flows,
         &service_plans,
         &documents_export.derived_enumerations,
+        java_macros,
         &mut generated_modules,
     );
     let microflow_files = flow_export::render_files(
@@ -363,7 +385,20 @@ fn import_cargo_project_inner(
     let nanoflow_files =
         flow_export::render_files(&converted_flows, &flow_plans, true, &names, &flow_relations)?;
     let service_ports = collect_service_ports(&modules, &packages, &typed_entities);
-    let action_ports = assemble_action_ports(&action_documents, &packages, &typed_entities);
+    let mut action_ports = assemble_action_ports(&action_documents, &packages, &typed_entities);
+    // Each contract shows the Java the action runs in Mendix.
+    for module in &mut action_ports {
+        let folder = destination
+            .join("assets/javasource")
+            .join(module.module_name.to_lowercase())
+            .join("actions");
+        for action in &mut module.actions {
+            action.java =
+                std::fs::read_to_string(folder.join(format!("{}.java", action.action_name)))
+                    .ok()
+                    .and_then(|source| java_user_code(&source));
+        }
+    }
     for (module_name, stem, source) in &documents_export.enumeration_files {
         generated_module(&mut generated_modules, module_name)
             .enumerations
@@ -633,6 +668,12 @@ fn import_cargo_project_inner(
     }
     if needs_flow_runtime {
         adapters_index.push_str("pub use crate::infrastructure::generated::flow_runtime;\n");
+        // The project's own Rust for the Java actions its flows call.
+        adapters_index.push_str("\npub mod java_actions;\n");
+        write_text(
+            &destination.join("src/infrastructure/adapters/java_actions.rs"),
+            &render_java_actions_adapter(&action_ports),
+        )?;
     }
     write_text(
         &destination.join("src/infrastructure/adapters/mod.rs"),
@@ -3326,6 +3367,7 @@ fn model_names<'a>(
     kept: &flow_export::KeptFlows,
     services: &HashMap<(String, String), flow_export::ServiceSlot>,
     enumerations: &HashMap<String, DerivedEnumeration>,
+    java_actions: HashMap<String, names::FlowTarget>,
     generated: &mut std::collections::BTreeMap<String, GeneratedModule>,
 ) -> names::ModelNames<'a> {
     let converted_stems: HashMap<(&str, &str, bool), &str> = converted
@@ -3522,6 +3564,7 @@ fn model_names<'a>(
         nanoflows,
         roles,
         enumeration_values,
+        java_actions,
     }
 }
 
@@ -4706,11 +4749,24 @@ fn render_flow_runtime() -> String {
      \x20   /// [`Boot`] by reference so the same one can also build the\n\
      \x20   /// authentication adapter.\n\
      \x20   pub fn from_boot(booted: &Boot) -> Self {\n\
-     \x20       Self::new(\n\
+     \x20       // mxrs implements some Marketplace Java actions; the project\n\
+     \x20       // registers its own in `adapters::java_actions`, replacing any.\n\
+     \x20       let engine = crate::infrastructure::adapters::java_actions::register(\n\
      \x20           FlowEngine::from_modules(&booted.modules)\n\
-     \x20               .with_policy(booted.security.clone()),\n\
-     \x20           Store::new(booted.schema.clone()),\n\
-     \x20       )\n\
+     \x20               .with_policy(booted.security.clone())\n\
+     \x20               .with_marketplace_java_actions(),\n\
+     \x20       );\n\
+     \x20       let missing = engine.unregistered_java_actions();\n\
+     \x20       if !missing.is_empty() {\n\
+     \x20           eprintln!(\n\
+     \x20               \"[mxrs] warning: {} Java action(s) have no Rust implementation; a flow that calls one fails there:\",\n\
+     \x20               missing.len()\n\
+     \x20           );\n\
+     \x20           for (action, flows) in &missing {\n\
+     \x20               eprintln!(\"  {action} (called by {})\", flows.join(\", \"));\n\
+     \x20           }\n\
+     \x20       }\n\
+     \x20       Self::new(engine, Store::new(booted.schema.clone()))\n\
      \x20   }\n\n\
      \x20   /// Wraps an engine and store the caller assembled.\n\
      \x20   pub fn new(engine: FlowEngine, store: Store) -> Self {\n\
@@ -5830,6 +5886,9 @@ struct ActionPort {
     parameters: Vec<(String, String, String, String)>,
     /// `(marker type, runtime type)`; `None` returns unit (a void action).
     result: Option<(String, String)>,
+    /// What the action's Java does in Mendix — its `executeAction` body —
+    /// for whoever writes the Rust that does it in mxrs.
+    java: Option<String>,
 }
 
 impl ActionPort {
@@ -5847,7 +5906,45 @@ impl ActionPort {
 /// The `(marker, runtime)` port pair for one `CodeActions$*` type document.
 /// `None` when the type has no port representation (enumerations, generic
 /// entity types, or an entity that keeps the IR form).
+/// The `(marker, runtime type)` a Java action's parameter or result has in
+/// its contract. A type a struct cannot name is still a value the contract
+/// carries: an object or list of an open entity, or the engine's own value.
 fn code_action_port_type(
+    doc: &mxrs_bson::Document,
+    typed_entities: &HashMap<String, TypedEntityTarget>,
+) -> (String, String) {
+    if let Some(typed) = typed_code_action_port_type(doc, typed_entities) {
+        return typed;
+    }
+    let kind = doc.get_str("$Type").unwrap_or_default();
+    let is_entity = |kind: &str| {
+        kind.ends_with("$ParameterizedEntityType") || kind.ends_with("$ConcreteEntityType")
+    };
+    if is_entity(kind) {
+        return (
+            "mxrs::ports::MxAnyObject".into(),
+            "mxrs::ports::ObjectRef".into(),
+        );
+    }
+    if kind.ends_with("$ListType")
+        && doc
+            .get_document("Parameter")
+            .ok()
+            .and_then(|parameter| parameter.get_str("$Type").ok())
+            .is_some_and(is_entity)
+    {
+        return (
+            "mxrs::ports::MxAnyList".into(),
+            "Vec<mxrs::ports::ObjectRef>".into(),
+        );
+    }
+    (
+        "mxrs::ports::MxValue".into(),
+        "mxrs::ports::FlowValue".into(),
+    )
+}
+
+fn typed_code_action_port_type(
     doc: &mxrs_bson::Document,
     typed_entities: &HashMap<String, TypedEntityTarget>,
 ) -> Option<(String, String)> {
@@ -6633,11 +6730,8 @@ fn assemble_action_ports(
             if stem.is_empty() || stem.starts_with(|c: char| c.is_ascii_digit()) {
                 return None;
             }
-            // Marketplace actions remain preserved with their package model,
-            // but they are not application-owned adapter extension points.
-            if module_root(&stem, packages) == ModuleRoot::Package {
-                return None;
-            }
+            // A package's actions are contracts too: in Mendix their Java
+            // runs, and in mxrs a Rust implementation registered for them.
             actions.sort_by(|left, right| left.action_name.cmp(&right.action_name));
             let mut seen = std::collections::HashSet::new();
             actions.retain(|action| seen.insert(action.trait_name.clone()));
@@ -6669,18 +6763,8 @@ fn action_port(
         return None;
     }
     let register_fn = format!("register_{}", snake_ident(action_name));
-    // Generic actions need type arguments the port cannot express.
-    if document
-        .get_array("TypeParameters")
-        .ok()
-        .is_some_and(|parameters| {
-            !mxrs_bson::parse_array(Some(parameters.as_slice()))
-                .items
-                .is_empty()
-        })
-    {
-        return None;
-    }
+    // A generic action's type parameters are open entities: its objects are
+    // `ObjectRef`s, and the entity it is told to use is an argument.
     let result = match document.get_document("JavaReturnType").ok() {
         None => None,
         Some(return_doc) => {
@@ -6688,7 +6772,7 @@ fn action_port(
             if raw == "CodeActions$VoidType" || raw == "JavaActions$VoidType" {
                 None
             } else {
-                Some(code_action_port_type(return_doc, typed_entities)?)
+                Some(code_action_port_type(return_doc, typed_entities))
             }
         }
     };
@@ -6704,21 +6788,33 @@ fn action_port(
             .get_str("Name")
             .ok()
             .filter(|name| !name.is_empty())?;
-        let ident = snake_ident(name);
+        let mut ident = snake_ident(name);
         if ident.is_empty()
+            || ident.starts_with(|c: char| c.is_ascii_digit())
             || rust_keyword(&ident)
             || ident == "self"
             || ident == "engine"
-            || !idents.insert(ident.clone())
         {
-            return None;
+            ident.push_str("_value");
+        }
+        if !idents.insert(ident.clone()) {
+            ident = (2..)
+                .map(|suffix| format!("{ident}_{suffix}"))
+                .find(|candidate| idents.insert(candidate.clone()))
+                .expect("an unbounded suffix always finds a free name");
         }
         let parameter_type = parameter.get_document("ParameterType").ok()?;
-        if parameter_type.get_str("$Type").ok() != Some("CodeActions$BasicParameterType") {
-            return None;
-        }
-        let (marker, runtime) =
-            code_action_port_type(parameter_type.get_document("Type").ok()?, typed_entities)?;
+        let parameter_kind = parameter_type.get_str("$Type").unwrap_or_default();
+        let (marker, runtime) = if parameter_kind.ends_with("$BasicParameterType") {
+            code_action_port_type(parameter_type.get_document("Type").ok()?, typed_entities)
+        } else if parameter_kind.ends_with("$EntityTypeParameterType") {
+            ("mxrs::ports::MxEntityName".into(), "String".into())
+        } else {
+            (
+                "mxrs::ports::MxValue".into(),
+                "mxrs::ports::FlowValue".into(),
+            )
+        };
         parameters.push((name.to_string(), ident, marker, runtime));
     }
     Some(ActionPort {
@@ -6727,7 +6823,91 @@ fn action_port(
         register_fn,
         parameters,
         result,
+        java: None,
     })
+}
+
+/// The macro a flow calls Java action `action` by: its name in snake case,
+/// unless that is a word Rust keeps or an activity macro's name, which
+/// would be hidden where the action's macro is imported.
+fn java_action_macro_name(action: &str) -> String {
+    const ACTIVITY_MACROS: [&str; 15] = [
+        "aggregate_list",
+        "call_java_action",
+        "call_microflow",
+        "change_list",
+        "change_object",
+        "change_variable",
+        "commit_object",
+        "create_list",
+        "create_object",
+        "create_variable",
+        "delete_object",
+        "log",
+        "retrieve",
+        "rollback_object",
+        "mx",
+    ];
+    let mut name = snake_ident(action);
+    if name.is_empty()
+        || name.starts_with(|c: char| c.is_ascii_digit())
+        || rust_keyword(&name)
+        || ACTIVITY_MACROS.contains(&name.as_str())
+    {
+        name.push_str("_action");
+    }
+    name
+}
+
+/// The project's own registration of Rust implementations for the Java
+/// actions its flows call: empty until someone writes one, and naming where
+/// the contracts and their registration functions are.
+fn render_java_actions_adapter(modules: &[ActionPortModule]) -> String {
+    let example = modules
+        .iter()
+        .flat_map(|module| {
+            module
+                .actions
+                .iter()
+                .map(move |action| (module, action))
+        })
+        .next()
+        .map(|(module, action)| {
+            format!(
+                "//!\n//! ```ignore\n//! use crate::infrastructure::generated::{}_actions::{};\n//!\n//! pub fn register(engine: FlowEngine) -> FlowEngine {{\n//!     {}(engine, My{})\n//! }}\n//! ```\n",
+                module.module_stem, action.register_fn, action.register_fn, action.trait_name
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "//! Rust implementations of the Java actions the model's flows call.\n//!\n//! In Mendix a Java action runs its Java; in mxrs, the Rust registered for\n//! it here. Each action's contract — with the Java it runs in Mendix — is in\n//! its module's `ports::actions`, and `infrastructure::generated` has the\n//! function that registers an implementation of it.\n{example}\nuse mxrs::ports::FlowEngine;\n\n/// Registers this project's Java action implementations on the engine,\n/// after the Marketplace ones mxrs implements: one registered here for the\n/// same action replaces mxrs's.\npub fn register(engine: FlowEngine) -> FlowEngine {{\n    engine\n}}\n"
+    )
+}
+
+/// The user code of a Java action's `executeAction`: what it does, without
+/// the generated scaffolding around it.
+fn java_user_code(source: &str) -> Option<String> {
+    let after = &source[source.find("executeAction")?..];
+    let start = after.find("// BEGIN USER CODE")? + "// BEGIN USER CODE".len();
+    let end = after[start..].find("// END USER CODE")? + start;
+    let lines: Vec<&str> = after[start..end].lines().collect();
+    let indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()?;
+    let body = lines
+        .iter()
+        .skip_while(|line| line.trim().is_empty())
+        .map(|line| {
+            line.get(indent..)
+                .unwrap_or("")
+                .trim_end()
+                .replace('\t', "    ")
+        })
+        .collect::<Vec<_>>();
+    let body = body.join("\n").trim_end().to_string();
+    (!body.is_empty()).then_some(body)
 }
 
 fn render_action_port_file(module: &ActionPortModule) -> String {
@@ -6741,9 +6921,27 @@ fn render_action_port_file(module: &ActionPortModule) -> String {
         if handles { "ObjectHandle, " } else { "" },
     );
     for action in &module.actions {
+        let java = action
+            .java
+            .as_ref()
+            .map(|java| {
+                let code = java
+                    .lines()
+                    .map(|line| format!("/// {line}").trim_end().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("\n///\n/// In Mendix, its Java does:\n///\n/// ```java\n{code}\n/// ```")
+            })
+            .unwrap_or_default();
+        let qualified = format!("{}.{}", module.module_name, action.action_name);
+        let macro_name = java_action_macro_name(&action.action_name);
         let _ = writeln!(
             out,
-            "\n/// Contract of the `{}.{}` Java action.\npub trait {} {{\n{}    fn call(&self{}) -> Result<{}, ServiceError>;\n}}",
+            "\n/// Calls the `{qualified}` Java action from a flow, its result kept in the\n/// variable named first when it is: `{macro_name}!(flow, \"Result\", parameter = value, ...)`.\n#[allow(unused_macros)]\nmacro_rules! {macro_name} {{\n    ($flow:expr $(, $($arguments:tt)*)?) => {{\n        ::mxrs::call_java_action!($flow, {qualified:?} $(, $($arguments)*)?)\n    }};\n}}\n#[allow(unused_imports)]\npub(crate) use {macro_name};"
+        );
+        let _ = writeln!(
+            out,
+            "\n/// Contract of the `{}.{}` Java action.{java}\npub trait {} {{\n{}    fn call(&self{}) -> Result<{}, ServiceError>;\n}}",
             module.module_name,
             action.action_name,
             action.trait_name,
@@ -8448,7 +8646,7 @@ mod tests {
     /// action port trait plus registration glue; generics and untypable
     /// shapes stay on the engine's string-keyed registration.
     #[test]
-    fn action_ports_type_declared_java_actions_and_skip_the_rest() {
+    fn every_java_action_has_a_contract_and_a_macro() {
         let mut typed = HashMap::new();
         typed.insert(
             "Sales.Order".to_string(),
@@ -8503,8 +8701,10 @@ mod tests {
             &std::collections::BTreeSet::new(),
             &typed,
         );
+        // A generic action is a contract too: its type parameters are open
+        // entities.
         assert_eq!(modules.len(), 1);
-        assert_eq!(modules[0].actions.len(), 1);
+        assert_eq!(modules[0].actions.len(), 2);
 
         let port = render_action_port_file(&modules[0]);
         assert!(port.contains("pub trait CommitInBatches"), "{port}");
@@ -8514,7 +8714,14 @@ mod tests {
             ),
             "{port}"
         );
-        assert!(!port.contains("Generic"), "{port}");
+        assert!(port.contains("pub trait Generic"), "{port}");
+        // Each action is called from a flow by the macro named for it.
+        assert!(
+            port.contains("macro_rules! commit_in_batches {")
+                && port.contains("::mxrs::call_java_action!($flow, \"Sales.CommitInBatches\"")
+                && port.contains("pub(crate) use commit_in_batches;"),
+            "{port}"
+        );
 
         let registry = render_action_registry_file(&modules[0]);
         assert!(

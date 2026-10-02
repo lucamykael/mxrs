@@ -130,6 +130,17 @@ pub fn with_macros(flow: &mut FlowBuilder) {
         stack_trace
     );
 
+    call_java_action!(
+        flow,
+        "OQL.ExecuteOQLStatement",
+        "Result",
+        statement = "Sales.Report",
+        returnEntity = Customer,
+        amount = mx("empty")
+    );
+
+    call_java_action!(flow, "CommunityCommons.TimeMeasureStart", TimerName = "t");
+
     delete_object!(flow, &order, refresh);
 
     rollback_object!(flow, &order);
@@ -197,6 +208,14 @@ pub fn with_builders(flow: &mut FlowBuilder) {
     flow.log(LogSeverity::Info, mx("'Orders'"), "{1} shipped", |log| {
         log.parameter(mx("$Counter"));
         log.include_stack_trace(true);
+    });
+    flow.call_java_into("Result", "OQL.ExecuteOQLStatement", |call| {
+        call.argument("statement", mx("'Sales.Report'"));
+        call.entity_argument("returnEntity", Ref::<Customer>::new());
+        call.argument("amount", mx("empty"));
+    });
+    flow.call_java("CommunityCommons.TimeMeasureStart", |call| {
+        call.argument("TimerName", mx("'t'"));
     });
     flow.delete_with(&order, |delete| {
         delete.refresh_in_client(true);

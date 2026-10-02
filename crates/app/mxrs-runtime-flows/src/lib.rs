@@ -25,6 +25,7 @@ mod engine;
 mod export_mapping;
 mod expression;
 mod http_objects;
+mod marketplace;
 mod value;
 
 pub use engine::{

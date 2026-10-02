@@ -311,7 +311,7 @@ fn signature(flow: &Microflow) -> Option<Vec<(String, Ty)>> {
 pub(crate) type KeptFlows = HashMap<(String, String, bool), String>;
 
 pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<ConvertedFlow>> {
-    Ok(collect_all(project, modules, &HashSet::new())?.0)
+    Ok(collect_all(project, modules, &HashSet::new(), &HashSet::new())?.0)
 }
 
 /// Every flow that can be declared in Rust, and for each one that cannot,
@@ -323,6 +323,7 @@ pub(crate) fn collect_all(
     project: &Project,
     modules: &[Module],
     enumeration_values: &HashSet<String>,
+    java_actions: &HashSet<String>,
 ) -> Result<(Vec<ConvertedFlow>, KeptFlows)> {
     let mut kept = KeptFlows::new();
     let attributes = attributes(modules);
@@ -415,6 +416,7 @@ pub(crate) fn collect_all(
         attributes: &accessors,
         microflows: &microflows,
         enumeration_values,
+        java_actions,
     };
     // `MXRS_EXPLAIN_FLOWS=1` says why each flow that stays in the imported
     // model does.
