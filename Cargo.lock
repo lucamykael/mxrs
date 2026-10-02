@@ -1030,6 +1030,7 @@ dependencies = [
  "mxrs-writer",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "tempfile",
  "thiserror",
  "uuid",
@@ -1080,6 +1081,8 @@ dependencies = [
 name = "mxrs-frontend"
 version = "0.1.0"
 dependencies = [
+ "mxrs-dsl",
+ "mxrs-expr",
  "mxrs-ir",
  "oxc_allocator",
  "oxc_ast",
@@ -1407,6 +1410,7 @@ name = "mxrs-scaffold"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-frontend",
  "mxrs-materializers",
  "mxrs-model",
  "serde_json",

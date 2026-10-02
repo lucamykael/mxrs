@@ -58,41 +58,12 @@ pub(crate) fn add_service_method(
     }));
     let names: Vec<String> = known.iter().map(|(name, _)| name.clone()).collect();
     let (prefix, core) = split_prefix(&method.name);
-    let first_word = core.split('_').next().unwrap_or(core);
-    let subject = entity_subject(core, &names, first_word.len())
-        .map(|(entity, action)| (Subject::Entity(entity), action))
-        .or_else(|| {
-            let (word, action) = core.split_once('_')?;
-            let stem = format!("{}_service", snake_case(word));
-            (!action.is_empty() && !is_verb(word) && folder.join(format!("{stem}.rs")).is_file())
-                .then(|| (Subject::Word(word.to_string()), action.to_string()))
-        })
-        .or_else(|| {
-            entity_subject(core, &names, core.len())
-                .map(|(entity, action)| (Subject::Entity(entity), action))
-        });
-    let (subject, action) = match subject {
-        Some((subject, action)) => (Some(subject), action),
-        None => (None, core.to_string()),
-    };
-    let (file_stem, service) = match &subject {
-        Some(subject) => {
-            let text = subject.text();
-            let stem = snake_case(text);
-            let type_name = if text.starts_with(|c: char| c.is_ascii_uppercase())
-                && text.chars().all(|c| c.is_ascii_alphanumeric())
-            {
-                text.to_string()
-            } else {
-                pascal_case(&stem)
-            };
-            (format!("{stem}_service"), format!("{type_name}Service"))
-        }
-        None => (
-            format!("{module_stem}_service"),
-            format!("{}Service", pascal_case(&module_stem)),
-        ),
-    };
+    let (subject, action) = plan_subject(core, &names, |word| {
+        folder
+            .join(format!("{}_service.rs", snake_case(word)))
+            .is_file()
+    });
+    let (file_stem, service) = service_names(subject.as_ref(), &module_stem);
     let path = folder.join(format!("{file_stem}.rs"));
     let existing = transaction.content(&path)?;
     // A file that already declares a service names its flows by the subject
@@ -280,6 +251,55 @@ pub(crate) fn add_service_method(
     Ok(Placed { module_path })
 }
 
+/// What a flow named `core` (its kind's prefix aside) is about, and what it
+/// does to it. `word_service` says whether the module already has a
+/// service of a word, which a name opening with that word joins.
+pub(crate) fn plan_subject(
+    core: &str,
+    entities: &[String],
+    word_service: impl Fn(&str) -> bool,
+) -> (Option<Subject>, String) {
+    let first_word = core.split('_').next().unwrap_or(core);
+    let subject = entity_subject(core, entities, first_word.len())
+        .map(|(entity, action)| (Subject::Entity(entity), action))
+        .or_else(|| {
+            let (word, action) = core.split_once('_')?;
+            (!action.is_empty() && !is_verb(word) && word_service(word))
+                .then(|| (Subject::Word(word.to_string()), action.to_string()))
+        })
+        .or_else(|| {
+            entity_subject(core, entities, core.len())
+                .map(|(entity, action)| (Subject::Entity(entity), action))
+        });
+    match subject {
+        Some((subject, action)) => (Some(subject), action),
+        None => (None, core.to_string()),
+    }
+}
+
+/// `(file stem, type)` of the service of `subject`: `asset_type_service`
+/// and `AssetTypeService`, or the module's own.
+pub(crate) fn service_names(subject: Option<&Subject>, module_stem: &str) -> (String, String) {
+    match subject {
+        Some(subject) => {
+            let text = subject.text();
+            let stem = snake_case(text);
+            let type_name = if text.starts_with(|c: char| c.is_ascii_uppercase())
+                && text.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                text.to_string()
+            } else {
+                pascal_case(&stem)
+            };
+            (format!("{stem}_service"), format!("{type_name}Service"))
+        }
+        None => (
+            format!("{module_stem}_service"),
+            format!("{}Service", pascal_case(module_stem)),
+        ),
+    }
+}
+
 /// The `#[service(...)]` a file declares: the struct its `impl` is for,
 /// the subject its flows are named by, and the line the `impl` opens on.
 struct ServiceDeclaration {
@@ -359,13 +379,13 @@ fn declared_methods(source: &str, derive: &dyn Fn(&str) -> String) -> Vec<(Strin
     methods
 }
 
-enum Subject {
+pub(crate) enum Subject {
     Entity(String),
     Word(String),
 }
 
 impl Subject {
-    fn text(&self) -> &str {
+    pub(crate) fn text(&self) -> &str {
         match self {
             Subject::Entity(text) | Subject::Word(text) => text,
         }
@@ -374,7 +394,7 @@ impl Subject {
 
 /// The entities the project already declares for the module: the structs
 /// of its entity and DTO files.
-fn declared_entities(root: &Path, module_stem: &str) -> Vec<(String, String)> {
+pub(crate) fn declared_entities(root: &Path, module_stem: &str) -> Vec<(String, String)> {
     let mut entities = Vec::new();
     for concept in ["entities", "dtos"] {
         let Ok(files) = std::fs::read_dir(root.join("src/domain").join(concept).join(module_stem))
@@ -408,7 +428,7 @@ fn declared_entities(root: &Path, module_stem: &str) -> Vec<(String, String)> {
 }
 
 /// The method declaring a flow, from what its name says besides its subject.
-fn method_name(action: &str, name: &str) -> String {
+pub(crate) fn method_name(action: &str, name: &str) -> String {
     let mut function = snake_case(action);
     if function.is_empty() {
         function = "flow".to_string();
@@ -435,7 +455,7 @@ fn method_name(action: &str, name: &str) -> String {
 }
 
 /// `ACT_CreateOrder` → (`ACT`, `CreateOrder`). The importer's rule.
-fn split_prefix(name: &str) -> (Option<&str>, &str) {
+pub(crate) fn split_prefix(name: &str) -> (Option<&str>, &str) {
     match name.split_once('_') {
         Some((prefix, rest))
             if (2..=5).contains(&prefix.len())

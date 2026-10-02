@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub mod artifact;
 pub mod lifecycle;
+mod nanoflow;
 pub mod page_templates;
 pub mod registry;
 mod service;

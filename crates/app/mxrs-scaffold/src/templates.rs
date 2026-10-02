@@ -244,16 +244,6 @@ pub(crate) fn github_workflow() -> String {
     "name: MXRS\n\non:\n  push:\n  pull_request:\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: dtolnay/rust-toolchain@stable\n        with:\n          components: rustfmt, clippy\n      - run: cargo fmt --all -- --check\n      - run: cargo clippy --workspace --all-targets -- -D warnings\n      - run: cargo test --workspace --all-targets\n".to_string()
 }
 
-pub(crate) fn nanoflow(module_name: &str, name: &str) -> String {
-    flow(
-        module_name,
-        name,
-        "nanoflow",
-        "Client nanoflow",
-        String::new(),
-    )
-}
-
 /// Mirrors mxrb's `published_rest` template, including its scope statement:
 /// mxrb scaffolds a microflow and says publishing the REST document itself is
 /// still a native Studio Pro operation. That is equally true here — mxrs has
@@ -392,19 +382,6 @@ pub(crate) fn flow_declaration(kind: &str, module_name: &str, name: &str) -> Flo
 pub(crate) fn service_stem(name: &str) -> String {
     let function = flow_declaration("microflow", "", name).function;
     format!("{}_service", function.trim_end_matches('_'))
-}
-
-/// The file a scaffolded nanoflow lives in.
-pub(crate) fn nanoflow_stem(name: &str) -> String {
-    let function = flow_declaration("nanoflow", "", name).function;
-    let stem = function.trim_end_matches('_');
-    // The same rule the importer applies: a file Rust cannot name, or one
-    // the folder keeps for itself, says what it holds instead.
-    if stem.is_empty() || crate::is_rust_keyword(stem) || matches!(stem, "mod" | "imported") {
-        format!("{stem}_nanoflow")
-    } else {
-        stem.to_string()
-    }
 }
 
 fn flow(module_name: &str, name: &str, kind: &str, description: &str, note: String) -> String {
@@ -737,10 +714,6 @@ mod tests {
                 "#[microflow(VAL, module = \"Sales\", name = \"VAL_Order_Total\")]\npub fn order_total(_flow: &mut FlowBuilder) {}\n",
             ),
             (
-                nanoflow("Sales", "NAN_Refresh"),
-                "#[nanoflow(NAN, module = \"Sales\")]\npub fn refresh(_flow: &mut FlowBuilder) {}\n",
-            ),
-            (
                 published_rest("Sales", "Handle"),
                 "#[microflow(module = \"Sales\")]\npub fn handle(_flow: &mut FlowBuilder) {}\n",
             ),
@@ -778,8 +751,6 @@ mod tests {
         // The flow a service file declares decides the file's name.
         assert_eq!(service_stem("ACT_CreateOrder"), "create_order_service");
         assert_eq!(service_stem("String"), "string_service");
-        assert_eq!(nanoflow_stem("NAN_Refresh"), "refresh");
-        assert_eq!(nanoflow_stem("Imported"), "imported_nanoflow");
         // Every index is its header and the modules it holds — nothing
         // composes, so there is no `apply` anywhere.
         for index in [
@@ -848,16 +819,17 @@ mod tests {
             "{:?}",
             loader.body
         );
-        let nanoflow = page_chain_nanoflow(
-            "Sales",
-            "OrderOverview",
-            Some("crate::services::sales::order_overview_service"),
+        // The client half is the frontend's, calling the microflow by name.
+        let nanoflow = page_chain_nanoflow("Sales", "OrderOverview", true);
+        assert_eq!(nanoflow.name, "NAN_RefreshOrderOverview");
+        assert_eq!(
+            nanoflow.body,
+            ["await callMicroflow(\"Sales.ACT_RefreshOrderOverview\");"]
         );
         assert!(
-            nanoflow.contains(
-                "use crate::services::sales::order_overview_service::ACT_RefreshOrderOverview;"
-            ),
-            "{nanoflow}"
+            page_chain_nanoflow("Sales", "OrderOverview", false)
+                .body
+                .is_empty()
         );
         let page = page_from_template(
             "Sales",
@@ -871,7 +843,7 @@ mod tests {
         for expected in [
             "use crate::services::sales::order_overview_service::ACT_LoadOrderOverview;\n",
             "use crate::domain::entities::sales::order_overview::OrderOverview;\n",
-            "use crate::ui::nanoflows::sales::refresh_order_overview::NAN_RefreshOrderOverview;\n",
+            "use crate::ui::nanoflows::sales::in_frontend::NAN_RefreshOrderOverview;\n",
             "#[page(module = \"Sales\")]\npub fn order_overview(page: &mut PageBuilder) {\n",
             "    page.data_view_from_microflow(MicroflowRef::<ACT_LoadOrderOverview>::new(), |view| {\n",
             "        view.text_box(OrderOverview::reference());\n",
@@ -1001,44 +973,39 @@ pub(crate) fn page_chain_action(module_name: &str, feature: &str) -> crate::serv
     }
 }
 
-/// `NAN_Refresh<Feature>`: the client-side half. With a
-/// `page:nanoflow:microflow` chain it calls the generated microflow, which is
-/// the only part of mxrb's two nanoflow templates that has an mxrs equivalent
-/// (its `show_message` does not).
+/// `NAN_Refresh<Feature>`: the client-side half, a method of the
+/// frontend's services. With a `page:nanoflow:microflow` chain it calls the
+/// generated microflow, which is the only part of mxrb's two nanoflow
+/// templates that has an mxrs equivalent (its `show_message` does not).
 pub(crate) fn page_chain_nanoflow(
     module_name: &str,
     feature: &str,
-    refresh_service: Option<&str>,
-) -> String {
-    let calls_microflow = refresh_service.is_some();
-    let FlowDeclaration {
-        attribute,
-        function,
-    } = flow_declaration("nanoflow", module_name, &format!("NAN_Refresh{feature}"));
-    if !calls_microflow {
-        return format!(
-            "//! Client refresh action for the `{module_name}.{feature}` page slice.\n\
-             //!\n\
-             //! Body intentionally empty: mxrb's template shows a client\n\
-             //! message here and `mxrs_ir::Activity` has no equivalent.\n\n\
-             use mxrs::prelude::*;\n\n\
-             #[{attribute}]\n\
-             pub fn {function}(_flow: &mut FlowBuilder) {{}}\n"
+    calls_microflow: bool,
+) -> crate::nanoflow::NanoflowMethod {
+    let mut docs = vec![format!(
+        "Client refresh action for the `{module_name}.{feature}` page slice."
+    )];
+    let (body, vocabulary) = if calls_microflow {
+        docs.push(String::new());
+        docs.push(
+            "Calls the generated microflow, completing the client-to-server half of a".to_string(),
         );
+        docs.push("`page:nanoflow:microflow` chain.".to_string());
+        (
+            vec![format!(
+                "await callMicroflow(\"{module_name}.ACT_Refresh{feature}\");"
+            )],
+            vec!["callMicroflow"],
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    crate::nanoflow::NanoflowMethod {
+        name: format!("NAN_Refresh{feature}"),
+        docs,
+        body,
+        vocabulary,
     }
-    let (action_path, action) = chain_microflow(module_name, "Refresh", feature, refresh_service);
-    format!(
-        "//! Client refresh action for the `{module_name}.{feature}` page slice.\n\
-         //!\n\
-         //! Calls the generated microflow, completing the client-to-server\n\
-         //! half of a `page:nanoflow:microflow` chain.\n\n\
-         use mxrs::prelude::*;\n\n\
-         use {action_path}::{action};\n\n\
-         #[{attribute}]\n\
-         pub fn {function}(flow: &mut FlowBuilder) {{\n    \
-         flow.call_microflow(MicroflowRef::<{action}>::new(), None, false, vec![]);\n\
-         }}\n"
-    )
 }
 
 /// Renders one of the catalogued page patterns. Mirrors mxrb's
@@ -1120,9 +1087,8 @@ pub(crate) fn page_from_template(
             imports.push(format!("use {path}::{action};"));
         }
         Some(RefreshAction::Nanoflow) => imports.push(format!(
-            "use crate::ui::nanoflows::{}::{}::NAN_Refresh{name};",
-            snake_case(module_name),
-            nanoflow_stem(&format!("NAN_Refresh{name}"))
+            "use crate::ui::nanoflows::{}::in_frontend::NAN_Refresh{name};",
+            snake_case(module_name)
         )),
         None => {}
     }

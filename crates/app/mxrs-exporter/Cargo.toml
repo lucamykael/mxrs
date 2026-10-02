@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
+mxrs-frontend = { path = "../../authoring/mxrs-frontend" }
 mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
@@ -22,11 +23,11 @@ mxrs-typegen = { path = "../../authoring/mxrs-typegen" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
 serde.workspace = true
 serde_json.workspace = true
+syn = { version = "2", features = ["full"] }
 tempfile = "3.27.0"
 thiserror.workspace = true
 
 [dev-dependencies]
-mxrs-frontend = { path = "../../authoring/mxrs-frontend" }
 mxrs-macros = { path = "../../authoring/mxrs-macros" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
 uuid = { version = "1", features = ["v4"] }

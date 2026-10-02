@@ -8,6 +8,8 @@ authors.workspace = true
 description = "Reads the user interface a project declares in its frontend's TypeScript — navigation, and in time layouts, pages and nanoflows — into the same declarations the Rust authoring surface produces."
 
 [dependencies]
+mxrs-dsl = { path = "../mxrs-dsl" }
+mxrs-expr = { path = "../mxrs-expr" }
 mxrs-ir = { path = "../mxrs-ir" }
 oxc_allocator = "=0.146.0"
 oxc_ast = "=0.146.0"

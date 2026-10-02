@@ -141,6 +141,17 @@ macro_rules! imported {
     };
 }
 
+/// Names the nanoflows a module declares in the frontend
+/// (`frontend/src/services/`), so Rust code — a page's button — can call them
+/// by type: `mxrs::frontend_flows! { module = "Sales"; nanoflow ACT_Order_Open; }`.
+/// It declares nothing; the frontend does.
+#[macro_export]
+macro_rules! frontend_flows {
+    (module = $module:literal; $($kind:ident $marker:ident $(= $name:literal)?;)*) => {
+        $($crate::__imported_flow!($kind, $module, $marker $(, $name)?);)*
+    };
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __imported_flow {

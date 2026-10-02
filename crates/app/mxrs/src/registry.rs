@@ -143,6 +143,7 @@ pub fn apply_with_frontend(
     frontend: mxrs_frontend::FrontendDecl,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     let mut navigation = frontend.navigation;
+    let mut nanoflows = Some(frontend.nanoflows);
     let declarations = declarations(crate_name);
     if navigation.is_some() {
         let rust = declarations
@@ -161,6 +162,11 @@ pub fn apply_with_frontend(
         }
     }
     for declaration in declarations {
+        if declaration.stage > Stage::Nanoflow
+            && let Some(declared) = nanoflows.take()
+        {
+            add_nanoflows(project, declared)?;
+        }
         if declaration.stage > Stage::Navigation
             && let Some(declared) = navigation.take()
         {
@@ -168,8 +174,38 @@ pub fn apply_with_frontend(
         }
         declaration.apply(project);
     }
+    if let Some(declared) = nanoflows {
+        add_nanoflows(project, declared)?;
+    }
     if let Some(declared) = navigation {
         project.navigation = Some(declared);
+    }
+    Ok(())
+}
+
+/// Adds the nanoflows the frontend declares to their modules; one Rust
+/// declares too is declared twice.
+fn add_nanoflows(
+    project: &mut ProjectDecl,
+    nanoflows: Vec<(String, mxrs_ir::flow::MicroflowDecl)>,
+) -> Result<(), mxrs_frontend::FrontendError> {
+    for (module, nanoflow) in nanoflows {
+        let declared = project.module_mut(&module);
+        if declared
+            .nanoflows
+            .iter()
+            .any(|existing| existing.name == nanoflow.name)
+        {
+            return Err(mxrs_frontend::FrontendError::Shape {
+                path: "src/services".to_string(),
+                line: 1,
+                detail: format!(
+                    "nanoflow {module}.{} is declared in the frontend and with #[nanoflow]; keep one",
+                    nanoflow.name
+                ),
+            });
+        }
+        declared.nanoflows.push(nanoflow);
     }
     Ok(())
 }

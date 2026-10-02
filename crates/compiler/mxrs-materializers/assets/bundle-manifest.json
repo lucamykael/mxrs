@@ -2,7 +2,7 @@
   "format": 1,
   "name": "mxrs-react-shell",
   "version": "0.1.0",
-  "source_sha256": "42dfb84316d61706cce7fc19d8658f8a00ba8f3daafeaf9e86cd368b8f8f8bae",
+  "source_sha256": "5ab7debe057adecf75558595a52f77179e09c698424f6320d34c08a161667886",
   "toolchain": {
     "node": "26.2.0",
     "npm": "12.0.2",

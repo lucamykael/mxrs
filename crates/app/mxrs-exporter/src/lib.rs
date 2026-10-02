@@ -70,6 +70,7 @@ mod entity_export;
 mod flow_export;
 mod flow_general;
 mod frontend_export;
+mod frontend_flows;
 mod layout;
 mod names;
 #[cfg(test)]
@@ -303,9 +304,24 @@ fn import_cargo_project_inner(
             })
             .collect();
     let java_actions: std::collections::HashSet<String> = java_macros.keys().cloned().collect();
-    let (converted_flows, kept_flows) =
+    let (mut converted_flows, kept_flows) =
         flow_export::collect_all(&project, &modules, &enumeration_values, &java_actions)?;
     let flow_relations = mxrs_model::relations::flow_relations(&project)?;
+    // Nanoflows are the frontend's services: each one whose TypeScript
+    // reads back as its declaration is declared there, not in Rust.
+    let frontend_nanoflows = frontend_flows::declare_in_frontend(
+        &converted_flows,
+        &modules,
+        |module| module_root(&module_stem(module), &packages) == ModuleRoot::Authored,
+        &flow_relations,
+    )?;
+    converted_flows.retain(|flow| {
+        !(flow.is_nanoflow()
+            && frontend_nanoflows
+                .declared
+                .get(&flow.module)
+                .is_some_and(|names| names.contains(&flow.declaration.name)))
+    });
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
         (document.get_str("$Type").ok() == Some("Security$ProjectSecurity")).then_some(document)
@@ -393,6 +409,7 @@ fn import_cargo_project_inner(
         &service_plans,
         &documents_export.derived_enumerations,
         java_macros,
+        &frontend_nanoflows.declared,
         &mut generated_modules,
     );
     let microflow_files = flow_export::render_files(
@@ -637,6 +654,13 @@ fn import_cargo_project_inner(
     }
     if let Some(security) = &security_source {
         write_text(&destination.join("src/domain/security.rs"), security)?;
+    }
+    for (file, source) in &frontend_nanoflows.files {
+        let path = destination.join("frontend/src").join(file);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+        }
+        write_text(&path, source)?;
     }
     if navigation_in_frontend {
         let folder = destination.join("frontend/src/navigation");
@@ -3162,7 +3186,7 @@ fn generated_readme(
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the pages, layouts and nanoflows the model declares, until each moves to the frontend.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. {navigation_note}\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; client-side nanoflows stay in `ui`. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the pages and layouts the model declares, until each moves to the frontend, and the names Rust pages call the frontend's nanoflows by.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `services/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. {navigation_note} Nanoflows are its services: `services/<module>/<subject>Service.ts` holds them as `async` methods in structured TypeScript, in the vocabulary of `mxrs/flows.ts`, which every build reads into the model.\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; every nanoflow a service of the frontend. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -3229,6 +3253,7 @@ fn model_names<'a>(
     services: &HashMap<(String, String), flow_export::ServiceSlot>,
     enumerations: &HashMap<String, DerivedEnumeration>,
     java_actions: HashMap<String, names::FlowTarget>,
+    frontend: &std::collections::BTreeMap<String, Vec<String>>,
     generated: &mut std::collections::BTreeMap<String, GeneratedModule>,
 ) -> names::ModelNames<'a> {
     let converted_stems: HashMap<(&str, &str, bool), &str> = converted
@@ -3281,8 +3306,39 @@ fn model_names<'a>(
                 .map(|(_, file)| (*file).to_string())
                 .collect();
             let mut imported_files = Vec::new();
+            // The nanoflows the frontend declares are named here too, so
+            // Rust pages can call them.
+            let mut frontend_lines = Vec::new();
+            let mut frontend_markers = std::collections::HashSet::new();
             for name in flow_names {
                 let qualified = format!("{module_name}.{name}");
+                if nanoflow
+                    && root == ModuleRoot::Authored
+                    && frontend
+                        .get(module_name)
+                        .is_some_and(|names| names.iter().any(|declared| declared == name))
+                {
+                    let mut marker = names::flow_marker(name);
+                    if !frontend_markers.insert(marker.clone()) {
+                        marker = (2..)
+                            .map(|suffix| format!("{marker}_{suffix}"))
+                            .find(|candidate| frontend_markers.insert(candidate.clone()))
+                            .expect("an unbounded suffix always finds a free name");
+                    }
+                    frontend_lines.push(if marker == name {
+                        format!("    nanoflow {marker};")
+                    } else {
+                        format!("    nanoflow {marker} = {name:?};")
+                    });
+                    targets.insert(
+                        qualified,
+                        names::FlowTarget {
+                            module_path: format!("crate::{authored}::{stem}::in_frontend"),
+                            marker,
+                        },
+                    );
+                    continue;
+                }
                 if root == ModuleRoot::Authored
                     && let Some(file) = converted_stems.get(&(module_name, name, nanoflow))
                 {
@@ -3364,6 +3420,15 @@ fn model_names<'a>(
                         marker,
                     },
                 );
+            }
+            if !frontend_lines.is_empty() {
+                imported_files.push((
+                    "in_frontend".to_string(),
+                    format!(
+                        "//! The {module_name} module's nanoflows are declared in the frontend, in\n//! `frontend/src/services/{stem}/`; they are named here so Rust pages can\n//! call them.\n\nmxrs::frontend_flows! {{\n    module = {module_name:?};\n{}\n}}\n",
+                        frontend_lines.join("\n")
+                    ),
+                ));
             }
             if !imported_files.is_empty() {
                 let module = generated_module(generated, module_name);
@@ -9256,6 +9321,160 @@ pub enum ENUMStatus {
         assert!(source.contains("::mxrs_macros::project!"));
     }
 
+    /// Every kind of statement a nanoflow's body holds is declared in the
+    /// frontend's TypeScript, which reads back as the same flow: none stays
+    /// in Rust.
+    #[test]
+    fn nanoflows_of_every_shape_are_declared_in_the_frontend() {
+        use mxrs_dsl::mx;
+        use mxrs_dsl::{
+            AggregateFunction, Commit, ListChange, LogSeverity, MemberName, MessageKind, SortOrder,
+            var,
+        };
+        use mxrs_ir::flow::DataType;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Shop.mpr");
+        let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+        builder.module("Sales", |module| {
+            module.role("User", "Sells");
+            module.entity("Order", |entity| {
+                entity.string("Number");
+                entity.decimal("Total");
+                entity.boolean("Paid");
+            });
+            module.microflow("ACT_Ping", |_flow| {});
+            module.page("Home", |page| {
+                page.layout("Atlas_Core.ApplicationLayout", "Main");
+                page.container(|container| {
+                    container.text("Welcome");
+                });
+            });
+            module.nanoflow("NF_Check", |flow| {
+                flow.parameter_of(
+                    "Order",
+                    DataType::Object("Sales.Order".into()),
+                    |parameter| {
+                        parameter.required(true);
+                    },
+                );
+                flow.returns(DataType::Boolean);
+                flow.return_with(mx("$Order/Paid"));
+            });
+            module.nanoflow("NF_Everything", |flow| {
+                flow.parameter_of(
+                    "Order",
+                    DataType::Object("Sales.Order".into()),
+                    |parameter| {
+                        parameter.required(true);
+                        parameter.documentation("The order to look at");
+                    },
+                );
+                flow.parameter_of("SPCOrders", DataType::List("Sales.Order".into()), |_| {});
+                flow.decision(
+                    mx("$Order/Paid"),
+                    |flow| {
+                        flow.close_page();
+                        flow.end();
+                    },
+                    |_| {},
+                );
+                flow.create("NewOrder", "Sales.Order", |create| {
+                    create.set(MemberName::attribute("Sales.Order.Number"), mx("'A-1'"));
+                    create.commit(Commit::Yes);
+                });
+                flow.change(&var("Order"), |change| {
+                    change.set(MemberName::attribute("Sales.Order.Total"), mx("10.50"));
+                    change.refresh_in_client(true);
+                });
+                flow.retrieve("Unpaid", "Sales.Order", |retrieve| {
+                    retrieve.xpath("[Paid = false()]\n[Total > 0]");
+                    retrieve.sort_by("Sales.Order.Number", SortOrder::Descending);
+                });
+                flow.list_filter(
+                    "Large",
+                    &var("Unpaid"),
+                    MemberName::attribute("Sales.Order.Paid"),
+                    mx("false"),
+                );
+                flow.list_head("First", &var("Large"));
+                flow.change_list(&var("Unpaid"), ListChange::Add, mx("$NewOrder"));
+                flow.aggregate("Count", &var("Unpaid"), AggregateFunction::Count, |_| {});
+                flow.aggregate("Sum", &var("Unpaid"), AggregateFunction::Sum, |aggregate| {
+                    aggregate.attribute("Sales.Order.Total");
+                });
+                flow.create_variable("Counter", DataType::Integer, mx("0"));
+                flow.for_each(&var("SPCOrders"), "Each", |flow, _| {
+                    flow.switch(mx("$Each/Number"), |cases| {
+                        cases.case("A-1", |flow| {
+                            flow.break_loop();
+                        });
+                        cases.empty(|flow| {
+                            flow.continue_loop();
+                        });
+                    });
+                    flow.change_variable(&var("Counter"), mx("$Counter + 1"));
+                });
+                flow.call_into("Pinged", "Sales.ACT_Ping", |_| {});
+                flow.call_nanoflow_into("Checked", "Sales.NF_Check", |call| {
+                    call.argument("Order", mx("$Order"));
+                });
+                flow.call_javascript_into("Progress", "NanoflowCommons.ShowProgress", |call| {
+                    call.argument("message", mx("'Saving'"));
+                });
+                flow.show_page("Sales.Home", |page| {
+                    page.title("en_US", "Orders");
+                });
+                flow.show_message(MessageKind::Warning, |message| {
+                    message.text("en_US", "Saved {1}");
+                    message.parameter(mx("$Counter"));
+                    message.blocking(false);
+                });
+                flow.log(LogSeverity::Info, mx("'Sales'"), "Done", |log| {
+                    log.include_stack_trace(true);
+                });
+            });
+        });
+        mxrs_writer::write_project(&path, &builder.build()).unwrap();
+        let generated = directory.path().join("shop");
+        import_cargo_project(&path, &generated, None).unwrap();
+        let ui = std::fs::read_to_string(generated.join("src/ui/nanoflows/sales/mod.rs")).unwrap();
+        assert_eq!(
+            ui,
+            "//! The sales module's nanoflows.\n\npub mod in_frontend;\n"
+        );
+        let service = std::fs::read_dir(generated.join("frontend/src/services/sales"))
+            .unwrap()
+            .flatten()
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "@nanoflow NF_Check",
+            "@nanoflow NF_Everything",
+            "@param order The order to look at",
+            "@mendixName spcOrders SPCOrders",
+            "async check(order: MxObject<\"Sales.Order\">): Promise<boolean> {\n    return mx(\"$Order/Paid\");",
+            "if (mx(\"$Order/Paid\")) {\n      await closePage();\n      return;\n    }",
+            "const newOrder = await createObject(\"Sales.Order\", { Number: \"A-1\" }, { commit: true });",
+            "await changeObject(order, { Total: 10.50 }, { refresh: true });",
+            "xpath: `[Paid = false()]\n[Total > 0]`, sort: [[\"Number\", \"desc\"]]",
+            "const large = await changeList(unpaid, { filter: [\"Paid\", false] });",
+            "await changeList(unpaid, { add: newOrder });",
+            "await aggregateList(unpaid, { sum: \"Total\" }, { name: \"Sum\" });",
+            "loop: for (const each of spcOrders) {",
+            "switch (mx<string | null>(\"$Each/Number\")) {",
+            "case \"A-1\": {\n          break loop;",
+            "case null: {\n          continue;",
+            "await callNanoflow(\"Sales.NF_Check\", { Order: order }, { name: \"Checked\" });",
+            "await showPage(\"Sales.Home\", { title: { en_US: \"Orders\" } });",
+            "{ parameters: [mx(\"$Counter\")], blocking: false },",
+            "await log(\"Info\", \"Sales\", \"Done\", { stackTrace: true });",
+        ] {
+            assert!(service.contains(expected), "{expected}\n{service}");
+        }
+    }
+
     /// What the frontend's navigation file says is read back as the
     /// declaration the model's navigation reads as.
     #[test]
@@ -10087,13 +10306,21 @@ impl OrderService {
         );
         let nanoflows =
             std::fs::read_to_string(generated.join("src/ui/nanoflows/sales/mod.rs")).unwrap();
+        // A nanoflow is the frontend's: a method of its module's service,
+        // named in Rust for the page that calls it.
         assert_eq!(
             nanoflows,
-            "//! The sales module's nanoflows.\n\npub mod validate;\n"
+            "//! The sales module's nanoflows.\n\npub mod in_frontend;\n"
         );
         assert_eq!(
-            std::fs::read_to_string(generated.join("src/ui/nanoflows/sales/validate.rs")).unwrap(),
-            "use mxrs::prelude::*;\n\n#[nanoflow(NF, module = \"Sales\", used_by(\"Sales.OrderDetail\"))]\npub fn validate(_flow: &mut FlowBuilder) {}\n"
+            std::fs::read_to_string(generated.join("src/ui/nanoflows/sales/in_frontend.rs"))
+                .unwrap(),
+            "//! The Sales module's nanoflows are declared in the frontend, in\n//! `frontend/src/services/sales/`; they are named here so Rust pages can\n//! call them.\n\nmxrs::frontend_flows! {\n    module = \"Sales\";\n    nanoflow NF_Validate;\n}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(generated.join("frontend/src/services/sales/salesService.ts"))
+                .unwrap(),
+            "// The Sales module's nanoflows.\nimport { nanoflowService } from \"@/mxrs/flows\";\n\nexport const SalesService = nanoflowService(\"Sales\", {\n  /**\n   * @nanoflow NF_Validate\n   */\n  async validate(): Promise<void> {},\n});\n"
         );
         // Runnable microflows surface as a typed service port plus the
         // runtime adapter that implements it. Every entity is a struct now,

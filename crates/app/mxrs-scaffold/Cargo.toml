@@ -11,6 +11,7 @@ description = "Transactional Cargo-native application scaffolds for MXRS."
 workspace = true
 
 [dependencies]
+mxrs-frontend = { path = "../../authoring/mxrs-frontend" }
 mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
 syn = { version = "2", features = ["full", "visit"] }
 serde_json.workspace = true

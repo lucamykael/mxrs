@@ -986,13 +986,12 @@ fn create_page_slice(
             .has_microflow()
             .then_some(())
             .and(refresh_service.as_deref());
-        create_concept_file(
+        add_frontend_nanoflow(
             transaction,
             root,
             module_name,
-            module_folder(ArtifactKind::Nanoflow),
-            &templates::nanoflow_stem(&format!("NAN_Refresh{artifact_name}")),
-            templates::page_chain_nanoflow(module_name, artifact_name, calls),
+            &templates::page_chain_nanoflow(module_name, artifact_name, calls.is_some()),
+            &slice_entities,
         )?;
     }
 
@@ -1038,6 +1037,21 @@ fn create_artifact(
     if options.kind == ArtifactKind::Repository {
         return create_repository(transaction, root, module_name, artifact_name);
     }
+    // A nanoflow is the frontend's: a method of a TypeScript service.
+    if options.kind == ArtifactKind::Nanoflow {
+        return add_frontend_nanoflow(
+            transaction,
+            root,
+            module_name,
+            &crate::nanoflow::NanoflowMethod {
+                name: artifact_name.to_string(),
+                docs: vec!["Client nanoflow.".to_string()],
+                body: Vec::new(),
+                vocabulary: Vec::new(),
+            },
+            &[],
+        );
+    }
     // A microflow is a method of the service of what it is about — the
     // place the importer would have put it.
     let service_docs = match options.kind {
@@ -1077,7 +1091,6 @@ fn create_artifact(
         ArtifactKind::Constant => templates::constant(module_name, artifact_name),
         ArtifactKind::ScheduledEvent => templates::scheduled_event(module_name, artifact_name),
         ArtifactKind::UseCase => templates::use_case(module_name, artifact_name),
-        ArtifactKind::Nanoflow => templates::nanoflow(module_name, artifact_name),
         ArtifactKind::PublishedRest => templates::published_rest(module_name, artifact_name),
         ArtifactKind::ConsumedRest => templates::consumed_rest(module_name, artifact_name),
         ArtifactKind::JavaAction => templates::java_action(module_name, artifact_name),
@@ -1085,7 +1098,7 @@ fn create_artifact(
         ArtifactKind::Evaluation | ArtifactKind::Ci => unreachable!("handled by the caller"),
         ArtifactKind::Validation => templates::validation(module_name, artifact_name),
         ArtifactKind::Integration => templates::integration(module_name, artifact_name),
-        ArtifactKind::Repository => unreachable!("handled above"),
+        ArtifactKind::Repository | ArtifactKind::Nanoflow => unreachable!("handled above"),
         ArtifactKind::Page => templates::page(
             module_name,
             artifact_name,
@@ -1106,7 +1119,6 @@ fn create_artifact(
         ArtifactKind::UseCase | ArtifactKind::Validation | ArtifactKind::PublishedRest => {
             templates::service_stem(artifact_name)
         }
-        ArtifactKind::Nanoflow => templates::nanoflow_stem(artifact_name),
         _ => snake_case(artifact_name),
     };
     create_concept_file(
@@ -1264,6 +1276,42 @@ fn add_microflow(
             )
         },
     )
+}
+
+/// Adds a nanoflow to the frontend's services and names it for Rust pages
+/// in the module's `in_frontend.rs`.
+fn add_frontend_nanoflow(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    method: &crate::nanoflow::NanoflowMethod,
+    entities: &[String],
+) -> Result<()> {
+    crate::nanoflow::add_nanoflow(transaction, root, module_name, method, entities)?;
+    let path = root
+        .join("src")
+        .join(module_folder(ArtifactKind::Nanoflow))
+        .join(snake_case(module_name))
+        .join("in_frontend.rs");
+    match transaction.content(&path)? {
+        Some(source) => {
+            let source = crate::nanoflow::add_marker(&source, &method.name).ok_or_else(|| {
+                ScaffoldError::InvalidProjectSource {
+                    path: path.display().to_string(),
+                    reason: "its `mxrs::frontend_flows!` does not close".to_string(),
+                }
+            })?;
+            transaction.write(&path, source)
+        }
+        None => create_concept_file(
+            transaction,
+            root,
+            module_name,
+            module_folder(ArtifactKind::Nanoflow),
+            "in_frontend",
+            crate::nanoflow::marker_file(module_name, &method.name),
+        ),
+    }
 }
 
 fn create_concept_file(

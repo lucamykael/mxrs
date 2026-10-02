@@ -78,10 +78,23 @@ read-only behavioral oracle; never edit it.
   `frontend/src/navigation/index.ts`: `export default { profiles: [...] }
   satisfies Navigation;`, checked against `src/types/navigation.ts`. A
   declaration file is data — what would need running is refused with its
-  line. The importer, `mxrs new` and the scaffolds write these files; what
-  has not moved yet (pages, layouts, nanoflows) stays in `src/ui/` until
-  it does, and a page's `#[navigation_item]` joins the frontend's profile.
-  The backend keeps no user-interface folder once the move is complete.
+  line. A nanoflow is structured TypeScript (user directive, 2026-10-03): an
+  `async` method of `nanoflowService("Module", { ... })`, its comment naming
+  it (`@nanoflow ACT_Order_Open`, `@roles`, `@param`, `@mendixName`,
+  `@defaultValue`), TypeScript's own `if`/`switch`/`for...of`/`return`/
+  `break`/`continue` its control flow and an `await` per activity in the
+  vocabulary of `src/mxrs/flows.ts` (`createObject`, `retrieve`,
+  `changeList`, `callMicroflow`, `Service.method(...)` for another nanoflow,
+  `showPage`, `onError`, ...) — read, never run, into the flow builder. The
+  importer writes a nanoflow there only when its TypeScript reads back as
+  the declaration its Rust body declares, and keeps it in Rust otherwise
+  (`MXRS_EXPLAIN_FLOWS=1` says why); Rust pages call the frontend's
+  nanoflows by the names `src/ui/nanoflows/<module>/in_frontend.rs` gives
+  them (`mxrs::frontend_flows!`). The importer, `mxrs new` and the
+  scaffolds write these files; what has not moved yet (pages, layouts)
+  stays in `src/ui/` until it does, and a page's `#[navigation_item]` joins
+  the frontend's profile. The backend keeps no user-interface folder once
+  the move is complete.
 - A declaration is one annotated item in its own file, and it registers
   itself (user directive, 2026-10-01). `#[entity]`/`#[dto]`/`#[view]` on a
   struct, `#[enumeration]`/`#[module_roles]` on an enum, and `#[microflow]`/

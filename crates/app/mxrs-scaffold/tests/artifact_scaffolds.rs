@@ -95,6 +95,21 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     scaffold(&root, ArtifactKind::Validation, "Sales.VAL_Order");
     scaffold(&root, ArtifactKind::Integration, "Sales.INT_Orders");
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
+    // A nanoflow is the frontend's: a method of the service of its subject,
+    // named in Rust for the pages that call it.
+    let service =
+        std::fs::read_to_string(root.join("frontend/src/services/sales/orderService.ts")).unwrap();
+    assert!(
+        service.contains("export const OrderService = nanoflowService(\"Sales\", {")
+            && service.contains("   * @nanoflow NAN_RefreshOrder\n")
+            && service.contains("  async refresh(): Promise<void> {},\n"),
+        "{service}"
+    );
+    assert!(
+        std::fs::read_to_string(root.join("src/ui/nanoflows/sales/in_frontend.rs"))
+            .unwrap()
+            .contains("    nanoflow NAN_RefreshOrder;\n")
+    );
     scaffold(&root, ArtifactKind::PublishedRest, "Sales.HandleOrder");
     scaffold(&root, ArtifactKind::ConsumedRest, "Sales.FetchCatalog");
     scaffold(&root, ArtifactKind::JavaAction, "Sales.InvokeCheckout");

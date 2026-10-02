@@ -25,6 +25,11 @@ impl ConvertedFlow {
     pub(crate) fn is_nanoflow(&self) -> bool {
         self.native_type == "Microflows$Nanoflow"
     }
+
+    /// The body of the function declaring it, before names are resolved.
+    pub(crate) fn body(&self) -> &[String] {
+        &self.source
+    }
 }
 
 pub(crate) struct RenderedFlowSource {
@@ -524,9 +529,14 @@ pub(crate) fn collect_all(
         }
         let converted = {
             // The typed conversion first: it checks more. Whatever it cannot
-            // express is stated in full instead.
-            convert(module, doc, &targets, &entities, &attributes).or_else(|| {
-                match crate::flow_general::convert(module, doc, &model) {
+            // express is stated in full instead. A nanoflow is the frontend's,
+            // whose TypeScript states each activity in full: it takes the
+            // general conversion, which it restates.
+            let nanoflow = doc.get_str("$Type").ok() == Some("Microflows$Nanoflow");
+            (!nanoflow)
+                .then(|| convert(module, doc, &targets, &entities, &attributes))
+                .flatten()
+                .or_else(|| match crate::flow_general::convert(module, doc, &model) {
                     Ok((declaration, source)) => Some(ConvertedFlow {
                         module: (*module).to_string(),
                         native_type: doc.get_str("$Type").ok()?.to_string(),
@@ -537,8 +547,7 @@ pub(crate) fn collect_all(
                         keep(&mut kept, explain, module, doc, reason);
                         None
                     }
-                }
-            })
+                })
         };
         result.extend(converted);
     }

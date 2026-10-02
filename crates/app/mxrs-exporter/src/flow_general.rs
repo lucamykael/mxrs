@@ -1826,8 +1826,11 @@ impl Converter<'_> {
                     });
                 }
                 Node::Loop { node, body } => {
-                    let mut loop_fields =
-                        node_fields(node, &["Documentation", "LoopSource", "ObjectCollection"])?;
+                    // The caption drawn on the loop is the model's, kept as it is.
+                    let mut loop_fields = node_fields(
+                        node,
+                        &["Caption", "Documentation", "LoopSource", "ObjectCollection"],
+                    )?;
                     loop_fields.text("ErrorHandlingType")?;
                     loop_fields.finish()?;
                     let source = node
@@ -2103,6 +2106,9 @@ fn node_fields<'a>(node: &'a Document, own: &[&'a str]) -> Outcome<Fields<'a>> {
     for key in ["RelativeMiddlePoint", "Size"] {
         fields.value(key)?;
     }
+    // A caption drawn on a node is the model's, which a rebuild keeps; the
+    // check that the writer rebuilds the body unchanged says if it did not.
+    fields.seen.insert("Caption");
     for key in own {
         fields.seen.insert(key);
     }

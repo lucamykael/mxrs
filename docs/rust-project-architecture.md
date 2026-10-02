@@ -59,8 +59,8 @@ infrastructure┘   (ports)
   this edge.
 - UI is the user interface the model declares, and it belongs to the
   frontend: its TypeScript is the source every build reads into the model.
-  The navigation is already there; pages, layouts and nanoflows stay in
-  `src/ui/` until they move. It is not where the application's HTTP surface
+  The navigation and the nanoflows are already there; pages and layouts
+  stay in `src/ui/` until they move. It is not where the application's HTTP surface
   lives.
 - Infrastructure implements ports for persistence, runtimes, queues and
   external services.
@@ -96,7 +96,7 @@ src/
 ├── ui/
 │   ├── pages/<mendix_module>/<page>.rs
 │   ├── layouts/<mendix_module>/<layout>.rs
-│   └── nanoflows/<mendix_module>/<nanoflow>.rs
+│   └── nanoflows/<mendix_module>/in_frontend.rs  the frontend's nanoflows, named
 ├── infrastructure/
 │   ├── adapters/
 │   └── persistence.rs
@@ -270,7 +270,9 @@ frontend/
     │   ├── layout/              header and navigation
     │   └── widgets/             one renderer per widget of the model
     ├── hooks/                   the loaded model, the hash route
+    ├── mxrs/flows.ts            the vocabulary nanoflows are written in
     ├── navigation/index.ts      the project's navigation, read by every build
+    ├── services/<module>/       nanoflows: one service per subject
     ├── pages/                   what a route shows
     ├── types/                   the model as the runtime publishes it, and
     │                            the shapes the declarations are checked against
@@ -306,7 +308,40 @@ export default {
 ```
 
 A variable, call or spread would need running, so it is refused with its
-line. A page that still lives in Rust adds itself to a profile with
+line.
+
+A nanoflow is a method of the frontend service of what it is about — the
+same subject rule as a microflow — written as structured TypeScript:
+
+```ts
+// frontend/src/services/sales/orderService.ts
+import { closePage, createObject, mx, nanoflowService, type MxObject } from "@/mxrs/flows";
+
+export const OrderService = nanoflowService("Sales", {
+  /**
+   * Opens a new order next to the customer's.
+   *
+   * @nanoflow ACT_Order_New
+   * @roles User
+   */
+  async new(customer: MxObject<"Sales.Customer">): Promise<void> {
+    if (mx("$Customer/Blocked")) {
+      await closePage();
+      return;
+    }
+    const newOrder = await createObject("Sales.Order", { "Sales.Order_Customer": customer });
+    await OrderService.open(newOrder);
+  },
+});
+```
+
+The comment names the nanoflow and who may run it; parameters are the
+method's, `?` marking one that is not required; the body is TypeScript's own
+control flow and one `await` per activity of `src/mxrs/flows.ts`. A value is
+text, a number, a boolean, a variable, or `mx("...")` for what Mendix writes
+as an expression; an attribute is its name and an association its qualified
+name. mxrs reads each statement as the flow builder call it stands for and
+never runs it. A page that still lives in Rust adds itself to a profile with
 `#[navigation_item]`, and a navigation declared both here and with
 `#[navigation]` is refused.
 

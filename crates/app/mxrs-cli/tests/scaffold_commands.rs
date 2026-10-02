@@ -585,7 +585,8 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
         ("domain", "domain/entities/sales/order_overview.rs"),
         // Both flows are about the slice's entity: methods of its service.
         ("services", "services/sales/order_overview_service.rs"),
-        ("ui", "ui/nanoflows/sales/refresh_order_overview.rs"),
+        // The client half is the frontend's: named in Rust for the page.
+        ("ui", "ui/nanoflows/sales/in_frontend.rs"),
         ("ui", "ui/pages/sales/order_overview.rs"),
     ] {
         let path = root.join("src").join(relative);
@@ -594,6 +595,11 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
             "{layer}/{relative}: {rendered}"
         );
     }
+    let frontend = root.join("frontend/src/services/sales/orderOverviewService.ts");
+    assert!(
+        rendered.contains(&format!("  create  {}", frontend.display())),
+        "{rendered}"
+    );
     // The page adds itself to the navigation from its own file, so the
     // item is created and destroyed with the page and there is no separate
     // navigation module to collide with the project's `navigation.rs`.

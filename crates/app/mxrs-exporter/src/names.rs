@@ -23,6 +23,52 @@ fn reference(kind: char, target: &str) -> String {
     format!("{OPEN}{kind}{target}{CLOSE}")
 }
 
+/// The prefix of an identifier standing for a reference in
+/// [`references_as_identifiers`]' output.
+pub(crate) const REFERENCE_IDENTIFIER: &str = "__mxref_";
+
+/// `body` with each reference spelled as an identifier Rust's grammar takes
+/// wherever a reference can stand — a type, a path, a struct literal's
+/// name or field: `__mxref_<kind>_<target in hex>`.
+pub(crate) fn references_as_identifiers(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len_utf8()..];
+        let Some(end) = after.find(CLOSE) else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let token = &after[..end];
+        let mut chars = token.chars();
+        let kind = chars.next().unwrap_or('?');
+        out.push_str(REFERENCE_IDENTIFIER);
+        out.push(kind);
+        out.push('_');
+        for byte in chars.as_str().bytes() {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        rest = &after[end + CLOSE.len_utf8()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The `(kind, target)` an identifier from [`references_as_identifiers`]
+/// stands for.
+pub(crate) fn identifier_reference(identifier: &str) -> Option<(char, String)> {
+    let rest = identifier.strip_prefix(REFERENCE_IDENTIFIER)?;
+    let mut chars = rest.chars();
+    let kind = chars.next()?;
+    let hex = chars.as_str().strip_prefix('_')?;
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    Some((kind, String::from_utf8(bytes).ok()?))
+}
+
 /// The struct declaring entity `Module.Entity`.
 pub(crate) fn entity(qualified_name: &str) -> String {
     reference('E', qualified_name)

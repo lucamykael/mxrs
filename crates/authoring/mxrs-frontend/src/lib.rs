@@ -9,8 +9,11 @@
 //! | file | declares |
 //! |---|---|
 //! | `src/navigation/index.ts` | the navigation profiles |
+//! | `src/services/**/*.ts` | nanoflows, as methods of `nanoflowService(...)` |
 
 mod literal;
+pub mod naming;
+mod nanoflows;
 mod navigation;
 
 use std::path::Path;
@@ -21,6 +24,8 @@ use mxrs_ir::NavigationDecl;
 #[derive(Debug, Default)]
 pub struct FrontendDecl {
     pub navigation: Option<NavigationDecl>,
+    /// Each nanoflow its services declare, with its module.
+    pub nanoflows: Vec<(String, mxrs_ir::flow::MicroflowDecl)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +70,10 @@ pub fn read_frontend(frontend: impl AsRef<Path>) -> Result<FrontendDecl, Fronten
                 detail,
             })?;
         declared.navigation = Some(declaration);
+    }
+    let services = source.join("services");
+    if services.is_dir() {
+        declared.nanoflows = nanoflows::read(&services)?;
     }
     Ok(declared)
 }

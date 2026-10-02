@@ -51,8 +51,9 @@ existing .mpr -> mxrs import -> Cargo project -> cargo check/test
 An import writes model declarations under `src/domain/`, every microflow as a
 service under `src/services/<module>/`, published REST services as
 route tables and controllers under `src/controllers/`, the navigation in the
-frontend (`frontend/src/navigation/index.ts`), pages and client-side nanoflows
-under `src/ui/`, and outbound/generated adapters under
+frontend (`frontend/src/navigation/index.ts`), nanoflows as the frontend's
+TypeScript services (`frontend/src/services/<module>/<subject>Service.ts`),
+pages under `src/ui/`, and outbound/generated adapters under
 `src/infrastructure/`. Every declaration is one annotated item in its own
 file — `#[entity]` on a struct, `#[microflow]` on the function that builds it —
 and registers itself, so adding one is the file plus its `pub mod` line; see
@@ -115,10 +116,12 @@ checks builder/IR calls against authored or existing native signatures before
 writing. Parameter and type IDs survive synchronization. Every microflow is a
 method of the service of what it is about, under `src/services/<module>/`
 (`ACT_AssetType_Edit` is `AssetTypeService::edit` in
-`asset_type_service.rs`), and every nanoflow a file of its own under
-`src/ui/nanoflows/<module>/`: the function that declares it, under an
-attribute that states its kind, the roles that may run it and what it calls,
-uses and is used by. A flow that cannot be declared yet is named where its
+`asset_type_service.rs`), under an attribute that states its kind, the roles
+that may run it and what it calls, uses and is used by. Every nanoflow is an
+`async` method of the frontend service of what it is about, in structured
+TypeScript — `if`, `switch`, `for...of`, `return` and an `await` per activity
+— which every build reads (never runs) into the model; one whose TypeScript
+would not read back as the same flow stays a Rust `#[nanoflow]` instead. A flow that cannot be declared yet is named where its
 declaration would be, so the rest of the project can still call and bind it,
 with a comment saying why it stayed in the snapshot. Project security is imported into
 `src/domain/security.rs`, each module's roles into
