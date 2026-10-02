@@ -344,7 +344,7 @@ fn scaffolding_the_same_artifact_twice_changes_nothing_the_first_run_wrote() {
 }
 
 #[test]
-fn repository_scaffold_separates_the_application_port_from_its_adapter() {
+fn repository_scaffold_separates_the_port_from_its_adapter() {
     let directory = tempfile::tempdir().unwrap();
     let root = application(directory.path());
     scaffold(&root, ArtifactKind::Module, "Sales");
@@ -352,21 +352,20 @@ fn repository_scaffold_separates_the_application_port_from_its_adapter() {
     assert!(
         files
             .iter()
-            .any(|path| path.ends_with("application/repositories/orders.rs"))
+            .any(|path| path.ends_with("ports/repositories/orders.rs"))
     );
     assert!(
         files
             .iter()
             .any(|path| { path.ends_with("infrastructure/repositories/orders_implementation.rs") })
     );
-    let port =
-        std::fs::read_to_string(root.join("src/application/repositories/orders.rs")).unwrap();
+    let port = std::fs::read_to_string(root.join("src/ports/repositories/orders.rs")).unwrap();
     let adapter = std::fs::read_to_string(
         root.join("src/infrastructure/repositories/orders_implementation.rs"),
     )
     .unwrap();
     assert!(port.contains("pub trait Port"));
-    assert!(adapter.contains("impl crate::application::repositories::orders::Port"));
+    assert!(adapter.contains("impl crate::ports::repositories::orders::Port"));
     let output = cargo(&root, &["check", "--offline", "--quiet"]);
     assert!(
         output.status.success(),
@@ -536,12 +535,9 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
         checked += 1;
 
         // `repository` is the one deliberately two-layer artifact: its port
-        // lives in `application` and its adapter in `infrastructure`.
+        // lives in `ports` and its adapter in `infrastructure`.
         let expected: Vec<String> = if advertised.contains('{') {
-            vec![
-                "src/application".to_string(),
-                "src/infrastructure".to_string(),
-            ]
+            vec!["src/ports".to_string(), "src/infrastructure".to_string()]
         } else {
             let module = match (command.kind, command.argument) {
                 (ArtifactKind::Module, _) => format!("module{index}"),
@@ -619,7 +615,7 @@ fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
     )
     .unwrap();
     let domain = std::fs::read(root.join("src/domain/mod.rs")).unwrap();
-    std::fs::remove_dir_all(root.join("src/application")).unwrap();
+    std::fs::remove_dir_all(root.join("src/services")).unwrap();
     std::fs::remove_dir_all(root.join("src/ui")).unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
@@ -635,7 +631,7 @@ fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
 
     let preview = migrate_project_layers(&root, false).unwrap();
     assert!(preview.migrated_layers);
-    assert!(!root.join("src/application/mod.rs").exists());
+    assert!(!root.join("src/services/mod.rs").exists());
     let applied = migrate_project_layers(&root, true).unwrap();
     assert!(applied.migrated_layers);
     assert_eq!(

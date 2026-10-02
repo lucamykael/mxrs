@@ -2,7 +2,7 @@
 //! standalone source (must include queue declarations and fail closed on an
 //! unattested native shape, same as any other editable document) and
 //! `import_cargo_project`'s Cargo-native project (must emit editable queues
-//! under `src/application/task_queues.rs` and remain buildable after the
+//! under `src/services/task_queues.rs` and remain buildable after the
 //! source `.mpr` is gone — the whole point of `model/imported/` capturing a
 //! lossless snapshot). Real nested `cargo` invocations, same rationale and
 //! pattern as `compiles.rs`: generated-source correctness isn't provable by
@@ -155,7 +155,7 @@ fn standalone_export_fails_closed_for_a_task_queue_with_an_unattested_native_sha
 }
 
 #[test]
-fn import_cargo_project_emits_task_queues_under_the_application_layer() {
+fn import_cargo_project_emits_task_queues_beside_the_services_that_run_on_them() {
     let dir = tempfile::tempdir().unwrap();
     let original = dir.path().join("Original.mpr");
     let generated = dir.path().join("generated");
@@ -163,7 +163,7 @@ fn import_cargo_project_emits_task_queues_under_the_application_layer() {
 
     mxrs_exporter::import_cargo_project(&original, &generated, Some(&workspace_root())).unwrap();
 
-    let task_queues_path = generated.join("src/application/task_queues.rs");
+    let task_queues_path = generated.join("src/services/task_queues.rs");
     assert!(
         task_queues_path.is_file(),
         "expected {} to exist",
@@ -186,14 +186,13 @@ fn import_cargo_project_emits_task_queues_under_the_application_layer() {
     assert!(task_queues_source.contains("\"Exports\""));
     assert!(task_queues_source.contains("|_| {}"));
 
-    let application_source =
-        std::fs::read_to_string(generated.join("src/application/mod.rs")).unwrap();
-    assert!(application_source.contains("pub mod task_queues;"));
+    let services_source = std::fs::read_to_string(generated.join("src/services/mod.rs")).unwrap();
+    assert!(services_source.contains("pub mod task_queues;"));
+    assert!(!generated.join("src/application").exists());
+    let crate_root = std::fs::read_to_string(generated.join("src/lib.rs")).unwrap();
+    assert!(crate_root.contains("pub mod services;"), "{crate_root}");
     // The queues register themselves, into the module that owns them.
-    assert!(
-        !application_source.contains("apply"),
-        "{application_source}"
-    );
+    assert!(!services_source.contains("apply"), "{services_source}");
     assert!(
         task_queues_source.contains("#[declaration(module = \"Jobs\", stage = TaskQueue)]"),
         "{task_queues_source}"

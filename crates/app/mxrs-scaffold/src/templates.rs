@@ -17,8 +17,8 @@ pub(crate) fn domain_layer() -> String {
         .to_string()
 }
 
-pub(crate) fn application_layer() -> String {
-    "//! Application orchestration: each module's microflows as services.\n".to_string()
+pub(crate) fn services_layer() -> String {
+    "//! What the application does: every module's microflows as services, one\n//! folder per Mendix module and one file per microflow.\n".to_string()
 }
 
 /// The user-interface layer of a fresh project: the application layout,
@@ -314,7 +314,7 @@ pub(crate) fn repository_adapter(module_name: &str, name: &str, stem: &str) -> S
         "//! Infrastructure adapter for `{module_name}.{name}`.\n\n\
          #[derive(Debug, Default, Clone, Copy)]\n\
          pub struct Adapter;\n\n\
-         impl crate::application::repositories::{stem}::Port for Adapter {{}}\n"
+         impl crate::ports::repositories::{stem}::Port for Adapter {{}}\n"
     )
 }
 
@@ -788,7 +788,7 @@ mod tests {
             registry_index("modules"),
             module_registry("main"),
             domain_layer(),
-            application_layer(),
+            services_layer(),
             ui_layer(),
         ] {
             assert!(index.starts_with("//!"), "{index}");
@@ -848,7 +848,7 @@ mod tests {
         let nanoflow = page_chain_nanoflow("Sales", "OrderOverview", true);
         assert!(
             nanoflow.contains(
-                "use crate::application::services::sales::refresh_order_overview_service::ACT_RefreshOrderOverview;"
+                "use crate::services::sales::refresh_order_overview_service::ACT_RefreshOrderOverview;"
             ),
             "{nanoflow}"
         );
@@ -861,7 +861,7 @@ mod tests {
             &[],
         );
         for expected in [
-            "use crate::application::services::sales::load_order_overview_service::ACT_LoadOrderOverview;\n",
+            "use crate::services::sales::load_order_overview_service::ACT_LoadOrderOverview;\n",
             "use crate::domain::entities::sales::order_overview::OrderOverview;\n",
             "use crate::ui::nanoflows::sales::refresh_order_overview::NAN_RefreshOrderOverview;\n",
             "#[page(module = \"Sales\")]\npub fn order_overview(page: &mut PageBuilder) {\n",
@@ -908,7 +908,7 @@ fn chain_microflow(module_name: &str, action: &str, feature: &str) -> (String, S
     let name = format!("ACT_{action}{feature}");
     (
         format!(
-            "crate::application::services::{}::{}",
+            "crate::services::{}::{}",
             snake_case(module_name),
             service_stem(&name)
         ),

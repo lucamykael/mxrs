@@ -209,25 +209,30 @@ fn structured_traversal_rejects_ambiguous_edges_and_container_crossings() {
         "disconnected",
         "duplicate-id",
         "error-edge",
-        "unknown-case",
         "duplicate-edge",
         "merge-cycle",
         "inner-parameter",
     ] {
         let mut doc = original.clone();
         let nodes = structured_nodes(&doc).unwrap();
-        let Node::Decision {
-            split,
-            yes,
-            no,
-            merge,
-            ..
-        } = &nodes[1]
-        else {
+        let Node::Decision { split, yes, no } = &nodes[1] else {
             panic!("decision")
         };
         let split_id = split.get("$ID").unwrap().clone();
-        let merge_id = merge.unwrap().get("$ID").unwrap().clone();
+        let merge_id = mxrs_writer::flow_graph::documents(
+            original
+                .get_document("ObjectCollection")
+                .unwrap()
+                .get("Objects")
+                .unwrap(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|object| object.get_str("$Type").ok() == Some("Microflows$ExclusiveMerge"))
+        .unwrap()
+        .get("$ID")
+        .unwrap()
+        .clone();
         let Node::Simple(yes) = yes[0] else {
             panic!("yes")
         };
@@ -308,18 +313,11 @@ fn structured_traversal_rejects_ambiguous_edges_and_container_crossings() {
                     "error-edge" => {
                         edge.insert("IsErrorHandler", true);
                     }
-                    "duplicate-case" | "unknown-case" => {
+                    "duplicate-case" => {
                         edge.get_array_mut("CaseValues").unwrap()[1]
                             .as_document_mut()
                             .unwrap()
-                            .insert(
-                                "Value",
-                                if mutation == "duplicate-case" {
-                                    "true"
-                                } else {
-                                    "unknown"
-                                },
-                            );
+                            .insert("Value", "true");
                     }
                     _ => unreachable!(),
                 }

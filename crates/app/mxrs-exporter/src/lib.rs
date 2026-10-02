@@ -68,6 +68,7 @@ use entity_export::TypedEntityTarget;
 
 mod entity_export;
 mod flow_export;
+mod flow_general;
 mod names;
 #[cfg(test)]
 #[path = "../../../../xtask/support/nested_cargo.rs"]
@@ -264,7 +265,8 @@ fn import_cargo_project_inner(
     )?;
     let persistence_source = render_persistence_module(&modules);
     let infrastructure_source = render_infrastructure_module(persistence_source.is_some());
-    let converted_flows = flow_export::collect(&project, &modules)?;
+    let (converted_flows, kept_flows) = flow_export::collect_all(&project, &modules)?;
+    let flow_relations = mxrs_model::relations::flow_relations(&project)?;
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
         (document.get_str("$Type").ok() == Some("Security$ProjectSecurity")).then_some(document)
@@ -308,7 +310,6 @@ fn import_cargo_project_inner(
     // placeholder folder is noise the reader has to rule out.
     for directory in [
         destination.join("src/domain"),
-        destination.join("src/application"),
         controllers_directory.clone(),
         destination.join("src/ui"),
         infrastructure_directory.join("adapters"),
@@ -332,10 +333,18 @@ fn import_cargo_project_inner(
         &typed_entities,
         &converted_flows,
         &flow_plans,
+        &kept_flows,
         &mut generated_modules,
     );
-    let microflow_files = flow_export::render_files(&converted_flows, &flow_plans, false, &names)?;
-    let nanoflow_files = flow_export::render_files(&converted_flows, &flow_plans, true, &names)?;
+    let microflow_files = flow_export::render_files(
+        &converted_flows,
+        &flow_plans,
+        false,
+        &names,
+        &flow_relations,
+    )?;
+    let nanoflow_files =
+        flow_export::render_files(&converted_flows, &flow_plans, true, &names, &flow_relations)?;
     let service_ports = collect_service_ports(&modules, &packages, &typed_entities);
     let action_ports = assemble_action_ports(&action_documents, &packages, &typed_entities);
     for (module_name, stem, source) in &documents_export.enumeration_files {
@@ -472,9 +481,14 @@ fn import_cargo_project_inner(
         .values()
         .any(|module| module.root == ModuleRoot::Package);
     let authored_layers = write_modules_layer(destination, &generated_modules)?;
+    // The services layer is always there, as `domain` is: a project with no
+    // microflow yet still has the place its first one goes.
+    if !authored_layers.contains_key("services") {
+        let directory = destination.join("src/services");
+        std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
+        write_text(&directory.join("mod.rs"), &render_services_index(&[]))?;
+    }
     let domain_source = render_domain_module(&authored_layers, security_source.is_some());
-    let application_source =
-        render_application_module(&authored_layers, task_queues_source.is_some());
     let ui_source = render_ui_module(&authored_layers);
     write_text(
         &destination.join("Cargo.toml"),
@@ -493,24 +507,32 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "pub mod application;\npub mod controllers;\npub mod domain;\npub mod infrastructure;\n{}pub mod ui;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
+            "pub mod controllers;\npub mod domain;\npub mod infrastructure;\n{}{}{}pub mod ui;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
             if has_packages {
                 "pub mod packages;\n"
             } else {
                 ""
             },
+            if authored_layers.contains_key("ports") {
+                "pub mod ports;\n"
+            } else {
+                ""
+            },
+            "pub mod services;\n",
             rust_string(&manifest.mendix_version),
         ),
     )?;
     write_text(&destination.join("src/domain/mod.rs"), &domain_source)?;
-    write_text(
-        &destination.join("src/application/mod.rs"),
-        &application_source,
-    )?;
     write_text(&destination.join("src/ui/mod.rs"), &ui_source)?;
     if let Some(task_queues) = &task_queues_source {
+        // The queues services run on are declared beside them.
+        let index = destination.join("src/services/mod.rs");
+        let mut source =
+            std::fs::read_to_string(&index).map_err(|source| io_error(&index, source))?;
+        source.push_str("pub mod task_queues;\n");
+        write_text(&index, &source)?;
         write_text(
-            &destination.join("src/application/task_queues.rs"),
+            &destination.join("src/services/task_queues.rs"),
             task_queues,
         )?;
     }
@@ -657,10 +679,10 @@ fn import_cargo_project_inner(
 
 /// The project-level domain layer: every module's model declarations, and
 /// the project's own security when the model states one. It never depends
-/// outward on application, infrastructure or UI.
+/// outward on services, infrastructure or UI.
 fn render_domain_module(layers: &AuthoredLayers, security: bool) -> String {
     render_layer_module(
-        "//! Business data and rules that do not depend on delivery or infrastructure.\n//! Persisted entities, value-like DTOs, enumerations and model security stay here;\n//! server-side workflows are application services, not part of the domain.\n\n",
+        "//! Business data and rules that do not depend on delivery or infrastructure.\n//! Persisted entities, value-like DTOs, enumerations and model security stay here;\n//! server-side workflows are `services`, not part of the domain.\n\n",
         "domain",
         layers,
         if security { &["security"] } else { &[] },
@@ -689,13 +711,16 @@ fn render_layer_module(
     out
 }
 
-fn render_application_module(layers: &AuthoredLayers, task_queues: bool) -> String {
-    render_layer_module(
-        "//! Application orchestration: each module's microflows as services, boundary\n//! ports and project-level task queues. This layer coordinates the domain but\n//! knows no HTTP framework, database driver or other delivery mechanism.\n\n",
-        "application",
-        layers,
-        if task_queues { &["task_queues"] } else { &[] },
-    )
+/// The services layer's index: each module's folder of microflows. The
+/// project's task queues, when it declares any, are added by the caller.
+fn render_services_index(modules: &[&str]) -> String {
+    let mut out = String::from(
+        "//! What the application does: every module's microflows as services, one\n//! folder per Mendix module and one file per microflow, and the task queues\n//! they run on. A service coordinates the domain and knows no HTTP\n//! framework, database driver or other delivery mechanism.\n\n",
+    );
+    for module in modules {
+        let _ = writeln!(out, "pub mod {module};");
+    }
+    out
 }
 
 /// The user interface the model declares: navigation, and every module's
@@ -2620,6 +2645,34 @@ fn constant_environment_variable(module: &str, name: &str) -> String {
     result.trim_end_matches('_').to_string()
 }
 
+/// The variant each of a module's roles is declared as, in the order the
+/// enum lists them: the role's name and the identifier that spells it.
+fn role_variants(roles: &[mxrs_model::module::ModuleRole]) -> Vec<(String, String)> {
+    let mut roles = roles.iter().collect::<Vec<_>>();
+    roles.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut seen = std::collections::HashSet::new();
+    roles
+        .into_iter()
+        .map(|role| {
+            let name = role.name.as_deref().unwrap_or("Unnamed");
+            let mut variant = derive_pascal_case(&sanitize_ident(name));
+            if variant.starts_with(|c: char| c.is_ascii_digit()) {
+                variant.insert(0, '_');
+            }
+            if variant.is_empty() || rust_keyword(&variant) {
+                variant.push_str("Role");
+            }
+            if !seen.insert(variant.clone()) {
+                variant = (2..)
+                    .map(|suffix| format!("{variant}{suffix}"))
+                    .find(|candidate| seen.insert(candidate.clone()))
+                    .expect("an unbounded suffix always finds a free name");
+            }
+            (name.to_string(), variant)
+        })
+        .collect()
+}
+
 /// One module's roles as the enum that declares them: a variant per role,
 /// its description as the variant's comment.
 fn render_module_security(
@@ -2633,24 +2686,11 @@ fn render_module_security(
         "use mxrs::prelude::*;\n\n#[module_roles(module = {})]\npub enum Role {{\n",
         rust_string(module_name),
     );
+    let variants = role_variants(roles);
     let mut roles = roles.iter().collect::<Vec<_>>();
     roles.sort_by(|left, right| left.name.cmp(&right.name));
-    let mut seen = std::collections::HashSet::new();
-    for role in roles {
+    for (role, (_, variant)) in roles.into_iter().zip(variants) {
         let name = role.name.as_deref().unwrap_or("Unnamed");
-        let mut variant = derive_pascal_case(&sanitize_ident(name));
-        if variant.starts_with(|c: char| c.is_ascii_digit()) {
-            variant.insert(0, '_');
-        }
-        if variant.is_empty() || rust_keyword(&variant) {
-            variant.push_str("Role");
-        }
-        if !seen.insert(variant.clone()) {
-            variant = (2..)
-                .map(|suffix| format!("{variant}{suffix}"))
-                .find(|candidate| seen.insert(candidate.clone()))
-                .expect("an unbounded suffix always finds a free name");
-        }
         let mut options = Vec::new();
         if variant != name {
             options.push(format!("name = {}", rust_string(name)));
@@ -3170,7 +3210,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/application/services/`: one editable Rust file per supported server microflow, plus `imported.rs` naming the ones that stay in the imported model.\n- `src/application/ports/`: framework-independent contracts implemented by infrastructure adapters.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the user interface the model declares — pages, layouts, nanoflows and navigation.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `pages/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nSupported server-side microflows are reconstructed as application services; client-side nanoflows stay in `ui`. `mxrs run --frontend` supervises the Rust API and Vite client together. Other graphs remain exact in imported model data. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. Every microflow is a service: one folder per Mendix module, one `<name>_service.rs` per microflow with the function that declares it, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the user interface the model declares — pages, layouts, nanoflows and navigation.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `pages/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; client-side nanoflows stay in `ui`. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet keeps its file, which names it and says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -3222,15 +3262,17 @@ fn write_text(path: &Path, contents: &str) -> Result<()> {
 /// lists that name the ones Rust does not declare.
 ///
 /// A converted flow is named by the type its own `#[microflow]` declares. A
-/// flow the project keeps in the imported model is named in its module's
-/// `imported.rs`, beside the converted ones — and an installed module's
-/// flows in that package's `markers.rs`, since a package declares nothing.
+/// flow the project keeps in the imported model has a file of its own all
+/// the same, where the converted ones are, that names it and says why it
+/// stayed — and an installed module's flows are named in that package's
+/// `markers.rs`, since a package declares nothing.
 fn model_names<'a>(
     modules: &[Module],
     packages: &std::collections::BTreeSet<String>,
     entities: &'a HashMap<String, TypedEntityTarget>,
     converted: &[flow_export::ConvertedFlow],
     plans: &[flow_export::FlowFile],
+    kept: &flow_export::KeptFlows,
     generated: &mut std::collections::BTreeMap<String, GeneratedModule>,
 ) -> names::ModelNames<'a> {
     let converted_stems: HashMap<(&str, &str, bool), &str> = converted
@@ -3266,7 +3308,7 @@ fn model_names<'a>(
             let (keyword, authored) = if nanoflow {
                 ("nanoflow", "ui::nanoflows")
             } else {
-                ("microflow", "application::services")
+                ("microflow", "services")
             };
             let mut flow_names = flows
                 .iter()
@@ -3276,7 +3318,13 @@ fn model_names<'a>(
             flow_names.sort_unstable();
             flow_names.dedup();
             let mut taken = std::collections::HashSet::new();
-            let mut imported_lines = Vec::new();
+            // The files the module's converted flows already have.
+            let mut files: std::collections::HashSet<String> = converted_stems
+                .iter()
+                .filter(|((module, _, kind), _)| *module == module_name && *kind == nanoflow)
+                .map(|(_, file)| (*file).to_string())
+                .collect();
+            let mut imported_files = Vec::new();
             for name in flow_names {
                 let qualified = format!("{module_name}.{name}");
                 if root == ModuleRoot::Authored
@@ -3309,8 +3357,24 @@ fn model_names<'a>(
                 };
                 let module_path = match root {
                     ModuleRoot::Authored => {
-                        imported_lines.push(line);
-                        format!("crate::{authored}::{stem}::imported")
+                        let base = flow_export::kept_file_stem(name, nanoflow);
+                        let mut file = base.clone();
+                        let mut suffix = 2;
+                        while !files.insert(file.clone()) {
+                            file = format!("{base}_{suffix}");
+                            suffix += 1;
+                        }
+                        let reason = kept
+                            .get(&(module_name.to_string(), name.to_string(), nanoflow))
+                            .map(String::as_str)
+                            .unwrap_or("nothing here reads it yet");
+                        imported_files.push((
+                            file.clone(),
+                            format!(
+                                "//! `{module_name}.{name}` stays in the imported model: {reason}.\n//! It is named here so the rest of the project can call and bind it, and\n//! becomes editable Rust when it is declared with `#[{keyword}]` instead.\n\nmxrs::imported! {{\n    module = {module_name:?};\n{line}\n}}\n"
+                            ),
+                        ));
+                        format!("crate::{authored}::{stem}::{file}")
                     }
                     ModuleRoot::Package => {
                         package_lines.push(line);
@@ -3325,18 +3389,14 @@ fn model_names<'a>(
                     },
                 );
             }
-            if !imported_lines.is_empty() {
-                let source = format!(
-                    "//! The {module_name} module's {keyword}s that stay in the imported model.\n//! They are named here so the rest of the project can call and bind\n//! them; each becomes editable Rust when it is declared with\n//! `#[{keyword}]` instead.\n\nmxrs::imported! {{\n    module = {module_name:?};\n{}\n}}\n",
-                    imported_lines.join("\n")
-                );
+            if !imported_files.is_empty() {
                 let module = generated_module(generated, module_name);
                 let files = if nanoflow {
                     &mut module.nanoflows
                 } else {
                     &mut module.services
                 };
-                files.push(("imported".to_string(), source));
+                files.extend(imported_files);
             }
         }
         if !package_lines.is_empty() {
@@ -3346,10 +3406,33 @@ fn model_names<'a>(
             ));
         }
     }
+    // A role is named by the variant of the enum its module declares its
+    // roles with. An installed module declares nothing, so its roles have no
+    // such enum and are named as the model names them.
+    let mut roles = HashMap::new();
+    for module in modules {
+        let Some(module_name) = module.name.as_deref() else {
+            continue;
+        };
+        let stem = module_stem(module_name);
+        if module_root(&stem, packages) != ModuleRoot::Authored {
+            continue;
+        }
+        for (name, variant) in role_variants(&module.module_roles) {
+            roles.insert(
+                format!("{module_name}.{name}"),
+                names::RoleTarget {
+                    module_path: format!("crate::domain::module_security::{stem}"),
+                    variant,
+                },
+            );
+        }
+    }
     names::ModelNames {
         entities,
         microflows,
         nanoflows,
+        roles,
     }
 }
 
@@ -4230,7 +4313,7 @@ fn project_attr_keyword(attribute_type: AttributeType) -> Option<&'static str> {
     }
 }
 
-/// One generated service port: the `application/ports` trait for one Mendix
+/// One generated service port: the `ports` trait for one Mendix
 /// module's runnable microflows, plus everything the runtime adapter impl
 /// needs to drive them through `FlowEngine::call`.
 struct ServicePort {
@@ -4280,7 +4363,7 @@ fn port_type(
         Ty::Float => ("mxrs::MxFloat".into(), "f64".into()),
         Ty::Decimal => ("mxrs::MxDecimal".into(), "f64".into()),
         Ty::DateTime => ("mxrs::MxDateTime".into(), "f64".into()),
-        Ty::Binary => return None,
+        Ty::Binary | Ty::Enumeration(_) => return None,
         Ty::Object(entity) | Ty::List(entity) => {
             let target = typed_entities.get(entity)?;
             if target.dto {
@@ -4583,8 +4666,7 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
         let _ = writeln!(
             out,
             "\nimpl {}::services::{} for RuntimeServices {{",
-            port.root
-                .path(&port.module_stem, "application::ports", "ports"),
+            port.root.path(&port.module_stem, "ports", "ports"),
             port.trait_name
         );
         for (index, method) in port.methods.iter().enumerate() {
@@ -6534,9 +6616,7 @@ fn render_action_registry_file(module: &ActionPortModule) -> String {
     let mut out = format!(
         "//! Registers hand-written `{name}` action-port implementations on the\n//! flow engine under the names the model calls them by.\n\nuse std::collections::BTreeMap;\n\nuse mxrs::ports::{{FlowEngine, FlowError, FlowValue, JavaAction{port_value}}};\n\nuse {ports}::actions::*;\n",
         name = module.module_name,
-        ports = module
-            .root
-            .path(&module.module_stem, "application::ports", "ports"),
+        ports = module.root.path(&module.module_stem, "ports", "ports"),
         port_value = if uses_port_value { ", PortValue" } else { "" },
     );
     for action in &module.actions {
@@ -6848,9 +6928,10 @@ fn record_concept(layers: &mut AuthoredLayers, layer: &str, concept: &str) {
         .push(concept.to_string());
 }
 
-/// Writes `src/domain/`, `src/application/`, `src/controllers/` and `src/ui/`
-/// for the modules this project created, one folder per concept with a module folder
-/// inside each.
+/// Writes `src/domain/`, `src/services/`, `src/ports/`, `src/controllers/`
+/// and `src/ui/` for the modules this project created: a module folder
+/// inside each concept, and directly inside the layers that are one concept
+/// — services, ports, controllers.
 fn write_authored_layers(
     destination: &Path,
     modules: &[(&String, &GeneratedModule)],
@@ -6889,8 +6970,8 @@ fn write_authored_layers(
             modules: files(|module| &module.mappings),
         },
         AuthoredConcept {
-            folder: "application/services",
-            subject: "server-side microflows as application services",
+            folder: "services",
+            subject: "microflows as services",
             modules: files(|module| &module.services),
         },
         AuthoredConcept {
@@ -6930,10 +7011,14 @@ fn write_authored_concept(destination: &Path, concept: &AuthoredConcept<'_>) -> 
     let directory = destination.join("src").join(concept.folder);
     std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
     let (_, name) = split_concept(concept.folder);
-    let mut index = format!(
-        "//! Every module's {}, one folder per Mendix module: names are\n//! unique per module, not across the project.\n\n",
-        concept.subject
-    );
+    let mut index = if concept.folder == "services" {
+        render_services_index(&[])
+    } else {
+        format!(
+            "//! Every module's {}, one folder per Mendix module: names are\n//! unique per module, not across the project.\n\n",
+            concept.subject
+        )
+    };
     for (stem, _) in &concept.modules {
         let _ = writeln!(index, "pub mod {stem};");
     }
@@ -6996,10 +7081,10 @@ fn write_authored_ports(
     if owned.is_empty() {
         return Ok(());
     }
-    let directory = destination.join("src/application/ports");
+    let directory = destination.join("src/ports");
     std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
     let mut index = String::from(
-        "//! Contracts each Mendix module exposes to hand-written code, one\n//! folder per module.\n\n",
+        "//! The contracts between the model and hand-written code, one folder per\n//! Mendix module: what a module's services offer, and what its actions\n//! need an adapter in `infrastructure` to provide.\n\n",
     );
     for (stem, _) in &owned {
         let _ = writeln!(index, "pub mod {stem};");
@@ -7022,7 +7107,7 @@ fn write_authored_ports(
         }
         write_text(&folder.join("mod.rs"), &module_index)?;
     }
-    record_concept(declared, "application", "ports");
+    record_concept(declared, "ports", "ports");
     Ok(())
 }
 
@@ -7255,8 +7340,8 @@ mod tests {
         ] {
             record_concept(&mut full, "domain", concept);
         }
-        record_concept(&mut full, "application", "services");
-        record_concept(&mut full, "application", "ports");
+        record_concept(&mut full, "services", "services");
+        record_concept(&mut full, "ports", "ports");
         for concept in ["nanoflows", "pages"] {
             record_concept(&mut full, "ui", concept);
         }
@@ -7280,18 +7365,21 @@ mod tests {
         let bare = render_domain_module(&empty, false);
         assert!(!bare.contains("pub mod"), "{bare}");
 
+        // Services are a layer of their own: its index is the modules that
+        // have any, and nothing of another layer.
         assert_eq!(
-            render_application_module(&full, true)
+            render_services_index(&["crm", "sales"])
                 .lines()
                 .filter(|line| !line.starts_with("//!") && !line.is_empty())
                 .collect::<Vec<_>>(),
-            [
-                "pub mod ports;",
-                "pub mod services;",
-                "pub mod task_queues;",
-            ]
+            ["pub mod crm;", "pub mod sales;"]
         );
-        assert!(!render_application_module(&full, false).contains("task_queues"));
+        // Neither services nor ports are concepts of the domain or of the
+        // user interface.
+        for layer in [render_domain_module(&full, true), render_ui_module(&full)] {
+            assert!(!layer.contains("pub mod services;"), "{layer}");
+            assert!(!layer.contains("pub mod ports;"), "{layer}");
+        }
 
         let ui = render_ui_module(&full);
         // Nanoflows are the frontend's services, so they are a user-interface
@@ -7320,7 +7408,7 @@ mod tests {
         // declaration at all.
         for layer in [
             render_domain_module(&full, true),
-            render_application_module(&full, true),
+            render_services_index(&["sales"]),
             ui,
             render_infrastructure_module(true),
         ] {
@@ -7980,7 +8068,7 @@ mod tests {
         }
         // The authored module keeps all of it.
         assert_eq!(
-            read("src/application/services/sales/mod.rs"),
+            read("src/services/sales/mod.rs"),
             "//! The sales module's services.\n\npub mod ping_service;\n",
             "an authored module still declares its microflows",
         );
@@ -9169,13 +9257,10 @@ pub enum ENUMStatus {
                 .is_file()
         );
         assert!(generated.join("src/domain/security.rs").is_file());
-        assert!(generated.join("src/application/mod.rs").is_file());
+        assert!(generated.join("src/services/mod.rs").is_file());
+        assert!(!generated.join("src/application").exists());
         assert!(generated.join("src/domain/dtos/sales/mod.rs").is_file());
-        assert!(
-            generated
-                .join("src/application/services/sales/mod.rs")
-                .is_file()
-        );
+        assert!(generated.join("src/services/sales/mod.rs").is_file());
         assert!(generated.join("src/ui/mod.rs").is_file());
         assert!(generated.join("src/ui/nanoflows/sales/mod.rs").is_file());
         assert!(generated.join("src/ui/navigation.rs").is_file());
@@ -9227,21 +9312,21 @@ pub enum ENUMStatus {
         );
         let domain_source = std::fs::read_to_string(generated.join("src/domain/mod.rs")).unwrap();
         assert!(domain_source.contains("pub mod security;"));
-        let application_source =
-            std::fs::read_to_string(generated.join("src/application/mod.rs")).unwrap();
+        let services_source =
+            std::fs::read_to_string(generated.join("src/services/mod.rs")).unwrap();
         let ui_source = std::fs::read_to_string(generated.join("src/ui/mod.rs")).unwrap();
         assert!(ui_source.contains("pub mod navigation;"));
         // What the application serves over HTTP is a layer of its own.
         assert!(!ui_source.contains("pub mod http;"), "{ui_source}");
         assert!(!generated.join("src/presentation").exists());
-        for layer in [&domain_source, &application_source, &ui_source] {
+        for layer in [&domain_source, &services_source, &ui_source] {
             assert!(!layer.contains("fn apply"), "{layer}");
             assert!(!layer.contains("crate::"), "{layer}");
         }
         assert!(!generated.join("src/composition.rs").exists());
         // The model declares no task queue, so there is no file for them.
-        assert!(!generated.join("src/application/task_queues.rs").exists());
-        assert!(!application_source.contains("task_queues"));
+        assert!(!generated.join("src/services/task_queues.rs").exists());
+        assert!(!services_source.contains("task_queues"));
         // Project security and navigation are the functions that build them,
         // stating only what differs from the builder's own defaults.
         assert_eq!(
@@ -9437,32 +9522,34 @@ pub fn maximum_orders(constant: &mut ConstantBuilder) {
         assert!(!generated.join("src/infrastructure/imported.rs").exists());
         // No marker file: an entity is named by its struct, a flow by the
         // type its declaration generates, and a flow that stays in the
-        // imported model by its module's `imported.rs`.
+        // imported model by the file it would be declared in.
         assert!(!generated.join("src/domain/markers").exists());
         assert!(!generated.join("src/infrastructure/markers.rs").exists());
         let microflows =
-            std::fs::read_to_string(generated.join("src/application/services/sales/mod.rs"))
-                .unwrap();
+            std::fs::read_to_string(generated.join("src/services/sales/mod.rs")).unwrap();
         assert!(!microflows.contains("apply"), "{microflows}");
         assert!(microflows.contains("pub mod ping_service;"), "{microflows}");
         assert_eq!(
-            std::fs::read_to_string(
-                generated.join("src/application/services/sales/ping_service.rs")
-            )
-            .unwrap(),
-            "use mxrs::prelude::*;\n\n#[microflow(ACT, module = \"Sales\")]\npub fn ping(_flow: &mut FlowBuilder) {}\n"
+            std::fs::read_to_string(generated.join("src/services/sales/ping_service.rs")).unwrap(),
+            // The attribute says what refers to the flow: here the project's
+            // navigation, an entity's event handler and a published service.
+            "use mxrs::prelude::*;\n\n#[microflow(\n    ACT,\n    module = \"Sales\",\n    used_by(\"Navigation\", \"Sales.Order\", \"Sales.OrderService\")\n)]\npub fn ping(_flow: &mut FlowBuilder) {}\n"
         );
-        let get_order = std::fs::read_to_string(
-            generated.join("src/application/services/sales/get_order_service.rs"),
-        )
-        .unwrap();
+        let get_order =
+            std::fs::read_to_string(generated.join("src/services/sales/get_order_service.rs"))
+                .unwrap();
         assert_eq!(
             get_order,
             r#"use mxrs::prelude::*;
 
 use crate::domain::entities::sales::order::Order;
 
-#[microflow(ACT, module = "Sales")]
+#[microflow(
+    ACT,
+    module = "Sales",
+    uses(Order),
+    used_by("Sales.OrderDetail", "Sales.OrderService")
+)]
 pub fn get_order(flow: &mut FlowBuilder) {
     let value_order = flow.create_object("order", Ref::<Order>::new(), vec![], false);
     flow.return_value(&value_order);
@@ -9477,17 +9564,16 @@ pub fn get_order(flow: &mut FlowBuilder) {
         );
         assert_eq!(
             std::fs::read_to_string(generated.join("src/ui/nanoflows/sales/validate.rs")).unwrap(),
-            "use mxrs::prelude::*;\n\n#[nanoflow(NF, module = \"Sales\")]\npub fn validate(_flow: &mut FlowBuilder) {}\n"
+            "use mxrs::prelude::*;\n\n#[nanoflow(NF, module = \"Sales\", used_by(\"Sales.OrderDetail\"))]\npub fn validate(_flow: &mut FlowBuilder) {}\n"
         );
         // Runnable microflows surface as a typed service port plus the
         // runtime adapter that implements it. Every entity is a struct now,
         // so a flow returning one is on the typed surface too.
         let ports_index =
-            std::fs::read_to_string(generated.join("src/application/ports/sales/mod.rs")).unwrap();
+            std::fs::read_to_string(generated.join("src/ports/sales/mod.rs")).unwrap();
         assert!(ports_index.contains("pub mod services;"), "{ports_index}");
         let sales_port =
-            std::fs::read_to_string(generated.join("src/application/ports/sales/services.rs"))
-                .unwrap();
+            std::fs::read_to_string(generated.join("src/ports/sales/services.rs")).unwrap();
         assert!(
             sales_port.contains("pub trait SalesServices"),
             "{sales_port}"
@@ -9508,9 +9594,8 @@ pub fn get_order(flow: &mut FlowBuilder) {
         .unwrap();
         assert!(adapter.contains("pub struct RuntimeServices"), "{adapter}");
         assert!(
-            adapter.contains(
-                "impl crate::application::ports::sales::services::SalesServices for RuntimeServices"
-            ),
+            adapter
+                .contains("impl crate::ports::sales::services::SalesServices for RuntimeServices"),
             "{adapter}"
         );
         assert!(adapter.contains("\"Sales.ACT_Ping\""), "{adapter}");
@@ -9518,8 +9603,7 @@ pub fn get_order(flow: &mut FlowBuilder) {
         // registration glue.
         assert!(ports_index.contains("pub mod actions;"), "{ports_index}");
         let sales_actions =
-            std::fs::read_to_string(generated.join("src/application/ports/sales/actions.rs"))
-                .unwrap();
+            std::fs::read_to_string(generated.join("src/ports/sales/actions.rs")).unwrap();
         assert!(
             sales_actions.contains("pub trait ReverseText"),
             "{sales_actions}"
@@ -9676,7 +9760,9 @@ pub fn get_order(flow: &mut FlowBuilder) {
         assert!(crate_root.contains("pub mod infrastructure;"));
         assert!(!crate_root.contains("pub mod generated"));
         // The crate root exposes layers; composition belongs to its own file.
-        assert!(crate_root.contains("pub mod application;"));
+        assert!(crate_root.contains("pub mod services;"));
+        assert!(crate_root.contains("pub mod ports;"));
+        assert!(!crate_root.contains("pub mod application;"));
         assert!(crate_root.contains("pub mod domain;"));
         assert!(crate_root.contains("pub mod controllers;"));
         assert!(crate_root.contains("pub mod ui;"));
@@ -9693,13 +9779,13 @@ pub fn get_order(flow: &mut FlowBuilder) {
         assert!(!crate_root.contains("extern crate"), "{crate_root}");
         assert!(!crate_root.contains("fn build"), "{crate_root}");
         // Empty placeholder folders are noise; only what receives generated
-        // content exists. `src/application/ports` and `src/application/use_cases`
-        // are real concepts of the layer-first tree now, so they are expected —
-        // the module-first tree they used to live in is what must be gone.
+        // content exists. `src/ports` and `src/services` are real layers of
+        // the tree, so they are expected — the `application` folder they
+        // used to share, and the module-first tree before it, must be gone.
         for absent in [
             "src/modules",
             "src/domain/modules",
-            "src/application/modules",
+            "src/application",
             "src/presentation",
             "src/ui/modules",
             "src/controllers/modules",

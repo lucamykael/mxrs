@@ -21,6 +21,7 @@ pub mod module;
 pub mod navigation;
 pub mod page;
 pub mod project;
+pub mod relations;
 mod support;
 
 pub use association::Association;

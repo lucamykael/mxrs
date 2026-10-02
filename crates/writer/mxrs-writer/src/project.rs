@@ -56,6 +56,8 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
     if let Some(declaration) = &project.navigation {
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
     }
+    drop(mpr);
+    crate::relations::report(path, project);
     Ok(())
 }
 
@@ -256,6 +258,8 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
     if let Some(declaration) = &project.navigation {
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
     }
+    drop(mpr);
+    crate::relations::report(path, project);
     Ok(())
 }
 

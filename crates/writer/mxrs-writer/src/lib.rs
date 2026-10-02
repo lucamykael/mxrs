@@ -47,9 +47,11 @@ pub mod module;
 mod navigation;
 pub mod page_compiler;
 pub mod project;
+pub mod relations;
 pub mod scaffold;
 mod security;
 
 pub use error::{Result, WriterError};
+pub use flow_contract::validate_flow_declaration;
 pub use instrumentation::{InstrumentationReport, instrument_functional_tests};
 pub use project::{synchronize_project, synchronize_project_documents, write_project};

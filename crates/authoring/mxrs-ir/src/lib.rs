@@ -30,12 +30,15 @@ pub use declaration::{
     MenuItemDecl, ModuleDecl, OnOverlap, OqlViewSourceDecl, ProjectDecl, RegularExpressionDecl,
     ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule, SystemMember, SystemMembersDecl,
 };
-pub use flow::{Activity, FlowParameterDecl, Member, MicroflowCallMapping, MicroflowDecl};
+pub use flow::{
+    Activity, DataType, ErrorHandling, FlowParameterDecl, FlowRelations, Member,
+    MicroflowCallMapping, MicroflowDecl, NativeDocument, NativeValue, SwitchCase,
+};
 pub use markers::system;
 pub use markers::{
     AssociationMarker, AssociationRef, AttributeMarker, AttributeRef, EntityMarker,
-    EnumerationMarker, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef, Ref, Reference,
-    ReferenceSet,
+    EnumerationMarker, FlowName, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef, Ref,
+    Reference, ReferenceSet,
 };
 pub use page::{
     ButtonAction, DataSourceDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutKind,

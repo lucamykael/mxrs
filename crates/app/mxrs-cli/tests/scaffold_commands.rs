@@ -160,7 +160,7 @@ fn quality_integration_and_ci_scaffolds_emit_consumable_files() {
     // layer rather than next to the model declarations, in the file its
     // declaring function names.
     assert!(
-        root.join("src/application/services/sales/validate_order_service.rs")
+        root.join("src/services/sales/validate_order_service.rs")
             .is_file()
     );
     assert!(
@@ -210,7 +210,7 @@ fn a_wrong_action_word_or_missing_project_fails_without_writing_anything() {
     }
     // `mxrs new` ships an empty `modules` aggregator in every layer, so the
     // evidence that nothing was written is the absence of the module itself.
-    for layer in ["domain", "application", "ui"] {
+    for layer in ["domain", "services", "ui"] {
         assert!(!root.join(format!("src/{layer}/modules/sales")).exists());
     }
     let outside = cli(&[
@@ -412,7 +412,7 @@ fn upgrade_previews_then_transactionally_updates_a_generated_project() {
 fn upgrade_without_a_version_migrates_a_pre_layered_project_and_reports_every_change() {
     let directory = tempfile::tempdir().unwrap();
     let root = project(directory.path());
-    std::fs::remove_dir_all(root.join("src/application")).unwrap();
+    std::fs::remove_dir_all(root.join("src/services")).unwrap();
     std::fs::remove_dir_all(root.join("src/ui")).unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
@@ -440,7 +440,7 @@ fn upgrade_without_a_version_migrates_a_pre_layered_project_and_reports_every_ch
     assert_eq!(preview["applied"], false);
     assert_eq!(preview["created"].as_array().unwrap().len(), 2);
     assert_eq!(preview["updated"].as_array().unwrap().len(), 1);
-    assert!(!root.join("src/application/mod.rs").exists());
+    assert!(!root.join("src/services/mod.rs").exists());
 
     let applied = cli(&["upgrade", "--target", root.to_str().unwrap(), "--apply"]);
     assert!(applied.status.success(), "{:?}", applied.stderr);
@@ -583,13 +583,10 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     // three layers instead of landing entirely under `src/domain/`.
     for (layer, relative) in [
         ("domain", "domain/entities/sales/order_overview.rs"),
+        ("services", "services/sales/load_order_overview_service.rs"),
         (
-            "application",
-            "application/services/sales/load_order_overview_service.rs",
-        ),
-        (
-            "application",
-            "application/services/sales/refresh_order_overview_service.rs",
+            "services",
+            "services/sales/refresh_order_overview_service.rs",
         ),
         ("ui", "ui/nanoflows/sales/refresh_order_overview.rs"),
         ("ui", "ui/pages/sales/order_overview.rs"),

@@ -183,7 +183,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Handler>",
         summary: "Create a published REST handler microflow",
-        destination: "src/application/services/<module>",
+        destination: "src/services/<module>",
         kind: ArtifactKind::PublishedRest,
     },
     ScaffoldCommand {
@@ -191,7 +191,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Name>",
         summary: "Create a repository port and infrastructure adapter",
-        destination: "src/{application,infrastructure}/repositories",
+        destination: "src/{ports,infrastructure}/repositories",
         kind: ArtifactKind::Repository,
     },
     ScaffoldCommand {
@@ -234,7 +234,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application validation microflow",
-        destination: "src/application/services/<module>",
+        destination: "src/services/<module>",
         kind: ArtifactKind::Validation,
     },
     ScaffoldCommand {
@@ -242,7 +242,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create an application service microflow",
-        destination: "src/application/services/<module>",
+        destination: "src/services/<module>",
         kind: ArtifactKind::UseCase,
     },
 ];
@@ -390,6 +390,16 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
     let root =
         std::path::absolute(&options.target).map_err(|error| io_error(&options.target, error))?;
     require_project(&root)?;
+    // An earlier tree would get the new layers beside its old ones.
+    if let layout @ (crate::lifecycle::ProjectLayout::ModuleFirst
+    | crate::lifecycle::ProjectLayout::ApplicationLayer) =
+        crate::lifecycle::project_layout(&root)?
+    {
+        return Err(ScaffoldError::OutdatedLayout {
+            root: root.display().to_string(),
+            layout: layout.as_str(),
+        });
+    }
     let mut transaction = Transaction::default();
     if options.kind == ArtifactKind::FunctionalTest {
         let (module_name, artifact_name) = qualified_name(options.kind, &options.name)?;
@@ -1069,14 +1079,9 @@ fn create_repository(
     artifact_name: &str,
 ) -> Result<()> {
     let stem = snake_case(artifact_name);
-    let port_root = root.join("src/application");
+    let port_root = root.join("src/ports");
     let port_family = port_root.join("repositories");
-    connect_plain_family(
-        transaction,
-        &root.join("src"),
-        "application",
-        "repositories",
-    )?;
+    connect_plain_family(transaction, &root.join("src"), "ports", "repositories")?;
     let port = port_family.join(format!("{stem}.rs"));
     transaction.create(
         &port,
@@ -1159,7 +1164,7 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
         // other; `controllers/` is the route tables and handlers an import
         // generates from the published service itself.
         ArtifactKind::UseCase | ArtifactKind::Validation | ArtifactKind::PublishedRest => {
-            "application/services"
+            "services"
         }
         ArtifactKind::Page => "ui/pages",
         ArtifactKind::Nanoflow => "ui/nanoflows",
@@ -1386,7 +1391,7 @@ fn require_module(root: &Path, module_name: &str) -> Result<()> {
         "src/domain/dtos",
         "src/domain/enumerations",
         "src/domain/documents",
-        "src/application/services",
+        "src/services",
         "src/ui/pages",
         "src/ui/nanoflows",
     ]

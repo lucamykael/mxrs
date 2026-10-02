@@ -48,7 +48,75 @@ pub(crate) fn validate_project(project: &ProjectDecl, existing: &[Module]) -> Re
                 )
         })
         .collect::<Vec<_>>();
+    validate_roles(project, existing, &flows)?;
     validate(&flows, &entities, existing)
+}
+
+/// Checks that every role a flow is stated to allow is one its module
+/// declares — or, when the declaration leaves the module's roles to the
+/// model, one the model has. A module whose roles neither says is not
+/// checked.
+fn validate_roles(
+    project: &ProjectDecl,
+    existing: &[Module],
+    flows: &[(&str, &MicroflowDecl, bool)],
+) -> Result<()> {
+    let mut known: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for module in existing {
+        if let Some(name) = module.name.as_deref() {
+            known.insert(
+                name,
+                module
+                    .module_roles
+                    .iter()
+                    .filter_map(|role| role.name.as_deref())
+                    .collect(),
+            );
+        }
+    }
+    for module in &project.modules {
+        if let Some(roles) = &module.roles {
+            known.insert(
+                &module.name,
+                roles.iter().map(|role| role.name.as_str()).collect(),
+            );
+        }
+    }
+    for &(module, flow, _) in flows {
+        for role in flow.allowed_roles.iter().flatten() {
+            let is_module = |owner: &str| {
+                project.modules.iter().any(|module| module.name == owner)
+                    || existing
+                        .iter()
+                        .any(|module| module.name.as_deref() == Some(owner))
+            };
+            let valid = role.split_once('.').is_some_and(|(owner, name)| {
+                known
+                    .get(owner)
+                    .map_or_else(|| is_module(owner), |roles| roles.contains(name))
+            });
+            if !valid {
+                return Err(WriterError::InvalidFlowActivity {
+                    flow: format!("{module}.{}", flow.name),
+                    reason: format!("roles(...) names {role:?}, which is not a module role"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks one flow declaration the way a build would before writing it:
+/// its parameters, the variables its activities declare, the entities its
+/// signature names. An importer asks this before it offers a flow as Rust,
+/// so what it generates is something the writer accepts.
+pub fn validate_flow_declaration(
+    module: &str,
+    flow: &MicroflowDecl,
+    nanoflow: bool,
+    entities: &HashSet<String>,
+) -> Result<()> {
+    validate(&[(module, flow, nanoflow)], entities, &[])
 }
 
 pub(crate) fn validate_documents(
@@ -155,6 +223,7 @@ fn validate(
             .map(|parameter| parameter.name.clone())
             .collect();
         validate_activities(&name, &flow.activities, &targets, entities, &mut variables)?;
+        validate_structure(&name, &flow.activities, &flow.rescue_activities)?;
         validate_activities(
             &name,
             &flow.rescue_activities,
@@ -178,8 +247,11 @@ fn validate_entity(
     value_type: &FlowReturnType,
     entities: &HashSet<String>,
 ) -> std::result::Result<(), String> {
+    // The System module's entities are the runtime's: no model stores
+    // them, and every model may name them.
     if let FlowReturnType::Object(entity) | FlowReturnType::List(entity) = value_type
         && !entities.contains(entity)
+        && !entity.starts_with("System.")
     {
         return Err(format!("unknown flow value entity {entity:?}"));
     }
@@ -228,6 +300,11 @@ fn native_type(doc: &Document) -> std::result::Result<FlowReturnType, String> {
                 FlowReturnType::List(entity)
             }
         }
+        "DataTypes$EnumerationType" => FlowReturnType::Enumeration(
+            doc.get_str("Enumeration")
+                .map_err(|_| "native enumeration type has no enumeration")?
+                .to_string(),
+        ),
         kind => return Err(format!("unsupported native data type {kind:?}")),
     })
 }
@@ -347,6 +424,11 @@ fn validate_activities(
                 true_branch,
                 false_branch,
                 ..
+            }
+            | Activity::RuleDecision {
+                true_branch,
+                false_branch,
+                ..
             } => {
                 validate_activities(flow, true_branch, targets, entities, &mut variables.clone())?;
                 validate_activities(
@@ -377,8 +459,225 @@ fn validate_activities(
             Activity::AggregateCount {
                 output_variable, ..
             } => declare_variable(flow, output_variable, variables)?,
+            Activity::Disabled(inner) => validate_activities(
+                flow,
+                std::slice::from_ref(inner.as_ref()),
+                targets,
+                entities,
+                variables,
+            )?,
+            Activity::OnError {
+                handling,
+                activity,
+                handler,
+            } => {
+                let invalid = |reason: &str| WriterError::InvalidFlowActivity {
+                    flow: flow.into(),
+                    reason: reason.into(),
+                };
+                let mut handled = activity.as_ref();
+                while let Activity::Disabled(inner) = handled {
+                    handled = inner;
+                }
+                if matches!(
+                    handled,
+                    Activity::Decision { .. }
+                        | Activity::RuleDecision { .. }
+                        | Activity::RuleSwitch { .. }
+                        | Activity::Label(_)
+                        | Activity::Jump(_)
+                        | Activity::Switch { .. }
+                        | Activity::TypeSwitch { .. }
+                        | Activity::ReturnValue { .. }
+                        | Activity::BreakLoop
+                        | Activity::ContinueLoop
+                        | Activity::RaiseError
+                        | Activity::OnError { .. }
+                ) {
+                    return Err(invalid(
+                        "only an action or a loop can have an error handler",
+                    ));
+                }
+                if *handling == mxrs_ir::ErrorHandling::Continue && !handler.is_empty() {
+                    return Err(invalid(
+                        "an activity that continues on error has no handler to run",
+                    ));
+                }
+                // What the handler declares is its own: the activity it
+                // answers for did not finish.
+                let mut handler_variables = variables.clone();
+                validate_activities(
+                    flow,
+                    std::slice::from_ref(activity.as_ref()),
+                    targets,
+                    entities,
+                    variables,
+                )?;
+                validate_activities(flow, handler, targets, entities, &mut handler_variables)?;
+            }
+            Activity::Switch { cases, .. }
+            | Activity::RuleSwitch { cases, .. }
+            | Activity::TypeSwitch { cases, .. } => {
+                let mut values = HashSet::new();
+                for case in cases {
+                    if case.values.is_empty()
+                        || !case
+                            .values
+                            .iter()
+                            .all(|value| values.insert(value.as_str()))
+                    {
+                        return Err(WriterError::InvalidFlowActivity {
+                            flow: flow.into(),
+                            reason: "each case of a switch is selected by its own values".into(),
+                        });
+                    }
+                    validate_activities(
+                        flow,
+                        &case.activities,
+                        targets,
+                        entities,
+                        &mut variables.clone(),
+                    )?;
+                }
+            }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// Checks the shape of a flow's bodies — its own (with the handler that
+/// rescues it, which the model draws in the same container) and each loop's:
+/// every jump has a label of its name in that same body, no two labels of
+/// the flow share a name, no body opens with a jump, no loop body opens with
+/// a label (a loop is entered at the activity nothing leads to), no switch
+/// is without cases, and only an action can be disabled.
+fn validate_structure(flow: &str, activities: &[Activity], rescue: &[Activity]) -> Result<()> {
+    let mut names = HashSet::new();
+    validate_body(flow, &[activities, rescue], false, &mut names)
+}
+
+fn validate_body<'a>(
+    flow: &str,
+    parts: &[&'a [Activity]],
+    in_loop: bool,
+    names: &mut HashSet<&'a str>,
+) -> Result<()> {
+    fn collect<'a>(
+        activities: &'a [Activity],
+        labels: &mut Vec<&'a str>,
+        jumps: &mut Vec<&'a str>,
+        bodies: &mut Vec<&'a [Activity]>,
+    ) -> std::result::Result<(), String> {
+        for activity in activities {
+            match activity {
+                Activity::Label(name) => labels.push(name),
+                Activity::Jump(name) => jumps.push(name),
+                Activity::Decision {
+                    true_branch,
+                    false_branch,
+                    ..
+                }
+                | Activity::RuleDecision {
+                    true_branch,
+                    false_branch,
+                    ..
+                } => {
+                    collect(true_branch, labels, jumps, bodies)?;
+                    collect(false_branch, labels, jumps, bodies)?;
+                }
+                Activity::Switch { cases, .. }
+                | Activity::RuleSwitch { cases, .. }
+                | Activity::TypeSwitch { cases, .. } => {
+                    if cases.is_empty() {
+                        return Err("a switch needs at least one case".to_string());
+                    }
+                    for case in cases {
+                        collect(&case.activities, labels, jumps, bodies)?;
+                    }
+                }
+                Activity::OnError {
+                    activity, handler, ..
+                } => {
+                    collect(
+                        std::slice::from_ref(activity.as_ref()),
+                        labels,
+                        jumps,
+                        bodies,
+                    )?;
+                    collect(handler, labels, jumps, bodies)?;
+                }
+                Activity::Disabled(inner) => {
+                    let action = match inner.as_ref() {
+                        Activity::OnError { activity, .. } => activity.as_ref(),
+                        other => other,
+                    };
+                    if matches!(
+                        action,
+                        Activity::Label(_)
+                            | Activity::Jump(_)
+                            | Activity::Decision { .. }
+                            | Activity::RuleDecision { .. }
+                            | Activity::Switch { .. }
+                            | Activity::RuleSwitch { .. }
+                            | Activity::TypeSwitch { .. }
+                            | Activity::LoopOver { .. }
+                            | Activity::WhileLoop { .. }
+                            | Activity::BreakLoop
+                            | Activity::ContinueLoop
+                            | Activity::RaiseError
+                            | Activity::ReturnValue { .. }
+                            | Activity::Disabled(_)
+                    ) {
+                        return Err("only an action can be disabled".to_string());
+                    }
+                    collect(std::slice::from_ref(inner.as_ref()), labels, jumps, bodies)?
+                }
+                Activity::LoopOver { activities, .. } | Activity::WhileLoop { activities, .. } => {
+                    bodies.push(activities)
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    let invalid = |reason: String| WriterError::InvalidFlowActivity {
+        flow: flow.into(),
+        reason,
+    };
+    let (mut labels, mut jumps, mut bodies) = (Vec::new(), Vec::new(), Vec::new());
+    for part in parts {
+        collect(part, &mut labels, &mut jumps, &mut bodies).map_err(invalid)?;
+        if matches!(part.first(), Some(Activity::Jump(_))) {
+            return Err(invalid("a body cannot open with a jump".to_string()));
+        }
+    }
+    if in_loop
+        && matches!(
+            parts.first().and_then(|body| body.first()),
+            Some(Activity::Label(_))
+        )
+    {
+        return Err(invalid(
+            "a loop body cannot open with a label: nothing would mark where the loop starts"
+                .to_string(),
+        ));
+    }
+    let known: HashSet<&str> = labels.iter().copied().collect();
+    for label in labels {
+        if !names.insert(label) {
+            return Err(invalid(format!("two labels are named {label:?}")));
+        }
+    }
+    for jump in jumps {
+        if !known.contains(jump) {
+            return Err(invalid(format!(
+                "a jump to {jump:?} has no label of that name in the same flow or loop body"
+            )));
+        }
+    }
+    for body in bodies {
+        validate_body(flow, &[body], true, names)?;
     }
     Ok(())
 }

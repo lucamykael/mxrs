@@ -118,6 +118,19 @@ pub(crate) fn synchronize_nanoflows_with_identity(
     )
 }
 
+/// Whether a flow document already allows exactly `roles`, in whatever
+/// order it lists them: the order is the model's, not something a
+/// declaration states.
+fn same_roles(document: &mxrs_bson::Document, roles: &[String]) -> bool {
+    let stored: std::collections::BTreeSet<&str> = match document.get("AllowedModuleRoles") {
+        Some(mxrs_bson::Bson::Array(items)) => {
+            items.iter().filter_map(mxrs_bson::Bson::as_str).collect()
+        }
+        _ => return false,
+    };
+    stored == roles.iter().map(String::as_str).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn synchronize_flows_with_identity(
     mpr: &mut MprFile,
@@ -132,10 +145,11 @@ fn synchronize_flows_with_identity(
     let mut updates = Vec::new();
 
     for decl in declarations {
-        let (objects, flows) = flow_compiler::build_microflow_graph(
+        let (objects, flows) = flow_compiler::build_flow_graph(
             &decl.activities,
             &decl.rescue_activities,
             decl.return_expression.as_deref(),
+            native_type == "Microflows$Nanoflow",
         );
         let previous = existing_by_name.get(&decl.name);
         let existing_id = previous.map(|(id, _)| id.clone());
@@ -152,7 +166,7 @@ fn synchronize_flows_with_identity(
             mark_as_used: false,
             excluded: false,
             export_level: "Hidden".into(),
-            allowed_module_roles: vec![],
+            allowed_module_roles: decl.allowed_roles.clone().unwrap_or_default(),
             parameters: vec![],
             return_type_document: crate::flow_compiler::return_type_document(
                 decl.return_type.as_ref(),
@@ -171,6 +185,19 @@ fn synchronize_flows_with_identity(
             previous.is_some_and(|(_, old)| crate::flow_graph::same_parameters(old, decl));
         doc.insert("Name", decl.name.clone());
         doc.insert("Documentation", decl.documentation.clone());
+        // Who may run the flow is the declaration's to say when it says it;
+        // otherwise the model keeps the roles it has.
+        if let Some(roles) = &decl.allowed_roles
+            && !same_roles(&doc, roles)
+        {
+            doc.insert(
+                "AllowedModuleRoles",
+                mxrs_bson::build_array(
+                    roles.iter().cloned().map(mxrs_bson::Bson::String).collect(),
+                    1,
+                ),
+            );
+        }
         doc.insert(
             "MicroflowReturnType",
             crate::flow_graph::merge_return_type(&doc, &fresh),
@@ -183,6 +210,26 @@ fn synchronize_flows_with_identity(
                 fresh.get("ObjectCollection").expect("objects").clone(),
             );
             doc.insert("Flows", fresh.get("Flows").expect("flows").clone());
+            if let Some((_, old)) = previous {
+                // A structural edit rebuilds the graph: the notes stay, the
+                // rest of the drawing is new, and the build says so.
+                let notes = old
+                    .get_document("ObjectCollection")
+                    .map(crate::flow_graph::annotations)
+                    .unwrap_or_default();
+                eprintln!(
+                    "[mxrs] warning: {module_name}.{}: the body's structure changed, so its \
+                     graph was rebuilt; {} annotation(s) kept without the lines that attached \
+                     them, and activity captions, documentation, colours and layout reset",
+                    decl.name,
+                    notes.len()
+                );
+                doc.get_document_mut("ObjectCollection")
+                    .expect("objects")
+                    .get_array_mut("Objects")
+                    .expect("object array")
+                    .extend(notes.into_iter().map(mxrs_bson::Bson::Document));
+            }
             if same_parameters && let Some((_, old)) = previous {
                 // Legacy parameters are graph objects; retain them even when
                 // a structural body edit requires a fresh activity graph.

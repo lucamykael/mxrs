@@ -13,6 +13,10 @@ pub enum ProjectLayout {
     /// reporting the project as unrecognizable, but nothing writes it any
     /// more: re-import to get the layer-first tree.
     ModuleFirst,
+    /// The layer-first tree that kept services and ports under
+    /// `src/application/`. Recognized for the same reason: services and
+    /// ports are layers of their own now, and re-importing writes them so.
+    ApplicationLayer,
     Layered,
     Incomplete,
 }
@@ -22,6 +26,7 @@ impl ProjectLayout {
         match self {
             Self::PreLayered => "pre-layered",
             Self::ModuleFirst => "module-first",
+            Self::ApplicationLayer => "application-layer",
             Self::Layered => "layered",
             Self::Incomplete => "incomplete",
         }
@@ -145,8 +150,6 @@ pub fn upgrade_project(
 /// its model by hand in `domain::build`, so the migration composes that
 /// entry point explicitly instead of moving the user's source into
 /// self-registering declarations.
-const MIGRATED_APPLICATION_LAYER: &str =
-    "pub fn build() -> mxrs::ProjectDecl {\n    crate::domain::build()\n}\n";
 const MIGRATED_UI_LAYER: &str = "pub fn apply(_project: &mut mxrs::ProjectDecl) {}\n";
 
 fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<bool> {
@@ -157,11 +160,17 @@ fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<b
     match layout_from(root, &source) {
         ProjectLayout::Layered => return Ok(false),
         ProjectLayout::PreLayered => {}
-        // Moving a module-first tree means moving the user's own source
+        // Moving an earlier layered tree means moving the user's own source
         // between folders, and guessing which of it was hand-edited. The
-        // importer already produces the layer-first tree from the model, so
-        // re-importing is the honest path and this refuses instead.
-        ProjectLayout::ModuleFirst | ProjectLayout::Incomplete => {
+        // importer already produces the current tree from the model, so
+        // re-importing is the honest path and this says so instead.
+        layout @ (ProjectLayout::ModuleFirst | ProjectLayout::ApplicationLayer) => {
+            return Err(ScaffoldError::OutdatedLayout {
+                root: root.display().to_string(),
+                layout: layout.as_str(),
+            });
+        }
+        ProjectLayout::Incomplete => {
             return Err(ScaffoldError::UnsupportedLayerMigration(
                 root.display().to_string(),
             ));
@@ -169,9 +178,9 @@ fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<b
     }
 
     transaction.write(&library, layered_library(&source, &library)?)?;
-    let application = root.join("src/application/mod.rs");
+    let services = root.join("src/services/mod.rs");
     let ui = root.join("src/ui/mod.rs");
-    transaction.create(&application, MIGRATED_APPLICATION_LAYER.to_string())?;
+    transaction.create(&services, crate::templates::services_layer())?;
     transaction.create(&ui, MIGRATED_UI_LAYER.to_string())?;
 
     let infrastructure = root.join("src/infrastructure/mod.rs");
@@ -195,9 +204,23 @@ pub fn project_layout(root: impl AsRef<Path>) -> Result<ProjectLayout> {
 }
 
 fn layout_from(root: &Path, library: &str) -> ProjectLayout {
-    let application = root.join("src/application/mod.rs").is_file();
+    let services = root.join("src/services/mod.rs").is_file();
     let ui = root.join("src/ui/mod.rs").is_file();
-    match (application, ui) {
+    // Services and ports under one `application` folder is the tree before
+    // they became layers. Without its `ui` it is no tree at all, and never
+    // the pre-layered one: migrating that would drop `mod application;`.
+    let application = root.join("src/application/mod.rs").is_file()
+        || library
+            .lines()
+            .any(|line| matches!(line.trim(), "mod application;" | "pub mod application;"));
+    if !services && application {
+        return if ui {
+            ProjectLayout::ApplicationLayer
+        } else {
+            ProjectLayout::Incomplete
+        };
+    }
+    match (services, ui) {
         (false, false)
             if library
                 .lines()
@@ -224,9 +247,9 @@ fn complete_layered_layout(root: &Path, library: &str) -> bool {
         .iter()
         .all(|relative| root.join(relative).is_file())
         && [
-            "pub mod application;",
             "pub mod domain;",
             "pub mod infrastructure;",
+            "pub mod services;",
             "pub mod ui;",
         ]
         .iter()
@@ -256,6 +279,8 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
                 | "pub mod modules;"
                 | "mod presentation;"
                 | "pub mod presentation;"
+                | "mod services;"
+                | "pub mod services;"
                 | "mod ui;"
                 | "pub mod ui;"
         );
@@ -266,9 +291,9 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
             if !inserted_layers {
                 lines.extend(
                     [
-                        "pub mod application;",
                         "pub mod domain;",
                         "pub mod infrastructure;",
+                        "pub mod services;",
                         "pub mod ui;",
                     ]
                     .map(str::to_string),
@@ -303,7 +328,7 @@ fn layered_library(source: &str, path: &Path) -> Result<String> {
     lines[attribute].insert_str(end, ", project = crate::build");
     let composition = [
         "pub fn build() -> mxrs::ProjectDecl {",
-        "    let mut project = application::build();",
+        "    let mut project = domain::build();",
         "    ui::apply(&mut project);",
         "    project",
         "}",
@@ -426,9 +451,9 @@ mod tests {
             (
                 "src/lib.rs",
                 concat!(
-                    "pub mod application;\n",
                     "pub mod domain;\n",
                     "pub mod infrastructure;\n",
+                    "pub mod services;\n",
                     "pub mod ui;\n\n",
                     "pub fn build() {}\n\n",
                     "#[mxrs::application(version = \"11.12.1\", ",
@@ -436,7 +461,7 @@ mod tests {
                 ),
             ),
             ("src/domain/mod.rs", "pub fn build() {}\n"),
-            ("src/application/mod.rs", ""),
+            ("src/services/mod.rs", ""),
             ("src/infrastructure/mod.rs", ""),
             ("src/ui/mod.rs", ""),
         ] {
@@ -666,7 +691,7 @@ mod tests {
                     .iter()
                     .any(|path| path.ends_with("src/lib.rs"))
             );
-            assert!(!root.join("src/application/mod.rs").exists());
+            assert!(!root.join("src/services/mod.rs").exists());
             assert_eq!(
                 std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
                 library
@@ -676,12 +701,14 @@ mod tests {
             assert!(applied.migrated_layers);
             assert!(applied.applied);
             for relative in [
-                "src/application/mod.rs",
+                "src/services/mod.rs",
                 "src/ui/mod.rs",
                 "src/infrastructure/mod.rs",
             ] {
                 assert!(root.join(relative).is_file(), "missing {relative}");
             }
+            // Services are a layer, not a folder of an `application` one.
+            assert!(!root.join("src/application").exists());
             // Migration creates the layers, never a module tree.
             assert!(!root.join("src/modules").exists());
             assert_eq!(
@@ -709,12 +736,12 @@ mod tests {
             }
             let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
             for declaration in [
-                "pub mod application;",
                 "pub mod domain;",
                 "pub mod infrastructure;",
+                "pub mod services;",
                 "pub mod ui;",
                 "project = crate::build",
-                "let mut project = application::build();",
+                "let mut project = domain::build();",
                 "ui::apply(&mut project);",
             ] {
                 assert!(library.contains(declaration), "{declaration}: {library}");
@@ -731,15 +758,37 @@ mod tests {
 
     #[test]
     fn incomplete_or_custom_layouts_fail_without_publishing_staged_changes() {
-        for partial_shape in ["one-layer", "missing-aggregators", "custom-entry-point"] {
+        for partial_shape in [
+            "one-layer",
+            "missing-aggregators",
+            "application-layer",
+            "application-without-ui",
+            "custom-entry-point",
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().join("app");
             let (domain, _) = pre_layered_shell(&root, false);
             match partial_shape {
-                "one-layer" => write(&root, "src/application/mod.rs", "pub mod modules;\n"),
+                "one-layer" => write(&root, "src/services/mod.rs", "pub mod modules;\n"),
                 "missing-aggregators" => {
-                    write(&root, "src/application/mod.rs", "pub mod modules;\n");
+                    write(&root, "src/services/mod.rs", "pub mod modules;\n");
                     write(&root, "src/ui/mod.rs", "pub mod modules;\n");
+                }
+                // The tree that kept services under `application/`: named
+                // for what it is, and re-imported rather than moved.
+                "application-layer" => {
+                    write(&root, "src/application/mod.rs", "pub mod services;\n");
+                    write(&root, "src/ui/mod.rs", "pub mod navigation;\n");
+                    assert_eq!(
+                        project_layout(&root).unwrap(),
+                        ProjectLayout::ApplicationLayer
+                    );
+                }
+                // Half of that tree is not the pre-layered one: migrating
+                // it would take `mod application;` out of the crate.
+                "application-without-ui" => {
+                    write(&root, "src/application/mod.rs", "pub mod services;\n");
+                    assert_eq!(project_layout(&root).unwrap(), ProjectLayout::Incomplete);
                 }
                 "custom-entry-point" => {
                     let path = root.join("src/lib.rs");
@@ -753,7 +802,8 @@ mod tests {
             let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
             assert!(matches!(
                 upgrade_project(&root, "11.13.0", true),
-                Err(ScaffoldError::UnsupportedLayerMigration(_))
+                Err(ScaffoldError::UnsupportedLayerMigration(_)
+                    | ScaffoldError::OutdatedLayout { .. })
             ));
             assert_eq!(
                 std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),

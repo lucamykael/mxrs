@@ -35,6 +35,41 @@ pub struct FlowArgs {
     prefix: Option<syn::Ident>,
     module: syn::LitStr,
     name: Option<syn::LitStr>,
+    /// `roles(...)`: the module roles that may run the flow.
+    roles: Option<Vec<Related>>,
+    /// `calls(...)`: the flows it calls.
+    calls: Option<Vec<Related>>,
+    /// `uses(...)`: the entities it works with.
+    uses: Option<Vec<Related>>,
+    /// `used_by(...)`: what refers to it.
+    used_by: Option<Vec<Related>>,
+}
+
+/// One item of a relation list: the Rust item that declares the related
+/// thing — which the compiler resolves and an editor follows — or, for what
+/// no Rust item declares, its qualified name.
+enum Related {
+    Item(syn::Path),
+    Name(syn::LitStr),
+}
+
+impl syn::parse::Parse for Related {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        if input.peek(syn::LitStr) {
+            input.parse().map(Related::Name)
+        } else {
+            input.parse().map(Related::Item)
+        }
+    }
+}
+
+fn related_list(input: syn::parse::ParseStream<'_>) -> syn::Result<Vec<Related>> {
+    let content;
+    syn::parenthesized!(content in input);
+    Ok(content
+        .parse_terminated(<Related as syn::parse::Parse>::parse, syn::Token![,])?
+        .into_iter()
+        .collect())
 }
 
 impl syn::parse::Parse for FlowArgs {
@@ -42,9 +77,29 @@ impl syn::parse::Parse for FlowArgs {
         let mut prefix = None;
         let mut module = None;
         let mut name = None;
+        let (mut roles, mut calls, mut uses, mut used_by) = (None, None, None, None);
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
-            if input.peek(syn::Token![=]) {
+            if input.peek(syn::token::Paren) {
+                let slot = match key.to_string().as_str() {
+                    "roles" => &mut roles,
+                    "calls" => &mut calls,
+                    "uses" => &mut uses,
+                    "used_by" => &mut used_by,
+                    _ => {
+                        return Err(syn::Error::new(
+                            key.span(),
+                            "unknown flow relation; expected `roles(...)`, `calls(...)`, `uses(...)` or `used_by(...)`",
+                        ));
+                    }
+                };
+                if slot.replace(related_list(input)?).is_some() {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!("`{key}(...)` is stated once"),
+                    ));
+                }
+            } else if input.peek(syn::Token![=]) {
                 input.parse::<syn::Token![=]>()?;
                 match key.to_string().as_str() {
                     "module" => module = Some(input.parse()?),
@@ -65,7 +120,7 @@ impl syn::parse::Parse for FlowArgs {
                 if !is_prefix {
                     return Err(syn::Error::new(
                         key.span(),
-                        "expected a naming prefix in capitals (`ACT`, `SUB`, `DS`, ...), `module = \"...\"`, or `name = \"...\"`",
+                        "expected a naming prefix in capitals (`ACT`, `SUB`, `DS`, ...), `module = \"...\"`, `name = \"...\"`, or a relation such as `calls(...)`",
                     ));
                 }
                 if prefix.replace(key.clone()).is_some() {
@@ -80,6 +135,10 @@ impl syn::parse::Parse for FlowArgs {
             prefix,
             module: module.ok_or_else(|| input.error("missing `module = \"ModuleName\"`"))?,
             name,
+            roles,
+            calls,
+            uses,
+            used_by,
         })
     }
 }
@@ -167,6 +226,31 @@ pub fn expand_flow(
         .filter(|attribute| attribute.path().is_ident("doc"))
         .collect::<Vec<_>>();
     let documentation = doc_text(&docs).map(|text| quote! { __mxrs_flow.documentation(#text); });
+    // A role is a variant of the enum its module declares its roles with,
+    // a called flow the type its declaration generates, an entity its
+    // struct: each resolves to the name the model knows it by.
+    let relation = |list: &Option<Vec<Related>>,
+                    method: TokenStream,
+                    name_of: &dyn Fn(&syn::Path) -> TokenStream| {
+        list.as_ref().map(|items| {
+            let names = items.iter().map(|item| match item {
+                Related::Name(name) => quote! { ::std::string::String::from(#name) },
+                Related::Item(path) => name_of(path),
+            });
+            quote! {
+                __mxrs_flow.#method(::std::vec::Vec::<::std::string::String>::from([#(#names),*]));
+            }
+        })
+    };
+    let flow_name = |path: &syn::Path| quote! { <#path as ::mxrs::FlowName>::flow_name() };
+    let roles = relation(&args.roles, quote!(allowed_roles), &|path| {
+        quote! { (#path).qualified_name() }
+    });
+    let calls = relation(&args.calls, quote!(declares_calls), &flow_name);
+    let uses = relation(&args.uses, quote!(declares_uses), &|path| {
+        quote! { <#path as ::mxrs::EntityMarker>::qualified_name() }
+    });
+    let used_by = relation(&args.used_by, quote!(declares_used_by), &flow_name);
     let (marker_trait, module_builder, method, stage, noun) = match kind {
         FlowKind::Microflow => (
             quote!(::mxrs::MicroflowMarker),
@@ -201,6 +285,12 @@ pub fn expand_flow(
             const NAME: &'static str = #name;
         }
 
+        impl ::mxrs::FlowName for #marker {
+            fn flow_name() -> ::std::string::String {
+                <Self as #marker_trait>::qualified_name()
+            }
+        }
+
         ::mxrs::inventory::submit! {
             ::mxrs::registry::Declaration::new(
                 #stage,
@@ -211,6 +301,10 @@ pub fn expand_flow(
                     let mut __mxrs_module = #module_builder::new(#module);
                     __mxrs_module.#method(#name, |__mxrs_flow| {
                         #documentation
+                        #roles
+                        #calls
+                        #uses
+                        #used_by
                         #ident(__mxrs_flow);
                     });
                     __mxrs_project.merge_module(__mxrs_module.into_decl());

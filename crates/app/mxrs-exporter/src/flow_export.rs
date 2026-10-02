@@ -118,7 +118,7 @@ pub(crate) fn data_type(doc: &Document) -> Option<Ty> {
 }
 
 /// A reference to the struct declaring entity `Module.Entity`.
-fn marker(name: &str) -> Option<String> {
+pub(crate) fn marker(name: &str) -> Option<String> {
     let (module, entity) = name.split_once('.')?;
     if !mxrs_typegen::is_rust_identifier(module) || !mxrs_typegen::is_rust_identifier(entity) {
         return None;
@@ -127,7 +127,7 @@ fn marker(name: &str) -> Option<String> {
 }
 
 /// A reference to the type naming microflow `Module.Flow`.
-fn flow_marker(name: &str) -> Option<String> {
+pub(crate) fn flow_marker(name: &str) -> Option<String> {
     let (module, flow) = name.split_once('.')?;
     if !mxrs_typegen::is_rust_identifier(module) || !mxrs_typegen::is_rust_identifier(flow) {
         return None;
@@ -145,6 +145,8 @@ fn tag(ty: &Ty, entities: &HashSet<String>) -> Option<String> {
         Ty::Decimal => "MxDecimal".into(),
         Ty::DateTime => "MxDateTime".into(),
         Ty::Binary => "MxBinary".into(),
+        // An enumeration value has no typed expression form here yet.
+        Ty::Enumeration(_) => return None,
         Ty::Object(entity) | Ty::List(entity) => {
             if !entities.contains(entity) {
                 return None;
@@ -169,7 +171,7 @@ fn tag(ty: &Ty, entities: &HashSet<String>) -> Option<String> {
 /// it can be read back (`new_order` → `NewOrder`), so two variables never
 /// share a binding; any other name keeps its exact spelling behind a
 /// `value_` prefix, which no converted name starts with.
-fn binding(name: &str) -> Option<String> {
+pub(crate) fn binding(name: &str) -> Option<String> {
     let mut chars = name.chars();
     if !chars
         .next()
@@ -194,6 +196,25 @@ fn binding(name: &str) -> Option<String> {
                 | "boolean"
                 | "attribute"
                 | "association"
+                // What the builders' own closures and helpers are called:
+                // a variable of the same name would hide them, or be taken
+                // for used because of them.
+                | "mx"
+                | "var"
+                | "create"
+                | "change"
+                | "commit"
+                | "delete"
+                | "rollback"
+                | "retrieve"
+                | "aggregate"
+                | "log"
+                | "call"
+                | "message"
+                | "page"
+                | "sort"
+                | "on"
+                | "rule"
         );
     Some(if readable {
         snake
@@ -283,7 +304,21 @@ fn signature(flow: &Microflow) -> Option<Vec<(String, Ty)>> {
         .collect()
 }
 
+/// Why each flow that is not declared in Rust stays in the imported model,
+/// by module, name and whether it is a nanoflow.
+pub(crate) type KeptFlows = HashMap<(String, String, bool), String>;
+
 pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<ConvertedFlow>> {
+    Ok(collect_all(project, modules)?.0)
+}
+
+/// Every flow that can be declared in Rust, and for each one that cannot,
+/// why not.
+pub(crate) fn collect_all(
+    project: &Project,
+    modules: &[Module],
+) -> Result<(Vec<ConvertedFlow>, KeptFlows)> {
+    let mut kept = KeptFlows::new();
     let attributes = attributes(modules);
     let entities: HashSet<_> = modules
         .iter()
@@ -303,6 +338,43 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
                 .collect::<Vec<_>>()
         })
         .collect();
+    let accessors: HashSet<(String, String)> = modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_default();
+            module.entities().iter().flat_map(move |entity| {
+                let qualified = format!(
+                    "{module_name}.{}",
+                    entity.name.as_deref().unwrap_or_default()
+                );
+                entity
+                    .attributes
+                    .iter()
+                    .filter_map(|attribute| attribute.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .map(move |name| (qualified.clone(), name))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let microflows: HashSet<String> = modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_default();
+            module
+                .microflows
+                .iter()
+                .filter_map(move |flow| Some(format!("{module_name}.{}", flow.name.as_deref()?)))
+        })
+        .collect();
+    let model = crate::flow_general::Model {
+        entities: &entities,
+        attributes: &accessors,
+        microflows: &microflows,
+    };
+    // `MXRS_EXPLAIN_FLOWS=1` says why each flow that stays in the imported
+    // model does.
+    let explain = std::env::var_os("MXRS_EXPLAIN_FLOWS").is_some();
     let mut raw = Vec::new();
     let mut seen = HashSet::new();
     let mut ambiguous = HashSet::new();
@@ -332,12 +404,25 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
             if !seen.insert(key.clone()) {
                 ambiguous.insert(key);
             }
-            if parameters_attested(&doc).is_none() {
-                if let Some(name) = &flow.name {
-                    targets.remove(&format!("{module_name}.{name}"));
-                }
-            } else {
+            // A signature the typed builders cannot state is not one a typed
+            // call can be checked against; the flow itself may still be
+            // declared in full.
+            if (parameters_attested(&doc).is_none()
+                || signature(&Microflow::from_bson(&doc)).is_none())
+                && let Some(name) = &flow.name
+            {
+                targets.remove(&format!("{module_name}.{name}"));
+            }
+            if parameters_attested(&doc).is_some() {
                 raw.push((module_name, doc));
+            } else {
+                keep(
+                    &mut kept,
+                    explain,
+                    module_name,
+                    &doc,
+                    "its parameters are stored in a form nothing here reads".to_string(),
+                );
             }
         }
     }
@@ -346,18 +431,60 @@ pub(crate) fn collect(project: &Project, modules: &[Module]) -> Result<Vec<Conve
             targets.remove(name);
         }
     }
-    let mut result: Vec<_> = raw
-        .iter()
-        .filter(|(module, doc)| {
-            !ambiguous.contains(&(
-                format!("{module}.{}", doc.get_str("Name").unwrap_or_default()),
-                doc.get_str("$Type").unwrap_or_default().to_string(),
-            ))
-        })
-        .filter_map(|(module, doc)| convert(module, doc, &targets, &entities, &attributes))
-        .collect();
+    let mut result = Vec::new();
+    for (module, doc) in &raw {
+        if ambiguous.contains(&(
+            format!("{module}.{}", doc.get_str("Name").unwrap_or_default()),
+            doc.get_str("$Type").unwrap_or_default().to_string(),
+        )) {
+            keep(
+                &mut kept,
+                explain,
+                module,
+                doc,
+                "its module has two flows of that name".to_string(),
+            );
+            continue;
+        }
+        let converted = {
+            // The typed conversion first: it checks more. Whatever it cannot
+            // express is stated in full instead.
+            convert(module, doc, &targets, &entities, &attributes).or_else(|| {
+                match crate::flow_general::convert(module, doc, &model) {
+                    Ok((declaration, source)) => Some(ConvertedFlow {
+                        module: (*module).to_string(),
+                        native_type: doc.get_str("$Type").ok()?.to_string(),
+                        declaration,
+                        source: crate::flow_general::polish(source),
+                    }),
+                    Err(reason) => {
+                        keep(&mut kept, explain, module, doc, reason);
+                        None
+                    }
+                }
+            })
+        };
+        result.extend(converted);
+    }
     result.sort_by(|a, b| (&a.module, &a.declaration.name).cmp(&(&b.module, &b.declaration.name)));
-    Ok(result)
+    Ok((result, kept))
+}
+
+/// Records why a flow stays in the imported model; `MXRS_EXPLAIN_FLOWS=1`
+/// also says so while importing.
+fn keep(kept: &mut KeptFlows, explain: bool, module: &str, doc: &Document, reason: String) {
+    let name = doc.get_str("Name").unwrap_or_default();
+    if explain {
+        eprintln!("[mxrs] {module}.{name} stays imported: {reason}");
+    }
+    kept.insert(
+        (
+            module.to_string(),
+            name.to_string(),
+            doc.get_str("$Type").ok() == Some("Microflows$Nanoflow"),
+        ),
+        reason,
+    );
 }
 
 fn parameters_attested(doc: &Document) -> Option<()> {
@@ -382,7 +509,6 @@ fn parameters_attested(doc: &Document) -> Option<()> {
             return None;
         }
     }
-    signature(&Microflow::from_bson(doc))?;
     Some(())
 }
 
@@ -454,6 +580,7 @@ fn convert(
         targets,
         entities,
         attributes,
+        nanoflow: doc.get_str("$Type").ok() == Some("Microflows$Nanoflow"),
     };
     declaration.activities = converter.block(
         &nodes[1..nodes.len().checked_sub(1)?],
@@ -534,7 +661,7 @@ fn polish_source(source: Vec<String>) -> Vec<String> {
 /// The identifier a line binds: `let name = ...` or a `|flow, name|` loop
 /// closure parameter. `None` for anything else, including bindings already
 /// underscore-prefixed.
-fn binding_name(line: &str) -> Option<String> {
+pub(crate) fn binding_name(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
     let closure_parameter = ["|flow, ", "|_flow, "]
         .iter()
@@ -560,7 +687,7 @@ fn binding_name(line: &str) -> Option<String> {
 /// string literals and model references, and neither a path segment
 /// (`Order::name()`) nor a method (`.name(...)`) — so a variable `name` is
 /// not kept alive by an attribute or a parameter that happens to share it.
-fn find_identifier(line: &str, name: &str) -> Option<usize> {
+pub(crate) fn find_identifier(line: &str, name: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -601,9 +728,15 @@ struct Converter<'a> {
     targets: &'a HashMap<String, &'a Microflow>,
     entities: &'a HashSet<String>,
     attributes: &'a Attributes,
+    /// A nanoflow's activities abort where a microflow's roll back.
+    nanoflow: bool,
 }
 
 impl Converter<'_> {
+    fn default_handling(&self) -> &'static str {
+        if self.nanoflow { "Abort" } else { "Rollback" }
+    }
+
     fn block(
         &self,
         nodes: &[Node<'_>],
@@ -646,7 +779,7 @@ impl Converter<'_> {
                 _ => None,
             },
             Node::Decision { split, yes, no, .. } => {
-                if split.get_str("ErrorHandlingType").ok()? != "Rollback" {
+                if split.get_str("ErrorHandlingType").ok()? != self.default_handling() {
                     return None;
                 }
                 let condition_doc = split.get_document("SplitCondition").ok()?;
@@ -666,7 +799,7 @@ impl Converter<'_> {
                     true_branch,
                     false_branch,
                 };
-                attest_control(split, &activity, "SplitCondition")?;
+                attest_control(split, &activity, "SplitCondition", self.nanoflow)?;
                 source.push(format!(
                     "flow.decision({rendered}, {}",
                     closure_start(&yes_source)
@@ -677,8 +810,11 @@ impl Converter<'_> {
                 source.push("});".into());
                 Some(activity)
             }
+            // The typed builders have no error handlers and no switches; a
+            // flow with either is declared in full instead.
+            Node::Switch { .. } | Node::Handled { .. } | Node::Label(_) | Node::Jump(_) => None,
             Node::Loop { node, body } => {
-                if node.get_str("ErrorHandlingType").ok()? != "Rollback" {
+                if node.get_str("ErrorHandlingType").ok()? != self.default_handling() {
                     return None;
                 }
                 let native = node.get_document("LoopSource").ok()?;
@@ -736,7 +872,7 @@ impl Converter<'_> {
                     } => *target = activities,
                     _ => unreachable!(),
                 }
-                attest_control(node, &activity, "LoopSource")?;
+                attest_control(node, &activity, "LoopSource", self.nanoflow)?;
                 source.push(if body.is_empty() {
                     opening.replace("|flow", "|_flow")
                 } else {
@@ -759,6 +895,7 @@ impl Converter<'_> {
             targets,
             entities,
             attributes,
+            ..
         } = self;
         let action = node.get_document("Action").ok()?;
         let activity = match action.get_str("$Type").ok()? {
@@ -958,10 +1095,11 @@ impl Converter<'_> {
             _ => return None,
         };
         // Unknown action fields/options must never be silently called editable.
-        let (fresh, _) = mxrs_writer::flow_compiler::build_microflow_graph(
+        let (fresh, _) = mxrs_writer::flow_compiler::build_flow_graph(
             std::slice::from_ref(&activity),
             &[],
             None,
+            self.nanoflow,
         );
         if !same_semantics(action, fresh.get(1)?.get_document("Action").ok()?) {
             return None;
@@ -978,11 +1116,12 @@ fn closure_start(source: &[String]) -> &'static str {
     }
 }
 
-fn attest_control(node: &Document, activity: &Activity, field: &str) -> Option<()> {
-    let (fresh, _) = mxrs_writer::flow_compiler::build_microflow_graph(
+fn attest_control(node: &Document, activity: &Activity, field: &str, nanoflow: bool) -> Option<()> {
+    let (fresh, _) = mxrs_writer::flow_compiler::build_flow_graph(
         std::slice::from_ref(activity),
         &[],
         None,
+        nanoflow,
     );
     same_semantics(
         node.get_document(field).ok()?,
@@ -1077,6 +1216,28 @@ fn flow_function(base: &str, marker: &str) -> String {
 /// `create_order_service.rs`, with `ACT` stated on the attribute. Two flows
 /// of one module that would share that name keep their whole Mendix name
 /// instead.
+/// The file a flow that stays in the imported model is named in: the one
+/// its declaration would have, so declaring it later replaces the file's
+/// contents and nothing else moves.
+pub(crate) fn kept_file_stem(name: &str, nanoflow: bool) -> String {
+    let function = flow_function(split_prefix(name).1, &names::flow_marker(name));
+    file_stem(&function, nanoflow)
+}
+
+/// The file a flow's declaring function lives in.
+fn file_stem(function: &str, nanoflow: bool) -> String {
+    let stem = function.trim_end_matches('_');
+    // A nanoflow's file is named after its function alone, so it must not
+    // be a word Rust keeps (`return.rs`) nor the folder's own index.
+    if !nanoflow {
+        format!("{stem}_service")
+    } else if stem.is_empty() || rust_keyword(stem) || stem == "mod" {
+        format!("{stem}_nanoflow")
+    } else {
+        stem.to_string()
+    }
+}
+
 pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
     let short = |flow: &ConvertedFlow| {
         let name = &flow.declaration.name;
@@ -1113,19 +1274,9 @@ pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
                 Some(prefix) => format!("{prefix}_{}", derive_pascal_case(&function)),
                 None => derive_pascal_case(&function),
             };
-            let stem = function.trim_end_matches('_');
-            // A nanoflow's file is named after its function alone, so it
-            // must not be a word Rust keeps (`return.rs`) nor one of the
-            // folder's own files.
-            let base = if !nanoflow {
-                format!("{stem}_service")
-            } else if stem.is_empty() || rust_keyword(stem) || matches!(stem, "mod" | "imported") {
-                format!("{stem}_nanoflow")
-            } else {
-                stem.to_string()
-            };
-            // Distinct functions can still ask for one file (`imported` and
-            // `imported_nanoflow`): the later one takes a numbered name.
+            let base = file_stem(&function, nanoflow);
+            // Distinct functions can still ask for one file (`return` and
+            // `return_nanoflow`): the later one takes a numbered name.
             let mut file_stem = base.clone();
             let mut suffix = 2;
             while !files.insert((flow.module.as_str(), nanoflow, file_stem.clone())) {
@@ -1149,6 +1300,7 @@ pub(crate) fn render_files(
     plans: &[FlowFile],
     nanoflow: bool,
     names: &ModelNames<'_>,
+    relations: &HashMap<String, mxrs_model::relations::FlowRelations>,
 ) -> Result<Vec<RenderedFlowSource>> {
     let attribute = if nanoflow { "nanoflow" } else { "microflow" };
     flows
@@ -1176,6 +1328,55 @@ pub(crate) fn render_files(
             arguments.push(format!("module = {}", rust_string(&flow.module)));
             if plan.explicit_name {
                 arguments.push(format!("name = {}", rust_string(name)));
+            }
+            // What the model says the flow is related to, each named by
+            // the Rust item that declares it where there is one.
+            if let Some(related) = relations.get(&format!("{}.{name}", flow.module)) {
+                let list = |name: &str, items: Vec<String>| {
+                    (!items.is_empty()).then(|| format!("{name}({})", items.join(", ")))
+                };
+                let flow_item = |target: &String| {
+                    if names.microflows.contains_key(target) {
+                        names::microflow(target)
+                    } else if names.nanoflows.contains_key(target) {
+                        names::nanoflow(target)
+                    } else {
+                        rust_string(target)
+                    }
+                };
+                arguments.extend(list(
+                    "roles",
+                    related
+                        .roles
+                        .iter()
+                        .map(|role| {
+                            if names.roles.contains_key(role) {
+                                names::role(role)
+                            } else {
+                                rust_string(role)
+                            }
+                        })
+                        .collect(),
+                ));
+                arguments.extend(list("calls", related.calls.iter().map(flow_item).collect()));
+                arguments.extend(list(
+                    "uses",
+                    related
+                        .uses
+                        .iter()
+                        .map(|entity| {
+                            if names.entities.contains_key(entity) {
+                                names::entity(entity)
+                            } else {
+                                rust_string(entity)
+                            }
+                        })
+                        .collect(),
+                ));
+                arguments.extend(list(
+                    "used_by",
+                    related.used_by.iter().map(flow_item).collect(),
+                ));
             }
             writeln!(item, "#[{attribute}({})]", arguments.join(", ")).unwrap();
             // A variable whose Mendix name does not read back from snake
@@ -1236,6 +1437,9 @@ mod tests {
         assert_eq!(binding("Flow").as_deref(), Some("value_Flow"));
         assert_eq!(binding("String").as_deref(), Some("value_String"));
         assert_eq!(binding("Type").as_deref(), Some("value_Type"));
+        // The receivers of switch and rule closures.
+        assert_eq!(binding("On").as_deref(), Some("value_On"));
+        assert_eq!(binding("Rule").as_deref(), Some("value_Rule"));
         assert_eq!(binding("ValueTotal").as_deref(), Some("value_ValueTotal"));
         assert_eq!(binding("not valid"), None);
     }
@@ -1300,8 +1504,8 @@ mod tests {
         let flows = [
             flow("Sales", "ACT_Return", true),
             flow("Sales", "ACT_Type", true),
-            flow("Sales", "Imported", true),
-            flow("Sales", "ImportedNanoflow", true),
+            flow("Sales", "Mod", true),
+            flow("Sales", "ModNanoflow", true),
             flow("Sales", "ACT_Refresh", true),
             flow("Sales", "ACT_Return", false),
             flow("Crm", "ACT_Refresh", true),
@@ -1316,10 +1520,10 @@ mod tests {
                 // `return.rs` and `type.rs` are not modules Rust can declare.
                 "return_nanoflow",
                 "type_nanoflow",
-                // `imported.rs` is the folder's own; the flow that is really
-                // called `ImportedNanoflow` then finds its name taken.
-                "imported_nanoflow",
-                "imported_nanoflow_2",
+                // `mod.rs` is the folder's own; the flow that is really
+                // called `ModNanoflow` then finds its name taken.
+                "mod_nanoflow",
+                "mod_nanoflow_2",
                 "refresh",
                 "return_service",
                 // Another module's folder is another namespace.

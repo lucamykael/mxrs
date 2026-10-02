@@ -21,15 +21,32 @@ read-only behavioral oracle; never edit it.
   typed DSL/IR/writer/exporter surface for it.
 - Generated projects are layer-first for the modules the project created
   (user directive, 2026-09-29, superseding the module-first directive of
-  2026-09-28): one `src/domain/`, one `src/application/`, one
+  2026-09-28): one `src/domain/`, one `src/services/`, one `src/ports/`, one
   `src/controllers/` and one `src/ui/` for the whole project, each concept —
   entities, DTOs, enumerations, export mappings, documents, module security;
-  microflow services and ports; controllers; pages, layouts, nanoflows —
-  holding a folder per Mendix module. The module folder inside a concept is
+  services; ports; controllers; pages, layouts, nanoflows — holding a folder
+  per Mendix module. The module folder inside a concept is
   not a repetition of the layers: Mendix entity names are unique per module
   and not across a project, so it is what keeps them apart. Project-level
   layers keep cross-cutting concerns (project security, navigation, shared
   infrastructure). Dependencies point inward.
+- Microflows are services, and services are a layer (user directive,
+  2026-10-01): `src/services/<module>/<name>_service.rs`, beside `domain`,
+  `controllers` and `infrastructure` — there is no `application` folder
+  around it. Every microflow has a file of its own, holding the function
+  that declares it; there is no `imported.rs` listing leftovers. Every
+  microflow body is editable Rust: what a typed builder cannot check is
+  stated as Mendix writes it (`mx("...")`), and an activity no builder
+  covers is stated as its document (`flow.native_action`) rather than
+  keeping the flow out of Rust. A flow that still cannot be declared keeps
+  its file, which names it and says why. The attribute on a flow states what
+  the flow is: its kind (`ACT`, `SUB`, ...), the roles that may run it
+  (`roles(...)`, which is the model's own list), and what it calls, uses and
+  is used by (`calls(...)`, `uses(...)`, `used_by(...)`), each named by the
+  Rust item that declares it. Those three write nothing and are compared
+  with the model on every build; a difference is a warning. `src/ports/`
+  holds the contracts between the model and hand-written code, and task
+  queues are declared in `src/services/task_queues.rs`.
 - There is no `presentation` layer (user directive, 2026-10-01): what the
   application serves over HTTP and the user interface it declares are
   different things. `src/controllers/<module>/` holds, per published REST

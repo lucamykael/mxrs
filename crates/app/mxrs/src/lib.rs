@@ -4,6 +4,11 @@
 //! remain available for framework development, but are not part of the
 //! normal application-facing dependency surface.
 
+pub use mxrs_dsl::flow_actions;
+pub use mxrs_dsl::{
+    AggregateFunction, AssociationName, AttributeName, ChangeKind, Commit, EntityName, FlowVar,
+    ListChange, LogSeverity, MemberName, MessageKind, MicroflowName, SortOrder, Variable, var,
+};
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, ConstantBuilder, ContainerBuilder, DataViewBuilder,
     DemoUserBuilder, EntityBuilder, EnumerationBuilder, FlowBuilder, FlowParameterBuilder,
@@ -69,6 +74,7 @@ pub use mxrs_semantic::{
     Diagnostic as SemanticDiagnostic, Reference as SemanticReference,
     SearchHit as SemanticSearchHit, SemanticError, SemanticIndex,
 };
+pub use mxrs_writer::relations::relation_warnings as flow_relation_warnings;
 pub use mxrs_writer::{synchronize_project, write_project};
 
 pub mod mapping;
@@ -145,6 +151,11 @@ macro_rules! __imported_flow {
             const MODULE: &'static str = $module;
             const NAME: &'static str = $name;
         }
+        impl $crate::FlowName for $marker {
+            fn flow_name() -> ::std::string::String {
+                <Self as $crate::MicroflowMarker>::qualified_name()
+            }
+        }
     };
     (nanoflow, $module:literal, $marker:ident, $name:expr) => {
         #[allow(non_camel_case_types)]
@@ -153,6 +164,11 @@ macro_rules! __imported_flow {
         impl $crate::NanoflowMarker for $marker {
             const MODULE: &'static str = $module;
             const NAME: &'static str = $name;
+        }
+        impl $crate::FlowName for $marker {
+            fn flow_name() -> ::std::string::String {
+                <Self as $crate::NanoflowMarker>::qualified_name()
+            }
         }
     };
 }
@@ -166,6 +182,10 @@ pub trait ApplicationDefinition {
 
 /// Imports commonly used authoring types and macros.
 pub mod prelude {
+    pub use crate::{
+        AggregateFunction, ChangeKind, Commit, DataType, FlowVar, ListChange, LogSeverity,
+        MemberName, MessageKind, Mx, NativeDocument, NativeValue, SortOrder, Variable, mx, var,
+    };
     pub use crate::{
         ApplicationDefinition, AssociationMarker, AttributeMarker, ButtonBuilder, CallArgument,
         ConstantBuilder, ConstantType, ContainerBuilder, DataViewBuilder, DemoUserBuilder,

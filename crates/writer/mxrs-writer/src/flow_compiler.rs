@@ -11,6 +11,8 @@
 //! `ArgumentModel`/`Queue` fields only present on majors 6-10/8-9) are
 //! dropped rather than ported.
 
+use std::collections::HashMap;
+
 use mxrs_bson::{Bson, Document, doc};
 use mxrs_ir::flow::{Activity, FlowReturnType, Member};
 
@@ -34,8 +36,80 @@ pub fn return_type_document(return_type: Option<&FlowReturnType>) -> Option<Docu
         FlowReturnType::List(entity) => {
             doc! { "$ID": id, "$Type": "DataTypes$ListType", "Entity": entity.clone() }
         }
+        FlowReturnType::Enumeration(enumeration) => {
+            doc! { "$ID": id, "$Type": "DataTypes$EnumerationType", "Enumeration": enumeration.clone() }
+        }
     };
     Some(document)
+}
+
+/// A stated action document as the model stores it: every nested document
+/// gets an identity of its own, and every list the marker it was declared
+/// with.
+pub(crate) fn native_document(document: &mxrs_ir::NativeDocument) -> Document {
+    let mut lowered = doc! {
+        "$ID": uuid::Uuid::new_v4().to_string(),
+        "$Type": document.ty.clone(),
+    };
+    for (key, value) in &document.fields {
+        lowered.insert(key.clone(), native_value(value));
+    }
+    lowered
+}
+
+fn native_value(value: &mxrs_ir::NativeValue) -> Bson {
+    use mxrs_ir::NativeValue;
+    match value {
+        NativeValue::Null => Bson::Null,
+        NativeValue::Bool(value) => Bson::Boolean(*value),
+        NativeValue::Int32(value) => Bson::Int32(*value),
+        NativeValue::Int64(value) => Bson::Int64(*value),
+        NativeValue::Text(value) => Bson::String(value.clone()),
+        NativeValue::Document(document) => Bson::Document(native_document(document)),
+        NativeValue::List(marker, items) => Bson::Array(mxrs_bson::build_array(
+            items.iter().map(native_value).collect(),
+            *marker,
+        )),
+    }
+}
+
+/// Lowers the body of a microflow or, with `nanoflow`, of a nanoflow. The
+/// two differ in what an activity does about failing when nothing says
+/// otherwise: a microflow rolls back, a nanoflow — which has no transaction
+/// to roll back — aborts.
+pub fn build_flow_graph(
+    activities: &[Activity],
+    rescue_activities: &[Activity],
+    return_expression: Option<&str>,
+    nanoflow: bool,
+) -> (Vec<Document>, Vec<Document>) {
+    let (mut objects, flows) =
+        build_microflow_graph(activities, rescue_activities, return_expression);
+    if nanoflow {
+        for object in &mut objects {
+            abort_on_error(object);
+        }
+    }
+    (objects, flows)
+}
+
+fn abort_on_error(document: &mut Document) {
+    if document.get_str("ErrorHandlingType").ok() == Some("Rollback") {
+        document.insert("ErrorHandlingType", "Abort");
+    }
+    for (_, value) in document.iter_mut() {
+        match value {
+            Bson::Document(inner) => abort_on_error(inner),
+            Bson::Array(items) => {
+                for item in items {
+                    if let Bson::Document(inner) = item {
+                        abort_on_error(inner);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 pub fn build_microflow_graph(
@@ -59,8 +133,10 @@ pub fn build_microflow_graph(
     let mut x = 190;
     let mut rescue_origin = None;
     for (index, activity) in activities.iter().enumerate() {
-        if prev_id.is_none() {
-            break;
+        // Once a path has ended only a label, which jumps reach, starts
+        // another one.
+        if prev_id.is_none() && !matches!(activity, Activity::Label(_)) {
+            continue;
         }
         let error_handling = if !rescue_activities.is_empty() && index + 1 == activities.len() {
             "CustomWithoutRollBack"
@@ -103,7 +179,45 @@ pub fn build_microflow_graph(
         );
     }
 
+    // A jump is lowered before anything knows which merge its label became:
+    // its edge points at the label's name until every merge exists.
+    let mut labels = HashMap::new();
+    for object in &mut objects {
+        collect_labels(object, &mut labels);
+    }
+    for flow in &mut flows {
+        if let Some(name) = flow
+            .get_str("DestinationPointer")
+            .ok()
+            .and_then(|pointer| pointer.strip_prefix(LABEL))
+            && let Some(merge) = labels.get(name)
+        {
+            flow.insert("DestinationPointer", merge.as_str());
+        }
+    }
+
     (objects, flows)
+}
+
+/// What a jump's edge points at until its label's merge is known, followed
+/// by the label's name.
+const LABEL: &str = "label:";
+
+fn collect_labels(object: &mut Document, labels: &mut HashMap<String, String>) {
+    if let Some(Bson::String(name)) = object.remove("$Label")
+        && let Ok(id) = object.get_str("$ID")
+    {
+        labels.insert(name, id.to_string());
+    }
+    if let Ok(collection) = object.get_document_mut("ObjectCollection")
+        && let Ok(inner) = collection.get_array_mut("Objects")
+    {
+        for item in inner {
+            if let Bson::Document(inner) = item {
+                collect_labels(inner, labels);
+            }
+        }
+    }
 }
 
 struct BranchResult {
@@ -121,22 +235,149 @@ fn process_activity(
     y: i32,
     error_handling: &str,
 ) -> (Option<String>, i32) {
-    if let Activity::Decision {
-        condition,
-        true_branch,
-        false_branch,
+    if let Activity::Disabled(inner) = activity {
+        let first = objects.len();
+        let result = process_activity(inner, prev_id, objects, flows, x, y, error_handling);
+        // The model disables one node; what an activity lowers to first is
+        // the node that stands for it.
+        if let Some(node) = objects.get_mut(first) {
+            node.insert("Disabled", true);
+        }
+        return result;
+    }
+    if let Activity::OnError {
+        handling,
+        activity: inner,
+        handler,
     } = activity
     {
-        return process_decision(
+        return process_handled(*handling, inner, handler, prev_id, objects, flows, x, y);
+    }
+    match activity {
+        Activity::Decision {
             condition,
             true_branch,
             false_branch,
-            prev_id,
-            objects,
-            flows,
-            x,
-            y,
-        );
+        } => {
+            let mut split = flow_object_doc("", "Microflows$ExclusiveSplit", x, y, "90;60");
+            split.insert("SplitCondition", split_condition_doc(condition));
+            split.insert("Caption", condition.as_str());
+            split.insert("ErrorHandlingType", "Rollback");
+            split.insert("Documentation", "");
+            let branches = [
+                (vec!["true".to_string()], true_branch.as_slice()),
+                (vec!["false".to_string()], false_branch.as_slice()),
+            ];
+            return process_split(
+                split,
+                "Microflows$EnumerationCase",
+                &branches,
+                prev_id,
+                objects,
+                flows,
+                x,
+                y,
+            );
+        }
+        Activity::RuleDecision {
+            rule,
+            arguments,
+            true_branch,
+            false_branch,
+        } => {
+            let branches = [
+                (vec!["true".to_string()], true_branch.as_slice()),
+                (vec!["false".to_string()], false_branch.as_slice()),
+            ];
+            return process_split(
+                rule_split(rule, arguments, x, y),
+                "Microflows$EnumerationCase",
+                &branches,
+                prev_id,
+                objects,
+                flows,
+                x,
+                y,
+            );
+        }
+        Activity::Label(name) => {
+            let merge_id = uuid::Uuid::new_v4().to_string();
+            let mut merge = flow_object_doc(&merge_id, "Microflows$ExclusiveMerge", x, y, "40;40");
+            merge.insert("$Label", name.as_str());
+            objects.push(merge);
+            if let Some(prev) = prev_id {
+                flows.push(sequence_flow_doc(prev, &merge_id, None));
+            }
+            return (Some(merge_id), x + 80);
+        }
+        Activity::Jump(name) => {
+            if let Some(prev) = prev_id {
+                flows.push(sequence_flow_doc(prev, &format!("{LABEL}{name}"), None));
+            }
+            return (None, x);
+        }
+        Activity::RuleSwitch {
+            rule,
+            arguments,
+            cases,
+        } => {
+            let branches: Vec<_> = cases
+                .iter()
+                .map(|case| (case.values.clone(), case.activities.as_slice()))
+                .collect();
+            return process_split(
+                rule_split(rule, arguments, x, y),
+                "Microflows$EnumerationCase",
+                &branches,
+                prev_id,
+                objects,
+                flows,
+                x,
+                y,
+            );
+        }
+        Activity::Switch { expression, cases } => {
+            let mut split = flow_object_doc("", "Microflows$ExclusiveSplit", x, y, "90;60");
+            split.insert("SplitCondition", split_condition_doc(expression));
+            split.insert("Caption", expression.as_str());
+            split.insert("ErrorHandlingType", "Rollback");
+            split.insert("Documentation", "");
+            let branches: Vec<_> = cases
+                .iter()
+                .map(|case| (case.values.clone(), case.activities.as_slice()))
+                .collect();
+            return process_split(
+                split,
+                "Microflows$EnumerationCase",
+                &branches,
+                prev_id,
+                objects,
+                flows,
+                x,
+                y,
+            );
+        }
+        Activity::TypeSwitch { variable, cases } => {
+            let mut split = flow_object_doc("", "Microflows$InheritanceSplit", x, y, "90;60");
+            split.insert("SplitVariableName", variable.as_str());
+            split.insert("Caption", "");
+            split.insert("Documentation", "");
+            let branches: Vec<_> = cases
+                .iter()
+                .map(|case| (case.values.clone(), case.activities.as_slice()))
+                .collect();
+            return process_split(
+                split,
+                "Microflows$InheritanceCase",
+                &branches,
+                prev_id,
+                objects,
+                flows,
+                x,
+                y,
+            );
+        }
+        _ => {}
     }
 
     match activity {
@@ -175,6 +416,7 @@ fn process_activity(
     let act_id = uuid::Uuid::new_v4().to_string();
     let terminal_type = match activity {
         Activity::BreakLoop => Some(("Microflows$BreakEvent", None)),
+        Activity::RaiseError => Some(("Microflows$ErrorEvent", None)),
         Activity::ContinueLoop => Some(("Microflows$ContinueEvent", None)),
         Activity::ReturnValue { expression } => {
             Some(("Microflows$EndEvent", Some(expression.as_str())))
@@ -201,11 +443,109 @@ fn process_activity(
     }
 }
 
+/// Lowers an activity with an error handler of its own: the activity, the
+/// handler hanging off it by an error edge, and — when the handler does not
+/// end the flow — a merge after the activity where the two paths join.
 #[allow(clippy::too_many_arguments)]
-fn process_decision(
-    condition: &str,
-    true_branch: &[Activity],
-    false_branch: &[Activity],
+fn process_handled(
+    handling: mxrs_ir::ErrorHandling,
+    activity: &Activity,
+    handler: &[Activity],
+    prev_id: Option<&str>,
+    objects: &mut Vec<Document>,
+    flows: &mut Vec<Document>,
+    x: i32,
+    y: i32,
+) -> (Option<String>, i32) {
+    let first = objects.len();
+    let (next, next_x) = process_activity(
+        activity,
+        prev_id,
+        objects,
+        flows,
+        x,
+        y,
+        handling.native_name(),
+    );
+    // An action says how it fails in its action document, a loop on its node.
+    if let Some(node) = objects.get_mut(first) {
+        match node.get_document_mut("Action") {
+            Ok(action) => {
+                action.insert("ErrorHandlingType", handling.native_name());
+            }
+            Err(_) => {
+                node.insert("ErrorHandlingType", handling.native_name());
+            }
+        }
+    }
+    let Some(origin) = next else {
+        return (None, next_x);
+    };
+    if handling == mxrs_ir::ErrorHandling::Continue {
+        return (Some(origin), next_x);
+    }
+    let link = |to: &str| flow_doc(&origin, to, &[], true);
+    let branch = process_branch(handler, &link, objects, flows, x, y + 150);
+    if branch.terminal {
+        return (Some(origin), next_x);
+    }
+    let merge_id = uuid::Uuid::new_v4().to_string();
+    objects.push(flow_object_doc(
+        &merge_id,
+        "Microflows$ExclusiveMerge",
+        next_x,
+        y,
+        "40;40",
+    ));
+    flows.push(sequence_flow_doc(&origin, &merge_id, None));
+    match branch.last.as_deref() {
+        Some(last) => flows.push(sequence_flow_doc(last, &merge_id, None)),
+        None => flows.push(link(&merge_id)),
+    }
+    (Some(merge_id), next_x + 140)
+}
+
+/// The split a rule decides: the rule and what it is called with.
+fn rule_split(rule: &str, arguments: &[(String, String)], x: i32, y: i32) -> Document {
+    let mappings = arguments
+        .iter()
+        .map(|(parameter, argument)| {
+            Bson::Document(doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "Microflows$RuleCallParameterMapping",
+                "Parameter": parameter.as_str(),
+                "Argument": argument.as_str(),
+            })
+        })
+        .collect();
+    let mut split = flow_object_doc("", "Microflows$ExclusiveSplit", x, y, "90;60");
+    split.insert(
+        "SplitCondition",
+        doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Microflows$RuleSplitCondition",
+            "RuleCall": doc! {
+                "$ID": uuid::Uuid::new_v4().to_string(),
+                "$Type": "Microflows$RuleCall",
+                "Microflow": rule,
+                "ParameterMappings": mxrs_bson::build_array(mappings, 2),
+            },
+        },
+    );
+    split.insert("Caption", rule);
+    split.insert("ErrorHandlingType", "Rollback");
+    split.insert("Documentation", "");
+    split
+}
+
+/// Lowers a split and its branches: one edge per branch carrying the case
+/// values that select it, and a merge where the branches that do not end
+/// the flow join.
+#[allow(clippy::too_many_arguments)]
+fn process_split(
+    mut split: Document,
+    case_type: &str,
+    branches: &[(Vec<String>, &[Activity])],
     prev_id: Option<&str>,
     objects: &mut Vec<Document>,
     flows: &mut Vec<Document>,
@@ -213,33 +553,40 @@ fn process_decision(
     y: i32,
 ) -> (Option<String>, i32) {
     let split_id = uuid::Uuid::new_v4().to_string();
-    let mut split_doc = flow_object_doc(&split_id, "Microflows$ExclusiveSplit", x, y, "90;60");
-    split_doc.insert("SplitCondition", split_condition_doc(condition));
-    split_doc.insert("Caption", condition);
-    split_doc.insert("ErrorHandlingType", "Rollback");
-    split_doc.insert("Documentation", "");
-    objects.push(split_doc);
+    split.insert("$ID", split_id.as_str());
+    objects.push(split);
     if let Some(prev) = prev_id {
         flows.push(sequence_flow_doc(prev, &split_id, None));
     }
 
-    let branch_width = true_branch.len().max(false_branch.len()).max(1) as i32;
+    let branch_width = branches
+        .iter()
+        .map(|(_, activities)| activities.len())
+        .max()
+        .unwrap_or(0)
+        .max(1) as i32;
     let x_branch = x + 140;
     let x_merge = x + 140 * (branch_width + 1);
 
-    let true_result =
-        process_decision_branch(true_branch, &split_id, "true", objects, flows, x_branch, y);
-    let false_result = process_decision_branch(
-        false_branch,
-        &split_id,
-        "false",
-        objects,
-        flows,
-        x_branch,
-        y + 150,
-    );
-
-    if true_result.terminal && false_result.terminal {
+    let link = |values: &[String], to: &str| {
+        let cases: Vec<_> = values
+            .iter()
+            .map(|value| (case_type, value.as_str()))
+            .collect();
+        flow_doc(&split_id, to, &cases, false)
+    };
+    let mut results = Vec::new();
+    for (index, (values, activities)) in branches.iter().enumerate() {
+        results.push(process_branch(
+            activities,
+            &|to: &str| link(values, to),
+            objects,
+            flows,
+            x_branch,
+            y + 150 * index as i32,
+        ));
+    }
+    if results.iter().all(|result| result.terminal) && !results.is_empty() {
         return (None, x_merge + 140);
     }
     let merge_id = uuid::Uuid::new_v4().to_string();
@@ -250,9 +597,9 @@ fn process_decision(
         y,
         "40;40",
     ));
-    for (result, case_value) in [(&true_result, "true"), (&false_result, "false")] {
+    for (result, (values, _)) in results.iter().zip(branches) {
         match &result.first {
-            None => flows.push(decision_flow_doc(&split_id, &merge_id, case_value)),
+            None => flows.push(link(values, &merge_id)),
             Some(_) if !result.terminal => flows.push(sequence_flow_doc(
                 result
                     .last
@@ -267,11 +614,11 @@ fn process_decision(
     (Some(merge_id), x_merge + 140)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn process_decision_branch(
+/// Lowers the activities of one branch; `link` draws the edge that enters
+/// it, to whatever its first activity lowers to.
+fn process_branch(
     activities: &[Activity],
-    split_id: &str,
-    case_value: &str,
+    link: &dyn Fn(&str) -> Document,
     objects: &mut Vec<Document>,
     flows: &mut Vec<Document>,
     mut x: i32,
@@ -281,7 +628,18 @@ fn process_decision_branch(
     let mut previous: Option<String> = None;
     let mut terminal = false;
     for activity in activities {
-        if terminal {
+        if terminal && !matches!(activity, Activity::Label(_)) {
+            continue;
+        }
+        // A jump lowers to an edge and nothing else: one that opens the
+        // branch is the branch's own entering edge, pointed at the label.
+        if let Activity::Jump(name) = activity
+            && previous.is_none()
+        {
+            let target = format!("{LABEL}{name}");
+            flows.push(link(&target));
+            first = Some(target);
+            terminal = true;
             break;
         }
         let before = objects.len();
@@ -294,18 +652,17 @@ fn process_decision_branch(
             y,
             "Rollback",
         );
-        let created_first = objects[before].get_str("$ID").ok().map(str::to_string);
-        if first.is_none() {
+        let created_first = objects
+            .get(before)
+            .and_then(|object| object.get_str("$ID").ok())
+            .map(str::to_string);
+        // Only the branch's first activity is entered from the split; a
+        // label after an ended path is reached by its jumps alone.
+        if first.is_none()
+            && let Some(created) = created_first.as_deref()
+        {
+            flows.push(link(created));
             first = created_first.clone();
-        }
-        if previous.is_none() {
-            flows.push(decision_flow_doc(
-                split_id,
-                created_first
-                    .as_deref()
-                    .expect("activity always assigns an $ID"),
-                case_value,
-            ));
         }
         previous = next_id;
         terminal = previous.is_none();
@@ -338,8 +695,11 @@ fn process_loop(
     let mut inner_previous: Option<String> = None;
     let mut inner_x = 50;
     for activity in activities {
-        if !inner_objects.is_empty() && inner_previous.is_none() {
-            break;
+        if !inner_objects.is_empty()
+            && inner_previous.is_none()
+            && !matches!(activity, Activity::Label(_))
+        {
+            continue;
         }
         let (next, next_x) = process_activity(
             activity,
@@ -395,8 +755,8 @@ fn build_rescue_branch(
     let mut previous: Option<String> = None;
     let mut started = false;
     for activity in activities {
-        if started && previous.is_none() {
-            break;
+        if started && previous.is_none() && !matches!(activity, Activity::Label(_)) {
+            continue;
         }
         let before = objects.len();
         let (next, next_x) = process_activity(
@@ -435,28 +795,49 @@ fn split_condition_doc(condition: &str) -> Document {
     doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$ExpressionSplitCondition", "Expression": condition }
 }
 
-fn decision_flow_doc(split_id: &str, to_id: &str, case_value: &str) -> Document {
-    sequence_flow_doc(split_id, to_id, Some(case_value))
+fn sequence_flow_doc(from_id: &str, to_id: &str, case_value: Option<&str>) -> Document {
+    match case_value {
+        Some(value) => flow_doc(
+            from_id,
+            to_id,
+            &[("Microflows$EnumerationCase", value)],
+            false,
+        ),
+        None => flow_doc(from_id, to_id, &[], false),
+    }
 }
 
-fn sequence_flow_doc(from_id: &str, to_id: &str, case_value: Option<&str>) -> Document {
-    let mut case_doc = doc! {
-        "$ID": uuid::Uuid::new_v4().to_string(),
-        "$Type": if case_value.is_some() { "Microflows$EnumerationCase" } else { "Microflows$NoCase" },
+/// One sequence flow. `cases` are the values that select it out of a split,
+/// each with the case type that carries it; `error` makes it the edge an
+/// activity's failure follows.
+fn flow_doc(from_id: &str, to_id: &str, cases: &[(&str, &str)], error: bool) -> Document {
+    let case_docs: Vec<Bson> = if cases.is_empty() {
+        vec![Bson::Document(doc! {
+            "$ID": uuid::Uuid::new_v4().to_string(),
+            "$Type": "Microflows$NoCase",
+        })]
+    } else {
+        cases
+            .iter()
+            .map(|(ty, value)| {
+                Bson::Document(doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": *ty,
+                    "Value": *value,
+                })
+            })
+            .collect()
     };
-    if let Some(v) = case_value {
-        case_doc.insert("Value", v);
-    }
     doc! {
         "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$SequenceFlow",
         "OriginPointer": from_id, "DestinationPointer": to_id,
         "OriginConnectionIndex": 1, "DestinationConnectionIndex": 3,
-        "IsErrorHandler": false,
+        "IsErrorHandler": error,
         "Line": doc! {
             "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$BezierCurve",
             "OriginControlVector": "0;0", "DestinationControlVector": "0;0",
         },
-        "CaseValues": mxrs_bson::build_array(vec![Bson::Document(case_doc)], 2),
+        "CaseValues": mxrs_bson::build_array(case_docs, 2),
     }
 }
 
@@ -601,6 +982,20 @@ fn activity_action_doc(activity: &Activity, error_handling: &str) -> Document {
             },
             "Node": node.clone(),
         },
+        // The document states its own error handling along with everything
+        // else the action is.
+        Activity::Action(document) => native_document(document),
+        Activity::Disabled(_)
+        | Activity::OnError { .. }
+        | Activity::RaiseError
+        | Activity::RuleDecision { .. }
+        | Activity::RuleSwitch { .. }
+        | Activity::Label(_)
+        | Activity::Jump(_)
+        | Activity::Switch { .. }
+        | Activity::TypeSwitch { .. } => {
+            unreachable!("lowered by process_activity before build_activity")
+        }
         Activity::Decision { .. }
         | Activity::LoopOver { .. }
         | Activity::WhileLoop { .. }

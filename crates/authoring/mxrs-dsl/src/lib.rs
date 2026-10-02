@@ -54,6 +54,7 @@ mod constant;
 mod entity;
 mod enumeration;
 mod flow;
+pub mod flow_actions;
 mod menu;
 mod module;
 mod navigation;
@@ -73,12 +74,18 @@ pub use enumeration::EnumerationBuilder;
 pub use flow::{
     CallArgument, FlowBuilder, FlowParameterBuilder, MicroflowModuleBuilder, NanoflowModuleBuilder,
 };
+pub use flow_actions::{
+    AggregateFunction, AssociationName, AttributeName, ChangeKind, Commit, EntityName, FlowVar,
+    ListChange, LogSeverity, MemberName, MessageKind, MicroflowName, SortOrder, Variable, var,
+};
 pub use menu::{MenuBuilder, MenuItemBuilder};
 pub use module::{ModuleBuilder, OqlViewSourceBuilder};
 pub use mxrs_expr::{
     Expr, ListVar, MxBool, MxDecimal, MxFloat, MxInteger, MxLong, MxString, Var, boolean, decimal,
     float, integer, long, string,
 };
+pub use mxrs_expr::{Mx, mx};
+pub use mxrs_ir::DataType;
 pub use mxrs_ir::{
     ConstantType, ExportLevel, MemberRights, MenuActionDecl, MenuIconDecl, OnOverlap, ScheduleUnit,
     ScheduledEventSchedule, SecurityLevel,
