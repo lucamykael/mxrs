@@ -18,7 +18,7 @@
 //! the same thing either way.
 
 use proc_macro2::{Span, TokenStream};
-use quote::{ToTokens, quote};
+use quote::{ToTokens, quote, quote_spanned};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Expr, Token};
@@ -106,11 +106,12 @@ pub fn value(value: &Expr) -> TokenStream {
             let text = format!("-{digits}");
             quote! { ::mxrs::mx(#text) }
         }
-        // A name is what it stands for: a variable, or a text constant.
-        Expr::Path(path) if path.path.get_ident().is_some() && path.qself.is_none() => {
-            quote! { ::mxrs::ActivityValue::activity_value(&#value) }
+        // A name is what it stands for: a variable, a constant, an
+        // enumeration's value.
+        Expr::Path(path) if path.qself.is_none() => {
+            quote_spanned! { value.span()=> ::mxrs::ActivityValue::activity_value(&#value) }
         }
-        _ => quote! { ::std::convert::Into::<::mxrs::Mx>::into(#value) },
+        _ => quote_spanned! { value.span()=> ::std::convert::Into::<::mxrs::Mx>::into(#value) },
     }
 }
 
@@ -444,6 +445,12 @@ fn retrieve(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
         .map(|sort| sortings(sort, quote!(sort_by), quote!(__mxrs_retrieve)))
         .transpose()?
         .unwrap_or_default();
+    if options.has("first") && options.get("range").is_some() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "a retrieve takes the first object or a range, not both",
+        ));
+    }
     let first = options
         .has("first")
         .then(|| quote! { __mxrs_retrieve.first(); });
@@ -613,9 +620,7 @@ fn change_list(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
 /// expression` for an expression over each `$currentObject`.
 fn aggregate_list(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
     let list = first(arguments, "the list")?;
-    let functions = [
-        "sum", "average", "minimum", "maximum", "all", "any", "reduce",
-    ];
+    let functions = ["sum", "average", "minimum", "maximum", "all", "any"];
     let mut pairs: Vec<String> = functions.iter().map(|f| f.to_string()).collect();
     pairs.extend(functions.iter().map(|f| format!("{f}_of")));
     pairs.push("name".to_string());
@@ -627,6 +632,18 @@ fn aggregate_list(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
             "name the aggregate's result with `name = \"...\"`",
         )
     })?;
+    let stated = options.words.len()
+        + options
+            .pairs
+            .iter()
+            .filter(|(key, _)| key != "name")
+            .count();
+    if stated != 1 {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "an aggregate computes one thing: `count`, `sum = member`, `average_of = ...`, ...",
+        ));
+    }
     if options.has("count") {
         return Ok(quote! {
             (#flow).aggregate(#name, #list, ::mxrs::AggregateFunction::Count, |_| {})

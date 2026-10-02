@@ -214,6 +214,12 @@ fn expand(
                     <#dsl::Mx as ::core::convert::From<&#enum_ident>>::from(&value)
                 }
             }
+
+            impl #dsl::ActivityValue for #enum_ident {
+                fn activity_value(&self) -> #dsl::Mx {
+                    <#dsl::Mx as ::core::convert::From<&#enum_ident>>::from(self)
+                }
+            }
         }
     });
     Ok(quote! {

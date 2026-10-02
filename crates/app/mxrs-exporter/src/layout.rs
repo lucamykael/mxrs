@@ -461,6 +461,55 @@ fn quoted_after(text: &str, prefix: &str) -> Option<String> {
     rest.split('"').next().map(str::to_string)
 }
 
+/// `field: field` in a struct literal written the way Rust writes it, the
+/// field alone: `create_object!(flow, Order { customer })`.
+pub(crate) fn shorthand_fields(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let identifier = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let c = bytes[index];
+        if c == b'"' {
+            // A string literal is copied as it is.
+            let start = index;
+            index += 1;
+            while index < bytes.len() && bytes[index] != b'"' {
+                index += if bytes[index] == b'\\' { 2 } else { 1 };
+            }
+            index = (index + 1).min(bytes.len());
+            out.push_str(&source[start..index]);
+            continue;
+        }
+        let starts_word =
+            (c.is_ascii_alphabetic() || c == b'_') && (index == 0 || !identifier(bytes[index - 1]));
+        if starts_word {
+            let start = index;
+            while index < bytes.len() && identifier(bytes[index]) {
+                index += 1;
+            }
+            let word = &source[start..index];
+            let opens = source[..start].trim_end().ends_with(['{', ',']);
+            let rest = &source[index..];
+            let value = rest
+                .strip_prefix(": ")
+                .and_then(|rest| rest.strip_prefix(word));
+            let closes = value.is_some_and(|after| {
+                !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                    && after.trim_start().starts_with([',', '}'])
+            });
+            out.push_str(word);
+            if opens && closes {
+                index += ": ".len() + word.len();
+            }
+            continue;
+        }
+        out.push(c as char);
+        index += 1;
+    }
+    out
+}
+
 /// Spaces the statements of every flow body in `source` (formatted by
 /// rustfmt): declarations stacked, every other operation set apart by a
 /// blank line. Bodies holding a literal that spans lines are left as they
@@ -698,6 +747,20 @@ mod tests {
             ["const PAYLOAD: &str = include_str!(\"data/flow/payload.txt\");"]
         );
         assert_eq!(hoisted.data, [("flow/payload.txt".to_string(), payload)]);
+    }
+
+    #[test]
+    fn a_field_set_to_its_namesake_is_written_alone() {
+        assert_eq!(
+            shorthand_fields(
+                "create_object!(flow, Order { customer: customer, total: total_x, note: \"a: a\" })"
+            ),
+            "create_object!(flow, Order { customer, total: total_x, note: \"a: a\" })"
+        );
+        assert_eq!(
+            shorthand_fields("Order {\n    customer: customer\n}"),
+            "Order {\n    customer\n}"
+        );
     }
 
     #[test]

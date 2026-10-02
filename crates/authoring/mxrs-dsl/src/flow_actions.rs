@@ -96,11 +96,29 @@ pub trait ActivityValue {
     fn activity_value(&self) -> Mx;
 }
 
-impl ActivityValue for &str {
+impl ActivityValue for str {
     fn activity_value(&self) -> Mx {
-        Mx::from(mxrs_expr::string(*self))
+        Mx::from(mxrs_expr::string(self))
     }
 }
+
+impl<T: ActivityValue + ?Sized> ActivityValue for &T {
+    fn activity_value(&self) -> Mx {
+        (**self).activity_value()
+    }
+}
+
+macro_rules! literal_activity_values {
+    ($($number:ty),*) => {$(
+        impl ActivityValue for $number {
+            fn activity_value(&self) -> Mx {
+                mxrs_expr::mx(self.to_string())
+            }
+        }
+    )*};
+}
+
+literal_activity_values!(i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, bool);
 
 impl ActivityValue for String {
     fn activity_value(&self) -> Mx {

@@ -95,10 +95,13 @@ read-only behavioral oracle; never edit it.
   attribute or association, is its struct field. Their arguments are Rust
   expressions, so rustfmt lays them out: `create_object!(flow, Order {
   number: "A-1", status: OrderStatus::Open, customer: customer }, commit)`.
-  A value is the Mendix expression it reads as — a string literal or `&str`
+  A value is the Mendix expression it reads as — a string literal or text
   constant a Mendix string, a number or boolean itself, a variable `$` and
-  its name, an enumeration variant its qualified value — and `mx("...")` is
-  what Rust cannot check. A name Studio Pro would give by default
+  its name, an enumeration variant its qualified value (through
+  `ActivityValue`) — and `mx("...")` is what Rust cannot check. A field set
+  to its namesake variable is written alone (`Order { customer }`).
+  Contradictory options (`first` with a `range`, two aggregate functions)
+  do not compile. A name Studio Pro would give by default
   (`New<Entity>`, `<Entity>List`) is not stated. Each macro expands to the
   builder call the activity is, and the importer writes a macro wherever
   every part of the activity reads back exactly, the builder call

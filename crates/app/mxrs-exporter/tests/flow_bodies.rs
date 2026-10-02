@@ -1463,3 +1463,56 @@ fn every_flow_keeps_its_name_through_its_service() {
     run(&generated, &rebuilt);
     assert_eq!(flows(&rebuilt).into_keys().collect::<Vec<_>>(), before);
 }
+
+/// A call whose result the model does not use stays a call that does not
+/// use it, and a variable nothing reads is not kept alive by an activity
+/// macro's options (`name = "..."`): the generated project builds without a
+/// warning and reads back unchanged.
+#[test]
+fn macros_keep_discarded_results_and_leave_unused_variables_unbound() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_dir = dir.path().join("source");
+    std::fs::create_dir(&source_dir).unwrap();
+    let path = source_dir.join("Discarded.mpr");
+    let generated = dir.path().join("generated");
+    let rebuilt = dir.path().join("Rebuilt.mpr");
+    let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+    builder.module("Calls", |m| {
+        m.entity("Record", |_| {});
+    });
+    let mut project = builder.build();
+    let mut echo = MicroflowDecl::new("Echo");
+    echo.parameters
+        .push(FlowParameterDecl::new("input", Ty::String));
+    let mut caller = MicroflowDecl::new("Caller");
+    caller.activities = vec![
+        Activity::CreateList {
+            variable: "Name".into(),
+            entity: "Calls.Record".into(),
+        },
+        Activity::CreateList {
+            variable: "Spare".into(),
+            entity: "Calls.Record".into(),
+        },
+        Activity::CallMicroflow {
+            name: "Calls.Echo".into(),
+            result_variable: None,
+            result_type: None,
+            use_return: false,
+            mappings: vec![MicroflowCallMapping {
+                parameter: "input".into(),
+                value: "'x'".into(),
+                value_type: Some(Ty::String),
+            }],
+        },
+    ];
+    project.modules[0].microflows.extend([echo, caller]);
+    mxrs_writer::write_project(&path, &project).unwrap();
+    let before = flows(&path);
+    mxrs_exporter::import_cargo_project(&path, &generated, Some(&workspace())).unwrap();
+    let source = flow_sources(&generated);
+    assert!(!source.contains("let name ="), "{source}");
+    std::fs::remove_dir_all(source_dir).unwrap();
+    run(&generated, &rebuilt);
+    assert_eq!(flows(&rebuilt), before);
+}

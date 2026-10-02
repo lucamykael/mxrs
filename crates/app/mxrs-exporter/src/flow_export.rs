@@ -217,6 +217,16 @@ pub(crate) fn binding(name: &str) -> Option<String> {
                 | "sort"
                 | "on"
                 | "rule"
+                // The words an activity macro reads as options.
+                | "first"
+                | "count"
+                | "head"
+                | "tail"
+                | "clear"
+                | "commit_without_events"
+                | "refresh"
+                | "without_events"
+                | "stack_trace"
         );
     Some(if readable {
         snake
@@ -367,6 +377,7 @@ pub(crate) fn collect_all(
     // The associations an entity's struct declares a field for: the ones
     // from it to another entity a struct declares — the entity layer's rule.
     let mut accessors = accessors;
+    let mut association_owners: HashMap<String, String> = HashMap::new();
     let qualified_by_id: HashMap<&str, String> = modules
         .iter()
         .flat_map(|module| {
@@ -397,7 +408,9 @@ pub(crate) fn collect_all(
                 .cloned()
                 .unwrap_or_else(|| to.to_string());
             if entities.contains(from) && entities.contains(&target) {
-                accessors.insert((from.clone(), format!("{module_name}.{name}")));
+                let association = format!("{module_name}.{name}");
+                association_owners.insert(association.clone(), from.clone());
+                accessors.insert((from.clone(), association));
             }
         }
     }
@@ -417,6 +430,7 @@ pub(crate) fn collect_all(
         microflows: &microflows,
         enumeration_values,
         java_actions,
+        association_owners: &association_owners,
     };
     // `MXRS_EXPLAIN_FLOWS=1` says why each flow that stays in the imported
     // model does.
@@ -763,7 +777,17 @@ pub(crate) fn find_identifier(line: &str, name: &str) -> Option<usize> {
                 // single colon is a struct field's value: `number: name`.
                 let before = line[..start].trim_end();
                 let qualified = before.ends_with("::") || before.ends_with('.');
-                if &line[start..index] == name && !qualified {
+                // A name before a single colon is a field (`number: ...`),
+                // and one before a single `=` an argument's key (`name =
+                // ...`): neither reads a variable.
+                let after = line[index..].trim_start();
+                // `let name =` declares, and is found as such.
+                let labels = !before.ends_with("let")
+                    && ((after.starts_with(':') && !after.starts_with("::"))
+                        || (after.starts_with('=')
+                            && !after.starts_with("==")
+                            && !after.starts_with("=>")));
+                if &line[start..index] == name && !qualified && !labels {
                     return Some(start);
                 }
             }
@@ -1757,7 +1781,7 @@ fn source_file(
         source: body,
         constants,
         data,
-    } = crate::layout::hoist_literals_in(body, file_stem);
+    } = crate::layout::hoist_literals_in(&crate::layout::shorthand_fields(body), file_stem);
     let mut source = String::from("use mxrs::prelude::*;\n\n");
     for import in &resolved.imports {
         writeln!(source, "{import}").unwrap();

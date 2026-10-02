@@ -43,6 +43,9 @@ pub(crate) struct Model<'a> {
     pub(crate) enumeration_values: &'a HashSet<String>,
     /// Java actions a generated macro calls, by qualified name.
     pub(crate) java_actions: &'a HashSet<String>,
+    /// Each association a struct declares a field for, and that struct's
+    /// entity.
+    pub(crate) association_owners: &'a HashMap<String, String>,
 }
 
 /// Reads one stored document, and notices the fields nobody asked for.
@@ -2320,12 +2323,7 @@ impl Converter<'_> {
                     Some((owner, _)) => owner.to_string(),
                     None => {
                         let association = first.get_str("Association").ok()?;
-                        self.model
-                            .attributes
-                            .iter()
-                            .find(|(_, member)| member == association)?
-                            .0
-                            .clone()
+                        self.model.association_owners.get(association)?.clone()
                     }
                 };
                 format!(
@@ -2371,15 +2369,10 @@ impl Converter<'_> {
                     // The association by the field that declares it, where an
                     // entity's struct does.
                     let association = source.get_str("AssociationId").ok()?;
-                    let by = self
-                        .model
-                        .attributes
-                        .iter()
-                        .find(|(_, member)| member == association)
-                        .map_or_else(
-                            || rust_string(association),
-                            |(owner, _)| names::attribute(owner, association),
-                        );
+                    let by = self.model.association_owners.get(association).map_or_else(
+                        || rust_string(association),
+                        |owner| names::attribute(owner, association),
+                    );
                     return Some(vec![format!(
                         "retrieve!(flow, {}, by = {by}, name = {});",
                         Self::variable(scope, source.get_str("StartVariableName").ok()?),
@@ -2556,8 +2549,10 @@ impl Converter<'_> {
             ),
             "Microflows$MicroflowCallAction" => {
                 let result = text("ResultVariableName")?;
+                // A call whose result the model says it does not use stays a
+                // builder call: the macro always keeps its result.
                 let uses_result = action.get_bool("UseReturnVariable").ok()?;
-                if !uses_result && !result.is_empty() {
+                if !uses_result {
                     return None;
                 }
                 let call = action.get_document("MicroflowCall").ok()?;
@@ -2608,7 +2603,7 @@ impl Converter<'_> {
                 }
                 let result = text("ResultVariableName")?;
                 let uses_result = action.get_bool("UseReturnVariable").ok()?;
-                if !uses_result && !result.is_empty() {
+                if !uses_result {
                     return None;
                 }
                 let mut arguments = Vec::new();

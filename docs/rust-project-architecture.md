@@ -146,12 +146,9 @@ impl OrderService {
         used_by(ACT_Order_Save, "Sales.Order_Overview")
     )]
     pub fn create(flow: &mut FlowBuilder) {
-        let number = flow.call_into("Number", MicroflowRef::<SUB_Order_Number>::new(), |_| {});
+        let number = call_microflow!(flow, SUB_Order_Number, name = "Number");
 
-        let order = flow.create("NewOrder", Ref::<Order>::new(), |create| {
-            create.set(Order::number(), mx("$Number"));
-            create.commit(Commit::Yes);
-        });
+        let order = create_object!(flow, Order { number }, commit);
 
         flow.return_with(mx("$NewOrder"));
     }
