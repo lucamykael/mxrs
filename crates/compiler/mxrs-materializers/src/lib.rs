@@ -39,7 +39,7 @@ const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "2c58f7e97d9438b76b396596baba53a00bcc0111ae6c21f41106b9f79e95bbee",
+    "a7a93e9ab9ea598fe8964042fa3fd0b233e71a585724aec3cd9da0b46292b7eb",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -520,6 +520,14 @@ pub fn embedded_frontend_source_hash() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `mxrs new` writes the shell's sources as text.
+    #[test]
+    fn every_frontend_source_is_text() {
+        for (path, bytes) in frontend_source_files() {
+            assert!(std::str::from_utf8(bytes).is_ok(), "{path} is not UTF-8");
+        }
+    }
 
     #[test]
     fn every_embedded_release_asset_matches_its_pinned_hash() {

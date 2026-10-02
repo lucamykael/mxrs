@@ -39,6 +39,8 @@ pub(crate) struct Model<'a> {
     pub(crate) attributes: &'a HashSet<(String, String)>,
     /// Qualified names of the microflows a type names.
     pub(crate) microflows: &'a HashSet<String>,
+    /// Qualified names of the nanoflows a type names.
+    pub(crate) nanoflows: &'a HashSet<String>,
     /// `Module.Enumeration.Value`s an enum's variant names.
     pub(crate) enumeration_values: &'a HashSet<String>,
     /// Java actions a generated macro calls, by qualified name.
@@ -288,6 +290,15 @@ impl Converter<'_> {
         match crate::flow_export::flow_marker(name) {
             Some(marker) if self.model.microflows.contains(name) => {
                 format!("MicroflowRef::<{marker}>::new()")
+            }
+            _ => rust_string(name),
+        }
+    }
+
+    fn nanoflow(&self, name: &str) -> String {
+        match crate::flow_export::nanoflow_marker(name) {
+            Some(marker) if self.model.nanoflows.contains(name) => {
+                format!("NanoflowRef::<{marker}>::new()")
             }
             _ => rust_string(name),
         }
@@ -1010,6 +1021,153 @@ impl Converter<'_> {
                     )
                 } else {
                     format!("flow.call_java({}, ", rust_string(java_action))
+                };
+                Statement {
+                    document,
+                    lines: call_with_closure(head, closure("call", lines)),
+                    declares: keeps.then(|| result.to_string()),
+                }
+            }
+            "Microflows$NanoflowCallAction" => {
+                let result = fields.text("OutputVariableName")?;
+                let uses_result = fields.boolean("UseReturnVariable")?;
+                let mut call = Fields::new(fields.document("NanoflowCall")?);
+                let target = call.text("Nanoflow")?;
+                let keeps = uses_result && !result.is_empty();
+                let mut document = actions::call_nanoflow(target, keeps.then_some(result));
+                let mut lines = Vec::new();
+                if !uses_result {
+                    document
+                        .set("UseReturnVariable", false)
+                        .set("OutputVariableName", result);
+                    lines.push(format!("call.discard_result({});", rust_string(result)));
+                }
+                for mapping in call.items("ParameterMappings", 2)? {
+                    let mut mapping_fields = Fields::new(mapping);
+                    let parameter = mapping_fields.text("Parameter")?;
+                    let argument = mapping_fields.text("Argument")?;
+                    mapping_fields.empty_expression_model("ArgumentModel")?;
+                    mapping_fields.finish()?;
+                    if let Some(list) = document
+                        .document_mut("NanoflowCall")
+                        .and_then(|call| call.list_mut("ParameterMappings"))
+                    {
+                        list.push(NativeValue::Document(
+                            NativeDocument::new("Microflows$NanoflowCallParameterMapping")
+                                .with("Parameter", parameter)
+                                .with("Argument", argument),
+                        ));
+                    }
+                    let short = parameter
+                        .strip_prefix(target)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .filter(|name| !name.contains('.'))
+                        .unwrap_or(parameter);
+                    lines.push(format!(
+                        "call.argument({}, {});",
+                        rust_string(short),
+                        expression(argument)
+                    ));
+                }
+                call.finish()?;
+                let head = if keeps {
+                    format!(
+                        "flow.call_nanoflow_into({}, {}, ",
+                        rust_string(result),
+                        self.nanoflow(target)
+                    )
+                } else {
+                    format!("flow.call_nanoflow({}, ", self.nanoflow(target))
+                };
+                Statement {
+                    document,
+                    lines: call_with_closure(head, closure("call", lines)),
+                    declares: keeps.then(|| result.to_string()),
+                }
+            }
+            "Microflows$JavaScriptActionCallAction" => {
+                let javascript_action = fields.text("JavaScriptAction")?;
+                let result = fields.text("OutputVariableName")?;
+                let uses_result = fields.boolean("UseReturnVariable")?;
+                let keeps = uses_result && !result.is_empty();
+                let mut document =
+                    actions::call_javascript(javascript_action, keeps.then_some(result));
+                let mut lines = Vec::new();
+                if !uses_result {
+                    document
+                        .set("UseReturnVariable", false)
+                        .set("OutputVariableName", result);
+                    lines.push(format!("call.discard_result({});", rust_string(result)));
+                }
+                for mapping in fields.items("ParameterMappings", 2)? {
+                    let mut mapping_fields = Fields::new(mapping);
+                    let parameter = mapping_fields.text("Parameter")?;
+                    let mut value = Fields::new(mapping_fields.document("ParameterValue")?);
+                    mapping_fields.finish()?;
+                    let short = parameter
+                        .strip_prefix(javascript_action)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .filter(|name| !name.contains('.'))
+                        .unwrap_or(parameter);
+                    let (value_document, line) = match value.kind() {
+                        "Microflows$BasicCodeActionParameterValue" => {
+                            let argument = value.text("Argument")?;
+                            (
+                                NativeDocument::new("Microflows$BasicCodeActionParameterValue")
+                                    .with("Argument", argument),
+                                format!(
+                                    "call.argument({}, {});",
+                                    rust_string(short),
+                                    expression(argument)
+                                ),
+                            )
+                        }
+                        "Microflows$EntityTypeCodeActionParameterValue" => {
+                            let entity = value.text("Entity")?;
+                            (
+                                NativeDocument::new(
+                                    "Microflows$EntityTypeCodeActionParameterValue",
+                                )
+                                .with("Entity", entity),
+                                format!(
+                                    "call.entity_argument({}, {});",
+                                    rust_string(short),
+                                    self.entity(entity)
+                                ),
+                            )
+                        }
+                        "Microflows$NanoflowParameterValue" => {
+                            let nanoflow = value.text("Nanoflow")?;
+                            (
+                                NativeDocument::new("Microflows$NanoflowParameterValue")
+                                    .with("Nanoflow", nanoflow),
+                                format!(
+                                    "call.nanoflow_argument({}, {});",
+                                    rust_string(short),
+                                    self.nanoflow(nanoflow)
+                                ),
+                            )
+                        }
+                        other => return Err(format!("unsupported JavaScript argument {other}")),
+                    };
+                    value.finish()?;
+                    if let Some(list) = document.list_mut("ParameterMappings") {
+                        list.push(NativeValue::Document(
+                            NativeDocument::new("Microflows$JavaScriptActionParameterMapping")
+                                .with("Parameter", parameter)
+                                .with("ParameterValue", value_document),
+                        ));
+                    }
+                    lines.push(line);
+                }
+                let head = if keeps {
+                    format!(
+                        "flow.call_javascript_into({}, {}, ",
+                        rust_string(result),
+                        rust_string(javascript_action)
+                    )
+                } else {
+                    format!("flow.call_javascript({}, ", rust_string(javascript_action))
                 };
                 Statement {
                     document,
@@ -2593,6 +2751,91 @@ impl Converter<'_> {
                     String::new()
                 };
                 format!("call_microflow!(flow, {call}{name});")
+            }
+            "Microflows$NanoflowCallAction" => {
+                let result = text("OutputVariableName")?;
+                // A call whose result the model says it does not use stays a
+                // builder call: the macro always keeps its result.
+                if !action.get_bool("UseReturnVariable").ok()? {
+                    return None;
+                }
+                let call = action.get_document("NanoflowCall").ok()?;
+                let target = call.get_str("Nanoflow").ok()?;
+                if !self.model.nanoflows.contains(target) {
+                    return None;
+                }
+                let marker = crate::flow_export::nanoflow_marker(target)?;
+                let mut arguments = Vec::new();
+                for mapping in call
+                    .get("ParameterMappings")
+                    .and_then(mxrs_writer::flow_graph::documents)?
+                {
+                    let parameter = mapping.get_str("Parameter").ok()?;
+                    let short = parameter
+                        .strip_prefix(target)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .filter(|name| !name.contains('.'))?;
+                    if !mxrs_typegen::is_rust_identifier(short) || crate::rust_keyword(short) {
+                        return None;
+                    }
+                    arguments.push(format!(
+                        "{short}: {}",
+                        self.macro_value(mapping.get_str("Argument").ok()?, scope)
+                    ));
+                }
+                let call = if arguments.is_empty() {
+                    marker
+                } else {
+                    format!("{marker} {{ {} }}", arguments.join(", "))
+                };
+                let name = if result.is_empty() {
+                    String::new()
+                } else {
+                    format!(", name = {}", rust_string(result))
+                };
+                format!("call_nanoflow!(flow, {call}{name});")
+            }
+            "Microflows$JavaScriptActionCallAction" => {
+                let action_name = text("JavaScriptAction")?;
+                let result = text("OutputVariableName")?;
+                if !action.get_bool("UseReturnVariable").ok()? {
+                    return None;
+                }
+                let mut arguments = vec![rust_string(action_name)];
+                if !result.is_empty() {
+                    arguments.push(rust_string(result));
+                }
+                for mapping in action
+                    .get("ParameterMappings")
+                    .and_then(mxrs_writer::flow_graph::documents)?
+                {
+                    let parameter = mapping.get_str("Parameter").ok()?;
+                    let short = parameter
+                        .strip_prefix(action_name)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .filter(|name| !name.contains('.'))?;
+                    if !mxrs_typegen::is_rust_identifier(short) || crate::rust_keyword(short) {
+                        return None;
+                    }
+                    let value = mapping.get_document("ParameterValue").ok()?;
+                    let argument = match value.get_str("$Type").ok()? {
+                        "Microflows$BasicCodeActionParameterValue" => {
+                            self.macro_value(value.get_str("Argument").ok()?, scope)
+                        }
+                        "Microflows$EntityTypeCodeActionParameterValue" => {
+                            let entity = value.get_str("Entity").ok()?;
+                            let marker = self.typed_entity(entity)?;
+                            if entity_type_has_lowercase(entity) {
+                                marker
+                            } else {
+                                format!("{marker} {{}}")
+                            }
+                        }
+                        _ => return None,
+                    };
+                    arguments.push(format!("{short} = {argument}"));
+                }
+                format!("call_javascript_action!(flow, {});", arguments.join(", "))
             }
             "Microflows$JavaActionCallAction" => {
                 let action_name = text("JavaAction")?;

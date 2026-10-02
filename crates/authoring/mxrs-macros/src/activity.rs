@@ -38,7 +38,9 @@ pub enum Activity {
     CreateVariable,
     ChangeVariable,
     CallMicroflow,
+    CallNanoflow,
     CallJavaAction,
+    CallJavaScriptAction,
     Log,
 }
 
@@ -64,8 +66,10 @@ pub fn expand(activity: Activity, input: TokenStream) -> syn::Result<TokenStream
         Activity::AggregateList => aggregate_list(&flow, &rest),
         Activity::CreateVariable => create_variable(&flow, &rest),
         Activity::ChangeVariable => change_variable(&flow, &rest),
-        Activity::CallMicroflow => call_microflow(&flow, &rest),
-        Activity::CallJavaAction => call_java_action(&flow, &rest),
+        Activity::CallMicroflow => call_flow(&flow, &rest, Flow::Microflow),
+        Activity::CallNanoflow => call_flow(&flow, &rest, Flow::Nanoflow),
+        Activity::CallJavaAction => call_code_action(&flow, &rest, CodeAction::Java),
+        Activity::CallJavaScriptAction => call_code_action(&flow, &rest, CodeAction::JavaScript),
         Activity::Log => log(&flow, &rest),
     }
 }
@@ -708,12 +712,36 @@ fn change_variable(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> 
     Ok(quote! { (#flow).change_variable(#variable, #new) })
 }
 
-/// `call_microflow!(flow, ACT_Order_Ship { Order: order }, name = "...")`:
-/// the flow, by the type its declaration generates, and its arguments by
-/// the names of its parameters. With `name`, the result is kept.
-fn call_microflow(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
-    let call = first(arguments, "the microflow it calls")?;
-    let (target, mappings) = match call {
+/// Which kind of flow a call activity calls.
+#[derive(Clone, Copy)]
+enum Flow {
+    Microflow,
+    Nanoflow,
+}
+
+/// `call_microflow!(flow, ACT_Order_Ship { Order: order }, name = "...")`,
+/// and `call_nanoflow!` alike: the flow, by the type its declaration
+/// generates, and its arguments by the names of its parameters. With
+/// `name`, the result is kept.
+fn call_flow(flow: &Expr, arguments: &[Expr], kind: Flow) -> syn::Result<TokenStream> {
+    let (what, reference, call, call_into) = match kind {
+        Flow::Microflow => (
+            "the microflow it calls",
+            quote!(::mxrs::MicroflowRef),
+            quote!(call),
+            quote!(call_into),
+        ),
+        Flow::Nanoflow => (
+            "the nanoflow it calls",
+            quote!(::mxrs::NanoflowRef),
+            quote!(call_nanoflow),
+            quote!(call_nanoflow_into),
+        ),
+    };
+    let call_expression = first(arguments, what)?;
+    let call = (call, call_into);
+    let called = call_expression;
+    let (target, mappings) = match called {
         Expr::Struct(literal) => {
             if let Some(rest) = &literal.rest {
                 return Err(syn::Error::new_spanned(
@@ -746,23 +774,31 @@ fn call_microflow(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
         other => {
             return Err(syn::Error::new_spanned(
                 other,
-                "expected the microflow and its arguments: `ACT_Order_Ship { Order: order }`",
+                "expected the flow and its arguments: `ACT_Order_Ship { Order: order }`",
             ));
         }
     };
     let options = Options::parse(&arguments[1..], &[], &["name"])?;
+    let (call, call_into) = call;
     Ok(match options.get("name") {
         Some(name) => quote! {
-            (#flow).call_into(#name, ::mxrs::MicroflowRef::<#target>::new(), |__mxrs_call| {
+            (#flow).#call_into(#name, #reference::<#target>::new(), |__mxrs_call| {
                 #(#mappings)*
             })
         },
         None => quote! {
-            (#flow).call(::mxrs::MicroflowRef::<#target>::new(), |__mxrs_call| {
+            (#flow).#call(#reference::<#target>::new(), |__mxrs_call| {
                 #(#mappings)*
             })
         },
     })
+}
+
+/// Which kind of code a call activity runs.
+#[derive(Clone, Copy)]
+enum CodeAction {
+    Java,
+    JavaScript,
 }
 
 /// `call_java_action!(flow, "OQL.ExecuteOQLStatement", "Result", statement
@@ -771,9 +807,22 @@ fn call_microflow(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
 /// arguments by parameter name. An entity a parameter takes is its struct
 /// (`SPCProgramView`, or `CRD {}` for a name in capitals); every other
 /// argument is a value. A module's generated `<action>!` macro writes the
-/// action's name for it.
-fn call_java_action(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
-    let action = first(arguments, "the Java action it calls")?;
+/// action's name for it. `call_javascript_action!` calls a JavaScript
+/// action the same way.
+fn call_code_action(flow: &Expr, arguments: &[Expr], kind: CodeAction) -> syn::Result<TokenStream> {
+    let (what, call, call_into) = match kind {
+        CodeAction::Java => (
+            "the Java action it calls",
+            quote!(call_java),
+            quote!(call_java_into),
+        ),
+        CodeAction::JavaScript => (
+            "the JavaScript action it calls",
+            quote!(call_javascript),
+            quote!(call_javascript_into),
+        ),
+    };
+    let action = first(arguments, what)?;
     let (result, rest) = match arguments.get(1) {
         Some(Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Str(name),
@@ -820,12 +869,12 @@ fn call_java_action(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream>
         .collect::<syn::Result<Vec<_>>>()?;
     Ok(match result {
         Some(name) => quote! {
-            (#flow).call_java_into(#name, #action, |__mxrs_call| {
+            (#flow).#call_into(#name, #action, |__mxrs_call| {
                 #(#mappings)*
             })
         },
         None => quote! {
-            (#flow).call_java(#action, |__mxrs_call| {
+            (#flow).#call(#action, |__mxrs_call| {
                 #(#mappings)*
             })
         },

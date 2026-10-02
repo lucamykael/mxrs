@@ -137,6 +137,11 @@ pub(crate) fn flow_marker(name: &str) -> Option<String> {
     Some(names::microflow(name))
 }
 
+/// The type naming nanoflow `name`, as [`flow_marker`] names a microflow.
+pub(crate) fn nanoflow_marker(name: &str) -> Option<String> {
+    flow_marker(name).map(|_| names::nanoflow(name))
+}
+
 fn tag(ty: &Ty, entities: &HashSet<String>) -> Option<String> {
     Some(match ty {
         Ty::String => "MxString".into(),
@@ -424,10 +429,21 @@ pub(crate) fn collect_all(
                 .filter_map(move |flow| Some(format!("{module_name}.{}", flow.name.as_deref()?)))
         })
         .collect();
+    let nanoflows: HashSet<String> = modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_default();
+            module
+                .nanoflows
+                .iter()
+                .filter_map(move |flow| Some(format!("{module_name}.{}", flow.name.as_deref()?)))
+        })
+        .collect();
     let model = crate::flow_general::Model {
         entities: &entities,
         attributes: &accessors,
         microflows: &microflows,
+        nanoflows: &nanoflows,
         enumeration_values,
         java_actions,
         association_owners: &association_owners,

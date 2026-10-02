@@ -20,10 +20,10 @@ impl Ts {
 /// `frontend/src/navigation/index.ts`: the model's navigation profiles as
 /// the data that declares them.
 pub(crate) fn render_navigation(navigation: &mxrs_model::Navigation) -> String {
-    let mut profiles = navigation.profiles.iter().collect::<Vec<_>>();
-    profiles.sort_by(|left, right| left.name.cmp(&right.name));
-    let profiles = profiles
-        .into_iter()
+    // Profiles keep the model's order: a build writes them in this one.
+    let profiles = navigation
+        .profiles
+        .iter()
         .map(|profile| {
             let mut object = vec![("name".to_string(), Ts::text(&profile.name))];
             if profile.kind != "Responsive" {

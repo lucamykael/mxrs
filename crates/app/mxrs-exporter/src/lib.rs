@@ -312,14 +312,17 @@ fn import_cargo_project_inner(
     });
     let security_source = render_project_security_module(security_document.as_ref());
     // The navigation belongs to the frontend: it is declared there, in
-    // TypeScript, whenever the builder can restate it exactly.
+    // TypeScript, when a build would write it back exactly. One it would
+    // change stays in the imported model, untouched.
     let navigation = project.navigation()?;
-    let navigation_in_frontend = navigation_is_buildable(&navigation);
-    let navigation_source = if navigation_in_frontend {
-        frontend_export::render_navigation(&navigation)
-    } else {
-        render_navigation_module(&navigation)
+    let navigation_in_frontend = match project.navigation_document()? {
+        Some(document) => {
+            navigation_is_buildable(&navigation)
+                && mxrs_writer::restates_navigation(&document, &navigation_declaration(&navigation))
+        }
+        None => false,
     };
+    let navigation_source = frontend_export::render_navigation(&navigation);
     let task_queues_source = render_task_queue_declarations(&project)?;
     // The HTTP layer is generated for the axum adapter only; the other two
     // presets keep their server stub until their routers are ported.
@@ -585,7 +588,7 @@ fn import_cargo_project_inner(
         write_text(&directory.join("mod.rs"), &render_services_index(&[]))?;
     }
     let domain_source = render_domain_module(&authored_layers, security_source.is_some());
-    let ui_source = render_ui_module(&authored_layers, !navigation_in_frontend);
+    let ui_source = render_ui_module(&authored_layers, navigation_in_frontend);
     write_text(
         &destination.join("Cargo.toml"),
         &cargo_manifest(&package_name, mxrs_workspace, api_mode),
@@ -639,11 +642,6 @@ fn import_cargo_project_inner(
         let folder = destination.join("frontend/src/navigation");
         std::fs::create_dir_all(&folder).map_err(|source| io_error(&folder, source))?;
         write_text(&folder.join("index.ts"), &navigation_source)?;
-    } else {
-        write_text(
-            &destination.join("src/ui/navigation.rs"),
-            &navigation_source,
-        )?;
     }
     match api_mode {
         ApiMode::Axum => {
@@ -777,7 +775,12 @@ fn import_cargo_project_inner(
     )?;
     write_text(
         &destination.join("README.md"),
-        &generated_readme(&manifest.project_name, gaps.len(), &page_export),
+        &generated_readme(
+            &manifest.project_name,
+            gaps.len(),
+            &page_export,
+            navigation_in_frontend,
+        ),
     )?;
 
     Ok(CargoProjectImport {
@@ -841,12 +844,16 @@ fn render_services_index(modules: &[&str]) -> String {
 /// The user interface the model declares: navigation, and every module's
 /// pages, layouts and nanoflows. What the application serves over HTTP is
 /// not here — that is `controllers`.
-fn render_ui_module(layers: &AuthoredLayers, navigation: bool) -> String {
+fn render_ui_module(layers: &AuthoredLayers, navigation_in_frontend: bool) -> String {
     render_layer_module(
-        "//! Every module's pages, layouts and nanoflows, one folder per Mendix\n//! module inside each concept. The navigation is declared in the frontend.\n\n",
+        if navigation_in_frontend {
+            "//! Every module's pages, layouts and nanoflows, one folder per Mendix\n//! module inside each concept. The navigation is declared in the frontend.\n\n"
+        } else {
+            "//! Every module's pages, layouts and nanoflows, one folder per Mendix\n//! module inside each concept. The navigation stays in the imported model:\n//! the frontend's declaration cannot say all of it.\n\n"
+        },
         "ui",
         layers,
-        if navigation { &["navigation"] } else { &[] },
+        &[],
     )
 }
 
@@ -2966,6 +2973,52 @@ fn render_project_security_module(document: Option<&mxrs_bson::Document>) -> Opt
 /// Whether the navigation builder can say exactly what the model holds: it
 /// gives an item or a home one target, never two and never an empty role
 /// home.
+/// The declaration the model's navigation reads as.
+fn navigation_declaration(navigation: &mxrs_model::Navigation) -> mxrs_ir::NavigationDecl {
+    fn item_decl(item: &mxrs_model::navigation::NavigationItem) -> mxrs_ir::NavigationItemDecl {
+        mxrs_ir::NavigationItemDecl {
+            caption: item.caption.clone(),
+            page: item.page.clone(),
+            microflow: item.microflow.clone(),
+            icon: item.icon.as_ref().map(|icon| match icon {
+                mxrs_model::navigation::NavigationIcon::Glyph(glyph) => {
+                    mxrs_ir::NavigationIconDecl::Glyph(glyph.clone())
+                }
+                mxrs_model::navigation::NavigationIcon::Code(code) => {
+                    mxrs_ir::NavigationIconDecl::Code(*code)
+                }
+            }),
+            items: item.items.iter().map(item_decl).collect(),
+        }
+    }
+    mxrs_ir::NavigationDecl {
+        profiles: navigation
+            .profiles
+            .iter()
+            .map(|profile| mxrs_ir::NavigationProfileDecl {
+                name: profile.name.clone(),
+                kind: profile.kind.clone(),
+                app_title: profile.app_title.clone(),
+                home_page: profile.home_page.clone(),
+                home_microflow: profile.home_microflow.clone(),
+                sign_in_page: profile.sign_in_page.clone(),
+                role_homes: profile
+                    .role_homes
+                    .iter()
+                    .map(|home| mxrs_ir::RoleHomeDecl {
+                        user_role: home.role.clone().unwrap_or_default(),
+                        page: home.page.clone(),
+                        microflow: home.microflow.clone(),
+                    })
+                    .collect(),
+                items: profile.menu_items.iter().map(item_decl).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Whether the navigation says only what its declaration can: one target
+/// per item and home, a role for every role's home.
 fn navigation_is_buildable(navigation: &mxrs_model::Navigation) -> bool {
     fn item_is_buildable(item: &mxrs_model::navigation::NavigationItem) -> bool {
         !(item.page.is_some() && item.microflow.is_some())
@@ -2973,237 +3026,12 @@ fn navigation_is_buildable(navigation: &mxrs_model::Navigation) -> bool {
     }
     navigation.profiles.iter().all(|profile| {
         !(profile.home_page.is_some() && profile.home_microflow.is_some())
-            && profile
-                .role_homes
-                .iter()
-                .all(|home| home.page.is_some() != home.microflow.is_some())
+            && profile.role_homes.iter().all(|home| {
+                home.role.as_deref().is_some_and(|role| !role.is_empty())
+                    && home.page.is_some() != home.microflow.is_some()
+            })
             && profile.menu_items.iter().all(item_is_buildable)
     })
-}
-
-/// The project's navigation as the function that builds it. A model the
-/// builder cannot restate exactly is registered as the declaration itself
-/// instead, so nothing is approximated.
-fn render_navigation_module(navigation: &mxrs_model::Navigation) -> String {
-    if !navigation_is_buildable(navigation) {
-        return render_navigation_declaration(navigation);
-    }
-    let mut source = String::from(
-        "//! The project's navigation profiles.\n\n\
-         use mxrs::prelude::*;\n\n\
-         #[navigation]\n",
-    );
-    let mut profiles = navigation.profiles.iter().collect::<Vec<_>>();
-    profiles.sort_by(|left, right| left.name.cmp(&right.name));
-    let parameter = if profiles.is_empty() {
-        "_navigation"
-    } else {
-        "navigation"
-    };
-    let _ = writeln!(
-        source,
-        "pub fn navigation({parameter}: &mut NavigationBuilder) {{"
-    );
-    for profile in profiles {
-        let mut lines = Vec::new();
-        if profile.kind != "Responsive" {
-            lines.push(format!("profile.kind({});", rust_string(&profile.kind)));
-        }
-        for (locale, text) in &profile.app_title {
-            lines.push(format!(
-                "profile.title({}, {});",
-                rust_string(locale),
-                rust_string(text)
-            ));
-        }
-        if let Some(page) = &profile.home_page {
-            lines.push(format!("profile.home_page({});", rust_string(page)));
-        }
-        if let Some(microflow) = &profile.home_microflow {
-            lines.push(format!(
-                "profile.home_microflow({});",
-                rust_string(microflow)
-            ));
-        }
-        if let Some(page) = &profile.sign_in_page {
-            lines.push(format!("profile.sign_in_page({});", rust_string(page)));
-        }
-        for home in &profile.role_homes {
-            let role = rust_string(home.role.as_deref().unwrap_or_default());
-            match (&home.page, &home.microflow) {
-                (Some(page), _) => {
-                    lines.push(format!(
-                        "profile.home_for_page({role}, {});",
-                        rust_string(page)
-                    ));
-                }
-                (None, Some(microflow)) => lines.push(format!(
-                    "profile.home_for_microflow({role}, {});",
-                    rust_string(microflow)
-                )),
-                (None, None) => unreachable!("checked by navigation_is_buildable"),
-            }
-        }
-        for item in &profile.menu_items {
-            render_navigation_item_call(&mut lines, item, "profile");
-        }
-        if lines.is_empty() {
-            let _ = writeln!(
-                source,
-                "    navigation.profile({}, |_| {{}});",
-                rust_string(&profile.name)
-            );
-        } else {
-            let _ = writeln!(
-                source,
-                "    navigation.profile({}, |profile| {{\n{}\n    }});",
-                rust_string(&profile.name),
-                lines.join("\n")
-            );
-        }
-    }
-    source.push_str("}\n");
-    source
-}
-
-/// One navigation item as a call on `parent`. An item captioned in `en_US`
-/// states that caption as the call's own argument; one captioned only in
-/// other languages starts without a caption.
-fn render_navigation_item_call(
-    lines: &mut Vec<String>,
-    item: &mxrs_model::navigation::NavigationItem,
-    parent: &str,
-) {
-    let mut body = Vec::new();
-    for (locale, text) in &item.caption {
-        if locale != "en_US" {
-            body.push(format!(
-                "item.caption({}, {});",
-                rust_string(locale),
-                rust_string(text)
-            ));
-        }
-    }
-    if let Some(page) = &item.page {
-        body.push(format!("item.page({});", rust_string(page)));
-    }
-    if let Some(microflow) = &item.microflow {
-        body.push(format!("item.microflow({});", rust_string(microflow)));
-    }
-    match &item.icon {
-        Some(mxrs_model::navigation::NavigationIcon::Glyph(value)) => {
-            body.push(format!("item.icon({});", rust_string(value)));
-        }
-        Some(mxrs_model::navigation::NavigationIcon::Code(value)) => {
-            body.push(format!("item.icon_code({value});"));
-        }
-        None => {}
-    }
-    for child in &item.items {
-        render_navigation_item_call(&mut body, child, "item");
-    }
-    let opening = match item.caption.get("en_US") {
-        Some(caption) => format!("{parent}.item({}, ", rust_string(caption)),
-        None => format!("{parent}.localized_item("),
-    };
-    if body.is_empty() {
-        lines.push(format!("{opening}|_| {{}});"));
-    } else {
-        lines.push(format!("{opening}|item| {{\n{}\n}});", body.join("\n")));
-    }
-}
-
-/// The navigation as the declaration itself, for the rare model the builder
-/// cannot restate exactly.
-fn render_navigation_declaration(navigation: &mxrs_model::Navigation) -> String {
-    let mut source = String::from(
-        "//! The project's navigation profiles, stated as the declaration itself:\n\
-         //! this model gives an item or a home more than one target, which the\n\
-         //! navigation builder has no way to say.\n\n\
-         mxrs::register!(Navigation, |project| {\n\
-         project.navigation = Some(::mxrs::NavigationDecl { profiles: vec![\n",
-    );
-    let mut profiles = navigation.profiles.iter().collect::<Vec<_>>();
-    profiles.sort_by(|left, right| left.name.cmp(&right.name));
-    for profile in profiles {
-        let _ = writeln!(
-            source,
-            "        ::mxrs::NavigationProfileDecl {{ name: {}.to_string(), kind: {}.to_string(), app_title: {}, home_page: {}, home_microflow: {}, sign_in_page: {}, role_homes: vec![",
-            rust_string(&profile.name),
-            rust_string(&profile.kind),
-            rust_btree_map(&profile.app_title),
-            rust_option_string(profile.home_page.as_deref()),
-            rust_option_string(profile.home_microflow.as_deref()),
-            rust_option_string(profile.sign_in_page.as_deref()),
-        );
-        for home in &profile.role_homes {
-            let _ = writeln!(
-                source,
-                "            ::mxrs::RoleHomeDecl {{ user_role: {}.to_string(), page: {}, microflow: {} }},",
-                rust_string(home.role.as_deref().unwrap_or_default()),
-                rust_option_string(home.page.as_deref()),
-                rust_option_string(home.microflow.as_deref()),
-            );
-        }
-        source.push_str("        ], items: vec![\n");
-        for item in &profile.menu_items {
-            render_navigation_item(&mut source, item, 3);
-        }
-        source.push_str("        ] },\n");
-    }
-    source.push_str("    ] });\n});\n");
-    source
-}
-
-fn render_navigation_item(
-    source: &mut String,
-    item: &mxrs_model::navigation::NavigationItem,
-    depth: usize,
-) {
-    let indent = "    ".repeat(depth);
-    let _ = writeln!(
-        source,
-        "{indent}::mxrs::NavigationItemDecl {{ caption: {}, page: {}, microflow: {}, icon: {}, items: vec![",
-        rust_btree_map(&item.caption),
-        rust_option_string(item.page.as_deref()),
-        rust_option_string(item.microflow.as_deref()),
-        rust_option_navigation_icon(item.icon.as_ref()),
-    );
-    for child in &item.items {
-        render_navigation_item(source, child, depth + 1);
-    }
-    let _ = writeln!(source, "{indent}] }},");
-}
-
-fn rust_btree_map(values: &std::collections::BTreeMap<String, String>) -> String {
-    if values.is_empty() {
-        return "::std::collections::BTreeMap::new()".to_string();
-    }
-    let entries = values
-        .iter()
-        .map(|(key, value)| {
-            format!(
-                "({}.to_string(), {}.to_string())",
-                rust_string(key),
-                rust_string(value)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("::std::collections::BTreeMap::from([{entries}])")
-}
-
-fn rust_option_navigation_icon(icon: Option<&mxrs_model::navigation::NavigationIcon>) -> String {
-    match icon {
-        Some(mxrs_model::navigation::NavigationIcon::Glyph(value)) => format!(
-            "Some(::mxrs::NavigationIconDecl::Glyph({}.to_string()))",
-            rust_string(value)
-        ),
-        Some(mxrs_model::navigation::NavigationIcon::Code(value)) => {
-            format!("Some(::mxrs::NavigationIconDecl::Code({value}))")
-        }
-        None => "None".to_string(),
-    }
 }
 
 fn bson_integer(value: Option<&mxrs_bson::Bson>) -> Option<i32> {
@@ -3249,12 +3077,6 @@ fn bson_strings(document: &mxrs_bson::Document, field: &str) -> Vec<String> {
             _ => None,
         })
         .collect()
-}
-
-fn rust_option_string(value: Option<&str>) -> String {
-    value
-        .map(|value| format!("Some({}.to_string())", rust_string(value)))
-        .unwrap_or_else(|| "None".to_string())
 }
 
 /// Builds the public marker surface directly from the imported model. Flow
@@ -3305,7 +3127,7 @@ fn build_binary_source(crate_name: &str, project_name: &str, api_mode: ApiMode) 
         ),
     };
     format!(
-        "fn build() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let root = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"));\n    let mut project = {crate_name}::Application::build();\n    mxrs::merge_frontend(&mut project, root.join(\"frontend\"))?;\n    mxrs::replace_imported_project(root.join(\"model/imported\"), &output, &project)?;\n    mxrs::materialize_project_assets(root.join(\"assets\"), &output)?;\n    mxrs::materialize_java_sources(root.join(\"java\"), &output)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n\n{serve}",
+        "fn build() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| {}.to_string());\n    let root = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"));\n    let project = {crate_name}::Application::build_with_frontend(root.join(\"frontend\"))?;\n    mxrs::replace_imported_project(root.join(\"model/imported\"), &output, &project)?;\n    mxrs::materialize_project_assets(root.join(\"assets\"), &output)?;\n    mxrs::materialize_java_sources(root.join(\"java\"), &output)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n\n{serve}",
         serde_json::to_string(&default_output).expect("a string always serializes"),
     )
 }
@@ -3319,7 +3141,17 @@ fn indent(source: &str, spaces: usize) -> String {
         .join("\n")
 }
 
-fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportReport) -> String {
+fn generated_readme(
+    project_name: &str,
+    gaps: usize,
+    page_export: &PageExportReport,
+    navigation_in_frontend: bool,
+) -> String {
+    let navigation_note = if navigation_in_frontend {
+        "The user interface is the frontend's: `src/navigation/index.ts` declares the navigation, and every build reads it into the model."
+    } else {
+        "The user interface is the frontend's. This model's navigation says more than `src/navigation/index.ts` can declare, so it stays in `model/imported/` as it is."
+    };
     let pages_note = if page_export.typed_candidates > 0 {
         format!(
             "\n`src/ui/pages/` holds {} page(s) this import detected as buildable from\nmxrs-dsl's native/structural widget vocabulary (out of {} page(s) total), each a\n`#[page]` function in its module's folder.\n",
@@ -3330,7 +3162,7 @@ fn generated_readme(project_name: &str, gaps: usize, page_export: &PageExportRep
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the pages, layouts and nanoflows the model declares, until each moves to the frontend.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. The user interface is the frontend's: `src/navigation/index.ts` declares the navigation, and every build reads it into the model.\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; client-side nanoflows stay in `ui`. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the pages, layouts and nanoflows the model declares, until each moves to the frontend.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. {navigation_note}\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; client-side nanoflows stay in `ui`. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -6868,11 +6700,13 @@ fn action_port(
 /// uses — mxrs's own or the standard library's — which the action's macro
 /// would hide where it is imported.
 fn java_action_macro_name(action: &str) -> String {
-    const IN_USE: [&str; 69] = [
+    const IN_USE: [&str; 71] = [
         // The activity macros.
         "aggregate_list",
         "call_java_action",
+        "call_javascript_action",
         "call_microflow",
+        "call_nanoflow",
         "change_list",
         "change_object",
         "change_variable",
@@ -7837,15 +7671,15 @@ mod tests {
         let ui = render_ui_module(&full, true);
         // Nanoflows are the frontend's services, so they are a user-interface
         // concept — declared when the import produced any.
-        for held in [
-            "pub mod nanoflows;",
-            "pub mod navigation;",
-            "pub mod pages;",
-        ] {
+        for held in ["pub mod nanoflows;", "pub mod pages;"] {
             assert!(ui.contains(held), "{held}\n{ui}");
         }
-        // A navigation the frontend declares is not a module of the layer.
-        assert!(!render_ui_module(&full, false).contains("pub mod navigation;"));
+        // The navigation is never a Rust module of the layer: the frontend
+        // declares it, or the imported model keeps it.
+        for in_frontend in [true, false] {
+            let layer = render_ui_module(&full, in_frontend);
+            assert!(!layer.contains("pub mod navigation;"), "{layer}");
+        }
         // What the application serves over HTTP is not user interface: it
         // has a layer of its own.
         assert!(!ui.contains("pub mod http;"), "{ui}");
@@ -9420,6 +9254,141 @@ pub enum ENUMStatus {
         assert!(source.contains("string Number = \"A-0\""));
         assert!(source.contains("association Order_Customer -> Sales::Customer as Reference"));
         assert!(source.contains("::mxrs_macros::project!"));
+    }
+
+    /// What the frontend's navigation file says is read back as the
+    /// declaration the model's navigation reads as.
+    #[test]
+    fn the_navigation_written_for_the_frontend_reads_back_as_the_model() {
+        use mxrs_model::navigation::{
+            Navigation, NavigationIcon, NavigationItem, NavigationProfile, RoleHome,
+        };
+        let texts = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(language, text)| (language.to_string(), text.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let profile = |name: &str, kind: &str| NavigationProfile {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            app_icon: None,
+            app_title: Default::default(),
+            home_page: None,
+            home_microflow: None,
+            sign_in_page: None,
+            role_homes: vec![],
+            menu_items: vec![],
+        };
+        let mut responsive = profile("Responsive", "Responsive");
+        responsive.app_title = texts(&[("en_US", "Shop \"&\" Co"), ("nl_NL", "Winkel\nen zo")]);
+        responsive.home_microflow = Some("Sales.ACT_Home".to_string());
+        responsive.sign_in_page = Some("Main.Login".to_string());
+        responsive.role_homes = vec![RoleHome {
+            role: Some("Sales.User".to_string()),
+            page: Some("Sales.Orders".to_string()),
+            microflow: None,
+        }];
+        responsive.menu_items = vec![
+            NavigationItem {
+                caption: texts(&[("nl_NL", "Alleen Nederlands")]),
+                page: Some("Sales.Orders".to_string()),
+                icon: Some(NavigationIcon::Code(-3)),
+                ..Default::default()
+            },
+            NavigationItem {
+                caption: Default::default(),
+                microflow: Some("Sales.ACT_Ping".to_string()),
+                icon: Some(NavigationIcon::Glyph("\u{e001}".to_string())),
+                items: vec![NavigationItem {
+                    caption: texts(&[("en_US", "Nested")]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ];
+        // Profiles keep the model's order.
+        let navigation = Navigation {
+            profiles: vec![responsive, profile("Phone", "Phone")],
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("src/navigation");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("index.ts"),
+            frontend_export::render_navigation(&navigation),
+        )
+        .unwrap();
+        let read = mxrs_frontend::read_frontend(directory.path())
+            .unwrap()
+            .navigation
+            .unwrap();
+        assert_eq!(read, navigation_declaration(&navigation));
+    }
+
+    /// A navigation a build would not write back exactly stays in the
+    /// imported model: no file declares it, and the project says so.
+    #[test]
+    fn a_navigation_the_frontend_cannot_restate_stays_in_the_imported_model() {
+        let import = |customize: &dyn Fn(&mut mxrs_bson::Document)| {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("Shop.mpr");
+            let mut builder = mxrs_dsl::ProjectBuilder::new("11.12.1");
+            builder.module("Main", |_| {});
+            builder.navigation(|navigation| {
+                navigation.profile("Responsive", |_| {});
+            });
+            mxrs_writer::write_project(&path, &builder.build()).unwrap();
+            let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+            let unit = mpr
+                .all_units()
+                .unwrap()
+                .into_iter()
+                .find(|unit| {
+                    mpr.parse_contents(unit).is_ok_and(|document| {
+                        document.get_str("$Type").ok() == Some("Navigation$NavigationDocument")
+                    })
+                })
+                .unwrap();
+            let mut document = mpr.parse_contents(&unit).unwrap();
+            customize(&mut document);
+            mpr.update_unit(&unit.unit_id, document).unwrap();
+            drop(mpr);
+            let generated = directory.path().join("shop");
+            import_cargo_project(&path, &generated, None).unwrap();
+            let read = |relative: &str| std::fs::read_to_string(generated.join(relative)).ok();
+            (
+                read("frontend/src/navigation/index.ts"),
+                read("src/ui/mod.rs").unwrap(),
+                read("README.md").unwrap(),
+                directory,
+            )
+        };
+
+        let (navigation, ui, readme, _directory) = import(&|_| {});
+        assert!(navigation.unwrap().contains("name: \"Responsive\""));
+        assert!(ui.contains("declared in the frontend"), "{ui}");
+        assert!(readme.contains("`src/navigation/index.ts` declares the navigation"));
+
+        // Progressive web app settings are nothing the declaration says.
+        let (navigation, ui, readme, _directory) = import(&|document| {
+            let profiles = document.get_array_mut("Profiles").unwrap();
+            let profile = profiles
+                .iter_mut()
+                .find_map(|value| value.as_document_mut())
+                .unwrap();
+            profile.insert(
+                "ProgressiveWebAppSettings",
+                mxrs_bson::doc! {
+                    "$ID": uuid::Uuid::new_v4().to_string(),
+                    "$Type": "Navigation$ProgressiveWebAppSettings",
+                },
+            );
+        });
+        assert!(navigation.is_none());
+        assert!(ui.contains("stays in the imported model"), "{ui}");
+        assert!(!ui.contains("pub mod navigation"), "{ui}");
+        assert!(readme.contains("stays in `model/imported/`"), "{readme}");
     }
 
     #[test]

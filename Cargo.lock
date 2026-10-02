@@ -1019,6 +1019,7 @@ dependencies = [
  "mxrs-bson",
  "mxrs-dsl",
  "mxrs-forms",
+ "mxrs-frontend",
  "mxrs-ir",
  "mxrs-macros",
  "mxrs-materializers",
@@ -1086,6 +1087,7 @@ dependencies = [
  "oxc_span",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "tempfile",
  "thiserror",
 ]

@@ -56,6 +56,30 @@ pub(crate) fn synchronize_navigation(
     Ok(())
 }
 
+/// Whether `declaration`, written over the navigation `document` it was
+/// read from, gives that document back exactly: what a build would change
+/// in it is what the declaration cannot state.
+pub fn restates_navigation(document: &Document, declaration: &NavigationDecl) -> bool {
+    let identity = ProjectIdentity::for_project("restatement");
+    let previous = documents_by_name(document, "Profiles");
+    let Ok(profiles) = declaration
+        .profiles
+        .iter()
+        .map(|profile| {
+            profile_document(profile, previous.get(&profile.name), identity).map(Bson::Document)
+        })
+        .collect::<Result<Vec<_>>>()
+    else {
+        return false;
+    };
+    let mut rebuilt = document.clone();
+    rebuilt.insert(
+        "Profiles",
+        build_array(profiles, array_marker(document.get("Profiles"), 2)),
+    );
+    rebuilt == *document
+}
+
 fn profile_document(
     declaration: &NavigationProfileDecl,
     previous: Option<&Document>,
@@ -225,7 +249,13 @@ fn menu_item_document(
             icon.insert("$Type", "Forms$GlyphIcon");
             match icon_declaration {
                 mxrs_ir::NavigationIconDecl::Glyph(code) => icon.insert("Code", code.clone()),
-                mxrs_ir::NavigationIconDecl::Code(code) => icon.insert("Code", *code),
+                // A code keeps the width the model stored it with.
+                mxrs_ir::NavigationIconDecl::Code(code) => match i32::try_from(*code) {
+                    Ok(narrow) if !matches!(icon.get("Code"), Some(Bson::Int64(_))) => {
+                        icon.insert("Code", narrow)
+                    }
+                    _ => icon.insert("Code", *code),
+                },
             };
             document.insert("Icon", icon);
         }

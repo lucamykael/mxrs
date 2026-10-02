@@ -291,6 +291,25 @@ pub fn call_java_action(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Calls a nanoflow: `call_nanoflow!(flow, ACT_Order_Open { Order: order },
+/// name = "...")`, as `call_microflow!` calls a microflow.
+#[proc_macro]
+pub fn call_nanoflow(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::CallNanoflow, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Calls a JavaScript action: `call_javascript_action!(flow,
+/// "NanoflowCommons.ShowProgress", "Progress", message = "Saving")`, as
+/// `call_java_action!` calls a Java action.
+#[proc_macro]
+pub fn call_javascript_action(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::CallJavaScriptAction, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
 /// Declares a service: an `impl` block whose methods marked
 /// `#[microflow(...)]` are the flows of one subject.
 ///

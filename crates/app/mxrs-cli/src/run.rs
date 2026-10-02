@@ -311,7 +311,9 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     // A project's own Java action implementations are Rust it compiles, so
     // only its generated runtime (`cargo run -- serve`) registers them.
     if let Some(report) = engine.unregistered_java_actions_report() {
-        eprintln!("[mxrs] warning: {report}");
+        eprintln!(
+            "[mxrs] warning: {report}\n  `mxrs run` has only the Java actions mxrs implements; `cargo run -- serve` also registers the project's own."
+        );
     }
     let engine = Arc::new(engine);
     let flow_names: Vec<String> = engine.flow_names().map(str::to_string).collect();

@@ -349,7 +349,7 @@ pub struct Order {
 | `#[declaration(module = "...")]` | fn | anything else a module holds, through its `ModuleBuilder` |
 | `#[module_roles(module = "...")]` | enum | a module's roles; variants are the roles |
 | `#[security]` | fn | the project's security |
-| `#[navigation]` | fn | the project's navigation profiles, when the frontend's `src/navigation/index.ts` cannot restate them |
+| `#[navigation]` | fn | the project's navigation profiles, for a project without a frontend; with one, `frontend/src/navigation/index.ts` declares them and `#[navigation]` is refused |
 | `#[navigation_item(profile = "...", caption = "...")]` | fn | one item, declared next to the page it opens |
 | `#[demo_user]` | fn | a local demo user |
 

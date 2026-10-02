@@ -133,6 +133,47 @@ pub fn apply(crate_name: &str, project: &mut ProjectDecl) {
     }
 }
 
+/// Applies every declaration `crate_name` registered to `project`, with
+/// what the frontend declares in its place among them: its navigation at
+/// the navigation stage, so the items Rust pages add for themselves join
+/// it. A navigation the frontend declares is the project's only one.
+pub fn apply_with_frontend(
+    crate_name: &str,
+    project: &mut ProjectDecl,
+    frontend: mxrs_frontend::FrontendDecl,
+) -> Result<(), mxrs_frontend::FrontendError> {
+    let mut navigation = frontend.navigation;
+    let declarations = declarations(crate_name);
+    if navigation.is_some() {
+        let rust = declarations
+            .iter()
+            .find(|declaration| declaration.stage == Stage::Navigation);
+        if let Some(rust) = rust {
+            return Err(mxrs_frontend::FrontendError::Duplicate(format!(
+                "{}:{}",
+                rust.file, rust.line
+            )));
+        }
+        if project.navigation.is_some() {
+            return Err(mxrs_frontend::FrontendError::Duplicate(
+                "the project's entry point".to_string(),
+            ));
+        }
+    }
+    for declaration in declarations {
+        if declaration.stage > Stage::Navigation
+            && let Some(declared) = navigation.take()
+        {
+            project.navigation = Some(declared);
+        }
+        declaration.apply(project);
+    }
+    if let Some(declared) = navigation {
+        project.navigation = Some(declared);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

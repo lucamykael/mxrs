@@ -54,4 +54,5 @@ mod security;
 pub use error::{Result, WriterError};
 pub use flow_contract::validate_flow_declaration;
 pub use instrumentation::{InstrumentationReport, instrument_functional_tests};
+pub use navigation::restates_navigation;
 pub use project::{synchronize_project, synchronize_project_documents, write_project};

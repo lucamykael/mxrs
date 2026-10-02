@@ -79,7 +79,7 @@ struct Item {
 /// A caption in English alone is its text; one in other languages names
 /// each language.
 #[derive(Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, expecting = "a caption: a text, or texts by language code")]
 enum Caption {
     Text(String),
     Localized(BTreeMap<String, String>),
@@ -94,18 +94,26 @@ struct Icon {
     code: Option<i64>,
 }
 
+/// Why a value does not declare a navigation: at which path, and what is
+/// wrong there.
+pub(crate) type Refusal = (String, String);
+
 /// The navigation `value` declares, or why it does not declare one.
-pub(crate) fn navigation(value: serde_json::Value) -> Result<NavigationDecl, String> {
-    let declared: Navigation = serde_json::from_value(value).map_err(|error| error.to_string())?;
+pub(crate) fn navigation(value: &serde_json::Value) -> Result<NavigationDecl, Refusal> {
+    let declared: Navigation = serde_path_to_error::deserialize(value)
+        .map_err(|error| (error.path().to_string(), error.inner().to_string()))?;
+    let mut names = std::collections::HashSet::new();
     let profiles = declared
         .profiles
         .into_iter()
-        .map(|profile| {
+        .enumerate()
+        .map(|(index, profile)| {
+            let at = format!("profiles[{index}]");
+            if !names.insert(profile.name.clone()) {
+                return Err((at, format!("a second profile named {:?}", profile.name)));
+            }
             if profile.home_page.is_some() && profile.home_microflow.is_some() {
-                return Err(format!(
-                    "profile {:?} has both a home page and a home microflow",
-                    profile.name
-                ));
+                return Err((at, "a home page or a home microflow, not both".to_string()));
             }
             let mut declared = NavigationProfileDecl::new(&profile.name);
             if let Some(kind) = profile.kind {
@@ -118,11 +126,15 @@ pub(crate) fn navigation(value: serde_json::Value) -> Result<NavigationDecl, Str
             declared.role_homes = profile
                 .homes
                 .into_iter()
-                .map(|home| {
+                .enumerate()
+                .map(|(home_index, home)| {
                     if home.page.is_some() == home.microflow.is_some() {
-                        return Err(format!(
-                            "the home of role {:?} is a page or a microflow, one of them",
-                            home.role
+                        return Err((
+                            format!("{at}.homes[{home_index}]"),
+                            format!(
+                                "the home of role {:?} is a page or a microflow, one of them",
+                                home.role
+                            ),
                         ));
                     }
                     Ok(RoleHomeDecl {
@@ -135,7 +147,8 @@ pub(crate) fn navigation(value: serde_json::Value) -> Result<NavigationDecl, Str
             declared.items = profile
                 .items
                 .into_iter()
-                .map(item)
+                .enumerate()
+                .map(|(item_index, declared)| item(declared, format!("{at}.items[{item_index}]")))
                 .collect::<Result<_, _>>()?;
             Ok(declared)
         })
@@ -143,14 +156,15 @@ pub(crate) fn navigation(value: serde_json::Value) -> Result<NavigationDecl, Str
     Ok(NavigationDecl { profiles })
 }
 
-fn item(item: Item) -> Result<NavigationItemDecl, String> {
+fn item(item: Item, at: String) -> Result<NavigationItemDecl, Refusal> {
     let caption = match item.caption {
         Caption::Text(text) => BTreeMap::from([("en_US".to_string(), text)]),
         Caption::Localized(captions) => captions,
     };
     if item.page.is_some() && item.microflow.is_some() {
-        return Err(format!(
-            "the item {caption:?} opens a page or calls a microflow, one of them"
+        return Err((
+            at,
+            "an item opens a page or calls a microflow, one of them".to_string(),
         ));
     }
     let icon = match item.icon {
@@ -164,8 +178,9 @@ fn item(item: Item) -> Result<NavigationItemDecl, String> {
             code: Some(code),
         }) => Some(NavigationIconDecl::Code(code)),
         Some(_) => {
-            return Err(format!(
-                "the icon of {caption:?} is a glyph or a code, one of them"
+            return Err((
+                format!("{at}.icon"),
+                "an icon is a glyph or a code, one of them".to_string(),
             ));
         }
     };
@@ -177,7 +192,8 @@ fn item(item: Item) -> Result<NavigationItemDecl, String> {
         items: item
             .items
             .into_iter()
-            .map(self::item)
+            .enumerate()
+            .map(|(index, child)| self::item(child, format!("{at}.items[{index}]")))
             .collect::<Result<_, _>>()?,
     })
 }

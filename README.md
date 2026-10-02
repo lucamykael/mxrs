@@ -124,8 +124,10 @@ with a comment saying why it stayed in the snapshot. Project security is importe
 `src/domain/security.rs`, each module's roles into
 `src/domain/module_security/<module>.rs`, and modern navigation into the
 frontend's `src/navigation/index.ts` — TypeScript data, checked by the
-frontend's build and read by mxrs's (a navigation the TypeScript cannot
-restate exactly stays a Rust `#[navigation]` declaration). Their writers validate role and target
+frontend's build and read by mxrs's. A navigation a build would not write
+back exactly — an item that signs out or opens a link, an image icon,
+progressive web app settings — stays in the snapshot untouched instead.
+Their writers validate role and target
 invariants, preserve native fields outside the typed surface, and keep
 existing identities. Unknown documents remain complete in the snapshot.
 Task queues import as editable declarations in

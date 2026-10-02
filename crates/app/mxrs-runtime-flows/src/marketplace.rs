@@ -55,9 +55,19 @@ fn whole(
     }
 }
 
+/// The longest text these actions build, in characters: past it a flow
+/// fails as Java's `OutOfMemoryError` would, rather than a system that
+/// overcommits memory taking the process down later.
+const LONGEST: usize = 1 << 27;
+
 /// Room for `count` more elements, or the flow error Java's
 /// `OutOfMemoryError` would be — never an aborted process.
 fn reserve<T>(vector: &mut Vec<T>, count: usize, action: &str) -> Result<(), FlowError> {
+    if count > LONGEST {
+        return Err(FlowError::native(format!(
+            "{action}: {count} characters is more than a text can hold here ({LONGEST})"
+        )));
+    }
     vector
         .try_reserve_exact(count)
         .map_err(|_| FlowError::native(format!("{action}: out of memory for {count} characters")))
@@ -189,13 +199,20 @@ impl JavaAction for Base64Decode {
         let Some(encoded) = text(arguments, "encoded") else {
             return Ok(FlowValue::Empty);
         };
-        const LENIENT: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+        // Java's decoder needs no padding, but padding it is given must be
+        // whole; stray bits in the last character it ignores.
+        let padding = if encoded.contains('=') {
+            base64::engine::DecodePaddingMode::RequireCanonical
+        } else {
+            base64::engine::DecodePaddingMode::RequireNone
+        };
+        let engine = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
             base64::engine::GeneralPurposeConfig::new()
-                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+                .with_decode_padding_mode(padding)
                 .with_decode_allow_trailing_bits(true),
         );
-        let bytes = LENIENT.decode(encoded).map_err(|error| {
+        let bytes = engine.decode(encoded).map_err(|error| {
             FlowError::native(format!("CommunityCommons.Base64Decode: {error}"))
         })?;
         Ok(FlowValue::String(
@@ -282,6 +299,15 @@ mod tests {
         // `intValue()` does, here to a negative and so to no padding.
         assert_eq!(pad(Side::Left, "", 3, "0"), "000");
         assert_eq!(pad(Side::Left, "bat", 3_000_000_000, "0"), "bat");
+        // A text too long to build fails the flow.
+        assert!(
+            Pad(Side::Left)
+                .call(&arguments(&[
+                    ("value", FlowValue::String("a".into())),
+                    ("amount", FlowValue::Int(i64::from(i32::MAX))),
+                ]))
+                .is_err()
+        );
     }
 
     #[test]
@@ -305,6 +331,8 @@ mod tests {
                 decoded
             );
         }
+        // Padding it is given must be whole, as Java's says.
+        assert!(call(&Base64Decode, "encoded", "TQ=").is_err());
         assert_eq!(
             string(call(&StringTrim, "value", "\t a b \n").unwrap()),
             "a b"

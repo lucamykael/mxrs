@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use mxrs_bson::Document;
 use mxrs_mpr::{MprFile, RawUnit};
 
 use crate::error::Result;
@@ -55,13 +56,18 @@ impl Project {
     }
 
     pub fn navigation(&self) -> Result<Navigation> {
+        Ok(Navigation::from_bson(self.navigation_document()?.as_ref()))
+    }
+
+    /// The navigation document as the model stores it, when there is one.
+    pub fn navigation_document(&self) -> Result<Option<Document>> {
         for unit in self.mpr.all_units()? {
             let doc = self.mpr.parse_contents(&unit)?;
             if get_str_any(&doc, &["$Type"]).as_deref() == Some("Navigation$NavigationDocument") {
-                return Ok(Navigation::from_bson(Some(&doc)));
+                return Ok(Some(doc));
             }
         }
-        Ok(Navigation::from_bson(None))
+        Ok(None)
     }
 
     pub fn all_units(&self) -> Result<Vec<RawUnit>> {

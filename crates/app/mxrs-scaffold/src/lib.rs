@@ -229,10 +229,9 @@ fn project_files(
     let frontend = mxrs_materializers::frontend_source_files()
         .iter()
         .map(|(path, bytes)| {
-            (
-                format!("frontend/{path}"),
-                String::from_utf8_lossy(bytes).into_owned(),
-            )
+            let text = std::str::from_utf8(bytes)
+                .expect("the frontend shell is text, as its materializer's tests check");
+            (format!("frontend/{path}"), text.to_string())
         })
         .chain([(
             "frontend/src/navigation/index.ts".to_string(),
@@ -299,7 +298,7 @@ fn project_files(
         (
             "src/main.rs",
             format!(
-                "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| \"build/{}.mpr\".to_string());\n    let output_path = std::path::Path::new(&output);\n    if let Some(parent) = output_path.parent() {{ std::fs::create_dir_all(parent)?; }}\n    let mut declaration = {crate_name}::Application::build();\n    mxrs::merge_frontend(&mut declaration, std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"frontend\"))?;\n    if output_path.exists() {{\n        mxrs::synchronize_project(output_path, &declaration)?;\n    }} else {{\n        mxrs::write_project(output_path, &declaration)?;\n    }}\n    let web = output_path.parent().unwrap_or_else(|| std::path::Path::new(\".\")).join(\"web\");\n    mxrs::materialize_mpr(output_path, web)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n",
+                "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let output = std::env::args().nth(1).unwrap_or_else(|| \"build/{}.mpr\".to_string());\n    let output_path = std::path::Path::new(&output);\n    if let Some(parent) = output_path.parent() {{ std::fs::create_dir_all(parent)?; }}\n    let declaration = {crate_name}::Application::build_with_frontend(std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"frontend\"))?;\n    if output_path.exists() {{\n        mxrs::synchronize_project(output_path, &declaration)?;\n    }} else {{\n        mxrs::write_project(output_path, &declaration)?;\n    }}\n    let web = output_path.parent().unwrap_or_else(|| std::path::Path::new(\".\")).join(\"web\");\n    mxrs::materialize_mpr(output_path, web)?;\n    println!(\"built {{output}}\");\n    Ok(())\n}}\n",
                 package_name
             ),
         ),

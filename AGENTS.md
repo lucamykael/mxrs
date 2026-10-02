@@ -104,7 +104,8 @@ read-only behavioral oracle; never edit it.
   `change_list!` (the list itself — `add`, `remove`, `replace`, `clear` —
   or another made from it — `sort`, `filter`, `find_by`, `head`, `union`,
   ... with its `name`), `aggregate_list!`, `create_variable!`,
-  `change_variable!`, `call_microflow!`, `log!` — `retrieve!(flow, &order,
+  `change_variable!`, `call_microflow!`, `call_nanoflow!`,
+  `call_javascript_action!`, `log!` — `retrieve!(flow, &order,
   by = Order::customer(), name = "...")` over an association. A member,
   attribute or association, is its struct field. Their arguments are Rust
   expressions, so rustfmt lays them out: `create_object!(flow, Order {

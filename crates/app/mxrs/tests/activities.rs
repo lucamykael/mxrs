@@ -223,6 +223,49 @@ pub fn with_builders(flow: &mut FlowBuilder) {
     flow.rollback_with(&order, |_| {});
 }
 
+#[nanoflow(SUB, module = "Sales")]
+pub fn open_order(_flow: &mut FlowBuilder) {}
+
+#[nanoflow(ACT, module = "Sales")]
+pub fn client_with_macros(flow: &mut FlowBuilder) {
+    let order = flow.parameter_of("Order", DataType::object::<Order>(), |_| {});
+
+    let progress = call_javascript_action!(
+        flow,
+        "NanoflowCommons.ShowProgress",
+        "Progress",
+        message = "Saving",
+        blocking = true
+    );
+
+    call_nanoflow!(flow, SUB_OpenOrder { Order: order }, name = "Opened");
+
+    call_nanoflow!(flow, SUB_OpenOrder);
+
+    call_javascript_action!(flow, "NanoflowCommons.HideProgress", identifier = progress);
+
+    call_javascript_action!(flow, "Sales.Pick", "Picked", entity = Customer);
+}
+
+#[nanoflow(ACT, module = "Sales")]
+pub fn client_with_builders(flow: &mut FlowBuilder) {
+    flow.parameter_of("Order", DataType::object::<Order>(), |_| {});
+    flow.call_javascript_into("Progress", "NanoflowCommons.ShowProgress", |call| {
+        call.argument("message", mx("'Saving'"));
+        call.argument("blocking", mx("true"));
+    });
+    flow.call_nanoflow_into("Opened", NanoflowRef::<SUB_OpenOrder>::new(), |call| {
+        call.argument("Order", mx("$Order"));
+    });
+    flow.call_nanoflow(NanoflowRef::<SUB_OpenOrder>::new(), |_| {});
+    flow.call_javascript("NanoflowCommons.HideProgress", |call| {
+        call.argument("identifier", mx("$Progress"));
+    });
+    flow.call_javascript_into("Picked", "Sales.Pick", |call| {
+        call.entity_argument("entity", Ref::<Customer>::new());
+    });
+}
+
 #[mxrs::application(version = "11.12.1")]
 pub struct Application;
 
@@ -238,11 +281,36 @@ fn flow<'a>(project: &'a mxrs::ProjectDecl, name: &str) -> &'a mxrs::MicroflowDe
         .unwrap_or_else(|| panic!("{name} is declared"))
 }
 
+fn nanoflow<'a>(project: &'a mxrs::ProjectDecl, name: &str) -> &'a mxrs::MicroflowDecl {
+    project
+        .modules
+        .iter()
+        .find(|module| module.name == "Sales")
+        .expect("the Sales module is declared")
+        .nanoflows
+        .iter()
+        .find(|flow| flow.name == name)
+        .unwrap_or_else(|| panic!("{name} is declared"))
+}
+
 #[test]
 fn an_activity_macro_declares_what_its_builder_call_does() {
     let project = Application::build();
-    let macros = flow(&project, "ACT_WithMacros");
-    let builders = flow(&project, "ACT_WithBuilders");
+    for (macros, builders) in [
+        (
+            flow(&project, "ACT_WithMacros"),
+            flow(&project, "ACT_WithBuilders"),
+        ),
+        (
+            nanoflow(&project, "ACT_ClientWithMacros"),
+            nanoflow(&project, "ACT_ClientWithBuilders"),
+        ),
+    ] {
+        same_activities(macros, builders);
+    }
+}
+
+fn same_activities(macros: &mxrs::MicroflowDecl, builders: &mxrs::MicroflowDecl) {
     assert_eq!(
         format!("{:?}", macros.parameters),
         format!("{:?}", builders.parameters)

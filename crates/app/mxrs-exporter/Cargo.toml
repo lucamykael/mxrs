@@ -26,6 +26,7 @@ tempfile = "3.27.0"
 thiserror.workspace = true
 
 [dev-dependencies]
+mxrs-frontend = { path = "../../authoring/mxrs-frontend" }
 mxrs-macros = { path = "../../authoring/mxrs-macros" }
 mxrs-mpr = { path = "../../io/mxrs-mpr" }
 uuid = { version = "1", features = ["v4"] }

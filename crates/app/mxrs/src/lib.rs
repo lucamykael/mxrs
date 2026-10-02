@@ -8,7 +8,7 @@ pub use mxrs_dsl::flow_actions;
 pub use mxrs_dsl::{
     ActivityValue, AggregateFunction, AssociationName, AttributeName, ChangeKind, Commit,
     EntityName, FlowVar, ListChange, LogSeverity, MemberName, MessageKind, MicroflowName,
-    SortOrder, Variable, var,
+    NanoflowName, SortOrder, Variable, var,
 };
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, ConstantBuilder, ContainerBuilder, DataViewBuilder,
@@ -20,16 +20,16 @@ pub use mxrs_dsl::{
     TaskQueueBuilder, UserRoleBuilder,
 };
 pub use mxrs_expr::*;
-pub use mxrs_frontend::{FrontendDecl, FrontendError, merge_frontend, read_frontend};
+pub use mxrs_frontend::{FrontendDecl, FrontendError, read_frontend};
 pub use mxrs_ir::*;
 #[doc(hidden)]
 pub use mxrs_macros::project_facade as __project;
 pub use mxrs_macros::{
-    MxEntity, MxEnumeration, aggregate_list, application, call_java_action, call_microflow,
-    change_list, change_object, change_variable, commit_object, constant, create_list,
-    create_object, create_variable, declaration, delete_object, demo_user, dto, entity,
-    enumeration, layout, log, menu, microflow, module_roles, nanoflow, navigation, navigation_item,
-    page, retrieve, rollback_object, route, security, service, view,
+    MxEntity, MxEnumeration, aggregate_list, application, call_java_action, call_javascript_action,
+    call_microflow, call_nanoflow, change_list, change_object, change_variable, commit_object,
+    constant, create_list, create_object, create_variable, declaration, delete_object, demo_user,
+    dto, entity, enumeration, layout, log, menu, microflow, module_roles, nanoflow, navigation,
+    navigation_item, page, retrieve, rollback_object, route, security, service, view,
 };
 
 /// The collector declaration macros submit to. Re-exported so an application
@@ -207,10 +207,10 @@ pub mod prelude {
     pub use crate::{
         AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, LayoutBuilder,
         LifecycleEvent, MemberRights, MxBinary, MxList, MxObject, SystemMember, aggregate_list,
-        call_java_action, call_microflow, change_list, change_object, change_variable,
-        commit_object, constant, create_list, create_object, create_variable, declaration,
-        delete_object, demo_user, dto, entity, enumeration, layout, log, menu, microflow,
-        module_roles, nanoflow, navigation, navigation_item, page, retrieve, rollback_object,
-        route, security, service, view,
+        call_java_action, call_javascript_action, call_microflow, call_nanoflow, change_list,
+        change_object, change_variable, commit_object, constant, create_list, create_object,
+        create_variable, declaration, delete_object, demo_user, dto, entity, enumeration, layout,
+        log, menu, microflow, module_roles, nanoflow, navigation, navigation_item, page, retrieve,
+        rollback_object, route, security, service, view,
     };
 }

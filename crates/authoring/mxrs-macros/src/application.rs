@@ -73,6 +73,23 @@ pub fn expand(args: &ApplicationArgs, item: &ItemStruct) -> Result<TokenStream> 
             pub fn build() -> ::mxrs::ProjectDecl {
                 <Self as ::mxrs::ApplicationDefinition>::declaration()
             }
+
+            /// The model with what the frontend rooted at `frontend`
+            /// declares — its navigation — in its place.
+            pub fn build_with_frontend(
+                frontend: impl ::core::convert::AsRef<::std::path::Path>,
+            ) -> ::core::result::Result<::mxrs::ProjectDecl, ::mxrs::FrontendError> {
+                use ::mxrs::ApplicationDefinition as _;
+                let declared = ::mxrs::read_frontend(frontend)?;
+                let mut declaration = #base;
+                declaration.mendix_version = Self::MENDIX_VERSION.to_string();
+                ::mxrs::registry::apply_with_frontend(
+                    ::mxrs::registry::crate_of(::core::module_path!()),
+                    &mut declaration,
+                    declared,
+                )?;
+                ::core::result::Result::Ok(declaration)
+            }
         }
     })
 }

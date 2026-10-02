@@ -44,7 +44,7 @@ use mxrs_expr::{ListVar, Mx, Var};
 use mxrs_ir::flow::{Activity, DataType, NativeDocument, NativeValue, SwitchCase};
 use mxrs_ir::{
     AssociationMarker, AssociationRef, AttributeMarker, AttributeRef, EntityMarker,
-    MicroflowMarker, MicroflowRef, Ref,
+    MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef, Ref,
 };
 
 use crate::flow::FlowBuilder;
@@ -200,6 +200,24 @@ impl<M: MicroflowMarker> MicroflowName for MicroflowRef<M> {
 
 impl MicroflowName for &str {
     fn microflow_name(&self) -> String {
+        (*self).to_string()
+    }
+}
+
+/// A nanoflow, named by the type its declaration generates or by its
+/// qualified name.
+pub trait NanoflowName {
+    fn nanoflow_name(&self) -> String;
+}
+
+impl<N: NanoflowMarker> NanoflowName for NanoflowRef<N> {
+    fn nanoflow_name(&self) -> String {
+        self.qualified_name()
+    }
+}
+
+impl NanoflowName for &str {
+    fn nanoflow_name(&self) -> String {
         (*self).to_string()
     }
 }
@@ -834,6 +852,102 @@ impl JavaCallOptions<'_> {
     }
 }
 
+/// The arguments of a nanoflow call.
+pub struct NanoflowCallOptions<'a> {
+    document: &'a mut NativeDocument,
+}
+
+impl NanoflowCallOptions<'_> {
+    /// Passes `value` for `parameter`, named as the called nanoflow
+    /// declares it.
+    pub fn argument(&mut self, parameter: &str, value: impl Into<Mx>) -> &mut Self {
+        let Some(call) = self.document.document_mut("NanoflowCall") else {
+            return self;
+        };
+        let target = call.text("Nanoflow").unwrap_or_default().to_string();
+        let parameter = if parameter.contains('.') {
+            parameter.to_string()
+        } else {
+            format!("{target}.{parameter}")
+        };
+        let mapping = NativeDocument::new("Microflows$NanoflowCallParameterMapping")
+            .with("Parameter", parameter)
+            .with("Argument", value.into().into_text());
+        if let Some(mappings) = call.list_mut("ParameterMappings") {
+            mappings.push(NativeValue::Document(mapping));
+        }
+        self
+    }
+
+    /// Says the call's result is not used. `name` is the variable name the
+    /// model still keeps for it — empty when it keeps none.
+    pub fn discard_result(&mut self, name: &str) -> &mut Self {
+        self.document
+            .set("UseReturnVariable", false)
+            .set("OutputVariableName", name);
+        self
+    }
+}
+
+/// The arguments of a JavaScript action call.
+pub struct JavaScriptCallOptions<'a> {
+    document: &'a mut NativeDocument,
+}
+
+impl JavaScriptCallOptions<'_> {
+    /// Says the call's result is not used. `name` is the variable name the
+    /// model still keeps for it — empty when it keeps none.
+    pub fn discard_result(&mut self, name: &str) -> &mut Self {
+        self.document
+            .set("UseReturnVariable", false)
+            .set("OutputVariableName", name);
+        self
+    }
+
+    fn mapping(&mut self, parameter: &str, value: NativeDocument) -> &mut Self {
+        let action = self.document.text("JavaScriptAction").unwrap_or_default();
+        let parameter = if parameter.contains('.') {
+            parameter.to_string()
+        } else {
+            format!("{action}.{parameter}")
+        };
+        let mapping = NativeDocument::new("Microflows$JavaScriptActionParameterMapping")
+            .with("Parameter", parameter)
+            .with("ParameterValue", value);
+        if let Some(mappings) = self.document.list_mut("ParameterMappings") {
+            mappings.push(NativeValue::Document(mapping));
+        }
+        self
+    }
+
+    /// Passes the value of an expression.
+    pub fn argument(&mut self, parameter: &str, value: impl Into<Mx>) -> &mut Self {
+        self.mapping(
+            parameter,
+            NativeDocument::new("Microflows$BasicCodeActionParameterValue")
+                .with("Argument", value.into().into_text()),
+        )
+    }
+
+    /// Passes an entity, for a parameter that takes a type.
+    pub fn entity_argument(&mut self, parameter: &str, entity: impl EntityName) -> &mut Self {
+        self.mapping(
+            parameter,
+            NativeDocument::new("Microflows$EntityTypeCodeActionParameterValue")
+                .with("Entity", entity.entity_name()),
+        )
+    }
+
+    /// Passes a nanoflow, for a parameter that takes one to call back.
+    pub fn nanoflow_argument(&mut self, parameter: &str, nanoflow: impl NanoflowName) -> &mut Self {
+        self.mapping(
+            parameter,
+            NativeDocument::new("Microflows$NanoflowParameterValue")
+                .with("Nanoflow", nanoflow.nanoflow_name()),
+        )
+    }
+}
+
 options! {
     MessageOptions, MESSAGE_OPTIONS {
         /// Whether the user has to dismiss the message before going on.
@@ -1201,6 +1315,28 @@ pub mod actions {
                     .with("ParameterMappings", list(2)),
             )
             .with("ResultVariableName", result.unwrap_or_default())
+            .with("UseReturnVariable", true)
+    }
+
+    /// A nanoflow call; `result` as for [`call`].
+    pub fn call_nanoflow(nanoflow: &str, result: Option<&str>) -> NativeDocument {
+        action("Microflows$NanoflowCallAction")
+            .with(
+                "NanoflowCall",
+                NativeDocument::new("Microflows$NanoflowCall")
+                    .with("Nanoflow", nanoflow)
+                    .with("ParameterMappings", list(2)),
+            )
+            .with("OutputVariableName", result.unwrap_or_default())
+            .with("UseReturnVariable", true)
+    }
+
+    /// A JavaScript action call; `result` as for [`call`].
+    pub fn call_javascript(javascript_action: &str, result: Option<&str>) -> NativeDocument {
+        action("Microflows$JavaScriptActionCallAction")
+            .with("JavaScriptAction", javascript_action)
+            .with("OutputVariableName", result.unwrap_or_default())
+            .with("ParameterMappings", list(2))
             .with("UseReturnVariable", true)
     }
 
@@ -1759,6 +1895,65 @@ impl FlowBuilder {
         let name = name.into();
         let mut document = actions::call_java(java_action, Some(&name));
         configure(&mut JavaCallOptions {
+            document: &mut document,
+        });
+        self.action(document);
+        FlowVar(name)
+    }
+
+    /// Calls a nanoflow and discards what it returns.
+    pub fn call_nanoflow(
+        &mut self,
+        nanoflow: impl NanoflowName,
+        configure: impl FnOnce(&mut NanoflowCallOptions<'_>),
+    ) -> &mut Self {
+        let mut document = actions::call_nanoflow(&nanoflow.nanoflow_name(), None);
+        configure(&mut NanoflowCallOptions {
+            document: &mut document,
+        });
+        self.action(document)
+    }
+
+    /// Calls a nanoflow and keeps what it returns in `name`.
+    pub fn call_nanoflow_into(
+        &mut self,
+        name: impl Into<String>,
+        nanoflow: impl NanoflowName,
+        configure: impl FnOnce(&mut NanoflowCallOptions<'_>),
+    ) -> FlowVar {
+        let name = name.into();
+        let mut document = actions::call_nanoflow(&nanoflow.nanoflow_name(), Some(&name));
+        configure(&mut NanoflowCallOptions {
+            document: &mut document,
+        });
+        self.action(document);
+        FlowVar(name)
+    }
+
+    /// Calls a JavaScript action, named `Module.Action`, and discards its
+    /// result.
+    pub fn call_javascript(
+        &mut self,
+        javascript_action: &str,
+        configure: impl FnOnce(&mut JavaScriptCallOptions<'_>),
+    ) -> &mut Self {
+        let mut document = actions::call_javascript(javascript_action, None);
+        configure(&mut JavaScriptCallOptions {
+            document: &mut document,
+        });
+        self.action(document)
+    }
+
+    /// Calls a JavaScript action and keeps its result in `name`.
+    pub fn call_javascript_into(
+        &mut self,
+        name: impl Into<String>,
+        javascript_action: &str,
+        configure: impl FnOnce(&mut JavaScriptCallOptions<'_>),
+    ) -> FlowVar {
+        let name = name.into();
+        let mut document = actions::call_javascript(javascript_action, Some(&name));
+        configure(&mut JavaScriptCallOptions {
             document: &mut document,
         });
         self.action(document);
