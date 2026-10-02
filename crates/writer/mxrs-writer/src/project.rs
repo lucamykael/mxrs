@@ -57,7 +57,8 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
     }
     drop(mpr);
-    crate::relations::report(path, project)
+    crate::relations::report(path, project);
+    Ok(())
 }
 
 /// Updates an *already-created* `.mpr` (typically one `mxrs-exporter` read
@@ -258,7 +259,8 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
     }
     drop(mpr);
-    crate::relations::report(path, project)
+    crate::relations::report(path, project);
+    Ok(())
 }
 
 /// Applies only enumeration, constant, regular-expression, scheduled-event,

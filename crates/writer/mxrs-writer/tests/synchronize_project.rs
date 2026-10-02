@@ -295,6 +295,113 @@ fn synchronize_project_upserts_a_microflow_by_name() {
 }
 
 #[test]
+fn a_structural_edit_keeps_the_notes_drawn_on_the_flow() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Project.mpr");
+    let mut initial = ProjectBuilder::new("11.12.1");
+    initial.module("Sales", |m| {
+        m.microflow("ACT_Note", |f| {
+            f.return_value(mxrs_dsl::integer(1));
+        });
+    });
+    mxrs_writer::write_project(&path, &initial.build()).unwrap();
+
+    // A note drawn on the flow in Studio Pro.
+    {
+        let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
+        let (id, mut flow) = mpr
+            .all_units()
+            .unwrap()
+            .into_iter()
+            .find_map(|unit| {
+                let document = mpr.parse_contents(&unit).ok()?;
+                (document.get_str("Name").ok() == Some("ACT_Note"))
+                    .then(|| (unit.unit_id.clone(), document))
+            })
+            .unwrap();
+        flow.get_document_mut("ObjectCollection")
+            .unwrap()
+            .get_array_mut("Objects")
+            .unwrap()
+            .push(mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$ID": "0b6f3f53-3a8c-4a1e-9a0e-1d2c3b4a5f60",
+                "$Type": "Microflows$Annotation",
+                "Caption": "Keep me",
+                "RelativeMiddlePoint": "100;20",
+                "Size": "200;50",
+            }));
+        mpr.update_unit(&id, flow).unwrap();
+    }
+
+    let mut updated = ProjectBuilder::new("11.12.1");
+    updated.module("Sales", |m| {
+        m.microflow("ACT_Note", |f| {
+            f.return_value(mxrs_dsl::integer(1));
+        });
+    });
+    let mut updated = updated.build();
+    updated.modules[0].microflows[0].activities.insert(
+        0,
+        mxrs_ir::Activity::Decision {
+            condition: "true".into(),
+            true_branch: vec![],
+            false_branch: vec![],
+        },
+    );
+    mxrs_writer::synchronize_project(&path, &updated).unwrap();
+
+    let mpr = mxrs_mpr::MprFile::open(&path, true).unwrap();
+    let flow = mpr
+        .all_units()
+        .unwrap()
+        .into_iter()
+        .find_map(|unit| {
+            let document = mpr.parse_contents(&unit).ok()?;
+            (document.get_str("Name").ok() == Some("ACT_Note")).then_some(document)
+        })
+        .unwrap();
+    let objects = mxrs_writer::flow_graph::documents(
+        flow.get_document("ObjectCollection")
+            .unwrap()
+            .get("Objects")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        objects
+            .iter()
+            .any(|object| object.get_str("$Type").ok() == Some("Microflows$ExclusiveSplit")),
+        "the edit landed"
+    );
+    assert!(objects.iter().any(|object| {
+        object.get_str("$Type").ok() == Some("Microflows$Annotation")
+            && object.get_str("Caption").ok() == Some("Keep me")
+    }));
+}
+
+#[test]
+fn a_flow_allowed_to_a_role_its_module_does_not_have_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Project.mpr");
+    let project = |role: &'static str| {
+        let mut project = ProjectBuilder::new("11.12.1");
+        project.module("Sales", |m| {
+            m.role("User", "");
+            m.microflow("ACT_Ship", move |f| {
+                f.allowed_roles([role]);
+                f.return_value(mxrs_dsl::integer(1));
+            });
+        });
+        project.build()
+    };
+    let error = mxrs_writer::write_project(&path, &project("Sales.Missing"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Sales.Missing"), "{error}");
+    mxrs_writer::write_project(&path, &project("Sales.User")).unwrap();
+}
+
+#[test]
 fn synchronize_project_upserts_a_nanoflow_by_name_and_preserves_identity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Project.mpr");

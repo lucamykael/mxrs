@@ -129,6 +129,7 @@ pub fn flow_relations(project: &Project) -> Result<HashMap<String, FlowRelations
         let mut found = Found::default();
         collect(
             &Bson::Document(unit.document.clone()),
+            "",
             label,
             module.as_deref(),
             &flows,
@@ -173,8 +174,11 @@ struct Found {
     entities: BTreeSet<String>,
 }
 
+/// `key` is the field `value` stands in (an array's elements stand in the
+/// array's): what tells a flow from an entity of the same name.
 fn collect(
     value: &Bson,
+    key: &str,
     owner: &str,
     module: Option<&str>,
     flows: &HashSet<String>,
@@ -196,16 +200,19 @@ fn collect(
                 if matches!(key.as_str(), "$ID" | "$Type") {
                     continue;
                 }
-                collect(value, owner, module, flows, entities, found);
+                collect(value, key, owner, module, flows, entities, found);
             }
         }
         Bson::Array(values) => {
             for value in values {
-                collect(value, owner, module, flows, entities, found);
+                collect(value, key, owner, module, flows, entities, found);
             }
         }
         Bson::String(text) => {
-            if flows.contains(text) {
+            // A flow and an entity may share a name; the field that holds
+            // it says which it means.
+            let names_flow = key.contains("flow") || key.contains("Flow") || key == "Rule";
+            if flows.contains(text) && (names_flow || !entities.contains(text)) {
                 found.flows.insert((text.clone(), owner.to_string()));
             } else if entities.contains(text) {
                 found.entities.insert(text.clone());
@@ -238,5 +245,38 @@ fn strings(value: Option<&Bson>) -> Vec<&str> {
     match value {
         Some(Bson::Array(items)) => items.iter().filter_map(Bson::as_str).collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_flow_and_an_entity_of_one_name_are_told_apart_by_the_field_naming_them() {
+        let name = "Sales.Order".to_string();
+        let flows = HashSet::from([name.clone()]);
+        let entities = HashSet::from([name.clone()]);
+        let body = mxrs_bson::doc! {
+            "Action": {
+                "Entity": "Sales.Order",
+                "MicroflowCall": { "Microflow": "Sales.Order" },
+            },
+        };
+        let mut found = Found::default();
+        collect(
+            &Bson::Document(body),
+            "",
+            "Sales.Caller",
+            Some("Sales"),
+            &flows,
+            &entities,
+            &mut found,
+        );
+        assert_eq!(found.entities, BTreeSet::from([name.clone()]));
+        assert_eq!(
+            found.flows,
+            BTreeSet::from([(name, "Sales.Caller".to_string())])
+        );
     }
 }

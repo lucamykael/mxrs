@@ -170,7 +170,7 @@ struct Converter<'a> {
     default_handling: &'static str,
     /// The names given to the points the flow's paths converge on, by the
     /// identity of the node each one precedes.
-    labels: std::cell::RefCell<HashMap<String, String>>,
+    labels: HashMap<String, String>,
 }
 
 /// The Mendix variables in scope and the Rust bindings that hold them.
@@ -1419,16 +1419,17 @@ impl Converter<'_> {
                     return Err("an error handler on an error handler".to_string());
                 }
                 Node::Label(target) => {
-                    let mut labels = self.labels.borrow_mut();
-                    let name = format!("point_{}", labels.len() + 1);
-                    labels.insert(target.clone(), name.clone());
+                    let name = self
+                        .labels
+                        .get(target)
+                        .cloned()
+                        .ok_or("a point the reading did not name")?;
                     lines.push(format!("flow.label({});", rust_string(&name)));
                     activities.push(Activity::Label(name));
                 }
                 Node::Jump(target) => {
                     let name = self
                         .labels
-                        .borrow()
                         .get(target)
                         .cloned()
                         .ok_or("a jump to a point nothing names")?;
@@ -1927,6 +1928,40 @@ fn final_return<'a>(nodes: &'a [Node<'a>]) -> Option<&'a Document> {
     }
 }
 
+/// Names every point a jump goes to before anything is written, in the
+/// order the points are read: a jump may come before the point it goes to,
+/// as when one branch runs into the middle of the next.
+fn label_names(nodes: &[Node<'_>]) -> HashMap<String, String> {
+    fn walk(nodes: &[Node<'_>], names: &mut HashMap<String, String>) {
+        for node in nodes {
+            match node {
+                Node::Label(target) => {
+                    let name = format!("point_{}", names.len() + 1);
+                    names.insert(target.clone(), name);
+                }
+                Node::Decision { yes, no, .. } => {
+                    walk(yes, names);
+                    walk(no, names);
+                }
+                Node::Switch { cases, .. } => {
+                    for case in cases {
+                        walk(&case.body, names);
+                    }
+                }
+                Node::Loop { body, .. } => walk(body, names),
+                Node::Handled { node, handler } => {
+                    walk(std::slice::from_ref(node.as_ref()), names);
+                    walk(handler, names);
+                }
+                Node::Simple(_) | Node::Jump(_) => {}
+            }
+        }
+    }
+    let mut names = HashMap::new();
+    walk(nodes, &mut names);
+    names
+}
+
 /// Converts one flow document. On success: its declaration, and the lines of
 /// the function body that builds it.
 pub(crate) fn convert(
@@ -1945,7 +1980,7 @@ pub(crate) fn convert(
         } else {
             "Rollback"
         },
-        labels: Default::default(),
+        labels: label_names(&nodes),
     };
     let mut declaration = MicroflowDecl::new(name);
     declaration.documentation = flow.documentation.clone();
@@ -2086,4 +2121,47 @@ pub(crate) fn polish(mut lines: Vec<String>) -> Vec<String> {
         }
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use mxrs_bson::Bson;
+    use mxrs_ir::Activity;
+    use mxrs_writer::flow_graph::{Node, structured_nodes};
+
+    #[test]
+    fn a_jump_read_before_the_point_it_goes_to_is_already_named() {
+        let commit = |variable: &str| Activity::Commit {
+            variable: variable.into(),
+        };
+        // One branch runs into the middle of the next: its jump is read
+        // before the point it goes to.
+        let activities = vec![Activity::Decision {
+            condition: "$A".into(),
+            true_branch: vec![commit("First"), Activity::Jump("shared".into())],
+            false_branch: vec![Activity::Decision {
+                condition: "$B".into(),
+                true_branch: vec![commit("Second")],
+                false_branch: vec![Activity::Label("shared".into()), commit("Third")],
+            }],
+        }];
+        let (objects, flows) =
+            mxrs_writer::flow_compiler::build_microflow_graph(&activities, &[], None);
+        let document = mxrs_bson::doc! {
+            "ObjectCollection": {
+                "Objects": mxrs_bson::build_array(objects.into_iter().map(Bson::Document).collect(), 3),
+            },
+            "Flows": mxrs_bson::build_array(flows.into_iter().map(Bson::Document).collect(), 3),
+        };
+        let nodes = structured_nodes(&document).expect("the graph is read");
+        fn first_jump(nodes: &[Node<'_>]) -> Option<String> {
+            nodes.iter().find_map(|node| match node {
+                Node::Jump(target) => Some(target.clone()),
+                Node::Decision { yes, no, .. } => first_jump(yes).or_else(|| first_jump(no)),
+                _ => None,
+            })
+        }
+        let target = first_jump(&nodes).expect("the reading has a jump");
+        assert!(super::label_names(&nodes).contains_key(&target));
+    }
 }

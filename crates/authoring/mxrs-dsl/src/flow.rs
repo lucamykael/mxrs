@@ -173,7 +173,26 @@ impl FlowBuilder {
     }
 
     pub(crate) fn into_decl(self) -> MicroflowDecl {
+        self.assert_nothing_pending();
         self.decl
+    }
+
+    /// The activities a nested block declared.
+    fn into_activities(self) -> Vec<Activity> {
+        self.into_decl().activities
+    }
+
+    /// `disabled()` and `on_error(...)` say something about the activity
+    /// after them; a block that ends before one would lose them silently.
+    fn assert_nothing_pending(&self) {
+        assert!(
+            !self.disable_next,
+            "flow.disabled() must be followed by the activity it disables"
+        );
+        assert!(
+            self.handle_next.is_none(),
+            "an error handler must be followed by the activity it handles"
+        );
     }
 
     pub(crate) fn push(&mut self, activity: Activity) -> &mut Self {
@@ -250,7 +269,7 @@ impl FlowBuilder {
     pub(crate) fn nested(body: impl FnOnce(&mut FlowBuilder)) -> Vec<Activity> {
         let mut builder = FlowBuilder::branch();
         body(&mut builder);
-        builder.decl.activities
+        builder.into_activities()
     }
 
     pub(crate) fn is_nested(&self) -> bool {
@@ -476,8 +495,8 @@ impl FlowBuilder {
         otherwise(&mut false_builder);
         self.push(Activity::Decision {
             condition: condition.into_expr().render(),
-            true_branch: true_builder.decl.activities,
-            false_branch: false_builder.decl.activities,
+            true_branch: true_builder.into_activities(),
+            false_branch: false_builder.into_activities(),
         });
         self
     }
@@ -494,7 +513,7 @@ impl FlowBuilder {
         self.push(Activity::LoopOver {
             list_variable: list.name().to_string(),
             iterator: iterator_name,
-            activities: builder.decl.activities,
+            activities: builder.into_activities(),
         });
         self
     }
@@ -508,7 +527,7 @@ impl FlowBuilder {
         body(&mut builder);
         self.push(Activity::WhileLoop {
             condition: condition.into_expr().render(),
-            activities: builder.decl.activities,
+            activities: builder.into_activities(),
         });
         self
     }
@@ -526,7 +545,7 @@ impl FlowBuilder {
     pub fn rescue_all(&mut self, body: impl FnOnce(&mut FlowBuilder)) -> &mut Self {
         let mut builder = FlowBuilder::branch();
         body(&mut builder);
-        self.decl.rescue_activities = builder.decl.activities;
+        self.decl.rescue_activities = builder.into_activities();
         self
     }
 
@@ -542,5 +561,27 @@ impl FlowBuilder {
         self.decl.return_expression = Some(expression.render());
         self.decl.return_type = Some(expression.flow_return_type());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FlowBuilder;
+
+    #[test]
+    #[should_panic(expected = "must be followed by the activity it disables")]
+    fn disabling_nothing_is_refused_rather_than_dropped() {
+        FlowBuilder::nested(|flow| {
+            flow.raise_error();
+            flow.disabled();
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "must be followed by the activity it handles")]
+    fn a_handler_for_nothing_is_refused_rather_than_dropped() {
+        let mut flow = FlowBuilder::new("ACT_Ship");
+        flow.continue_on_error();
+        flow.into_decl();
     }
 }

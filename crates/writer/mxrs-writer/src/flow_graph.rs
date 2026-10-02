@@ -20,6 +20,29 @@ fn id(doc: &Document) -> Option<String> {
     extract_id(doc.get("$ID")?)
 }
 
+/// The notes drawn on a flow, wherever in it they stand. A graph rebuilt
+/// after a structural edit keeps them at its top level; the lines that tied
+/// them to activities go with those activities.
+pub(crate) fn annotations(collection: &Document) -> Vec<Document> {
+    let mut found = Vec::new();
+    for node in collection
+        .get("Objects")
+        .and_then(documents)
+        .unwrap_or_default()
+    {
+        match node.get_str("$Type").ok() {
+            Some("Microflows$Annotation") => found.push(node.clone()),
+            Some("Microflows$LoopedActivity") => {
+                if let Ok(inner) = node.get_document("ObjectCollection") {
+                    found.extend(annotations(inner));
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 /// Returns executable nodes in edge order, including the start and end.
 /// Parameters may be embedded in the object collection in older projects.
 pub fn linear_nodes(doc: &Document) -> Option<Vec<&Document>> {

@@ -146,10 +146,11 @@ pub fn order_create(flow: &mut FlowBuilder) {
   what the model has.
 - `calls(...)`, `uses(...)` and `used_by(...)` name the flows it calls, the
   entities it works with and what refers to it. Each item is the Rust item
-  that declares the thing — the type a flow's declaration generates, an
-  entity's struct — so the compiler checks it exists and an editor goes to
-  its file; what no Rust item declares, a page for instance, is named as the
-  model names it. They write nothing: the body and the documents that refer
+  that declares the thing — the type a flow's declaration generates in
+  `calls(...)` and `used_by(...)`, an entity's struct in `uses(...)` — so
+  the compiler checks it exists and an editor goes to its file; what no Rust
+  item declares, a page or an entity in `used_by(...)` for instance, is named
+  as the model names it. They write nothing: the body and the documents that refer
   to the flow already say all of it. A build compares the two and reports
   each difference as a warning, so the lists stay true or say where they are
   not. A relation left out is not compared.
@@ -187,7 +188,10 @@ does not say has a builder of its own:
 
 An edit that keeps the flow's structure changes only what it says: node
 identities, positions, captions and annotations stay the model's. An edit
-that changes the structure rebuilds the graph.
+that changes the structure rebuilds the graph: its annotations are kept,
+without the lines that attached them to activities, while activity
+captions, documentation, colours and layout start over — and the build says
+so for each flow it rebuilds.
 
 ## Controllers
 
@@ -324,18 +328,19 @@ The rules that keep these readable:
   "..."` on the declaration, `#[mxrs(name = "...")]` on a field.
 
 A flow the project keeps in its imported model without declaring it in Rust
-is named in its module's `imported.rs` (`mxrs::imported! { ... }`), so the
-rest of the project can still call and bind it. `mxrs::register!` registers
+still has the file its declaration would have, naming it
+(`mxrs::imported! { ... }`) so the rest of the project can call and bind it. `mxrs::register!` registers
 anything assembled directly against the project.
 
 The crate root is therefore the layers and the application, and no file
 composes another:
 
 ```rust
-pub mod application;
 pub mod controllers;
 pub mod domain;
 pub mod infrastructure;
+pub mod ports;
+pub mod services;
 pub mod ui;
 
 #[mxrs::application(version = "11.12.1")]

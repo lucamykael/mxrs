@@ -83,10 +83,17 @@ pub fn relation_warnings(path: impl AsRef<Path>, project: &ProjectDecl) -> Resul
 }
 
 /// Says on standard error where the declarations and the model built at
-/// `path` disagree about how the project's flows are related.
-pub(crate) fn report(path: &Path, project: &ProjectDecl) -> Result<()> {
-    for warning in relation_warnings(path, project)? {
-        eprintln!("[mxrs] warning: {warning}");
+/// `path` disagree about how the project's flows are related. The lists
+/// write nothing, so failing to check them never fails the build.
+pub(crate) fn report(path: &Path, project: &ProjectDecl) {
+    match relation_warnings(path, project) {
+        Ok(warnings) => {
+            for warning in warnings {
+                eprintln!("[mxrs] warning: {warning}");
+            }
+        }
+        Err(error) => {
+            eprintln!("[mxrs] warning: could not check the flows' stated relations: {error}")
+        }
     }
-    Ok(())
 }

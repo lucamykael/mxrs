@@ -77,6 +77,10 @@ pub enum ScaffoldError {
         "{0}: generated project layout cannot be migrated safely; restore a complete pre-layered or layered source tree"
     )]
     UnsupportedLayerMigration(String),
+    #[error(
+        "{root}: this project uses the earlier {layout} layout; write its model out with `mxrs convert rust-to-mendix` and re-import it with `mxrs convert mendix-to-rust` to get the current one"
+    )]
+    OutdatedLayout { root: String, layout: &'static str },
     #[error("project version declarations disagree: {0:?}")]
     VersionMismatch(Vec<String>),
     #[error("{0}: project security is not initialized (run `mxrs security init <Module>` first)")]

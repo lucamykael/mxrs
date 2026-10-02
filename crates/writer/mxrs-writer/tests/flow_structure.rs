@@ -604,6 +604,43 @@ fn a_declaration_the_model_cannot_hold_is_refused() {
             }],
             "its own values",
         ),
+        // A label's name is the flow's: one retry copied into a second loop
+        // would otherwise have its jump land in the first.
+        (
+            vec![
+                each(vec![
+                    commit("Order"),
+                    Activity::Label("again".into()),
+                    decision("$Retry", vec![Activity::Jump("again".into())], vec![]),
+                ]),
+                each(vec![
+                    commit("Line"),
+                    Activity::Label("again".into()),
+                    decision("$Retry", vec![Activity::Jump("again".into())], vec![]),
+                ]),
+            ],
+            "two labels",
+        ),
+        // A loop is entered at the activity nothing leads to.
+        (
+            vec![each(vec![
+                Activity::Label("again".into()),
+                commit("Order"),
+                decision("$Retry", vec![Activity::Jump("again".into())], vec![]),
+            ])],
+            "cannot open with a label",
+        ),
+        (
+            vec![Activity::Switch {
+                expression: "$Status".into(),
+                cases: vec![],
+            }],
+            "at least one case",
+        ),
+        (
+            vec![Activity::Disabled(Box::new(decision("$A", vec![], vec![])))],
+            "only an action can be disabled",
+        ),
     ] {
         let error = check(activities).unwrap_err();
         assert!(error.contains(reason), "{reason}: {error}");
@@ -663,4 +700,43 @@ fn a_guard_is_followed_by_the_rest_of_the_flow_not_wrapped_around_it() {
         )])),
         "Start,if(Action,End|Action,End)"
     );
+}
+
+#[test]
+fn the_handler_of_a_whole_flow_jumps_only_to_its_labels() {
+    let entities = std::collections::HashSet::new();
+    let mut declaration = flow(vec![commit("Order")]);
+    declaration.rescue_activities = vec![commit("Log"), Activity::Jump("nowhere".into())];
+    let error = mxrs_writer::validate_flow_declaration("Sales", &declaration, false, &entities)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no label of that name"), "{error}");
+}
+
+#[test]
+fn a_label_after_every_path_has_ended_is_still_where_its_jumps_go() {
+    // Both branches jump: nothing runs on into `done`, which only the jump
+    // reaches.
+    let declaration = flow(vec![
+        Activity::Label("again".into()),
+        commit("Order"),
+        decision(
+            "$Done",
+            vec![Activity::Jump("done".into())],
+            vec![Activity::Jump("again".into())],
+        ),
+        Activity::Label("done".into()),
+        commit("After"),
+    ]);
+    let entities = std::collections::HashSet::new();
+    mxrs_writer::validate_flow_declaration("Sales", &declaration, false, &entities).unwrap();
+    let document = stored(&declaration, false);
+    for edge in documents(document.get("Flows").unwrap()).unwrap() {
+        let to = extract_id(edge.get("DestinationPointer").unwrap()).unwrap();
+        assert!(!to.starts_with("label:"), "a jump left unresolved: {to}");
+    }
+    // Read back, the point only one jump reaches is where that jump goes on.
+    let read = shape(&structured_nodes(&document).expect("the graph is read back"));
+    assert_eq!(read, "Start,label,Action,if(Action,End|jump)");
+    assert_eq!(rebuild_difference(&document, &declaration), None);
 }

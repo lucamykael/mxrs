@@ -160,13 +160,17 @@ fn stage_layer_migration(transaction: &mut Transaction, root: &Path) -> Result<b
     match layout_from(root, &source) {
         ProjectLayout::Layered => return Ok(false),
         ProjectLayout::PreLayered => {}
-        // Moving a module-first tree means moving the user's own source
+        // Moving an earlier layered tree means moving the user's own source
         // between folders, and guessing which of it was hand-edited. The
-        // importer already produces the layer-first tree from the model, so
-        // re-importing is the honest path and this refuses instead.
-        ProjectLayout::ModuleFirst
-        | ProjectLayout::ApplicationLayer
-        | ProjectLayout::Incomplete => {
+        // importer already produces the current tree from the model, so
+        // re-importing is the honest path and this says so instead.
+        layout @ (ProjectLayout::ModuleFirst | ProjectLayout::ApplicationLayer) => {
+            return Err(ScaffoldError::OutdatedLayout {
+                root: root.display().to_string(),
+                layout: layout.as_str(),
+            });
+        }
+        ProjectLayout::Incomplete => {
             return Err(ScaffoldError::UnsupportedLayerMigration(
                 root.display().to_string(),
             ));
@@ -203,9 +207,18 @@ fn layout_from(root: &Path, library: &str) -> ProjectLayout {
     let services = root.join("src/services/mod.rs").is_file();
     let ui = root.join("src/ui/mod.rs").is_file();
     // Services and ports under one `application` folder is the tree before
-    // they became layers.
-    if !services && root.join("src/application/mod.rs").is_file() && ui {
-        return ProjectLayout::ApplicationLayer;
+    // they became layers. Without its `ui` it is no tree at all, and never
+    // the pre-layered one: migrating that would drop `mod application;`.
+    let application = root.join("src/application/mod.rs").is_file()
+        || library
+            .lines()
+            .any(|line| matches!(line.trim(), "mod application;" | "pub mod application;"));
+    if !services && application {
+        return if ui {
+            ProjectLayout::ApplicationLayer
+        } else {
+            ProjectLayout::Incomplete
+        };
     }
     match (services, ui) {
         (false, false)
@@ -749,6 +762,7 @@ mod tests {
             "one-layer",
             "missing-aggregators",
             "application-layer",
+            "application-without-ui",
             "custom-entry-point",
         ] {
             let directory = tempfile::tempdir().unwrap();
@@ -770,6 +784,12 @@ mod tests {
                         ProjectLayout::ApplicationLayer
                     );
                 }
+                // Half of that tree is not the pre-layered one: migrating
+                // it would take `mod application;` out of the crate.
+                "application-without-ui" => {
+                    write(&root, "src/application/mod.rs", "pub mod services;\n");
+                    assert_eq!(project_layout(&root).unwrap(), ProjectLayout::Incomplete);
+                }
                 "custom-entry-point" => {
                     let path = root.join("src/lib.rs");
                     let source = std::fs::read_to_string(&path)
@@ -782,7 +802,8 @@ mod tests {
             let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
             assert!(matches!(
                 upgrade_project(&root, "11.13.0", true),
-                Err(ScaffoldError::UnsupportedLayerMigration(_))
+                Err(ScaffoldError::UnsupportedLayerMigration(_)
+                    | ScaffoldError::OutdatedLayout { .. })
             ));
             assert_eq!(
                 std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),

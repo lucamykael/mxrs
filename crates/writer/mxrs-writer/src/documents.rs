@@ -210,6 +210,26 @@ fn synchronize_flows_with_identity(
                 fresh.get("ObjectCollection").expect("objects").clone(),
             );
             doc.insert("Flows", fresh.get("Flows").expect("flows").clone());
+            if let Some((_, old)) = previous {
+                // A structural edit rebuilds the graph: the notes stay, the
+                // rest of the drawing is new, and the build says so.
+                let notes = old
+                    .get_document("ObjectCollection")
+                    .map(crate::flow_graph::annotations)
+                    .unwrap_or_default();
+                eprintln!(
+                    "[mxrs] warning: {module_name}.{}: the body's structure changed, so its \
+                     graph was rebuilt; {} annotation(s) kept without the lines that attached \
+                     them, and activity captions, documentation, colours and layout reset",
+                    decl.name,
+                    notes.len()
+                );
+                doc.get_document_mut("ObjectCollection")
+                    .expect("objects")
+                    .get_array_mut("Objects")
+                    .expect("object array")
+                    .extend(notes.into_iter().map(mxrs_bson::Bson::Document));
+            }
             if same_parameters && let Some((_, old)) = previous {
                 // Legacy parameters are graph objects; retain them even when
                 // a structural body edit requires a fresh activity graph.

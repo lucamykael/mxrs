@@ -390,6 +390,16 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
     let root =
         std::path::absolute(&options.target).map_err(|error| io_error(&options.target, error))?;
     require_project(&root)?;
+    // An earlier tree would get the new layers beside its old ones.
+    if let layout @ (crate::lifecycle::ProjectLayout::ModuleFirst
+    | crate::lifecycle::ProjectLayout::ApplicationLayer) =
+        crate::lifecycle::project_layout(&root)?
+    {
+        return Err(ScaffoldError::OutdatedLayout {
+            root: root.display().to_string(),
+            layout: layout.as_str(),
+        });
+    }
     let mut transaction = Transaction::default();
     if options.kind == ArtifactKind::FunctionalTest {
         let (module_name, artifact_name) = qualified_name(options.kind, &options.name)?;

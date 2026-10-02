@@ -133,8 +133,10 @@ pub fn build_microflow_graph(
     let mut x = 190;
     let mut rescue_origin = None;
     for (index, activity) in activities.iter().enumerate() {
-        if prev_id.is_none() {
-            break;
+        // Once a path has ended only a label, which jumps reach, starts
+        // another one.
+        if prev_id.is_none() && !matches!(activity, Activity::Label(_)) {
+            continue;
         }
         let error_handling = if !rescue_activities.is_empty() && index + 1 == activities.len() {
             "CustomWithoutRollBack"
@@ -626,8 +628,8 @@ fn process_branch(
     let mut previous: Option<String> = None;
     let mut terminal = false;
     for activity in activities {
-        if terminal {
-            break;
+        if terminal && !matches!(activity, Activity::Label(_)) {
+            continue;
         }
         // A jump lowers to an edge and nothing else: one that opens the
         // branch is the branch's own entering edge, pointed at the label.
@@ -654,13 +656,13 @@ fn process_branch(
             .get(before)
             .and_then(|object| object.get_str("$ID").ok())
             .map(str::to_string);
-        if first.is_none() {
-            first = created_first.clone();
-        }
-        if previous.is_none()
+        // Only the branch's first activity is entered from the split; a
+        // label after an ended path is reached by its jumps alone.
+        if first.is_none()
             && let Some(created) = created_first.as_deref()
         {
             flows.push(link(created));
+            first = created_first.clone();
         }
         previous = next_id;
         terminal = previous.is_none();
@@ -693,8 +695,11 @@ fn process_loop(
     let mut inner_previous: Option<String> = None;
     let mut inner_x = 50;
     for activity in activities {
-        if !inner_objects.is_empty() && inner_previous.is_none() {
-            break;
+        if !inner_objects.is_empty()
+            && inner_previous.is_none()
+            && !matches!(activity, Activity::Label(_))
+        {
+            continue;
         }
         let (next, next_x) = process_activity(
             activity,
@@ -750,8 +755,8 @@ fn build_rescue_branch(
     let mut previous: Option<String> = None;
     let mut started = false;
     for activity in activities {
-        if started && previous.is_none() {
-            break;
+        if started && previous.is_none() && !matches!(activity, Activity::Label(_)) {
+            continue;
         }
         let before = objects.len();
         let (next, next_x) = process_activity(

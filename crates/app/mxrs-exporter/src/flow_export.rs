@@ -213,6 +213,8 @@ pub(crate) fn binding(name: &str) -> Option<String> {
                 | "message"
                 | "page"
                 | "sort"
+                | "on"
+                | "rule"
         );
     Some(if readable {
         snake
@@ -1435,6 +1437,9 @@ mod tests {
         assert_eq!(binding("Flow").as_deref(), Some("value_Flow"));
         assert_eq!(binding("String").as_deref(), Some("value_String"));
         assert_eq!(binding("Type").as_deref(), Some("value_Type"));
+        // The receivers of switch and rule closures.
+        assert_eq!(binding("On").as_deref(), Some("value_On"));
+        assert_eq!(binding("Rule").as_deref(), Some("value_Rule"));
         assert_eq!(binding("ValueTotal").as_deref(), Some("value_ValueTotal"));
         assert_eq!(binding("not valid"), None);
     }
