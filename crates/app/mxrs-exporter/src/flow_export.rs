@@ -1404,6 +1404,9 @@ pub(crate) fn render_files(
             item.push_str("}\n");
             let marker = names::flow_marker(name);
             let resolved = names.resolve(&item, &[&marker])?;
+            // Text too long for its line, or written over several, is named
+            // at the top of the file.
+            let (body, constants) = crate::layout::hoist_literals_in(&resolved.source);
             let mut source = String::from("use mxrs::prelude::*;\n\n");
             for import in &resolved.imports {
                 writeln!(source, "{import}").unwrap();
@@ -1411,7 +1414,13 @@ pub(crate) fn render_files(
             if !resolved.imports.is_empty() {
                 source.push('\n');
             }
-            source.push_str(&resolved.source);
+            for constant in &constants {
+                writeln!(source, "{constant}").unwrap();
+            }
+            if !constants.is_empty() {
+                source.push('\n');
+            }
+            source.push_str(&body);
             Ok(RenderedFlowSource {
                 module: flow.module.clone(),
                 file_name: plan.file_stem.clone(),

@@ -69,6 +69,7 @@ use entity_export::TypedEntityTarget;
 mod entity_export;
 mod flow_export;
 mod flow_general;
+mod layout;
 mod names;
 #[cfg(test)]
 #[path = "../../../../xtask/support/nested_cargo.rs"]
@@ -647,6 +648,7 @@ fn import_cargo_project_inner(
         )?;
     }
     format_generated_cargo_project(destination)?;
+    space_generated_sources(&destination.join("src"))?;
     write_text(
         &destination.join(".gitignore"),
         "/build\n/target\n/frontend/node_modules\n/frontend/dist\n",
@@ -3434,6 +3436,25 @@ fn model_names<'a>(
         nanoflows,
         roles,
     }
+}
+
+/// Spaces the statements of every generated Rust source under `root` the
+/// way [`layout::space_statements`] says, once rustfmt has laid them out.
+fn space_generated_sources(root: &Path) -> Result<()> {
+    let entries = std::fs::read_dir(root).map_err(|source| io_error(root, source))?;
+    for entry in entries {
+        let path = entry.map_err(|source| io_error(root, source))?.path();
+        if path.is_dir() {
+            space_generated_sources(&path)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            let source = std::fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
+            let spaced = layout::space_statements(&source);
+            if spaced != source {
+                std::fs::write(&path, spaced).map_err(|error| io_error(&path, error))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn format_generated_cargo_project(destination: &Path) -> Result<()> {
@@ -9552,6 +9573,7 @@ use crate::domain::entities::sales::order::Order;
 )]
 pub fn get_order(flow: &mut FlowBuilder) {
     let value_order = flow.create_object("order", Ref::<Order>::new(), vec![], false);
+
     flow.return_value(&value_order);
 }
 "#

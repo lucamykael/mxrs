@@ -74,6 +74,14 @@ read-only behavioral oracle; never edit it.
   names an artifact lives with it — an attribute is its entity's accessor
   (`Order::number()`), a flow is the type its declaration generates — so
   authored modules have no separate marker file.
+- Generated Rust reads in paragraphs (user directive, 2026-10-02): a
+  declaration's attributes sit directly above its `pub fn`; a flow's
+  parameters, return type and one-line `let`s are stacked; every other
+  operation has a blank line before and after it, while one activity's
+  options stay together; a blank line separates functions. Text too long
+  for its line, or written over several lines (an XPath, a long
+  expression), is a named `const` at the top of the file — rustfmt gives up
+  on a whole statement holding a literal it cannot fit.
 - Modules the project *installed* are module-first, under
   `src/packages/<module>/` (user directive, 2026-09-29):
   `Projects$Module`'s `FromAppStore` decides which, and a package carries only
