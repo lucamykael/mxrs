@@ -112,12 +112,14 @@ parameters, documentation, required flags, and typed defaults. Calls in one
 `project!` block check argument names and types at compile time; the writer
 checks builder/IR calls against authored or existing native signatures before
 writing. Parameter and type IDs survive synchronization. Every microflow is a
-file of its own under `src/services/<module>/`, and every nanoflow under
+method of the service of what it is about, under `src/services/<module>/`
+(`ACT_AssetType_Edit` is `AssetTypeService::edit` in
+`asset_type_service.rs`), and every nanoflow a file of its own under
 `src/ui/nanoflows/<module>/`: the function that declares it, under an
 attribute that states its kind, the roles that may run it and what it calls,
-uses and is used by. A flow that cannot be declared yet keeps its file, which
-names it so the rest of the project can still call and bind it and says why
-it stayed in the snapshot. Project security is imported into
+uses and is used by. A flow that cannot be declared yet is named where its
+declaration would be, so the rest of the project can still call and bind it,
+with a comment saying why it stayed in the snapshot. Project security is imported into
 `src/domain/security.rs`, each module's roles into
 `src/domain/module_security/<module>.rs`, and modern navigation into
 `src/ui/navigation.rs`. Their writers validate role and target

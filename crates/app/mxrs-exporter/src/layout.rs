@@ -20,13 +20,32 @@ const MAX_WIDTH: usize = 100;
 #[cfg(test)]
 const BODY_INDENT: usize = 4;
 
+/// Text longer than this many lines, or characters, is data rather than
+/// code: it is kept in a file of its own beside the source and included.
+const DATA_LINES: usize = 60;
+const DATA_CHARACTERS: usize = 4000;
+
+/// What naming a function body's long literals produced.
+#[derive(Debug, Default)]
+pub(crate) struct Hoisted {
+    /// The rewritten source.
+    pub(crate) source: String,
+    /// Each constant's declaration, in order of use.
+    pub(crate) constants: Vec<String>,
+    /// `(path, contents)` of each text kept beside the source, relative
+    /// to its `data/` folder; its constant includes it from there.
+    pub(crate) data: Vec<(String, String)>,
+}
+
 /// Replaces the string literals of the function bodies in `source` that
-/// would not fit their line, or that span lines, by constants. Answers the
-/// rewritten source and the constants' declarations, in order of use.
-pub(crate) fn hoist_literals_in(source: &str) -> (String, Vec<String>) {
+/// would not fit their line, or that span lines, by constants.
+///
+/// Text that is data is kept in `data/<data_folder>/`, one folder per
+/// source file: two files of one module never share one.
+pub(crate) fn hoist_literals_in(source: &str, data_folder: &str) -> Hoisted {
     let lines: Vec<String> = source.lines().map(str::to_string).collect();
     let mut out = Vec::with_capacity(lines.len());
-    let mut constants = Vec::new();
+    let mut hoisted = Hoisted::default();
     let mut taken = HashSet::new();
     let mut index = 0;
     while index < lines.len() {
@@ -40,29 +59,46 @@ pub(crate) fn hoist_literals_in(source: &str) -> (String, Vec<String>) {
         let Some(length) = lines[index..].iter().position(|line| *line == closing) else {
             continue;
         };
-        let (body, mut found) = hoist(&lines[index..index + length], 0, &mut taken);
-        out.extend(body);
-        constants.append(&mut found);
+        out.extend(hoist(
+            &lines[index..index + length],
+            0,
+            data_folder,
+            &mut taken,
+            &mut hoisted,
+        ));
         index += length;
     }
-    let mut rewritten = out.join("\n");
+    hoisted.source = out.join("\n");
     if source.ends_with('\n') {
-        rewritten.push('\n');
+        hoisted.source.push('\n');
     }
-    (rewritten, constants)
+    hoisted
 }
 
 /// As [`hoist_literals_in`], for `lines` of a function body written without
 /// the body's own indentation.
 #[cfg(test)]
-pub(crate) fn hoist_literals(lines: &[String]) -> (Vec<String>, Vec<String>) {
-    hoist(lines, BODY_INDENT, &mut HashSet::new())
+pub(crate) fn hoist_literals(lines: &[String]) -> (Vec<String>, Hoisted) {
+    let mut hoisted = Hoisted::default();
+    let lines = hoist(
+        lines,
+        BODY_INDENT,
+        "flow",
+        &mut HashSet::new(),
+        &mut hoisted,
+    );
+    (lines, hoisted)
 }
 
 /// `lines` with their long literals named, each line indented by `base`
 /// more than it is written.
-fn hoist(lines: &[String], base: usize, taken: &mut HashSet<String>) -> (Vec<String>, Vec<String>) {
-    let mut constants = Vec::new();
+fn hoist(
+    lines: &[String],
+    base: usize,
+    data_folder: &str,
+    taken: &mut HashSet<String>,
+    hoisted: &mut Hoisted,
+) -> Vec<String> {
     let mut out = Vec::with_capacity(lines.len());
     for (index, line) in lines.iter().enumerate() {
         let indent = line.len() - line.trim_start().len() + base;
@@ -78,10 +114,18 @@ fn hoist(lines: &[String], base: usize, taken: &mut HashSet<String>) -> (Vec<Str
             if multiline || too_long {
                 let prefix = format!("{rewritten}{before}");
                 let name = unique(constant_name(lines, index, &prefix), taken);
-                constants.push(format!(
-                    "const {name}: &str = {};",
-                    multiline_literal(&value)
-                ));
+                if value.lines().count() > DATA_LINES || value.len() > DATA_CHARACTERS {
+                    let file = format!("{data_folder}/{}.txt", name.to_ascii_lowercase());
+                    hoisted.constants.push(format!(
+                        "const {name}: &str = include_str!(\"data/{file}\");"
+                    ));
+                    hoisted.data.push((file, value));
+                } else {
+                    hoisted.constants.push(format!(
+                        "const {name}: &str = {};",
+                        multiline_literal(&value)
+                    ));
+                }
                 rewritten.push_str(&name);
             } else {
                 rewritten.push_str(literal);
@@ -91,7 +135,7 @@ fn hoist(lines: &[String], base: usize, taken: &mut HashSet<String>) -> (Vec<Str
         rewritten.push_str(rest);
         out.push(rewritten);
     }
-    (out, constants)
+    out
 }
 
 /// The first string literal of `text`: what precedes it, the literal with
@@ -531,9 +575,9 @@ mod tests {
             "});\n",
             "flow.return_with(mx(\"$NewRoot\\n\"));",
         ));
-        let (body, constants) = hoist_literals(&body);
+        let (body, hoisted) = hoist_literals(&body);
         assert_eq!(
-            constants,
+            hoisted.constants,
             [
                 "const BUILDING_XPATH: &str = \"[\n  (\n    BuildingID = $buildingID\n  )\n]\";",
                 "const NEW_PARAMETERS_MEASUREMENT_UNIT: &str = \"$IteratorSPCProgramParameter/SPCProgram.SPCProgramParameter_MeasurementUnit/Catalogs.MeasurementUnit/MeasurementUnitName\";",
@@ -546,6 +590,27 @@ mod tests {
         );
         // A trailing line break alone does not make text span lines.
         assert_eq!(body[7], "flow.return_with(mx(\"$NewRoot\\n\"));");
+    }
+
+    #[test]
+    fn text_that_is_data_is_kept_beside_the_source() {
+        let payload = (0..100)
+            .map(|n| format!("{{\"n\": {n}}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = vec![format!(
+            "flow.create_variable(\"Payload\", DataType::String, mx({payload:?}));"
+        )];
+        let (body, hoisted) = hoist_literals(&body);
+        assert_eq!(
+            body[0],
+            "flow.create_variable(\"Payload\", DataType::String, mx(PAYLOAD));"
+        );
+        assert_eq!(
+            hoisted.constants,
+            ["const PAYLOAD: &str = include_str!(\"data/flow/payload.txt\");"]
+        );
+        assert_eq!(hoisted.data, [("flow/payload.txt".to_string(), payload)]);
     }
 
     #[test]

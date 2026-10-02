@@ -531,7 +531,11 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
             (ArtifactKind::DemoUser, _) => format!("Artifact{index}"),
             _ => format!("Sales.Artifact{index}"),
         };
-        let files = scaffold(&root, command.kind, &name);
+        // A microflow joins its subject's service: the second one of a
+        // module adds a method to a file the first created.
+        let outcome = scaffold_artifact(&ArtifactScaffold::new(command.kind, &name, &root))
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let files = [outcome.files, outcome.updated].concat();
         checked += 1;
 
         // `repository` is the one deliberately two-layer artifact: its port

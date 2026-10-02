@@ -31,6 +31,8 @@ pub(crate) struct RenderedFlowSource {
     pub module: String,
     pub file_name: String,
     pub source: String,
+    /// `(file name, contents)` of text the source includes from `data/`.
+    pub data: Vec<(String, String)>,
 }
 
 struct AttributeInfo {
@@ -1163,6 +1165,8 @@ pub(crate) struct FlowFile {
     /// Whether the Mendix name has to be stated because the prefix and the
     /// function do not spell it.
     explicit_name: bool,
+    /// The service a microflow is a method of.
+    slot: Option<ServiceSlot>,
 }
 
 /// `ACT_CreateOrder` → (`ACT`, `CreateOrder`): the capitals before the first
@@ -1238,7 +1242,258 @@ fn file_stem(function: &str, nanoflow: bool) -> String {
     }
 }
 
-pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
+/// What a service is about.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum ServiceSubject {
+    /// An entity of the module, by its qualified name.
+    Entity(String),
+    /// A word the module's flow names share, as they write it.
+    Name(String),
+}
+
+impl ServiceSubject {
+    /// The subject as the flows' names write it.
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            ServiceSubject::Entity(qualified) => qualified.rsplit('.').next().unwrap_or(qualified),
+            ServiceSubject::Name(name) => name,
+        }
+    }
+}
+
+/// Where a microflow is declared: a method of the service of its subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceSlot {
+    /// `asset_type_service`: the file, under the module's folder.
+    pub(crate) file_stem: String,
+    /// `AssetTypeService`: the struct the `impl` belongs to.
+    pub(crate) service: String,
+    /// What the service is about; none for the module's own service, which
+    /// holds what no subject gathers.
+    pub(crate) subject: Option<ServiceSubject>,
+    /// The method declaring the flow.
+    pub(crate) function: String,
+    pub(crate) prefix: Option<String>,
+    /// Whether the Mendix name has to be stated because the prefix, the
+    /// subject and the method do not spell it.
+    pub(crate) explicit_name: bool,
+}
+
+/// Decides, for every microflow of `module`, the service it belongs to.
+///
+/// A flow is about the module's entity its name names (`ACT_AssetType_Edit`,
+/// `DS_List_AssetType` and `SUB_CheckAssetTypeInUse` are all about
+/// `AssetType`: `edit`, `list` and `check_in_use` of `AssetTypeService`).
+/// Flows no entity gathers but whose names open with the same word share a
+/// service of that word (`MF_RubyCrud_Create` → `RubyCrudService::create`).
+/// The rest belong to the module's own service.
+pub(crate) fn plan_services(
+    module: &str,
+    flow_names: &[String],
+    entities: &[String],
+) -> HashMap<String, ServiceSlot> {
+    let module_stem = crate::inner_file_stem(module);
+    let module_service = format!("{}Service", derive_pascal_case(&module_stem));
+    let words: HashMap<&str, usize> = flow_names.iter().fold(HashMap::new(), |mut words, name| {
+        if let Some((word, _)) = split_prefix(name).1.split_once('_') {
+            *words.entry(word).or_default() += 1;
+        }
+        words
+    });
+    let mut subjects: Vec<(&String, Option<ServiceSubject>, String)> = flow_names
+        .iter()
+        .map(|name| {
+            let core = split_prefix(name).1;
+            let first_word = core.split('_').next().unwrap_or(core);
+            let entity = |within: usize| {
+                entity_subject(core, entities, within).map(|(entity, action)| {
+                    (
+                        name,
+                        Some(ServiceSubject::Entity(format!("{module}.{entity}"))),
+                        action,
+                    )
+                })
+            };
+            // The name's first word says what the flow is about when it is
+            // an entity, or a word other flows open with too — unless it is
+            // what the flow does (`List_AssetType`), not what it is about.
+            if let Some(found) = entity(first_word.len()) {
+                return found;
+            }
+            if let Some((word, action)) = core.split_once('_')
+                && words.get(word).is_some_and(|count| *count > 1)
+                && !action.is_empty()
+                && !is_verb(word)
+            {
+                return (
+                    name,
+                    Some(ServiceSubject::Name(word.to_string())),
+                    action.to_string(),
+                );
+            }
+            entity(core.len()).unwrap_or((name, None, core.to_string()))
+        })
+        .collect();
+    subjects.sort_by(|a, b| a.0.cmp(b.0));
+    // A subject spelled like the module would share the module's service:
+    // what no subject gathers joins that service instead.
+    let module_subject = subjects
+        .iter()
+        .filter_map(|(_, subject, _)| subject.clone())
+        .find(|subject| crate::inner_file_stem(subject.text()) == module_stem);
+    if let Some(subject) = module_subject {
+        for (_, slot_subject, _) in &mut subjects {
+            if slot_subject.is_none() {
+                *slot_subject = Some(subject.clone());
+            }
+        }
+    }
+    let mut taken: HashSet<(String, String)> = HashSet::new();
+    let mut slots = HashMap::new();
+    for (name, subject, action) in subjects {
+        let (prefix, _) = split_prefix(name);
+        let marker = names::flow_marker(name);
+        let (file_stem, service) = match &subject {
+            Some(subject) => {
+                let stem = crate::inner_file_stem(subject.text());
+                // The struct is the subject as written when Rust reads that
+                // as a type's name, and its words in capitals otherwise.
+                let text = subject.text();
+                let type_name = if text.starts_with(|c: char| c.is_ascii_uppercase())
+                    && text.chars().all(|c| c.is_ascii_alphanumeric())
+                {
+                    text.to_string()
+                } else {
+                    derive_pascal_case(&stem)
+                };
+                (format!("{stem}_service"), format!("{type_name}Service"))
+            }
+            None => (format!("{module_stem}_service"), module_service.clone()),
+        };
+        let mut function = flow_function(&action, &marker);
+        if !taken.insert((file_stem.clone(), function.clone())) {
+            // Two flows of one subject doing the same: the kind tells them
+            // apart, and failing that a number.
+            let kinded = prefix
+                .map(|prefix| format!("{}_{function}", prefix.to_ascii_lowercase()))
+                .filter(|candidate| taken.insert((file_stem.clone(), candidate.clone())));
+            function = kinded.unwrap_or_else(|| {
+                (2..)
+                    .map(|suffix| format!("{function}_{suffix}"))
+                    .find(|candidate| taken.insert((file_stem.clone(), candidate.clone())))
+                    .expect("an unbounded suffix always finds a free name")
+            });
+        }
+        let derived = prefix
+            .map(str::to_string)
+            .into_iter()
+            .chain(subject.as_ref().map(|subject| subject.text().to_string()))
+            .chain([derive_pascal_case(&function)])
+            .collect::<Vec<_>>()
+            .join("_");
+        slots.insert(
+            name.clone(),
+            ServiceSlot {
+                file_stem,
+                service,
+                explicit_name: derived != *name,
+                subject,
+                function,
+                prefix: prefix.map(str::to_string),
+            },
+        );
+    }
+    slots
+}
+
+/// Whether a flow name's word says what the flow does rather than what it
+/// is about.
+fn is_verb(word: &str) -> bool {
+    const VERBS: [&str; 34] = [
+        "Act",
+        "Add",
+        "Calculate",
+        "Cancel",
+        "Change",
+        "Check",
+        "Clear",
+        "Close",
+        "Commit",
+        "Create",
+        "Delete",
+        "Do",
+        "Edit",
+        "Export",
+        "Find",
+        "Generate",
+        "Get",
+        "Import",
+        "List",
+        "Load",
+        "New",
+        "Open",
+        "Process",
+        "Refresh",
+        "Remove",
+        "Retrieve",
+        "Save",
+        "Search",
+        "Select",
+        "Send",
+        "Set",
+        "Show",
+        "Update",
+        "Validate",
+    ];
+    VERBS.contains(&word)
+}
+
+/// The longest of `entities` that `core` (a flow name without its prefix)
+/// names as a word of its own — plural allowed — and what the name says
+/// besides: `List_AssetReactionPlan` → (`AssetReactionPlan`, `List`),
+/// `CheckAssetTypeInUse` → (`AssetType`, `CheckInUse`).
+fn entity_subject(core: &str, entities: &[String], within: usize) -> Option<(String, String)> {
+    let mut best: Option<(&String, usize, usize)> = None;
+    for entity in entities {
+        for (start, _) in core.match_indices(entity.as_str()) {
+            if start >= within {
+                continue;
+            }
+            let mut end = start + entity.len();
+            let rest = &core[end..];
+            if let Some(plural) = ["es", "s"].iter().find(|plural| {
+                rest.strip_prefix(**plural).is_some_and(|after| {
+                    after.is_empty()
+                        || after.starts_with(['_'])
+                        || after.starts_with(|c: char| c.is_ascii_uppercase())
+                })
+            }) {
+                end += plural.len();
+            }
+            let before = core[..start].chars().next_back();
+            let after = core[end..].chars().next();
+            let opens =
+                before.is_none_or(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit());
+            let closes =
+                after.is_none_or(|c| c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit());
+            if opens && closes && best.is_none_or(|(chosen, _, _)| entity.len() > chosen.len()) {
+                best = Some((entity, start, end));
+            }
+        }
+    }
+    let (entity, start, end) = best?;
+    let action = format!("{}{}", &core[..start], &core[end..])
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    (!action.is_empty()).then(|| (entity.clone(), action))
+}
+
+pub(crate) fn plan_files(
+    flows: &[ConvertedFlow],
+    services: &HashMap<(String, String), ServiceSlot>,
+) -> Vec<FlowFile> {
     let short = |flow: &ConvertedFlow| {
         let name = &flow.declaration.name;
         flow_function(split_prefix(name).1, &names::flow_marker(name))
@@ -1256,6 +1511,15 @@ pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
         .map(|flow| {
             let name = &flow.declaration.name;
             let nanoflow = flow.is_nanoflow();
+            if !nanoflow && let Some(slot) = services.get(&(flow.module.clone(), name.clone())) {
+                return FlowFile {
+                    file_stem: slot.file_stem.clone(),
+                    function: slot.function.clone(),
+                    prefix: slot.prefix.clone(),
+                    explicit_name: slot.explicit_name,
+                    slot: Some(slot.clone()),
+                };
+            }
             let marker = names::flow_marker(name);
             let (prefix, _) = split_prefix(name);
             let mut function = short(flow);
@@ -1288,13 +1552,165 @@ pub(crate) fn plan_files(flows: &[ConvertedFlow]) -> Vec<FlowFile> {
                 explicit_name: derived != *name,
                 function,
                 prefix: prefix.map(str::to_string),
+                slot: None,
             }
         })
         .collect()
 }
 
-/// Renders each recovered flow as the function that declares it, in its own
-/// file. `plans` is [`plan_files`]' answer for the same `flows`.
+/// The function declaring one flow, with its doc comment and attribute, and
+/// the type its declaration generates. A method of a service leaves the
+/// module to the service.
+fn flow_item(
+    flow: &ConvertedFlow,
+    plan: &FlowFile,
+    in_service: bool,
+    names: &ModelNames<'_>,
+    relations: &HashMap<String, mxrs_model::relations::FlowRelations>,
+) -> (String, String) {
+    let attribute = if flow.is_nanoflow() {
+        "nanoflow"
+    } else {
+        "microflow"
+    };
+    let name = &flow.declaration.name;
+    let mut lines = flow.source.clone();
+    let mut item = String::new();
+    match crate::entity_export::doc_comment(&flow.declaration.documentation, "") {
+        Some(comment) => item.push_str(&comment),
+        None => lines.insert(
+            0,
+            format!(
+                "flow.documentation({});",
+                rust_string(&flow.declaration.documentation)
+            ),
+        ),
+    }
+    let mut arguments = Vec::new();
+    if let Some(prefix) = &plan.prefix {
+        arguments.push(prefix.clone());
+    }
+    if !in_service {
+        arguments.push(format!("module = {}", rust_string(&flow.module)));
+    }
+    if plan.explicit_name {
+        arguments.push(format!("name = {}", rust_string(name)));
+    }
+    // What the model says the flow is related to, each named by the Rust
+    // item that declares it where there is one.
+    if let Some(related) = relations.get(&format!("{}.{name}", flow.module)) {
+        let list = |name: &str, items: Vec<String>| {
+            (!items.is_empty()).then(|| format!("{name}({})", items.join(", ")))
+        };
+        let flow_item = |target: &String| {
+            if names.microflows.contains_key(target) {
+                names::microflow(target)
+            } else if names.nanoflows.contains_key(target) {
+                names::nanoflow(target)
+            } else {
+                rust_string(target)
+            }
+        };
+        arguments.extend(list(
+            "roles",
+            related
+                .roles
+                .iter()
+                .map(|role| {
+                    if names.roles.contains_key(role) {
+                        names::role(role)
+                    } else {
+                        rust_string(role)
+                    }
+                })
+                .collect(),
+        ));
+        arguments.extend(list("calls", related.calls.iter().map(flow_item).collect()));
+        arguments.extend(list(
+            "uses",
+            related
+                .uses
+                .iter()
+                .map(|entity| {
+                    if names.entities.contains_key(entity) {
+                        names::entity(entity)
+                    } else {
+                        rust_string(entity)
+                    }
+                })
+                .collect(),
+        ));
+        arguments.extend(list(
+            "used_by",
+            related.used_by.iter().map(flow_item).collect(),
+        ));
+    }
+    if arguments.is_empty() {
+        writeln!(item, "#[{attribute}]").unwrap();
+    } else {
+        writeln!(item, "#[{attribute}({})]", arguments.join(", ")).unwrap();
+    }
+    // A variable whose Mendix name does not read back from snake case keeps
+    // its exact spelling, capitals included.
+    if lines.iter().any(|line| {
+        line.match_indices("value_").any(|(index, _)| {
+            line[index + "value_".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .any(|c| c.is_ascii_uppercase())
+        })
+    }) {
+        item.push_str("#[allow(non_snake_case)]\n");
+    }
+    let parameter = if lines.is_empty() { "_flow" } else { "flow" };
+    writeln!(
+        item,
+        "pub fn {}({parameter}: &mut FlowBuilder) {{",
+        plan.function
+    )
+    .unwrap();
+    for line in &lines {
+        writeln!(item, "    {line}").unwrap();
+    }
+    item.push_str("}\n");
+    (item, names::flow_marker(name))
+}
+
+/// A source file: the prelude, the imports `resolved` asks for, the text
+/// too long for its line named at the top, and the items.
+fn source_file(
+    resolved: &names::Resolved,
+    body: &str,
+    file_stem: &str,
+) -> (String, Vec<(String, String)>) {
+    // Text too long for its line, or written over several, is named at the
+    // top of the file.
+    let crate::layout::Hoisted {
+        source: body,
+        constants,
+        data,
+    } = crate::layout::hoist_literals_in(body, file_stem);
+    let mut source = String::from("use mxrs::prelude::*;\n\n");
+    for import in &resolved.imports {
+        writeln!(source, "{import}").unwrap();
+    }
+    if !resolved.imports.is_empty() {
+        source.push('\n');
+    }
+    for constant in &constants {
+        writeln!(source, "{constant}").unwrap();
+    }
+    if !constants.is_empty() {
+        source.push('\n');
+    }
+    source.push_str(&body);
+    (source, data)
+}
+
+/// Renders the recovered flows of one kind as the code that declares them.
+/// A nanoflow is a function in a file of its own; a microflow is a method
+/// of its subject's service, one file per service. `plans` is
+/// [`plan_files`]' answer for the same `flows`.
 pub(crate) fn render_files(
     flows: &[ConvertedFlow],
     plans: &[FlowFile],
@@ -1302,132 +1718,105 @@ pub(crate) fn render_files(
     names: &ModelNames<'_>,
     relations: &HashMap<String, mxrs_model::relations::FlowRelations>,
 ) -> Result<Vec<RenderedFlowSource>> {
-    let attribute = if nanoflow { "nanoflow" } else { "microflow" };
-    flows
+    let mut files = Vec::new();
+    let mut services: std::collections::BTreeMap<(&str, &str), Vec<(&ConvertedFlow, &FlowFile)>> =
+        Default::default();
+    for (flow, plan) in flows
         .iter()
         .zip(plans)
         .filter(|(flow, _)| flow.is_nanoflow() == nanoflow)
-        .map(|(flow, plan)| {
-            let name = &flow.declaration.name;
-            let mut lines = flow.source.clone();
-            let mut item = String::new();
-            match crate::entity_export::doc_comment(&flow.declaration.documentation, "") {
-                Some(comment) => item.push_str(&comment),
-                None => lines.insert(
-                    0,
-                    format!(
-                        "flow.documentation({});",
-                        rust_string(&flow.declaration.documentation)
-                    ),
-                ),
+    {
+        if let Some(slot) = &plan.slot {
+            services
+                .entry((flow.module.as_str(), slot.file_stem.as_str()))
+                .or_default()
+                .push((flow, plan));
+            continue;
+        }
+        let (item, marker) = flow_item(flow, plan, false, names, relations);
+        let resolved = names.resolve(&item, &[&marker])?;
+        let (source, data) = source_file(&resolved, &resolved.source, &plan.file_stem);
+        files.push(RenderedFlowSource {
+            module: flow.module.clone(),
+            file_name: plan.file_stem.clone(),
+            source,
+            data,
+        });
+    }
+    for ((module, file_stem), mut members) in services {
+        members.sort_by(|a, b| a.1.function.cmp(&b.1.function));
+        let slot = members[0]
+            .1
+            .slot
+            .as_ref()
+            .expect("a service member has a slot");
+        let mut taken = vec![slot.service.clone()];
+        let mut body = String::new();
+        let subject = match &slot.subject {
+            Some(ServiceSubject::Entity(qualified)) if names.entities.contains_key(qualified) => {
+                format!(", subject = {}", names::entity(qualified))
             }
-            let mut arguments = Vec::new();
-            if let Some(prefix) = &plan.prefix {
-                arguments.push(prefix.clone());
+            Some(subject) => format!(", subject = {}", rust_string(subject.text())),
+            None => String::new(),
+        };
+        let what = match &slot.subject {
+            Some(subject) => format!("What the {module} module does with {}.", subject.text()),
+            None => format!("What the {module} module does that no one subject gathers."),
+        };
+        writeln!(body, "/// {what}").unwrap();
+        writeln!(body, "pub struct {};\n", slot.service).unwrap();
+        writeln!(
+            body,
+            "#[service(module = {}{subject})]",
+            rust_string(module)
+        )
+        .unwrap();
+        writeln!(body, "impl {} {{", slot.service).unwrap();
+        for (index, (flow, plan)) in members.iter().enumerate() {
+            let (item, marker) = flow_item(flow, plan, true, names, relations);
+            taken.push(marker);
+            if index > 0 {
+                body.push('\n');
             }
-            arguments.push(format!("module = {}", rust_string(&flow.module)));
-            if plan.explicit_name {
-                arguments.push(format!("name = {}", rust_string(name)));
+            for line in item.lines() {
+                if line.is_empty() {
+                    body.push('\n');
+                } else {
+                    writeln!(body, "    {line}").unwrap();
+                }
             }
-            // What the model says the flow is related to, each named by
-            // the Rust item that declares it where there is one.
-            if let Some(related) = relations.get(&format!("{}.{name}", flow.module)) {
-                let list = |name: &str, items: Vec<String>| {
-                    (!items.is_empty()).then(|| format!("{name}({})", items.join(", ")))
-                };
-                let flow_item = |target: &String| {
-                    if names.microflows.contains_key(target) {
-                        names::microflow(target)
-                    } else if names.nanoflows.contains_key(target) {
-                        names::nanoflow(target)
-                    } else {
-                        rust_string(target)
-                    }
-                };
-                arguments.extend(list(
-                    "roles",
-                    related
-                        .roles
-                        .iter()
-                        .map(|role| {
-                            if names.roles.contains_key(role) {
-                                names::role(role)
-                            } else {
-                                rust_string(role)
-                            }
-                        })
-                        .collect(),
-                ));
-                arguments.extend(list("calls", related.calls.iter().map(flow_item).collect()));
-                arguments.extend(list(
-                    "uses",
-                    related
-                        .uses
-                        .iter()
-                        .map(|entity| {
-                            if names.entities.contains_key(entity) {
-                                names::entity(entity)
-                            } else {
-                                rust_string(entity)
-                            }
-                        })
-                        .collect(),
-                ));
-                arguments.extend(list(
-                    "used_by",
-                    related.used_by.iter().map(flow_item).collect(),
-                ));
-            }
-            writeln!(item, "#[{attribute}({})]", arguments.join(", ")).unwrap();
-            // A variable whose Mendix name does not read back from snake
-            // case keeps its exact spelling, capitals included.
-            if lines.iter().any(|line| {
-                line.match_indices("value_").any(|(index, _)| {
-                    line[index + "value_".len()..]
-                        .chars()
-                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                        .any(|c| c.is_ascii_uppercase())
-                })
-            }) {
-                item.push_str("#[allow(non_snake_case)]\n");
-            }
-            let parameter = if lines.is_empty() { "_flow" } else { "flow" };
-            writeln!(
-                item,
-                "pub fn {}({parameter}: &mut FlowBuilder) {{",
-                plan.function
-            )
-            .unwrap();
-            for line in &lines {
-                writeln!(item, "    {line}").unwrap();
-            }
-            item.push_str("}\n");
-            let marker = names::flow_marker(name);
-            let resolved = names.resolve(&item, &[&marker])?;
-            // Text too long for its line, or written over several, is named
-            // at the top of the file.
-            let (body, constants) = crate::layout::hoist_literals_in(&resolved.source);
-            let mut source = String::from("use mxrs::prelude::*;\n\n");
-            for import in &resolved.imports {
-                writeln!(source, "{import}").unwrap();
-            }
-            if !resolved.imports.is_empty() {
-                source.push('\n');
-            }
-            for constant in &constants {
-                writeln!(source, "{constant}").unwrap();
-            }
-            if !constants.is_empty() {
-                source.push('\n');
-            }
-            source.push_str(&body);
-            Ok(RenderedFlowSource {
-                module: flow.module.clone(),
-                file_name: plan.file_stem.clone(),
-                source,
-            })
-        })
-        .collect()
+        }
+        body.push_str("}\n");
+        // Every flow this file names — declared here, or staying in the
+        // imported model beside them — is named as it is in its own file.
+        let own = names
+            .microflows
+            .get(&format!("{module}.{}", members[0].0.declaration.name))
+            .map(|target| target.module_path.clone());
+        if let Some(own) = &own {
+            taken.extend(
+                names
+                    .microflows
+                    .values()
+                    .filter(|target| target.module_path == *own)
+                    .map(|target| target.marker.clone()),
+            );
+        }
+        let taken = taken.iter().map(String::as_str).collect::<Vec<_>>();
+        let resolved = names.resolve(&body, &taken)?;
+        let source = match &own {
+            Some(own) => resolved.source.replace(&format!("{own}::"), ""),
+            None => resolved.source.clone(),
+        };
+        let (source, data) = source_file(&resolved, &source, file_stem);
+        files.push(RenderedFlowSource {
+            module: module.to_string(),
+            file_name: file_stem.to_string(),
+            source,
+            data,
+        });
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -1519,7 +1908,7 @@ mod tests {
             flow("Sales", "ACT_Return", false),
             flow("Crm", "ACT_Refresh", true),
         ];
-        let stems = plan_files(&flows)
+        let stems = plan_files(&flows, &HashMap::new())
             .into_iter()
             .map(|plan| plan.file_stem)
             .collect::<Vec<_>>();

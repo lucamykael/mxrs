@@ -953,33 +953,46 @@ fn create_page_slice(
             &stem,
             templates::page_chain_entity(module_name, artifact_name),
         )?;
-        create_concept_file(
+        add_microflow(
             transaction,
             root,
             module_name,
-            module_folder(ArtifactKind::UseCase),
-            &templates::service_stem(&format!("ACT_Load{artifact_name}")),
-            templates::page_chain_loader(module_name, artifact_name),
+            &templates::page_chain_loader(module_name, artifact_name),
+            &[artifact_name.to_string()],
         )?;
     }
-    if chain.is_some_and(PageChain::has_microflow) {
-        create_concept_file(
-            transaction,
-            root,
-            module_name,
-            module_folder(ArtifactKind::UseCase),
-            &templates::service_stem(&format!("ACT_Refresh{artifact_name}")),
-            templates::page_chain_action(module_name, artifact_name),
-        )?;
-    }
+    // The slice's entity, when it has one, is what its flows are about.
+    let slice_entities = if template.data_backed {
+        vec![artifact_name.to_string()]
+    } else {
+        Vec::new()
+    };
+    let refresh_service = if chain.is_some_and(PageChain::has_microflow) {
+        Some(
+            add_microflow(
+                transaction,
+                root,
+                module_name,
+                &templates::page_chain_action(module_name, artifact_name),
+                &slice_entities,
+            )?
+            .module_path,
+        )
+    } else {
+        None
+    };
     if let Some(chain) = chain.filter(|chain| chain.has_nanoflow()) {
+        let calls = chain
+            .has_microflow()
+            .then_some(())
+            .and(refresh_service.as_deref());
         create_concept_file(
             transaction,
             root,
             module_name,
             module_folder(ArtifactKind::Nanoflow),
             &templates::nanoflow_stem(&format!("NAN_Refresh{artifact_name}")),
-            templates::page_chain_nanoflow(module_name, artifact_name, chain.has_microflow()),
+            templates::page_chain_nanoflow(module_name, artifact_name, calls),
         )?;
     }
 
@@ -1002,6 +1015,7 @@ fn create_page_slice(
             LAYOUT_PARAMETER,
             template.name,
             refresh,
+            refresh_service.as_deref(),
             &options.page_roles,
         ),
     )
@@ -1023,6 +1037,39 @@ fn create_artifact(
     }
     if options.kind == ArtifactKind::Repository {
         return create_repository(transaction, root, module_name, artifact_name);
+    }
+    // A microflow is a method of the service of what it is about — the
+    // place the importer would have put it.
+    let service_docs = match options.kind {
+        ArtifactKind::UseCase => Some(vec![format!(
+            "Application service `{module_name}.{artifact_name}`."
+        )]),
+        ArtifactKind::Validation => Some(vec![format!(
+            "Application validation `{module_name}.{artifact_name}`."
+        )]),
+        ArtifactKind::PublishedRest => Some(vec![
+            format!("Published REST handler `{module_name}.{artifact_name}`."),
+            String::new(),
+            "Publishing the REST service document itself stays a native Studio Pro".to_string(),
+            "operation: mxrs has no published-REST declaration surface, so this".to_string(),
+            "scaffold creates only the handler microflow the service calls.".to_string(),
+        ]),
+        _ => None,
+    };
+    if let Some(docs) = service_docs {
+        add_microflow(
+            transaction,
+            root,
+            module_name,
+            &crate::service::ServiceMethod {
+                name: artifact_name.to_string(),
+                docs,
+                imports: Vec::new(),
+                body: Vec::new(),
+            },
+            &[],
+        )?;
+        return Ok(());
     }
     let source = match options.kind {
         ArtifactKind::Entity => templates::entity(module_name, artifact_name),
@@ -1190,6 +1237,35 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
 /// the crate. That is the whole connection: the declaration registers
 /// itself, so there is no aggregator to edit and no composition shape the
 /// scaffold has to recognize.
+/// Adds a microflow to its subject's service in `module_name`, creating
+/// the service's file — and wiring it into the module's services — when
+/// the service is new.
+fn add_microflow(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    method: &crate::service::ServiceMethod,
+    entities: &[String],
+) -> Result<crate::service::Placed> {
+    crate::service::add_service_method(
+        transaction,
+        root,
+        module_name,
+        method,
+        entities,
+        |transaction, stem, source| {
+            create_concept_file(
+                transaction,
+                root,
+                module_name,
+                module_folder(ArtifactKind::UseCase),
+                stem,
+                source,
+            )
+        },
+    )
+}
+
 fn create_concept_file(
     transaction: &mut Transaction,
     root: &Path,

@@ -33,7 +33,8 @@ pub struct FlowArgs {
     /// The naming-convention prefix (`ACT`, `SUB`, `DS`, ...), when the flow
     /// states one.
     prefix: Option<syn::Ident>,
-    module: syn::LitStr,
+    /// The flow's module; a flow declared in a service takes the service's.
+    module: Option<syn::LitStr>,
     name: Option<syn::LitStr>,
     /// `roles(...)`: the module roles that may run the flow.
     roles: Option<Vec<Related>>,
@@ -133,7 +134,7 @@ impl syn::parse::Parse for FlowArgs {
         }
         Ok(Self {
             prefix,
-            module: module.ok_or_else(|| input.error("missing `module = \"ModuleName\"`"))?,
+            module,
             name,
             roles,
             calls,
@@ -144,18 +145,23 @@ impl syn::parse::Parse for FlowArgs {
 }
 
 impl FlowArgs {
-    /// The Mendix name: stated outright, or the prefix joined to the
-    /// function's name in the convention's casing
-    /// (`ACT` + `create_animal` → `ACT_CreateAnimal`).
-    fn mendix_name(&self, function: &syn::Ident) -> syn::Result<String> {
+    /// The Mendix name: stated outright, or the prefix, the subject of the
+    /// service declaring the flow and the function's name joined in the
+    /// convention's casing (`ACT` + `create_animal` → `ACT_CreateAnimal`;
+    /// `ACT` + `AssetType` + `edit` → `ACT_AssetType_Edit`).
+    fn mendix_name(&self, function: &syn::Ident, subject: Option<&str>) -> syn::Result<String> {
         let function_name = function.to_string();
         let function_name = function_name.strip_prefix("r#").unwrap_or(&function_name);
         let Some(name) = &self.name else {
             let base = to_pascal_case(function_name);
-            return Ok(match &self.prefix {
-                Some(prefix) => format!("{prefix}_{base}"),
-                None => base,
-            });
+            let parts = self
+                .prefix
+                .as_ref()
+                .map(ToString::to_string)
+                .into_iter()
+                .chain(subject.map(str::to_string))
+                .chain([base]);
+            return Ok(parts.collect::<Vec<_>>().join("_"));
         };
         let value = name.value();
         if value.is_empty() || value.contains('.') {
@@ -176,12 +182,9 @@ impl FlowArgs {
     }
 }
 
-pub fn expand_flow(
-    args: &FlowArgs,
-    kind: FlowKind,
-    item: &syn::ItemFn,
-) -> syn::Result<TokenStream> {
-    let signature = &item.sig;
+/// What a flow declaration's function must look like: the builder alone,
+/// returning nothing, neither async nor generic.
+fn check_flow_signature(signature: &syn::Signature) -> syn::Result<()> {
     if let Some(token) = &signature.asyncness {
         return Err(syn::Error::new(
             token.span(),
@@ -206,11 +209,64 @@ pub fn expand_flow(
             "a flow declaration takes the builder alone: `fn name(flow: &mut FlowBuilder)`",
         ));
     }
+    Ok(())
+}
 
-    let ident = &signature.ident;
-    let visibility = &item.vis;
-    let module = &args.module;
-    let name = args.mendix_name(ident)?;
+pub fn expand_flow(
+    args: &FlowArgs,
+    kind: FlowKind,
+    item: &syn::ItemFn,
+) -> syn::Result<TokenStream> {
+    check_flow_signature(&item.sig)?;
+    let ident = &item.sig.ident;
+    let module = args
+        .module
+        .as_ref()
+        .ok_or_else(|| syn::Error::new(ident.span(), "missing `module = \"ModuleName\"`"))?;
+    let name = args.mendix_name(ident, None)?;
+    let declared = flow_declaration(FlowDeclaration {
+        args,
+        kind,
+        module,
+        name,
+        ident,
+        visibility: &item.vis,
+        attributes: &item.attrs,
+        call: quote!(#ident),
+    })?;
+    Ok(quote! {
+        #item
+        #declared
+    })
+}
+
+/// One flow, wherever it is declared: a function of its own or a method of
+/// a service.
+struct FlowDeclaration<'a> {
+    args: &'a FlowArgs,
+    kind: FlowKind,
+    module: &'a syn::LitStr,
+    name: String,
+    ident: &'a syn::Ident,
+    visibility: &'a syn::Visibility,
+    attributes: &'a [syn::Attribute],
+    /// How the registration calls the function that builds the flow.
+    call: TokenStream,
+}
+
+/// The unit type naming the flow, and its registration with the
+/// application.
+fn flow_declaration(declaration: FlowDeclaration<'_>) -> syn::Result<TokenStream> {
+    let FlowDeclaration {
+        args,
+        kind,
+        module,
+        name,
+        ident,
+        visibility,
+        attributes,
+        call,
+    } = declaration;
     let marker = marker_ident(&name, ident.span());
     if marker == *ident {
         return Err(syn::Error::new(
@@ -220,8 +276,7 @@ pub fn expand_flow(
             ),
         ));
     }
-    let docs = item
-        .attrs
+    let docs = attributes
         .iter()
         .filter(|attribute| attribute.path().is_ident("doc"))
         .collect::<Vec<_>>();
@@ -268,13 +323,12 @@ pub fn expand_flow(
         ),
     };
     let summary = format!(
-        "The `{}.{name}` {noun}, declared by [`{ident}`].",
-        module.value()
+        "The `{}.{name}` {noun}, declared by [`{}`].",
+        module.value(),
+        call.to_string().replace(' ', "")
     );
 
     Ok(quote! {
-        #item
-
         #[doc = #summary]
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone, Copy)]
@@ -305,12 +359,173 @@ pub fn expand_flow(
                         #calls
                         #uses
                         #used_by
-                        #ident(__mxrs_flow);
+                        #call(__mxrs_flow);
                     });
                     __mxrs_project.merge_module(__mxrs_module.into_decl());
                 },
             )
         }
+    })
+}
+
+/// Arguments of `#[mxrs::service(...)]`.
+pub struct ServiceArgs {
+    module: syn::LitStr,
+    /// What the service is about, named in each of its flows' names: an
+    /// entity's struct, or the name as the model writes it.
+    subject: Option<Subject>,
+}
+
+enum Subject {
+    Item(syn::Path),
+    Name(syn::LitStr),
+}
+
+impl Subject {
+    fn text(&self) -> syn::Result<String> {
+        match self {
+            Subject::Name(name) => Ok(name.value()),
+            Subject::Item(path) => path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+                .ok_or_else(|| syn::Error::new_spanned(path, "expected the subject's type")),
+        }
+    }
+}
+
+impl syn::parse::Parse for ServiceArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut module = None;
+        let mut subject = None;
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            input.parse::<syn::Token![=]>()?;
+            match key.to_string().as_str() {
+                "module" => module = Some(input.parse()?),
+                "subject" if input.peek(syn::LitStr) => {
+                    subject = Some(Subject::Name(input.parse()?));
+                }
+                "subject" => subject = Some(Subject::Item(input.parse()?)),
+                _ => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "unknown service option; expected `module` or `subject`",
+                    ));
+                }
+            }
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(Self {
+            module: module.ok_or_else(|| input.error("missing `module = \"ModuleName\"`"))?,
+            subject,
+        })
+    }
+}
+
+/// A flow a service's method declares, as the service read it.
+struct ServiceFlow {
+    args: FlowArgs,
+    kind: FlowKind,
+    name: String,
+    ident: syn::Ident,
+    visibility: syn::Visibility,
+    attributes: Vec<syn::Attribute>,
+}
+
+/// `#[service(module = "...", subject = ...)]` on an `impl` block: each
+/// method marked `#[microflow(...)]` or `#[nanoflow(...)]` declares a flow
+/// of the service's module, named `KIND_Subject_Method` unless it states
+/// its name.
+pub fn expand_service(args: &ServiceArgs, mut item: syn::ItemImpl) -> syn::Result<TokenStream> {
+    if let Some((_, path, _)) = &item.trait_ {
+        return Err(syn::Error::new_spanned(
+            path,
+            "a service is an inherent `impl` block, not a trait implementation",
+        ));
+    }
+    let subject = args.subject.as_ref().map(Subject::text).transpose()?;
+    // A subject named by its struct is checked to exist, and an editor
+    // follows it.
+    let subject_check = match &args.subject {
+        Some(Subject::Item(path)) => Some(quote! {
+            const _: fn() = || {
+                let _ = <#path as ::mxrs::EntityMarker>::qualified_name;
+            };
+        }),
+        _ => None,
+    };
+    let self_ty = item.self_ty.clone();
+    let mut flows = Vec::new();
+    for member in &mut item.items {
+        let syn::ImplItem::Fn(method) = member else {
+            continue;
+        };
+        let kind_of = |attribute: &syn::Attribute| match attribute
+            .path()
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            .as_deref()
+        {
+            Some("microflow") => Some(FlowKind::Microflow),
+            Some("nanoflow") => Some(FlowKind::Nanoflow),
+            _ => None,
+        };
+        let Some(position) = method
+            .attrs
+            .iter()
+            .position(|attribute| kind_of(attribute).is_some())
+        else {
+            continue;
+        };
+        let attribute = method.attrs.remove(position);
+        let kind = kind_of(&attribute).expect("the attribute was found by its kind");
+        let flow_args = match &attribute.meta {
+            syn::Meta::Path(_) => syn::parse2::<FlowArgs>(TokenStream::new())?,
+            _ => attribute.parse_args::<FlowArgs>()?,
+        };
+        if let Some(module) = &flow_args.module
+            && module.value() != args.module.value()
+        {
+            return Err(syn::Error::new(
+                module.span(),
+                "a flow of a service belongs to the service's module",
+            ));
+        }
+        check_flow_signature(&method.sig)?;
+        let name = flow_args.mendix_name(&method.sig.ident, subject.as_deref())?;
+        flows.push(ServiceFlow {
+            args: flow_args,
+            kind,
+            name,
+            ident: method.sig.ident.clone(),
+            visibility: method.vis.clone(),
+            attributes: method.attrs.clone(),
+        });
+    }
+    let declarations = flows
+        .iter()
+        .map(|flow| {
+            let ident = &flow.ident;
+            flow_declaration(FlowDeclaration {
+                args: &flow.args,
+                kind: flow.kind,
+                module: &args.module,
+                name: flow.name.clone(),
+                ident,
+                visibility: &flow.visibility,
+                attributes: &flow.attributes,
+                call: quote!(<#self_ty>::#ident),
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    Ok(quote! {
+        #item
+        #subject_check
+        #(#declarations)*
     })
 }
 

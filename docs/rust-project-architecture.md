@@ -76,7 +76,7 @@ src/
 │   ├── module_security/<mendix_module>.rs
 │   └── security.rs
 ├── services/
-│   ├── <mendix_module>/<microflow>_service.rs   one per microflow
+│   ├── <mendix_module>/<subject>_service.rs   one per subject
 │   └── task_queues.rs
 ├── ports/
 │   └── <mendix_module>/{services,actions}.rs
@@ -105,36 +105,59 @@ module-shaped under `packages/`.
 
 ## Services
 
-Every microflow of a module the project created is a file under
-`src/services/<module>/`, named for what it does: `ACT_Order_Create` is
-`order_create_service.rs`. The file holds the function that declares the
-flow, and the attribute on it says what the flow is beside what it does:
+A service is about something, and holds what its module does with it.
+Every microflow of a module the project created is a method of the service
+of its subject, under `src/services/<module>/`: `ACT_Order_Create`,
+`SUB_Order_Number` and `DS_List_Order` are `create`, `number` and `list` of
+`OrderService`, in `order_service.rs`. The subject is the module's entity
+the flow's name names — its first word first, since a word such as `List`
+says what the flow does rather than what it is about — or else the word
+several of the module's flow names open with (`MF_RubyCrud_Create` →
+`RubyCrudService`). Whatever no subject gathers is a method of the module's
+own service, `sales_service.rs`.
+
+The `#[service]` attribute gives every method its module, and names each
+flow `KIND_Subject_Method`; a flow whose model name says it differently
+states it with `name = "..."`. The attribute on each method says what the
+flow is beside what it does:
 
 ```rust
-// src/services/sales/order_create_service.rs
+// src/services/sales/order_service.rs
 use mxrs::prelude::*;
 
 use crate::domain::entities::sales::order::Order;
 use crate::domain::module_security::sales::Role;
-use crate::services::sales::order_number_service::SUB_Order_Number;
 use crate::ui::nanoflows::sales::order_save::ACT_Order_Save;
 
-#[microflow(
-    ACT,
-    module = "Sales",
-    name = "ACT_Order_Create",
-    roles(Role::Administrator, Role::Clerk),
-    calls(SUB_Order_Number),
-    uses(Order),
-    used_by(ACT_Order_Save, "Sales.Order_Overview")
-)]
-pub fn order_create(flow: &mut FlowBuilder) {
-    let number = flow.call_into("Number", MicroflowRef::<SUB_Order_Number>::new(), |_| {});
-    let order = flow.create("NewOrder", Ref::<Order>::new(), |create| {
-        create.set(Order::number(), mx("$Number"));
-        create.commit(Commit::Yes);
-    });
-    flow.return_with(mx("$NewOrder"));
+/// What the Sales module does with Order.
+pub struct OrderService;
+
+#[service(module = "Sales", subject = Order)]
+impl OrderService {
+    #[microflow(
+        ACT,
+        roles(Role::Administrator, Role::Clerk),
+        calls(SUB_Order_Number),
+        uses(Order),
+        used_by(ACT_Order_Save, "Sales.Order_Overview")
+    )]
+    pub fn create(flow: &mut FlowBuilder) {
+        let number = flow.call_into("Number", MicroflowRef::<SUB_Order_Number>::new(), |_| {});
+
+        let order = flow.create("NewOrder", Ref::<Order>::new(), |create| {
+            create.set(Order::number(), mx("$Number"));
+            create.commit(Commit::Yes);
+        });
+
+        flow.return_with(mx("$NewOrder"));
+    }
+
+    #[microflow(SUB)]
+    pub fn number(flow: &mut FlowBuilder) {
+        flow.returns(DataType::String);
+
+        flow.return_with(mx("'ORD-' + toString(dateTimeToEpoch([%CurrentDateTime%]))"));
+    }
 }
 ```
 
@@ -155,9 +178,9 @@ pub fn order_create(flow: &mut FlowBuilder) {
   each difference as a warning, so the lists stay true or say where they are
   not. A relation left out is not compared.
 
-A flow the importer cannot declare yet keeps its file all the same. It names
-the flow, so the rest of the project can call and bind it, and says why it
-stayed in the imported model:
+A flow the importer cannot declare yet is named in its service's file all
+the same, so the rest of the project can call and bind it, with a comment
+saying why it stayed in the imported model:
 
 ```rust
 //! `Sales.SUB_Legacy` stays in the imported model: its module has two flows of that name.

@@ -41,13 +41,18 @@ fn flow_sources(generated: &Path) -> String {
         .join("\n")
 }
 
-/// The file declaring `flow_name`: a flow is named by what it does, so
-/// `Structured` lives in `structured_service.rs`.
+/// The file declaring `flow_name`: a flow is a method of its subject's
+/// service named by what it does, so `Structured` — about nothing the
+/// module declares — is `structured` in the module's own service.
 fn flow_source_path(generated: &Path, flow_name: &str) -> PathBuf {
-    let file = format!("{}_service.rs", flow_name.to_lowercase());
+    let function = format!("pub fn {}(", flow_name.to_lowercase());
+    let kept = format!("microflow {flow_name};");
     service_files(generated)
         .into_iter()
-        .find(|path| path.file_name().is_some_and(|name| name == file.as_str()))
+        .find(|path| {
+            std::fs::read_to_string(path)
+                .is_ok_and(|source| source.contains(&function) || source.contains(&kept))
+        })
         .unwrap_or_else(|| panic!("generated source for flow {flow_name:?} not found"))
 }
 
@@ -717,22 +722,27 @@ fn decompiled_bodies_are_portable_editable_and_preserve_native_identity_and_layo
     // A declaration says what its flow is related to, by the Rust items
     // that declare those things: the flows it calls and the entity it
     // works with here, and on the other side what calls it.
-    let attribute = |source: &str| -> String {
-        let start = source.find("#[microflow(").expect("a flow attribute");
-        let end = source[start..]
-            .find("pub fn ")
+    let attribute = |source: &str, function: &str| -> String {
+        let end = source
+            .find(&format!("pub fn {function}("))
             .expect("the flow's function");
-        source[start..start + end]
+        let start = source[..end]
+            .rfind("#[microflow")
+            .expect("a flow attribute");
+        source[start..end]
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let caller = attribute(&editable_source);
+    let caller = attribute(&editable_source, "caller");
     for relation in ["calls(", "Echo", "uses(", "Record"] {
         assert!(caller.contains(relation), "{relation}: {caller}");
     }
     assert!(!caller.contains("used_by("), "{caller}");
-    let echo = attribute(&std::fs::read_to_string(flow_source_path(&generated, "Echo")).unwrap());
+    let echo = attribute(
+        &std::fs::read_to_string(flow_source_path(&generated, "Echo")).unwrap(),
+        "echo",
+    );
     assert!(echo.contains("used_by(Caller)"), "{echo}");
     let lib = generated.join("src/lib.rs");
     std::fs::write(
@@ -982,11 +992,11 @@ fn malformed_target_parameters_keep_both_target_and_caller_out_of_the_projection
     // passes the arguments the model passes.
     assert!(!source.contains("pub fn echo("), "{source}");
     assert!(source.contains("microflow Echo;"), "{source}");
-    // It keeps the file its declaration would have, which says why it
-    // stayed; no list of leftovers stands in for it.
+    // It stays in the file of the service its declaration would be part
+    // of, which says why it stayed; no list of leftovers stands in for it.
     let kept = std::fs::read_to_string(flow_source_path(&generated, "Echo")).unwrap();
     assert!(
-        kept.starts_with("//! `Calls.Echo` stays in the imported model: ")
+        kept.contains("// `Calls.Echo` stays in the imported model: ")
             && kept.contains("mxrs::imported! {\n    module = \"Calls\";\n    microflow Echo;\n}"),
         "{kept}"
     );

@@ -25,7 +25,7 @@ pub use mxrs_macros::project_facade as __project;
 pub use mxrs_macros::{
     MxEntity, MxEnumeration, application, constant, declaration, demo_user, dto, entity,
     enumeration, layout, menu, microflow, module_roles, nanoflow, navigation, navigation_item,
-    page, route, security, view,
+    page, route, security, service, view,
 };
 
 /// The collector declaration macros submit to. Re-exported so an application
@@ -204,6 +204,6 @@ pub mod prelude {
         AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, LayoutBuilder,
         LifecycleEvent, MemberRights, MxBinary, MxList, MxObject, SystemMember, constant,
         declaration, demo_user, dto, entity, enumeration, layout, menu, microflow, module_roles,
-        nanoflow, navigation, navigation_item, page, route, security, view,
+        nanoflow, navigation, navigation_item, page, route, security, service, view,
     };
 }

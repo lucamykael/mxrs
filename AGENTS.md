@@ -31,15 +31,23 @@ read-only behavioral oracle; never edit it.
   layers keep cross-cutting concerns (project security, navigation, shared
   infrastructure). Dependencies point inward.
 - Microflows are services, and services are a layer (user directive,
-  2026-10-01): `src/services/<module>/<name>_service.rs`, beside `domain`,
-  `controllers` and `infrastructure` — there is no `application` folder
-  around it. Every microflow has a file of its own, holding the function
-  that declares it; there is no `imported.rs` listing leftovers. Every
+  2026-10-01): `src/services/<module>/`, beside `domain`, `controllers` and
+  `infrastructure` — there is no `application` folder around it. A service
+  is about something, and holds what the module does with it (user
+  directive, 2026-10-02): `<subject>_service.rs` holds `pub struct
+  <Subject>Service;` and a `#[service(module = "...", subject = ...)]`
+  `impl` whose methods are the flows — `ACT_AssetType_Edit` is
+  `AssetTypeService::edit`. The subject is the module's entity a flow's
+  name names (its first word first; a verb such as `List` is what the flow
+  does, not what it is about), else the word several flow names open with,
+  else the module's own `<module>_service.rs`; the importer and the
+  scaffold place a flow the same way. There is no `imported.rs` listing
+  leftovers. Every
   microflow body is editable Rust: what a typed builder cannot check is
   stated as Mendix writes it (`mx("...")`), and an activity no builder
   covers is stated as its document (`flow.native_action`) rather than
-  keeping the flow out of Rust. A flow that still cannot be declared keeps
-  its file, which names it and says why. The attribute on a flow states what
+  keeping the flow out of Rust. A flow that still cannot be declared is
+  named in its service's file, which says why. The attribute on a flow states what
   the flow is: its kind (`ACT`, `SUB`, ...), the roles that may run it
   (`roles(...)`, which is the model's own list), and what it calls, uses and
   is used by (`calls(...)`, `uses(...)`, `used_by(...)`), each named by the

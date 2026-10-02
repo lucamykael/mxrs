@@ -156,13 +156,13 @@ fn quality_integration_and_ci_scaffolds_emit_consumable_files() {
             .status
             .success()
     );
-    // A validation is a server-side service, so it lands in the application
-    // layer rather than next to the model declarations, in the file its
-    // declaring function names.
-    assert!(
-        root.join("src/services/sales/validate_order_service.rs")
-            .is_file()
-    );
+    // A validation is a server-side flow, so it is a method of a service
+    // rather than a file next to the model declarations.
+    let declared = std::fs::read_dir(root.join("src/services/sales"))
+        .unwrap()
+        .filter_map(|entry| std::fs::read_to_string(entry.unwrap().path()).ok())
+        .any(|source| source.contains("#[service(") && source.contains("validate_order("));
+    assert!(declared);
     assert!(
         root.join("src/domain/integrations/sales/sync_orders.rs")
             .is_file()
@@ -583,11 +583,8 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     // three layers instead of landing entirely under `src/domain/`.
     for (layer, relative) in [
         ("domain", "domain/entities/sales/order_overview.rs"),
-        ("services", "services/sales/load_order_overview_service.rs"),
-        (
-            "services",
-            "services/sales/refresh_order_overview_service.rs",
-        ),
+        // Both flows are about the slice's entity: methods of its service.
+        ("services", "services/sales/order_overview_service.rs"),
         ("ui", "ui/nanoflows/sales/refresh_order_overview.rs"),
         ("ui", "ui/pages/sales/order_overview.rs"),
     ] {

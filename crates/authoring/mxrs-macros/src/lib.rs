@@ -137,6 +137,35 @@ pub fn microflow(attributes: TokenStream, item: TokenStream) -> TokenStream {
     expand_flow(attributes, item, declare::FlowKind::Microflow)
 }
 
+/// Declares a service: an `impl` block whose methods marked
+/// `#[microflow(...)]` are the flows of one subject.
+///
+/// ```text
+/// pub struct AssetTypeService;
+///
+/// #[service(module = "Catalogs", subject = AssetType)]
+/// impl AssetTypeService {
+///     // Declares `Catalogs.ACT_AssetType_Edit`, nameable as
+///     // `ACT_AssetType_Edit`.
+///     #[microflow(ACT)]
+///     pub fn edit(flow: &mut FlowBuilder) {}
+/// }
+/// ```
+///
+/// Every flow takes the service's module and is named `KIND_Subject_Method`
+/// unless it states `name = "..."`. `subject` is an entity's struct, or the
+/// subject as the model's names write it (`subject = "RubyCrud"`); a service
+/// without one names its flows `KIND_Method`.
+#[proc_macro_attribute]
+pub fn service(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attributes as declare::ServiceArgs);
+    let item = parse_macro_input!(item as syn::ItemImpl);
+    match declare::expand_service(&args, item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
 /// Declares a client-side nanoflow. Same shape as [`macro@microflow`].
 #[proc_macro_attribute]
 pub fn nanoflow(attributes: TokenStream, item: TokenStream) -> TokenStream {

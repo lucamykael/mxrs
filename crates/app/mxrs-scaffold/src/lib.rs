@@ -9,6 +9,7 @@ pub mod artifact;
 pub mod lifecycle;
 pub mod page_templates;
 pub mod registry;
+mod service;
 mod templates;
 mod transaction;
 

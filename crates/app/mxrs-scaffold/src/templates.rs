@@ -832,23 +832,28 @@ mod tests {
     /// A page slice names the model through the files that declare it.
     #[test]
     fn a_page_slice_imports_what_it_names() {
+        // The loader is a method of the slice's entity's service.
         let loader = page_chain_loader("Sales", "OrderOverview");
-        assert!(
-            loader.contains("use crate::domain::entities::sales::order_overview::OrderOverview;"),
-            "{loader}"
+        assert_eq!(loader.name, "ACT_LoadOrderOverview");
+        assert_eq!(
+            loader.imports,
+            ["use crate::domain::entities::sales::order_overview::OrderOverview;"]
         );
         assert!(
-            loader.contains("#[microflow(ACT, module = \"Sales\")]\npub fn load_order_overview("),
-            "{loader}"
+            loader
+                .body
+                .contains(&"        OrderOverview::total().set(0.0),".to_string()),
+            "{:?}",
+            loader.body
         );
-        assert!(
-            loader.contains("OrderOverview::total().set(0.0),"),
-            "{loader}"
+        let nanoflow = page_chain_nanoflow(
+            "Sales",
+            "OrderOverview",
+            Some("crate::services::sales::order_overview_service"),
         );
-        let nanoflow = page_chain_nanoflow("Sales", "OrderOverview", true);
         assert!(
             nanoflow.contains(
-                "use crate::services::sales::refresh_order_overview_service::ACT_RefreshOrderOverview;"
+                "use crate::services::sales::order_overview_service::ACT_RefreshOrderOverview;"
             ),
             "{nanoflow}"
         );
@@ -858,10 +863,11 @@ mod tests {
             "Main",
             "form-vertical",
             Some(RefreshAction::Nanoflow),
+            None,
             &[],
         );
         for expected in [
-            "use crate::services::sales::load_order_overview_service::ACT_LoadOrderOverview;\n",
+            "use crate::services::sales::order_overview_service::ACT_LoadOrderOverview;\n",
             "use crate::domain::entities::sales::order_overview::OrderOverview;\n",
             "use crate::ui::nanoflows::sales::refresh_order_overview::NAN_RefreshOrderOverview;\n",
             "#[page(module = \"Sales\")]\npub fn order_overview(page: &mut PageBuilder) {\n",
@@ -904,16 +910,24 @@ fn chain_entity(module_name: &str, feature: &str) -> (String, String) {
 
 /// `ACT_Load<Feature>`, `ACT_Refresh<Feature>`: the server-side flows of a
 /// page slice, named by the type their own declaration generates.
-fn chain_microflow(module_name: &str, action: &str, feature: &str) -> (String, String) {
+/// The loader is a method of the slice's own entity's service; the refresh
+/// action is wherever its scaffold placed it (`refresh_service`).
+fn chain_microflow(
+    module_name: &str,
+    action: &str,
+    feature: &str,
+    refresh_service: Option<&str>,
+) -> (String, String) {
     let name = format!("ACT_{action}{feature}");
-    (
-        format!(
-            "crate::services::{}::{}",
+    let path = match refresh_service {
+        Some(path) if action == "Refresh" => path.to_string(),
+        _ => format!(
+            "crate::services::{}::{}_service",
             snake_case(module_name),
-            service_stem(&name)
+            snake_case(feature)
         ),
-        name,
-    )
+    };
+    (path, name)
 }
 
 pub(crate) fn page_chain_entity(module_name: &str, name: &str) -> String {
@@ -937,55 +951,52 @@ pub(crate) fn page_chain_entity(module_name: &str, name: &str) -> String {
 
 /// `ACT_Load<Feature>`: creates the context object the data-backed page's
 /// data view renders. Mirrors mxrb's `page_chain_loader`, including creating
-/// the record uncommitted with the same seed values.
-pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> String {
+/// the record uncommitted with the same seed values. A method of the
+/// feature's service.
+pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> crate::service::ServiceMethod {
     let (entity_path, entity) = chain_entity(module_name, feature);
-    let FlowDeclaration {
-        attribute,
-        function,
-    } = flow_declaration("microflow", module_name, &format!("ACT_Load{feature}"));
     let [reference, total, active] = CHAIN_FIELDS;
-    format!(
-        "//! Loader for the `{module_name}.{feature}` page slice.\n\
-         //!\n\
-         //! Returns an uncommitted record for the page's data view to bind to.\n\n\
-         use mxrs::prelude::*;\n\n\
-         use {entity_path}::{entity};\n\n\
-         #[{attribute}]\n\
-         pub fn {function}(flow: &mut FlowBuilder) {{\n    \
-         let record = flow.create_object(\n        \
-         \"record\",\n        \
-         Ref::<{entity}>::new(),\n        \
-         vec![\n            \
-         {entity}::{reference}().set(\"NEW\"),\n            \
-         {entity}::{total}().set(0.0),\n            \
-         {entity}::{active}().set(true),\n        \
-         ],\n        \
-         false,\n    \
-         );\n    \
-         flow.return_value(record);\n\
-         }}\n"
-    )
+    crate::service::ServiceMethod {
+        name: format!("ACT_Load{feature}"),
+        docs: vec![
+            format!("Loader for the `{module_name}.{feature}` page slice."),
+            String::new(),
+            "Returns an uncommitted record for the page's data view to bind to.".to_string(),
+        ],
+        imports: vec![format!("use {entity_path}::{entity};")],
+        body: vec![
+            "let record = flow.create_object(".to_string(),
+            "    \"record\",".to_string(),
+            format!("    Ref::<{entity}>::new(),"),
+            "    vec![".to_string(),
+            format!("        {entity}::{reference}().set(\"NEW\"),"),
+            format!("        {entity}::{total}().set(0.0),"),
+            format!("        {entity}::{active}().set(true),"),
+            "    ],".to_string(),
+            "    false,".to_string(),
+            ");".to_string(),
+            String::new(),
+            "flow.return_value(record);".to_string(),
+        ],
+    }
 }
 
 /// `ACT_Refresh<Feature>`: the server-side half of a chain that ends in a
 /// microflow. mxrb's template logs a message here; `mxrs_ir::Activity` has no
 /// log activity, so the body is left empty rather than faked with an
 /// unrelated activity.
-pub(crate) fn page_chain_action(module_name: &str, feature: &str) -> String {
-    let FlowDeclaration {
-        attribute,
-        function,
-    } = flow_declaration("microflow", module_name, &format!("ACT_Refresh{feature}"));
-    format!(
-        "//! Refresh action for the `{module_name}.{feature}` page slice.\n\
-         //!\n\
-         //! Body intentionally empty: mxrb's template logs a message here and\n\
-         //! `mxrs_ir::Activity` has no log activity to mirror it with.\n\n\
-         use mxrs::prelude::*;\n\n\
-         #[{attribute}]\n\
-         pub fn {function}(_flow: &mut FlowBuilder) {{}}\n"
-    )
+pub(crate) fn page_chain_action(module_name: &str, feature: &str) -> crate::service::ServiceMethod {
+    crate::service::ServiceMethod {
+        name: format!("ACT_Refresh{feature}"),
+        docs: vec![
+            format!("Refresh action for the `{module_name}.{feature}` page slice."),
+            String::new(),
+            "Body intentionally empty: mxrb's template logs a message here and".to_string(),
+            "`mxrs_ir::Activity` has no log activity to mirror it with.".to_string(),
+        ],
+        imports: Vec::new(),
+        body: Vec::new(),
+    }
 }
 
 /// `NAN_Refresh<Feature>`: the client-side half. With a
@@ -995,8 +1006,9 @@ pub(crate) fn page_chain_action(module_name: &str, feature: &str) -> String {
 pub(crate) fn page_chain_nanoflow(
     module_name: &str,
     feature: &str,
-    calls_microflow: bool,
+    refresh_service: Option<&str>,
 ) -> String {
+    let calls_microflow = refresh_service.is_some();
     let FlowDeclaration {
         attribute,
         function,
@@ -1012,7 +1024,7 @@ pub(crate) fn page_chain_nanoflow(
              pub fn {function}(_flow: &mut FlowBuilder) {{}}\n"
         );
     }
-    let (action_path, action) = chain_microflow(module_name, "Refresh", feature);
+    let (action_path, action) = chain_microflow(module_name, "Refresh", feature, refresh_service);
     format!(
         "//! Client refresh action for the `{module_name}.{feature}` page slice.\n\
          //!\n\
@@ -1042,6 +1054,7 @@ pub(crate) fn page_from_template(
     layout_parameter: &str,
     template: &str,
     refresh: Option<RefreshAction>,
+    refresh_service: Option<&str>,
     roles: &[String],
 ) -> String {
     let title = humanize(name);
@@ -1101,7 +1114,7 @@ pub(crate) fn page_from_template(
     let mut imports = Vec::new();
     match refresh {
         Some(RefreshAction::Microflow) => {
-            let (path, action) = chain_microflow(module_name, "Refresh", name);
+            let (path, action) = chain_microflow(module_name, "Refresh", name, refresh_service);
             imports.push(format!("use {path}::{action};"));
         }
         Some(RefreshAction::Nanoflow) => imports.push(format!(
@@ -1112,7 +1125,7 @@ pub(crate) fn page_from_template(
         None => {}
     }
     if template == DATA_BACKED_TEMPLATE {
-        let (path, loader) = chain_microflow(module_name, "Load", name);
+        let (path, loader) = chain_microflow(module_name, "Load", name, None);
         imports.push(format!("use {path}::{loader};"));
         let (path, entity) = chain_entity(module_name, name);
         imports.push(format!("use {path}::{entity};"));
