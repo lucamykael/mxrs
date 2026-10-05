@@ -2,7 +2,7 @@
   "format": 1,
   "name": "mxrs-react-shell",
   "version": "0.1.0",
-  "source_sha256": "347737920344b323a660f698a56288c69d31330d0a2eba917c6ec58d577c028c",
+  "source_sha256": "d634eeeafb3c76489d0ac1327eebfd532b76db22a5a13b188754ce06bb651991",
   "toolchain": {
     "node": "26.2.0",
     "npm": "12.0.2",
@@ -11,9 +11,9 @@
     "react": "19.2.8"
   },
   "assets": {
-    ".vite/manifest.json": "341b83c0fc3b20d4bb85c0882bfd6c975ca5124f18b1de54a8172caa83cf1ced",
-    "app-DtkE4lbI.css": "59bab36d238c0ad66c08e482bf5a1bb82b80e890929248b1a32dd3073a813ac4",
-    "app-E33XIZf5.js": "82453ca9bd2b37d845bde5147127a1caaba71b4c11acbf571aacf86788703487",
-    "index.html": "ba59b4a7aefbe342b7385318421fe540e5c2e88812a31a06dbff9a9497e389ad"
+    ".vite/manifest.json": "277facd54436517639c3ace67d2a49b8c51cd12938d0e6c6273ae9ebab77aaee",
+    "app-B-jPssgj.js": "32e6540b91d1ab301d6561176c87b222f145bfe0f6d4bb81717fecbadbc5efe7",
+    "app-BmeIn_GC.css": "1770046252c2e0cde56fb2929057c488e35fbd6c095c33c53ea711f721c2ba53",
+    "index.html": "6a2e9751f31917da91e65678359639aea2188aa48e361f69c653e50c88cd1e61"
   }
 }

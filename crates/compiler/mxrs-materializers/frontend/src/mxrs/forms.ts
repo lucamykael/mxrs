@@ -3,9 +3,11 @@
 // `src/mxrs/elements.ts` is a kind of stored document, each prop one of its
 // fields, and the widgets it holds are its children. A prop left unsaid has
 // the value `elements.ts` gives it. mxrs reads these files into the model
-// on every build; it does not run them, and the browser does not render
-// them yet — an element renders as an empty box that holds its children.
-import { createElement, type ReactElement, type ReactNode } from "react";
+// on every build; it does not run them. The browser does: an element draws
+// itself the way `src/components/elements` says its type is drawn.
+import { type ReactElement, type ReactNode } from "react";
+
+import { render } from "@/components/elements/render";
 
 /** A number the model stores in 64 bits where its field holds 32: `long(5)`. */
 export interface Long {
@@ -69,7 +71,16 @@ export interface ChildrenDefault {
 export type Component<P, M = never, T extends string = string> = ((props: P) => ReactElement) & {
   readonly __main?: M;
   readonly __type?: T;
+  /** What the element is, for whoever draws it. */
+  readonly element?: Kind;
 };
+
+/** What an element is: its stored type, its fields' defaults and its main field. */
+export interface Kind {
+  readonly type: string;
+  readonly defaults: Readonly<Record<string, unknown>>;
+  readonly main?: string;
+}
 
 /** What a field holds when a page says nothing about it. */
 export type Default =
@@ -141,10 +152,6 @@ export const unset: Identity = { identity: "00000000-0000-0000-0000-000000000000
 
 export const missing: Missing = { missing: true };
 
-function box(type: string, content: ReactNode): ReactElement {
-  return createElement("div", { "data-element": type }, content);
-}
-
 /**
  * An element: the stored document type it is, what its fields hold by
  * default, and the one field it is mostly stated for — a prop that holds
@@ -155,8 +162,9 @@ export function element<
   D extends Record<string, Default>,
   M extends keyof D & string = never,
 >(type: T, defaults: D, main?: M): Component<Props<D>, [M] extends [never] ? never : Holds<D[M]>, T> {
-  void [defaults, main];
-  return (props) => box(type, (props as { children?: ReactNode }).children);
+  const kind: Kind = { type, defaults, main };
+  const component = (props: Props<D>) => render({ ...kind, props: props as Record<string, unknown> });
+  return Object.assign(component, { element: kind });
 }
 
 /** A pluggable widget's props: the fields of the widget it is stored as, and its own properties by their keys. */
@@ -174,8 +182,9 @@ export function widget(
   definition: ReactElement,
   defaults?: Record<string, ReactElement>,
 ): Component<WidgetProps> {
-  void [definition, defaults];
-  return () => box("CustomWidgets$CustomWidget", null);
+  const kind: Kind = { type: "CustomWidgets$CustomWidget", defaults: { definition, ...defaults } };
+  const component = (props: WidgetProps) => render({ ...kind, props });
+  return Object.assign(component, { element: kind });
 }
 
 /** A page, layout or snippet of a module. */

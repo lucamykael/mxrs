@@ -19,27 +19,27 @@ use sha2::{Digest, Sha256};
 const INDEX: EmbeddedAsset = EmbeddedAsset::new(
     "index.html",
     include_bytes!("../assets/index.html"),
-    "ba59b4a7aefbe342b7385318421fe540e5c2e88812a31a06dbff9a9497e389ad",
+    "6a2e9751f31917da91e65678359639aea2188aa48e361f69c653e50c88cd1e61",
 );
 const SCRIPT: EmbeddedAsset = EmbeddedAsset::new(
-    "app-E33XIZf5.js",
-    include_bytes!("../assets/app-E33XIZf5.js"),
-    "82453ca9bd2b37d845bde5147127a1caaba71b4c11acbf571aacf86788703487",
+    "app-B-jPssgj.js",
+    include_bytes!("../assets/app-B-jPssgj.js"),
+    "32e6540b91d1ab301d6561176c87b222f145bfe0f6d4bb81717fecbadbc5efe7",
 );
 const STYLES: EmbeddedAsset = EmbeddedAsset::new(
-    "app-DtkE4lbI.css",
-    include_bytes!("../assets/app-DtkE4lbI.css"),
-    "59bab36d238c0ad66c08e482bf5a1bb82b80e890929248b1a32dd3073a813ac4",
+    "app-BmeIn_GC.css",
+    include_bytes!("../assets/app-BmeIn_GC.css"),
+    "1770046252c2e0cde56fb2929057c488e35fbd6c095c33c53ea711f721c2ba53",
 );
 const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     ".vite/manifest.json",
     include_bytes!("../assets/.vite/manifest.json"),
-    "341b83c0fc3b20d4bb85c0882bfd6c975ca5124f18b1de54a8172caa83cf1ced",
+    "277facd54436517639c3ace67d2a49b8c51cd12938d0e6c6273ae9ebab77aaee",
 );
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "adfb17aeda2e653b045e341881b2b141067d5633bf470d8b500fd6ea08e6aaf0",
+    "561fa3125b55e039ded860ce5470959857c889467799a6203ae66fdbc040fc67",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -102,6 +102,18 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
         include_bytes!("../frontend/src/components/widgets/BoundInput.tsx"),
     ),
     (
+        "src/components/elements/context.ts",
+        include_bytes!("../frontend/src/components/elements/context.ts"),
+    ),
+    (
+        "src/components/elements/render.tsx",
+        include_bytes!("../frontend/src/components/elements/render.tsx"),
+    ),
+    (
+        "src/components/elements/view.ts",
+        include_bytes!("../frontend/src/components/elements/view.ts"),
+    ),
+    (
         "src/components/widgets/WidgetView.tsx",
         include_bytes!("../frontend/src/components/widgets/WidgetView.tsx"),
     ),
@@ -142,6 +154,10 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
         include_bytes!("../frontend/src/styles/layout.css"),
     ),
     (
+        "src/styles/elements.css",
+        include_bytes!("../frontend/src/styles/elements.css"),
+    ),
+    (
         "src/styles/widgets.css",
         include_bytes!("../frontend/src/styles/widgets.css"),
     ),
@@ -152,6 +168,10 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     (
         "src/types/navigation.ts",
         include_bytes!("../frontend/src/types/navigation.ts"),
+    ),
+    (
+        "src/utils/forms.ts",
+        include_bytes!("../frontend/src/utils/forms.ts"),
     ),
     (
         "src/utils/widgets.ts",

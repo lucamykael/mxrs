@@ -266,13 +266,15 @@ frontend/
 ├── scripts/sync-assets.mjs
 └── src/
     ├── main.tsx                 the entry point
-    ├── App.tsx                  the shell: header, navigation, current page
+    ├── App.tsx                  the application: the page the route names
     ├── api/                     calls to the Rust runtime (model, actions)
     ├── components/
+    │   ├── elements/            how each element of a page is drawn
     │   ├── layout/              header and navigation
     │   │   └── <module>/        the model's layouts, as TSX
     │   ├── snippets/<module>/   the model's snippets, as TSX
-    │   └── widgets/             one renderer per widget of the model
+    │   └── widgets/             the manifest's widgets, for a page only
+    │                            the model has
     ├── hooks/                   the loaded model, the hash route
     ├── mxrs/flows.ts            the vocabulary nanoflows are written in
     ├── mxrs/forms.ts            what pages are written with
@@ -293,7 +295,15 @@ from there). The production bundle `mxrs` ships is built from exactly these
 files, and its hash is pinned against them.
 
 The user interface the model declares is written here, in TypeScript, and
-every build reads it into the model — mxrs parses it and never runs it. A
+every build reads it into the model — mxrs parses it and never runs it. The
+browser does: a page is drawn from its own TSX, inside the layout it calls,
+each placeholder holding what the page gives it. `components/elements/`
+says how an element is drawn, by the type it is stored as — a container, a
+layout grid, a text, a button and what it opens or runs, an input and its
+label, a data view, tabs, a snippet, the widgets a pluggable widget holds —
+and an element nobody draws yet is a box holding its children. Drawing a
+type differently is an edit to that file; no data is loaded into a page
+yet. A
 declaration file exports data the frontend's own types check:
 
 ```ts

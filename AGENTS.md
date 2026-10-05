@@ -113,7 +113,10 @@ read-only behavioral oracle; never edit it.
   `columns: [{ ... }]`), or a `<WidgetValue>` when more is said. The importer declares a
   form there only when its TSX reads back as the stored document, and a
   build stores a form that says what is stored exactly as it is stored —
-  identities and the order of a widget's properties kept. The importer,
+  identities and the order of a widget's properties kept. The browser runs
+  the same file: a page is drawn from its TSX inside the layout it calls,
+  each element the way `src/components/elements` draws its stored type,
+  and one nobody draws yet as a box holding its children. The importer,
   `mxrs new` and the scaffolds write these files: a scaffolded page or
   layout is built as what it is, made the document the model would store,
   and stated with the project's elements — one the project lacks is added

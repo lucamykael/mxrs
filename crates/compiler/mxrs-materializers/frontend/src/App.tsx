@@ -1,13 +1,19 @@
 import { useMemo } from 'react';
 
+import { Shell } from '@/components/elements/context';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Navigation } from '@/components/layout/Navigation';
 import { useHashRoute } from '@/hooks/useHashRoute';
 import { useManifest } from '@/hooks/useManifest';
 import { ModelPage } from '@/pages/ModelPage';
 import { PageNotFound } from '@/pages/PageNotFound';
+import { findForm } from '@/utils/forms';
 
-/** The application shell: header, navigation, and the page the route names. */
+/**
+ * The application: the page the route names. A page the frontend declares
+ * is drawn from its TSX, inside the layout it calls; one only the model
+ * has is drawn from the manifest, inside the shell's own header and menu.
+ */
 export function App() {
   const { manifest, failure } = useManifest();
   const [route, open] = useHashRoute();
@@ -24,6 +30,17 @@ export function App() {
   const page = pages.find(
     (candidate) => candidate.qualified_name === requested || candidate.name === requested,
   );
+
+  const declared = findForm(page?.qualified_name ?? requested);
+  if (declared) {
+    return (
+      <Shell.Provider value={{ items: profile?.items || [], open, form: findForm }}>
+        <div className="mxrs-app" data-page={requested}>
+          {declared.document}
+        </div>
+      </Shell.Provider>
+    );
+  }
 
   return (
     <div className="mxrs-app">
