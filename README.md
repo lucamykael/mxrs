@@ -53,7 +53,9 @@ service under `src/services/<module>/`, published REST services as
 route tables and controllers under `src/controllers/`, the navigation in the
 frontend (`frontend/src/navigation/index.ts`), nanoflows as the frontend's
 TypeScript services (`frontend/src/services/<module>/<subject>Service.ts`),
-pages under `src/ui/`, and outbound/generated adapters under
+pages, layouts and snippets as its TSX (`frontend/src/pages/<module>/`,
+`components/layout/<module>/`, `components/snippets/<module>/`), and
+outbound/generated adapters under
 `src/infrastructure/`. Every declaration is one annotated item in its own
 file — `#[entity]` on a struct, `#[microflow]` on the function that builds it —
 and registers itself, so adding one is the file plus its `pub mod` line; see
@@ -223,9 +225,11 @@ microflow/nanoflow-sourced DataViews, attribute-bound TextBox/CheckBox/
 DatePicker/DropDown widgets, and name/class authoring for Data Grid 2,
 Gallery, and ComboBox through `mxrs-pluggable`. All compile through
 `mxrs-writer::page_compiler` onto `mxrs-forms`'s schema-driven Forms codec.
-`mxrs import` detects the lossless structural subset and renders each page as
-a `#[page]` function in `src/ui/pages/<module>/`, which registers
-itself.
+That typed vocabulary is what the scaffolds build a new page from. What a
+project declares is the frontend's TSX: `mxrs import`, `mxrs new` and
+`mxrs page new` write each page as the document the model stores for it,
+stated with the elements of `frontend/src/mxrs/elements.ts`, so every page
+is editable whatever widgets it holds.
 Data-bound widgets, flow-calling buttons, empty official pluggable shells,
 page metadata, object page parameters, and context-inherited DataViews import
 to typed builders when every reference can be proven. Configured pluggable

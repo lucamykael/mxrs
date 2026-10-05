@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, HashMap};
 use mxrs_ir::{NativeDocument, NativeValue};
 
 pub use read::{read_elements, read_form, read_widget};
-pub use shapes::{mine, render_elements};
+pub use shapes::{Extension, extend, mine, render_elements};
 pub use write::{render_form, render_widget};
 
 /// The type of the document every pluggable widget is stored as.
@@ -192,6 +192,11 @@ impl Shapes {
         self.defaults
             .insert(component.to_string(), document.clone());
         Ok(document)
+    }
+
+    /// These elements and `added`, which name none of them.
+    pub(crate) fn with(&self, added: Vec<Shape>) -> Result<Self, String> {
+        Self::new(self.by_component.values().cloned().chain(added).collect())
     }
 
     /// The element a type is when nothing says which of its shapes.

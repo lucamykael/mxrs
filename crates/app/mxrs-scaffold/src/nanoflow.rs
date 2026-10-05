@@ -235,15 +235,6 @@ pub(crate) fn marker_line(name: &str) -> String {
     format!("    nanoflow {name};")
 }
 
-/// `src/ui/nanoflows/<module>/in_frontend.rs` naming `name` alone.
-pub(crate) fn marker_file(module_name: &str, name: &str) -> String {
-    format!(
-        "//! The {module_name} module's nanoflows are declared in the frontend, in\n//! `frontend/src/services/{}/`; they are named here so Rust pages can\n//! call them.\n\nmxrs::frontend_flows! {{\n    module = {module_name:?};\n{}\n}}\n",
-        snake_case(module_name),
-        marker_line(name)
-    )
-}
-
 /// `source` of an `in_frontend.rs` naming `name` too.
 pub(crate) fn add_marker(source: &str, name: &str) -> Option<String> {
     let closing = source.rfind("\n}")?;

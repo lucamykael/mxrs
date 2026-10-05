@@ -1412,9 +1412,12 @@ name = "mxrs-scaffold"
 version = "0.1.0"
 dependencies = [
  "mxrs-bson",
+ "mxrs-forms",
  "mxrs-frontend",
+ "mxrs-ir",
  "mxrs-materializers",
  "mxrs-model",
+ "mxrs-writer",
  "serde_json",
  "sha2",
  "syn 2.0.119",

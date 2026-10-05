@@ -588,26 +588,142 @@ fn acyclic(shapes: &mut BTreeMap<String, Shape>) {
     }
 }
 
+/// What a vocabulary gains to state documents it could not: the whole of
+/// it afterwards, and the text that declares the elements it gained, to
+/// follow what `src/mxrs/elements.ts` already declares.
+pub struct Extension {
+    pub vocabulary: Vocabulary,
+    /// The new elements' declarations; empty when it gained none.
+    pub elements: String,
+    /// The pluggable widgets it gained.
+    pub widgets: Vec<WidgetDefinition>,
+}
+
+/// `vocabulary` with the elements and pluggable widgets `documents` are
+/// made of and it does not have. What it has stays as it is — its defaults
+/// are what the project's pages were written against — and an element it
+/// gains is named apart from them.
+pub fn extend(vocabulary: &Vocabulary, documents: &[&NativeDocument]) -> Result<Extension, String> {
+    let mined = mine(documents);
+    // Each mined element by the name it has here: the one the vocabulary
+    // already gives its shape, or a new one.
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    let mut taken: HashSet<String> = vocabulary
+        .shapes
+        .iter()
+        .map(|shape| shape.component.clone())
+        .chain(vocabulary.widgets.iter().map(|widget| widget.name.clone()))
+        .collect();
+    let same = |known: &Shape, shape: &Shape| {
+        known.ty == shape.ty
+            && known.fields.len() == shape.fields.len()
+            && known
+                .fields
+                .iter()
+                .zip(&shape.fields)
+                .all(|(left, right)| left.key == right.key)
+    };
+    let mut added: Vec<Shape> = Vec::new();
+    for shape in mined.shapes.iter() {
+        if let Some(known) = vocabulary.shapes.iter().find(|known| same(known, shape)) {
+            names.insert(shape.component.clone(), known.component.clone());
+            continue;
+        }
+        let base = shape
+            .component
+            .split_once('_')
+            .map_or(shape.component.as_str(), |(base, _)| base);
+        let name = std::iter::once(base.to_string())
+            .chain((2..).map(|count| format!("{base}_{count}")))
+            .find(|candidate| taken.insert(candidate.clone()))
+            .expect("a name nothing has yet");
+        names.insert(shape.component.clone(), name);
+        added.push(shape.clone());
+    }
+    for shape in &mut added {
+        shape.component = names[&shape.component].clone();
+        for field in &mut shape.fields {
+            if let FieldDefault::Element(nested) = &mut field.default {
+                *nested = names[nested.as_str()].clone();
+            }
+        }
+    }
+    let only: HashSet<String> = added.iter().map(|shape| shape.component.clone()).collect();
+    let shapes = vocabulary.shapes.with(added)?;
+    let mut widgets = Vec::new();
+    for mut widget in mined.widgets {
+        if vocabulary.widgets.iter().any(|known| known.ty == widget.ty) {
+            continue;
+        }
+        let base = widget
+            .name
+            .split_once('_')
+            .map_or(widget.name.clone(), |(base, _)| base.to_string());
+        widget.name = std::iter::once(base.clone())
+            .chain((2..).map(|count| format!("{base}_{count}")))
+            .find(|candidate| taken.insert(candidate.clone()))
+            .expect("a name nothing has yet");
+        widgets.push(widget);
+    }
+    let mut elements = String::new();
+    let mut ordered: Vec<&Shape> = shapes
+        .iter()
+        .filter(|shape| only.contains(&shape.component))
+        .collect();
+    ordered.sort_by(|left, right| left.component.cmp(&right.component));
+    let mut written: HashSet<&str> = shapes
+        .iter()
+        .filter(|shape| !only.contains(&shape.component))
+        .map(|shape| shape.component.as_str())
+        .collect();
+    for shape in ordered {
+        write_element(shape, &shapes, &mut written, &mut elements);
+    }
+    Ok(Extension {
+        vocabulary: Vocabulary {
+            shapes,
+            widgets: vocabulary
+                .widgets
+                .iter()
+                .cloned()
+                .chain(widgets.iter().cloned())
+                .collect(),
+        },
+        elements,
+        widgets,
+    })
+}
+
+/// The comment and import `src/mxrs/elements.ts` opens with.
+pub(crate) const ELEMENTS_HEADER: &str = "// The elements this project's pages, layouts and snippets are written with.\n\
+     // Each is a kind of document the model stores, with the value every field\n\
+     // has when a page says nothing about it: a page states only what differs.\n\
+     // mxrs reads this file into every build, so a default changed here changes\n\
+     // every page that leaves the field unsaid.\n\
+     import { children, element, list, long } from \"@/mxrs/forms\";\n";
+
 /// `src/mxrs/elements.ts`: each element, after the elements its defaults
 /// hold.
 pub fn render_elements(shapes: &Shapes) -> String {
-    let mut out = String::from(
-        "// The elements this project's pages, layouts and snippets are written with.\n\
-         // Each is a kind of document the model stores, with the value every field\n\
-         // has when a page says nothing about it: a page states only what differs.\n\
-         // mxrs reads this file into every build, so a default changed here changes\n\
-         // every page that leaves the field unsaid.\n\
-         import { children, element, list, long } from \"@/mxrs/forms\";\n",
-    );
+    let mut out = String::from(ELEMENTS_HEADER);
     let mut ordered: Vec<&Shape> = shapes.iter().collect();
     ordered.sort_by(|left, right| left.component.cmp(&right.component));
     let mut written: HashSet<&str> = HashSet::new();
-    fn write<'a>(
-        shape: &'a Shape,
-        shapes: &'a Shapes,
-        written: &mut HashSet<&'a str>,
-        out: &mut String,
-    ) {
+    for shape in ordered {
+        write_element(shape, shapes, &mut written, &mut out);
+    }
+    out
+}
+
+/// Writes `shape`'s declaration after those of the elements its defaults
+/// hold, each once.
+fn write_element<'a>(
+    shape: &'a Shape,
+    shapes: &'a Shapes,
+    written: &mut HashSet<&'a str>,
+    out: &mut String,
+) {
+    {
         if !written.insert(shape.component.as_str()) {
             return;
         }
@@ -615,7 +731,7 @@ pub fn render_elements(shapes: &Shapes) -> String {
             if let FieldDefault::Element(nested) = &field.default
                 && let Some(nested) = shapes.component(nested)
             {
-                write(nested, shapes, written, out);
+                write_element(nested, shapes, written, out);
             }
         }
         if shape.fields.is_empty() {
@@ -650,8 +766,4 @@ pub fn render_elements(shapes: &Shapes) -> String {
             None => out.push_str("});\n"),
         }
     }
-    for shape in ordered {
-        write(shape, shapes, &mut written, &mut out);
-    }
-    out
 }

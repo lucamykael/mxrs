@@ -59,10 +59,10 @@ infrastructure┘   (ports)
   this edge.
 - UI is the user interface the model declares, and it belongs to the
   frontend: its TypeScript is the source every build reads into the model.
-  The navigation, the nanoflows and the model's pages, layouts and
-  snippets are already there; a page the scaffold adds is still Rust, in
-  `src/ui/`, until the scaffolds move too. It is not where the application's
-  HTTP surface lives.
+  The navigation, the nanoflows and the pages, layouts and snippets are
+  there, whether an import, `mxrs new` or a scaffold wrote them; `src/ui/`
+  holds only what a project imported earlier still declares in Rust. It is
+  not where the application's HTTP surface lives.
 - Infrastructure implements ports for persistence, runtimes, queues and
   external services.
 - Composition of the *model* needs no module at all: declarations register
@@ -94,10 +94,11 @@ src/
 │   └── <mendix_module>/
 │       ├── <published_service>.rs          the route table
 │       └── <resource>_controller.rs        one function per operation
-├── ui/
-│   ├── pages/<mendix_module>/<page>.rs
-│   ├── layouts/<mendix_module>/<layout>.rs
+├── ui/                                     what Rust still declares of the
+│   │                                       user interface; empty in a fresh project
+│   ├── pages/<mendix_module>/<page>.rs     a page an earlier import kept in Rust
 │   └── nanoflows/<mendix_module>/in_frontend.rs  the frontend's nanoflows, named
+│                                           for those pages
 ├── infrastructure/
 │   ├── adapters/
 │   └── persistence.rs

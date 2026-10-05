@@ -111,11 +111,17 @@ read-only behavioral oracle; never edit it.
   `columns: [{ ... }]`), or a `<WidgetValue>` when more is said. The importer declares a
   form there only when its TSX reads back as the stored document, and a
   build stores a form that says what is stored exactly as it is stored —
-  identities and the order of a widget's properties kept. The importer and
-  `mxrs new` write these files; the scaffolds still write a new page in
-  Rust (`src/ui/`), and a page's `#[navigation_item]` joins the frontend's
-  profile. The backend keeps no user-interface folder once the move is
-  complete.
+  identities and the order of a widget's properties kept. The importer,
+  `mxrs new` and the scaffolds write these files: a scaffolded page or
+  layout is built as what it is, made the document the model would store,
+  and stated with the project's elements — one the project lacks is added
+  to `elements.ts` after those it has, whose defaults stay what its pages
+  were written against — and a templated page adds its item to the
+  frontend's navigation. A page of the frontend calls a nanoflow by its
+  name, so nothing names a scaffolded nanoflow in Rust; `src/ui/` is what
+  a project imported earlier still declares there (a Rust page, the
+  `in_frontend.rs` names such pages call nanoflows by), and a fresh
+  project's is empty.
 - A declaration is one annotated item in its own file, and it registers
   itself (user directive, 2026-10-01). `#[entity]`/`#[dto]`/`#[view]` on a
   struct, `#[enumeration]`/`#[module_roles]` on an enum, and `#[microflow]`/

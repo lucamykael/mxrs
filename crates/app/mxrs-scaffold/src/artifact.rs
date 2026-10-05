@@ -79,7 +79,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "init",
         argument: "<Module>",
         summary: "Initialize presentation and the application layout",
-        destination: "src/ui/layouts/<module>",
+        destination: "frontend/src/components/layout/<module>",
         kind: ArtifactKind::Presentation,
     },
     ScaffoldCommand {
@@ -167,7 +167,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Flow>",
         summary: "Create a client nanoflow declaration",
-        destination: "src/ui/nanoflows/<module>",
+        destination: "frontend/src/services/<module>",
         kind: ArtifactKind::Nanoflow,
     },
     ScaffoldCommand {
@@ -175,7 +175,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Page>",
         summary: "Create a page declaration and its module layout",
-        destination: "src/ui/pages/<module>",
+        destination: "frontend/src/pages/<module>",
         kind: ArtifactKind::Page,
     },
     ScaffoldCommand {
@@ -1002,22 +1002,49 @@ fn create_page_slice(
             templates::RefreshAction::Microflow
         }
     });
-    create_concept_file(
-        transaction,
-        root,
+    let _ = (&stem, refresh_service);
+    let page = crate::forms::templated_page(
         module_name,
-        module_folder(ArtifactKind::Page),
-        &stem,
-        templates::page_from_template(
-            module_name,
-            artifact_name,
-            LAYOUT_PARAMETER,
-            template.name,
-            refresh,
-            refresh_service.as_deref(),
-            &options.page_roles,
-        ),
-    )
+        artifact_name,
+        LAYOUT_PARAMETER,
+        template.name,
+        refresh,
+        &options.page_roles,
+    );
+    add_page(transaction, root, module_name, &page)?;
+    // The page joins the navigation the frontend declares, when it
+    // declares one the way an import or `mxrs new` writes it.
+    let navigation = root.join("frontend/src/navigation/index.ts");
+    if let Some(source) = transaction.content(&navigation)? {
+        match crate::forms::add_navigation_item(
+            &source,
+            &templates::humanize(artifact_name),
+            &format!("{module_name}.{artifact_name}"),
+        ) {
+            Some(source) => transaction.write(&navigation, source)?,
+            None => eprintln!(
+                "[mxrs] note: {} is not laid out the way mxrs writes it; add {module_name}.{artifact_name} to its items yourself",
+                navigation.display()
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// The Mendix version the project's forms are stored for.
+fn forms_version(root: &Path) -> Result<String> {
+    declared_version(root)?.ok_or(ScaffoldError::MissingVersionDeclaration)
+}
+
+/// Declares `page` in the frontend: `frontend/src/pages/<module>/`.
+fn add_page(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    page: &mxrs_ir::page::PageDecl,
+) -> Result<()> {
+    let document = crate::forms::page_document(&forms_version(root)?, page)?;
+    crate::forms::add_forms(transaction, root, &[(module_name, document)])
 }
 
 fn create_artifact(
@@ -1028,11 +1055,29 @@ fn create_artifact(
     artifact_name: &str,
 ) -> Result<()> {
     require_module(root, module_name)?;
+    // What is scaffolded joins a project: without its crate root there is
+    // none, whichever side of it the artifact lands on.
+    let library = root.join("src/lib.rs");
+    if transaction.content(&library)?.is_none() {
+        return Err(ScaffoldError::ProjectNotFound(
+            library.display().to_string(),
+        ));
+    }
     if options.kind == ArtifactKind::Page {
         ensure_module_layout(transaction, root, module_name)?;
         if options.page_template.is_some() || options.page_chain.is_some() {
             return create_page_slice(transaction, root, options, module_name, artifact_name);
         }
+    }
+    if options.kind == ArtifactKind::Page {
+        // A page is the frontend's: the TSX that states its document.
+        let page = crate::forms::plain_page(
+            module_name,
+            artifact_name,
+            LAYOUT_PARAMETER,
+            &options.page_roles,
+        );
+        return add_page(transaction, root, module_name, &page);
     }
     if options.kind == ArtifactKind::Repository {
         return create_repository(transaction, root, module_name, artifact_name);
@@ -1099,12 +1144,7 @@ fn create_artifact(
         ArtifactKind::Validation => templates::validation(module_name, artifact_name),
         ArtifactKind::Integration => templates::integration(module_name, artifact_name),
         ArtifactKind::Repository | ArtifactKind::Nanoflow => unreachable!("handled above"),
-        ArtifactKind::Page => templates::page(
-            module_name,
-            artifact_name,
-            LAYOUT_PARAMETER,
-            &options.page_roles,
-        ),
+        ArtifactKind::Page => unreachable!("handled above"),
         ArtifactKind::Security
         | ArtifactKind::Module
         | ArtifactKind::Presentation
@@ -1196,18 +1236,19 @@ fn ensure_module_layout(
     root: &Path,
     module_name: &str,
 ) -> Result<()> {
+    // The layout a project already declares, in Rust or in the frontend,
+    // is the one its pages are shown in.
     let family = root.join(format!("src/ui/layouts/{}/mod.rs", snake_case(module_name)));
-    if transaction.content(&family)?.is_some() {
+    let declared = root.join(format!(
+        "frontend/src/components/layout/{}/ApplicationLayout.tsx",
+        snake_case(module_name)
+    ));
+    if transaction.content(&family)?.is_some() || transaction.content(&declared)?.is_some() {
         return Ok(());
     }
-    create_concept_file(
-        transaction,
-        root,
-        module_name,
-        "ui/layouts",
-        "application_layout",
-        templates::layouts(module_name, LAYOUT_PARAMETER),
-    )
+    let layout = crate::forms::application_layout(LAYOUT_PARAMETER);
+    let document = crate::forms::layout_document(&forms_version(root)?, &layout)?;
+    crate::forms::add_forms(transaction, root, &[(module_name, document)])
 }
 
 /// Which `<layer>/<concept>` folder a scaffolded artifact lives in. These are
@@ -1288,9 +1329,11 @@ fn add_frontend_nanoflow(
     entities: &[String],
 ) -> Result<()> {
     crate::nanoflow::add_nanoflow(transaction, root, module_name, method, entities)?;
+    // A project whose Rust pages call the frontend's nanoflows names them
+    // in `in_frontend.rs`; the new one joins the names it already has. A
+    // page of the frontend calls a nanoflow by its own name.
     let path = root
-        .join("src")
-        .join(module_folder(ArtifactKind::Nanoflow))
+        .join("src/ui/nanoflows")
         .join(snake_case(module_name))
         .join("in_frontend.rs");
     match transaction.content(&path)? {
@@ -1303,14 +1346,7 @@ fn add_frontend_nanoflow(
             })?;
             transaction.write(&path, source)
         }
-        None => create_concept_file(
-            transaction,
-            root,
-            module_name,
-            module_folder(ArtifactKind::Nanoflow),
-            "in_frontend",
-            crate::nanoflow::marker_file(module_name, &method.name),
-        ),
+        None => Ok(()),
     }
 }
 
@@ -1580,50 +1616,26 @@ fn initialize_presentation(
     root: &Path,
     module_name: &str,
 ) -> Result<()> {
-    // Layer-first: the module gets its folder inside each user-interface
-    // concept, not a folder of its own.
+    // The layout is the frontend's, in its module's folder; one the
+    // project already declares there or in Rust is not replaced.
     let directory = snake_case(module_name);
-    let base = root.join("src/ui");
-    let aggregator = base.join("layouts").join(&directory).join("mod.rs");
-    let keeps = ["pages", "snippets", "nanoflows"]
-        .map(|family| base.join(family).join(&directory).join(".keep"));
-    if transaction.content(&aggregator)?.is_some()
-        && keeps
-            .iter()
-            .map(|path| transaction.content(path))
-            .collect::<Result<Vec<_>>>()?
-            .iter()
-            .all(Option::is_some)
-    {
-        return Err(ScaffoldError::FileExists(aggregator.display().to_string()));
-    }
-    require_module(root, module_name)?;
-    let layout_file = base
-        .join("layouts")
+    let declared = root
+        .join("frontend/src/components/layout")
+        .join(&directory)
+        .join("ApplicationLayout.tsx");
+    let rust = root
+        .join("src/ui/layouts")
         .join(&directory)
         .join("application_layout.rs");
-    // A layout file the module's own index does not know about was not put
-    // there by this scaffold; refuse rather than adopt or overwrite it.
-    if transaction.content(&aggregator)?.is_none() && transaction.content(&layout_file)?.is_some() {
-        return Err(ScaffoldError::FileExists(layout_file.display().to_string()));
-    }
-    if transaction.content(&layout_file)?.is_none() {
-        create_concept_file(
-            transaction,
-            root,
-            module_name,
-            "ui/layouts",
-            "application_layout",
-            templates::presentation_layout(module_name),
-        )?;
-    }
-    for (family, keep) in ["pages", "snippets", "nanoflows"].iter().zip(keeps) {
-        connect_concept_folder(transaction, root, module_name, &format!("ui/{family}"))?;
-        if transaction.content(&keep)?.is_none() {
-            transaction.create(keep, String::new())?;
+    for existing in [&declared, &rust] {
+        if transaction.content(existing)?.is_some() {
+            return Err(ScaffoldError::FileExists(existing.display().to_string()));
         }
     }
-    Ok(())
+    require_module(root, module_name)?;
+    let document =
+        crate::forms::layout_document(&forms_version(root)?, &crate::forms::presentation_layout())?;
+    crate::forms::add_forms(transaction, root, &[(module_name, document)])
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod artifact;
+mod forms;
 pub mod lifecycle;
 mod nanoflow;
 pub mod page_templates;
@@ -225,6 +226,20 @@ fn project_files(
         MxrsDependency::Git(url) => return Err(ScaffoldError::InvalidDependencyPath(url.clone())),
     };
     let version = json_string(&options.mendix_version);
+    // The home page and the layout it is shown in, as the TSX that states
+    // them, with the elements they are written with.
+    let layout =
+        forms::layout_document(&options.mendix_version, &forms::application_layout("Main"))?;
+    let home = forms::page_document(&options.mendix_version, &forms::home_page(&options.name))?;
+    let declared = forms::declare(None, &[], &[("Main", layout), ("Main", home)])?;
+    let interface: Vec<(String, String)> = declared
+        .elements
+        .into_iter()
+        .map(|elements| ("mxrs/elements.ts".to_string(), elements))
+        .chain(declared.widgets)
+        .chain(declared.forms)
+        .map(|(file, text)| (format!("frontend/src/{file}"), text))
+        .collect();
     // The user interface is the frontend's: the same React + TypeScript
     // application an import writes, with the navigation it declares.
     let frontend = mxrs_materializers::frontend_source_files()
@@ -237,7 +252,8 @@ fn project_files(
         .chain([(
             "frontend/src/navigation/index.ts".to_string(),
             templates::navigation(),
-        )]);
+        )])
+        .chain(interface);
     let rust: Vec<(&str, String)> = vec![
         (
             "Cargo.toml",
@@ -268,30 +284,6 @@ fn project_files(
         ),
         ("src/services/mod.rs", templates::services_layer()),
         ("src/ui/mod.rs", templates::ui_layer()),
-        (
-            "src/ui/layouts/mod.rs",
-            templates::registering_concept_index("layouts", "main"),
-        ),
-        (
-            "src/ui/layouts/main/mod.rs",
-            templates::registering_folder_index("Main", "layouts", "application_layout"),
-        ),
-        (
-            "src/ui/layouts/main/application_layout.rs",
-            templates::layouts("Main", "Main"),
-        ),
-        (
-            "src/ui/pages/mod.rs",
-            templates::registering_concept_index("pages", "main"),
-        ),
-        (
-            "src/ui/pages/main/mod.rs",
-            templates::registering_folder_index("Main", "pages", "home"),
-        ),
-        (
-            "src/ui/pages/main/home.rs",
-            templates::home_page(&escape_rust_string(&options.name)),
-        ),
         (
             "src/infrastructure/mod.rs",
             templates::infrastructure_layer(),
@@ -468,10 +460,6 @@ pub(crate) fn is_rust_keyword(value: &str) -> bool {
     )
 }
 
-fn escape_rust_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("a string is always serializable")
 }
@@ -590,8 +578,9 @@ mod tests {
         assert!(!main.contains("../"));
         // The display name reaches generated source through the home page's
         // text, not through `src/domain/mod.rs`.
-        let home = std::fs::read_to_string(destination.join("src/ui/pages/main/home.rs")).unwrap();
-        assert!(home.contains("Welcome to ../../Escape / App"));
+        let home =
+            std::fs::read_to_string(destination.join("frontend/src/pages/main/Home.tsx")).unwrap();
+        assert!(home.contains("Welcome to ../../Escape / App"), "{home}");
         let domain = std::fs::read_to_string(destination.join("src/domain/mod.rs")).unwrap();
         assert!(!domain.contains("Welcome to"));
         assert_eq!(package_name("日本語"), "mendix-app");
@@ -664,15 +653,21 @@ mod tests {
             }
         }
         // A fresh project is the same shape an import produces: the module
-        // it declares, a layout, a home page and the navigation opening it,
-        // each the annotated item that declares it.
+        // it declares in Rust, and in the frontend a layout, a home page —
+        // each the TSX that states it — and the navigation opening it.
         let read = |relative: &str| std::fs::read_to_string(destination.join(relative)).unwrap();
         assert!(read("src/domain/modules/main.rs").contains("#[declaration(module = \"Main\")]"));
         assert!(
-            read("src/ui/layouts/main/application_layout.rs")
-                .contains("#[layout(module = \"Main\")]")
+            read("frontend/src/components/layout/main/ApplicationLayout.tsx")
+                .contains("export default layout(\n  \"Main\",")
         );
-        assert!(read("src/ui/pages/main/home.rs").contains("#[page(module = \"Main\")]"));
+        let home = read("frontend/src/pages/main/Home.tsx");
+        assert!(
+            home.contains("export default page(\n  \"Main\",") && home.contains("name=\"Home\""),
+            "{home}"
+        );
+        assert!(!destination.join("src/ui/pages").exists());
+        assert!(!destination.join("src/ui/layouts").exists());
         // The navigation is the frontend's, beside the application that
         // renders it.
         assert!(read("frontend/src/navigation/index.ts").contains("homePage: \"Main.Home\""));
@@ -711,13 +706,12 @@ mod tests {
             "src/infrastructure/mod.rs",
             "src/lib.rs",
             "src/main.rs",
-            "src/ui/layouts/main/application_layout.rs",
-            "src/ui/layouts/main/mod.rs",
-            "src/ui/layouts/mod.rs",
             "src/ui/mod.rs",
-            "src/ui/pages/main/home.rs",
-            "src/ui/pages/main/mod.rs",
-            "src/ui/pages/mod.rs",
+            // The home page and its layout are the frontend's, with the
+            // elements they are written with.
+            "frontend/src/components/layout/main/ApplicationLayout.tsx",
+            "frontend/src/mxrs/elements.ts",
+            "frontend/src/pages/main/Home.tsx",
         ];
         let frontend = mxrs_materializers::frontend_source_files();
         for relative in expected

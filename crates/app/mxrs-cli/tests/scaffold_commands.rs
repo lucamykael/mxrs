@@ -262,7 +262,19 @@ fn a_dry_run_renders_the_json_document_without_touching_the_project() {
             .iter()
             .all(|file| !Path::new(file.as_str().unwrap()).exists())
     );
-    assert!(!document["updated"].as_array().unwrap().is_empty());
+    // A page is the frontend's: the TSX that states it, in its module's
+    // folder, with the layout it is shown in.
+    for expected in [
+        "frontend/src/pages/sales/OrderOverview.tsx",
+        "frontend/src/components/layout/sales/ApplicationLayout.tsx",
+    ] {
+        assert!(
+            files
+                .iter()
+                .any(|file| file.as_str().unwrap().ends_with(expected)),
+            "{expected}: {files:?}"
+        );
+    }
 
     let written = scaffold(
         &root,
@@ -278,10 +290,11 @@ fn a_dry_run_renders_the_json_document_without_touching_the_project() {
     assert!(written.status.success());
     let written: Value = serde_json::from_slice(&written.stdout).unwrap();
     assert_eq!(written["files"], document["files"]);
+    let page =
+        std::fs::read_to_string(root.join("frontend/src/pages/sales/OrderOverview.tsx")).unwrap();
     assert!(
-        std::fs::read_to_string(root.join("src/ui/pages/sales/order_overview.rs"))
-            .unwrap()
-            .contains("page.allow_role(\"Sales.User\");")
+        page.contains("allowedModuleRoles={[\"Sales.User\"]}"),
+        "{page}"
     );
 }
 
@@ -578,49 +591,40 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
     );
     assert!(output.status.success(), "{:?}", output.stderr);
     let rendered = text(&output);
-    // The default chain template is data-backed, so the slice is the entity,
-    // its loader, both refresh flows and the page — and the slice now spans
-    // three layers instead of landing entirely under `src/domain/`.
-    for (layer, relative) in [
-        ("domain", "domain/entities/sales/order_overview.rs"),
-        // Both flows are about the slice's entity: methods of its service.
-        ("services", "services/sales/order_overview_service.rs"),
-        // The client half is the frontend's: named in Rust for the page.
-        ("ui", "ui/nanoflows/sales/in_frontend.rs"),
-        ("ui", "ui/pages/sales/order_overview.rs"),
+    // The default chain template is data-backed, so the slice is the entity
+    // and its loader and refresh flow in Rust, and in the frontend the
+    // nanoflow and the page.
+    for relative in [
+        "src/domain/entities/sales/order_overview.rs",
+        // Both microflows are about the slice's entity: methods of its service.
+        "src/services/sales/order_overview_service.rs",
+        "frontend/src/services/sales/orderOverviewService.ts",
+        "frontend/src/pages/sales/OrderOverview.tsx",
     ] {
-        let path = root.join("src").join(relative);
+        let path = root.join(relative);
         assert!(
             rendered.contains(&format!("  create  {}", path.display())),
-            "{layer}/{relative}: {rendered}"
+            "{relative}: {rendered}"
         );
     }
-    let frontend = root.join("frontend/src/services/sales/orderOverviewService.ts");
+    // Nothing of the page is Rust's: it calls the nanoflow by its name.
+    assert!(!root.join("src/ui/pages").exists());
+    assert!(!root.join("src/ui/nanoflows").exists());
+    let page =
+        std::fs::read_to_string(root.join("frontend/src/pages/sales/OrderOverview.tsx")).unwrap();
     assert!(
-        rendered.contains(&format!("  create  {}", frontend.display())),
+        page.contains("nanoflow=\"Sales.NAN_RefreshOrderOverview\"")
+            && page.contains("microflow=\"Sales.ACT_LoadOrderOverview\""),
+        "{page}"
+    );
+    // The page joins the navigation the frontend declares.
+    let navigation = root.join("frontend/src/navigation/index.ts");
+    assert!(
+        rendered.contains(&format!("  update  {}", navigation.display())),
         "{rendered}"
     );
-    // The page adds itself to the navigation from its own file, so the
-    // item is created and destroyed with the page and there is no separate
-    // navigation module to collide with the project's `navigation.rs`.
-    assert!(!root.join("src/ui/navigation").exists());
-    let page = std::fs::read_to_string(root.join("src/ui/pages/sales/order_overview.rs")).unwrap();
-    assert!(
-        page.contains("#[navigation_item(profile = \"Responsive\", caption = \"Order Overview\")]"),
-        "{page}"
-    );
-    assert!(
-        page.contains("item.page(\"Sales.OrderOverview\");"),
-        "{page}"
-    );
-    // The item joins the profile it names, creating it when the application
-    // no longer declares one. It must not assume the profile is still there:
-    // MXRB refuses the scaffold outright when the Responsive aggregator is
-    // missing, and deferring that to a panic inside the user's build is
-    // strictly worse than either.
-    assert!(
-        !page.contains("expect("),
-        "generated navigation must not contain a panic path: {page}"
-    );
+    assert!(std::fs::read_to_string(&navigation).unwrap().contains(
+        "{ caption: \"Order Overview\", page: \"Sales.OrderOverview\", icon: { glyph: \"file\" } },"
+    ));
     assert!(text(&scaffold(&root, &["scaffold", "list"])).contains("page:Sales.OrderOverview"));
 }

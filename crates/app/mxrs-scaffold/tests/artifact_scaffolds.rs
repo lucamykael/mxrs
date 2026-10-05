@@ -95,8 +95,8 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     scaffold(&root, ArtifactKind::Validation, "Sales.VAL_Order");
     scaffold(&root, ArtifactKind::Integration, "Sales.INT_Orders");
     scaffold(&root, ArtifactKind::Nanoflow, "Sales.NAN_RefreshOrder");
-    // A nanoflow is the frontend's: a method of the service of its subject,
-    // named in Rust for the pages that call it.
+    // A nanoflow is the frontend's: a method of the service of its subject.
+    // Nothing names it in Rust: a page of the frontend calls it by name.
     let service =
         std::fs::read_to_string(root.join("frontend/src/services/sales/orderService.ts")).unwrap();
     assert!(
@@ -105,11 +105,7 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
             && service.contains("  async refresh(): Promise<void> {},\n"),
         "{service}"
     );
-    assert!(
-        std::fs::read_to_string(root.join("src/ui/nanoflows/sales/in_frontend.rs"))
-            .unwrap()
-            .contains("    nanoflow NAN_RefreshOrder;\n")
-    );
+    assert!(!root.join("src/ui/nanoflows").exists());
     scaffold(&root, ArtifactKind::PublishedRest, "Sales.HandleOrder");
     scaffold(&root, ArtifactKind::ConsumedRest, "Sales.FetchCatalog");
     scaffold(&root, ArtifactKind::JavaAction, "Sales.InvokeCheckout");
@@ -533,7 +529,7 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
         let advertised = command.destination;
         // `ci`, `evaluation` and `functional-test` write outside the layered
         // source tree, so "which layer" is not a question they answer.
-        if !advertised.starts_with("src/") {
+        if !advertised.starts_with("src/") && !advertised.starts_with("frontend/src/") {
             continue;
         }
         // A `<Module>` argument names a module rather than an artifact inside
@@ -897,37 +893,48 @@ fn an_unknown_template_or_chain_is_rejected_before_anything_is_written() {
 }
 
 #[test]
-fn presentation_initialization_previews_compiles_and_recovers_missing_directories() {
+fn presentation_initialization_previews_compiles_and_keeps_a_layout_already_declared() {
     let directory = tempfile::tempdir().unwrap();
     let root = application(directory.path());
     let options = ArtifactScaffold::new(ArtifactKind::Presentation, "Sales", &root);
     assert!(scaffold_artifact(&options).is_err());
-    assert!(!root.join("src/ui/layouts/sales").exists());
+    let declared = root.join("frontend/src/components/layout/sales/ApplicationLayout.tsx");
+    assert!(!declared.exists());
     scaffold(&root, ArtifactKind::Module, "Sales");
-    let orphan = root.join("src/ui/layouts/sales/application_layout.rs");
-    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
-    std::fs::write(&orphan, "custom layout source").unwrap();
+    // A layout the project still declares in Rust is not declared again.
+    let rust = root.join("src/ui/layouts/sales/application_layout.rs");
+    std::fs::create_dir_all(rust.parent().unwrap()).unwrap();
+    std::fs::write(&rust, "custom layout source").unwrap();
     assert!(scaffold_artifact(&options).is_err());
     assert_eq!(
-        std::fs::read_to_string(&orphan).unwrap(),
+        std::fs::read_to_string(&rust).unwrap(),
         "custom layout source"
     );
-    assert!(!orphan.with_file_name("mod.rs").exists());
-    std::fs::remove_dir_all(root.join("src/ui/layouts/sales")).unwrap();
+    assert!(!declared.exists());
+    std::fs::remove_dir_all(root.join("src/ui/layouts")).unwrap();
     let before = registry::entries(&root).unwrap();
+    let elements = root.join("frontend/src/mxrs/elements.ts");
+    let known = std::fs::read_to_string(&elements).unwrap();
     let preview = scaffold_artifact(&options.clone().dry_run(true)).unwrap();
-    assert!(!root.join("src/ui/layouts/sales").exists());
+    assert!(!declared.exists());
+    assert_eq!(std::fs::read_to_string(&elements).unwrap(), known);
     assert_eq!(registry::entries(&root).unwrap(), before);
     let applied = scaffold_artifact(&options).unwrap();
     assert_eq!(preview.files, applied.files);
     assert_eq!(preview.updated, applied.updated);
+    // The layout is the frontend's, and the elements it is written with
+    // follow the ones the project already had.
+    let source = std::fs::read_to_string(&declared).unwrap();
+    assert!(
+        source.contains("export default layout(\n  \"Sales\",")
+            && source.contains("name=\"ApplicationLayout\""),
+        "{source}"
+    );
+    let grown = std::fs::read_to_string(&elements).unwrap();
+    assert!(grown.starts_with(known.trim_end()) && grown.len() > known.len());
+    // Declared once: a second run is refused and changes nothing.
     assert!(scaffold_artifact(&options).is_err());
-    let layout = root.join("src/ui/layouts/sales/application_layout.rs");
-    let source = std::fs::read_to_string(&layout).unwrap();
-    assert!(source.contains("application_shell("));
-    std::fs::remove_file(root.join("src/ui/snippets/sales/.keep")).unwrap();
-    scaffold_artifact(&options).unwrap();
-    assert_eq!(std::fs::read_to_string(&layout).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(&declared).unwrap(), source);
     let output = cargo(
         &root,
         &[
