@@ -151,6 +151,17 @@ enum Mined {
     List(i32),
 }
 
+/// The field each of these elements is mostly stated for: a prop that
+/// holds one and says only that is written as the field's value.
+const MAINS: [(&str, &str); 6] = [
+    ("Forms$ClientTemplate", "Template"),
+    ("DomainModels$AttributeRef", "Attribute"),
+    ("DomainModels$DirectEntityRef", "Entity"),
+    ("Forms$Appearance", "Class"),
+    ("Forms$OptionDesignPropertyValue", "Option"),
+    ("Forms$PageVariable", "PageParameter"),
+];
+
 /// How many documents must hold a field before what most of them say is
 /// what all say by default. With fewer, a default would be one document's
 /// own content, moved out of the page that states it.
@@ -300,6 +311,11 @@ pub fn mine(documents: &[&NativeDocument]) -> Vocabulary {
             [only] => Some((*only).clone()),
             _ => None,
         };
+        let main = MAINS
+            .iter()
+            .find(|(of, _)| of == ty)
+            .map(|(_, key)| (*key).to_string())
+            .filter(|key| fields.iter().any(|field| &field.key == key));
         shapes.insert(
             component.clone(),
             Shape {
@@ -307,6 +323,7 @@ pub fn mine(documents: &[&NativeDocument]) -> Vocabulary {
                 component: component.clone(),
                 fields,
                 children,
+                main,
             },
         );
     }
@@ -496,12 +513,7 @@ fn hold(
             continue;
         };
         candidate.set("TypePointer", NativeValue::Null);
-        if let (Some(NativeValue::Text(_)), Some(default)) = (
-            candidate.get("PrimitiveValue"),
-            value_type.text("DefaultValue"),
-        ) {
-            candidate.set("PrimitiveValue", default);
-        }
+        super::declare_default(&mut candidate, value_type);
         let entry = held.entry(keys).or_default();
         if entry.plain.is_none() {
             entry.plain = shapes.shape(super::WIDGET_VALUE).and_then(|shape| {
@@ -633,7 +645,10 @@ pub fn render_elements(shapes: &Shapes) -> String {
             };
             out.push_str(&format!("  {}: {value},\n", field.prop));
         }
-        out.push_str("});\n");
+        match shape.main.as_deref().and_then(|key| shape.field(key)) {
+            Some(main) => out.push_str(&format!("}}, {});\n", super::tsx::json(&main.prop))),
+            None => out.push_str("});\n"),
+        }
     }
     for shape in ordered {
         write(shape, shapes, &mut written, &mut out);

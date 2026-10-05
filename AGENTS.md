@@ -100,9 +100,15 @@ read-only behavioral oracle; never edit it.
   the importer writes from the project's own documents and every build
   reads, says what each field holds when a page leaves it unsaid, so a
   page states only what differs; a type stored with another set of fields
-  is an element of its own (`DivContainer_2`). A pluggable widget's
-  definition is declared once, in `src/widgets/<Name>.tsx`, and used by
-  that name with its properties by their keys. The importer declares a
+  is an element of its own (`DivContainer_2`). An element mostly stated
+  for one field says which in `elements.ts`, and a prop that holds it and
+  says only that is the field's value: `captionTemplate={{ en_US: "Save" }}`,
+  `attributeRef="Sales.Order.Number"`, `appearance="card"`. A pluggable
+  widget's definition is declared once, in `src/widgets/<Name>.tsx`, with
+  what each property holds before a use says anything, and used by that
+  name with its properties by their keys — each the one thing a property
+  of its type is for (`advanced: true`, `header: { en_US: "Name" }`,
+  `columns: [{ ... }]`), or a `<WidgetValue>` when more is said. The importer declares a
   form there only when its TSX reads back as the stored document, and a
   build stores a form that says what is stored exactly as it is stored —
   identities and the order of a widget's properties kept. The importer and

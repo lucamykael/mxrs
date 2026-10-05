@@ -42,11 +42,7 @@ pub(crate) fn property_default(
         Some(defined) if shape.fits(defined) => defined.clone(),
         _ => {
             let mut base = shapes.default_for(shape).clone();
-            if let (Some(NativeValue::Text(_)), Some(default)) =
-                (base.get("PrimitiveValue"), value_type.text("DefaultValue"))
-            {
-                base.set("PrimitiveValue", default);
-            }
+            super::declare_default(&mut base, value_type);
             base
         }
     };
@@ -177,10 +173,7 @@ impl<'a> Writer<'a> {
             if base.get(key) == Some(value) {
                 continue;
             }
-            let attr = match value {
-                NativeValue::Text(text) => tsx::text_attr(text),
-                other => Attr::Value(self.expression(other, Some(field), &nested)?),
-            };
+            let attr = self.stated(value, field, base.get(key), &nested)?;
             attrs.push((field.prop.clone(), attr));
         }
         // What an element is called reads first.
@@ -189,6 +182,45 @@ impl<'a> Writer<'a> {
             attrs.insert(0, name);
         }
         Ok((attrs, children))
+    }
+
+    /// What a prop is written as for `value`, where it would hold `base`
+    /// were nothing said. An element that differs from the one already
+    /// there in its main field alone is that field's value.
+    fn stated(
+        &mut self,
+        value: &NativeValue,
+        field: &Field,
+        base: Option<&NativeValue>,
+        path: &str,
+    ) -> Outcome<Attr> {
+        let shapes = &self.vocabulary.shapes;
+        if let (
+            NativeValue::Document(said),
+            Some((shape, main)),
+            Some(NativeValue::Document(held)),
+        ) = (value, shapes.main_of(base), base)
+        {
+            let only_main = shape.fits(said)
+                && said
+                    .fields
+                    .iter()
+                    .zip(&held.fields)
+                    .all(|((key, said), (_, held))| key == &main.key || said == held);
+            let inner = said.get(&main.key);
+            return match inner {
+                Some(inner) if only_main && !matches!(inner, NativeValue::Null) => {
+                    self.stated(inner, main, held.get(&main.key), &join(path, &main.key))
+                }
+                // Anything else is the element in full: what is not an
+                // element here reads as its main field.
+                _ => Ok(Attr::Value(Js::Element(self.element(said, path)?))),
+            };
+        }
+        Ok(match value {
+            NativeValue::Text(text) => tsx::text_attr(text),
+            other => Attr::Value(self.expression(other, Some(field), path)?),
+        })
     }
 
     fn expression(
@@ -502,6 +534,64 @@ impl<'a> Writer<'a> {
                     )?));
                 }
                 objects = Some(Js::Array(written));
+            }
+            // A property whose value says one thing, the thing a property
+            // of its type is for, is written as that alone.
+            let main = super::property_main(value_type)
+                .and_then(|key| value_shape.field(key))
+                .filter(|main| {
+                    value_shape.fits(&unstated)
+                        && value
+                            .fields
+                            .iter()
+                            .zip(&unstated.fields)
+                            .all(|((key, said), (_, held))| key == &main.key || said == held)
+                        && !matches!(value.get(&main.key), Some(NativeValue::Null) | None)
+                });
+            if let Some(main) = main {
+                let said = value.get(&main.key).expect("checked above");
+                let written = match (&objects, said) {
+                    (Some(objects), _) if main.key == "Objects" => objects.clone(),
+                    (None, _) if main.key == "Objects" => return Err(unreadable()),
+                    // The widgets a property holds: one alone, or a list.
+                    (_, NativeValue::List(marker, items)) if main.key == "Widgets" => {
+                        if unstated.get("Widgets") != Some(&NativeValue::List(*marker, Vec::new()))
+                        {
+                            return Err(unreadable());
+                        }
+                        let mut widgets = Vec::with_capacity(items.len());
+                        for (index, item) in items.iter().enumerate() {
+                            let NativeValue::Document(item) = item else {
+                                return Err(unreadable());
+                            };
+                            widgets.push(Js::Element(
+                                self.element(item, &format!("{value_path}.Widgets[{index}]"))?,
+                            ));
+                        }
+                        match widgets.len() {
+                            1 => widgets.remove(0),
+                            _ => Js::Array(widgets),
+                        }
+                    }
+                    // A flag reads as one.
+                    (_, NativeValue::Text(flag))
+                        if value_type.text("Type") == Some("Boolean")
+                            && matches!(flag.as_str(), "true" | "false") =>
+                    {
+                        Js::Raw(flag.clone())
+                    }
+                    _ => match self.stated(
+                        said,
+                        main,
+                        unstated.get(&main.key),
+                        &join(&value_path, &main.key),
+                    )? {
+                        Attr::Text(text) => Js::Raw(tsx::text(&text)),
+                        Attr::Value(js) => js,
+                    },
+                };
+                entries.push((key.to_string(), written));
+                continue;
             }
             let (mut attrs, children) = self.fields(
                 value,

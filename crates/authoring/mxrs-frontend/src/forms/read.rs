@@ -159,8 +159,10 @@ pub fn read_elements(source: &str, path: &str) -> Result<Shapes, FrontendError> 
             let Some(Expression::CallExpression(call)) = &declarator.init else {
                 return Err(file.refuse(declarator.span, "`element(type, defaults)`"));
             };
-            let [ty, defaults] = call.arguments.as_slice() else {
-                return Err(file.refuse(call.span, "`element(type, defaults)`"));
+            let (ty, defaults, main) = match call.arguments.as_slice() {
+                [ty, defaults] => (ty, defaults, None),
+                [ty, defaults, main] => (ty, defaults, Some(main)),
+                _ => return Err(file.refuse(call.span, "`element(type, defaults)`")),
             };
             let (
                 Expression::Identifier(callee),
@@ -281,11 +283,26 @@ pub fn read_elements(source: &str, path: &str) -> Result<Shapes, FrontendError> 
             if !declared.insert(name.name.to_string()) {
                 return Err(file.shape(declarator.span, "an element is declared once"));
             }
+            // The field the element is mostly stated for, by its prop.
+            let main = match main.map(|main| (main, main.as_expression())) {
+                None => None,
+                Some((_, Some(Expression::StringLiteral(prop)))) => Some(
+                    fields
+                        .iter()
+                        .find(|field| field.prop == prop.value.as_str())
+                        .map(|field| field.key.clone())
+                        .ok_or_else(|| file.refuse(prop.span, "one of the element's fields"))?,
+                ),
+                Some((main, _)) => {
+                    return Err(file.refuse(main.span(), "the name of the element's main field"));
+                }
+            };
             shapes.push(Shape {
                 ty: ty.value.to_string(),
                 component: name.name.to_string(),
                 fields,
                 children,
+                main,
             });
         }
     }
@@ -335,6 +352,13 @@ fn is_name(name: &str) -> bool {
 
 /// The helpers of `src/mxrs/forms.ts` a declaration's values call.
 const HELPERS: [&str; 6] = ["long", "int", "named", "identity", "unset", "missing"];
+
+/// What a prop is given: text between quotes, an expression, or an element.
+enum Given<'p, 'a> {
+    Text(String),
+    Expression(&'p Expression<'a>),
+    Element(&'p JSXElement<'a>),
+}
 
 /// What a name a file imports stands for.
 enum Imported {
@@ -508,7 +532,7 @@ impl<'v> Reader<'v, '_> {
                 ));
             }
             let nested = join(path, &field.key);
-            let value = match &attribute.value {
+            let given = match &attribute.value {
                 None => {
                     return Err(self
                         .file
@@ -521,26 +545,21 @@ impl<'v> Reader<'v, '_> {
                             "text without `&` between quotes: write it as `{\"...\"}`",
                         ));
                     }
-                    NativeValue::Text(text.value.to_string())
+                    Given::Text(text.value.to_string())
                 }
                 Some(JSXAttributeValue::ExpressionContainer(container)) => {
                     let Some(expression) = container.expression.as_expression() else {
                         return Err(self.file.refuse(container.span, "a value"));
                     };
-                    self.value(expression, Some(field), &nested)?
+                    Given::Expression(expression)
                 }
-                Some(JSXAttributeValue::Element(element)) => {
-                    NativeValue::Document(self.element(element, &nested)?)
-                }
+                Some(JSXAttributeValue::Element(element)) => Given::Element(element),
                 Some(JSXAttributeValue::Fragment(fragment)) => {
                     return Err(self.file.refuse(fragment.span, "one element"));
                 }
             };
-            if let Some(expected) = kind_of(&field.default, &value) {
-                return Err(self
-                    .file
-                    .shape(attribute.span, format!("`{prop}` holds {expected}")));
-            }
+            let held = document.get(&field.key).cloned();
+            let value = self.given(given, field, held.as_ref(), attribute.span, &nested)?;
             document.set(&field.key, value);
         }
         let mut children = Vec::new();
@@ -576,6 +595,99 @@ impl<'v> Reader<'v, '_> {
             document.set(key, NativeValue::List(marker, items));
         }
         Ok(document)
+    }
+
+    /// What a prop states for `field`, which holds `held` before it says
+    /// anything. A value that is no element, where an element with a main
+    /// field is held, is that field of it.
+    fn given(
+        &mut self,
+        given: Given<'_, '_>,
+        field: &Field,
+        held: Option<&NativeValue>,
+        at: Span,
+        path: &str,
+    ) -> Outcome<NativeValue> {
+        let shapes = self.shapes;
+        let expression = match &given {
+            Given::Expression(expression) => Some(expression.without_parentheses()),
+            _ => None,
+        };
+        let whole = matches!(given, Given::Element(_))
+            || matches!(
+                expression,
+                Some(Expression::JSXElement(_) | Expression::NullLiteral(_))
+            );
+        if !whole
+            && let (Some((_, main)), Some(NativeValue::Document(element))) =
+                (shapes.main_of(held), held)
+        {
+            let mut element = element.clone();
+            let inner = self.given(
+                given,
+                main,
+                element.get(&main.key).cloned().as_ref(),
+                at,
+                &join(path, &main.key),
+            )?;
+            element.set(&main.key, inner);
+            return Ok(NativeValue::Document(element));
+        }
+        let value = match given {
+            Given::Text(text) => NativeValue::Text(text),
+            Given::Element(element) => NativeValue::Document(self.element(element, path)?),
+            Given::Expression(expression) => self.value(expression, Some(field), path)?,
+        };
+        if let Some(expected) = kind_of(&field.default, &value) {
+            return Err(self
+                .file
+                .shape(at, format!("`{}` holds {expected}", field.prop)));
+        }
+        Ok(value)
+    }
+
+    /// The objects a property holds, each by its own properties.
+    #[allow(clippy::too_many_arguments)]
+    fn objects(
+        &mut self,
+        stated: &Expression<'_>,
+        value_type: &NativeDocument,
+        value_type_path: &str,
+        marker: Option<i32>,
+        path: &str,
+        definition: &WidgetDefinition,
+        keys: &str,
+    ) -> Outcome<NativeValue> {
+        let Expression::ArrayExpression(array) = stated else {
+            return Err(self.file.refuse(stated.span(), "a list of objects"));
+        };
+        let (Some(NativeValue::Document(nested_type)), Some(marker)) =
+            (value_type.get("ObjectType"), marker)
+        else {
+            return Err(self
+                .file
+                .shape(array.span, "this property holds no objects"));
+        };
+        let mut items = Vec::with_capacity(array.elements.len());
+        for (index, element) in array.elements.iter().enumerate() {
+            let Some(Expression::ObjectExpression(object)) =
+                element.as_expression().map(Expression::without_parentheses)
+            else {
+                return Err(self
+                    .file
+                    .refuse(element.span(), "an object: its properties by their keys"));
+            };
+            items.push(NativeValue::Document(self.object(
+                nested_type,
+                &format!("{value_type_path}.ObjectType"),
+                Some(object),
+                object.span,
+                &format!("{path}.Objects[{index}]"),
+                definition,
+                keys,
+            )?));
+        }
+        Ok(NativeValue::List(marker, items))
     }
 
     fn value(
@@ -921,18 +1033,90 @@ impl<'v> Reader<'v, '_> {
                     continue;
                 }
                 None => base,
-                Some(Expression::JSXElement(element)) => self.widget_value(
-                    element,
-                    value_type,
-                    &value_type_path,
-                    &value_path,
-                    definition,
-                    &keys(prefix, key),
-                )?,
+                Some(Expression::JSXElement(element)) if self.is_value(element) => self
+                    .widget_value(
+                        element,
+                        value_type,
+                        &value_type_path,
+                        &value_path,
+                        definition,
+                        &keys(prefix, key),
+                    )?,
+                // Anything else is the one thing a property of this type
+                // is for.
                 Some(other) => {
-                    return Err(self
-                        .file
-                        .refuse(other.span(), &format!("a <{}>", value_shape.component)));
+                    let main = super::property_main(value_type)
+                        .and_then(|main| unstated_shape(shapes, defined)?.field(main));
+                    let Some(main) = main else {
+                        return Err(self
+                            .file
+                            .refuse(other.span(), &format!("a <{}>", value_shape.component)));
+                    };
+                    let mut value = base;
+                    let held = value.get(&main.key).cloned();
+                    let said = match other.without_parentheses() {
+                        stated if main.key == "Objects" => {
+                            let marker = match &held {
+                                Some(NativeValue::List(marker, _)) => Some(*marker),
+                                _ => None,
+                            };
+                            self.objects(
+                                stated,
+                                value_type,
+                                &value_type_path,
+                                marker,
+                                &value_path,
+                                definition,
+                                &keys(prefix, key),
+                            )?
+                        }
+                        Expression::BooleanLiteral(flag)
+                            if value_type.text("Type") == Some("Boolean") =>
+                        {
+                            NativeValue::Text(flag.value.to_string())
+                        }
+                        // The widgets a property holds: one alone, or a list.
+                        stated if main.key == "Widgets" => {
+                            let Some(NativeValue::List(marker, _)) = held else {
+                                return Err(self
+                                    .file
+                                    .shape(stated.span(), "this property holds no widgets"));
+                            };
+                            let elements: Vec<&Expression<'_>> = match stated {
+                                Expression::ArrayExpression(array) => array
+                                    .elements
+                                    .iter()
+                                    .map(|element| {
+                                        element.as_expression().ok_or_else(|| {
+                                            self.file.refuse(element.span(), "a widget")
+                                        })
+                                    })
+                                    .collect::<Outcome<_>>()?,
+                                one => vec![one],
+                            };
+                            let mut widgets = Vec::with_capacity(elements.len());
+                            for (index, element) in elements.into_iter().enumerate() {
+                                let Expression::JSXElement(element) = element.without_parentheses()
+                                else {
+                                    return Err(self.file.refuse(element.span(), "a widget"));
+                                };
+                                widgets.push(NativeValue::Document(self.element(
+                                    element,
+                                    &format!("{value_path}.Widgets[{index}]"),
+                                )?));
+                            }
+                            NativeValue::List(marker, widgets)
+                        }
+                        stated => self.given(
+                            Given::Expression(stated),
+                            main,
+                            held.as_ref(),
+                            stated.span(),
+                            &join(&value_path, &main.key),
+                        )?,
+                    };
+                    value.set(&main.key, said);
+                    value
                 }
             };
             let mut property = property_base.clone();
@@ -948,6 +1132,20 @@ impl<'v> Reader<'v, '_> {
         object.set("Properties", NativeValue::List(*marker, properties));
         object.set("TypePointer", NativeValue::Pointer(type_path.to_string()));
         Ok(object)
+    }
+
+    /// Whether `jsx` is a property's value element, stated in full.
+    fn is_value(&self, jsx: &JSXElement<'_>) -> bool {
+        let tag = match &jsx.opening_element.name {
+            JSXElementName::IdentifierReference(name) => name.name.as_str(),
+            JSXElementName::Identifier(name) => name.name.as_str(),
+            _ => return false,
+        };
+        matches!(
+            self.imports.get(tag),
+            Some(Imported::Element(component))
+                if self.shapes.component(component).is_some_and(|shape| shape.ty == WIDGET_VALUE)
+        )
     }
 
     fn widget_value(
@@ -998,37 +1196,20 @@ impl<'v> Reader<'v, '_> {
             None => None,
         };
         if let Some(stated) = stated {
-            let Expression::ArrayExpression(array) = stated else {
-                return Err(self.file.refuse(stated.span(), "a list of objects"));
+            let marker = match document.get("Objects") {
+                Some(NativeValue::List(marker, _)) => Some(*marker),
+                _ => None,
             };
-            let (Some(NativeValue::Document(nested_type)), Some(NativeValue::List(marker, _))) =
-                (value_type.get("ObjectType"), document.get("Objects"))
-            else {
-                return Err(self
-                    .file
-                    .shape(array.span, "this property holds no objects"));
-            };
-            let marker = *marker;
-            let mut items = Vec::with_capacity(array.elements.len());
-            for (index, element) in array.elements.iter().enumerate() {
-                let Some(Expression::ObjectExpression(object)) =
-                    element.as_expression().map(Expression::without_parentheses)
-                else {
-                    return Err(self
-                        .file
-                        .refuse(element.span(), "an object: its properties by their keys"));
-                };
-                items.push(NativeValue::Document(self.object(
-                    nested_type,
-                    &format!("{value_type_path}.ObjectType"),
-                    Some(object),
-                    object.span,
-                    &format!("{path}.Objects[{index}]"),
-                    definition,
-                    keys,
-                )?));
-            }
-            document.set("Objects", NativeValue::List(marker, items));
+            let objects = self.objects(
+                stated,
+                value_type,
+                value_type_path,
+                marker,
+                path,
+                definition,
+                keys,
+            )?;
+            document.set("Objects", objects);
         }
         Ok(document)
     }

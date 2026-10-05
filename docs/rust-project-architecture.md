@@ -371,7 +371,7 @@ stores:
 
 ```tsx
 // frontend/src/pages/sales/Order_Edit.tsx
-import { ActionButton, Appearance, DivContainer, FormCallArgument, LayoutCall, Page } from "@/mxrs/elements";
+import { ActionButton, DivContainer, FormCallArgument, LayoutCall, Page } from "@/mxrs/elements";
 import { page } from "@/mxrs/forms";
 import { Combobox } from "@/widgets/Combobox";
 
@@ -383,9 +383,9 @@ export default page(
     formCall={
       <LayoutCall form="Atlas_Core.PopupLayout">
         <FormCallArgument parameter="Atlas_Core.PopupLayout.Main">
-          <DivContainer name="card" appearance={<Appearance class="card" />}>
-            <Combobox name="status" properties={{ ... }} />
-            <ActionButton name="save" captionTemplate={...} />
+          <DivContainer name="card" appearance="card">
+            <Combobox name="status" properties={{ attributeEnumeration: "Sales.Order.Status" }} />
+            <ActionButton name="save" captionTemplate={{ en_US: "Save" }} />
           </DivContainer>
         </FormCallArgument>
       </LayoutCall>
@@ -410,14 +410,25 @@ project's: a default changed there changes every page that leaves the field
 unsaid, and what an unsaid prop means never depends on the version of mxrs.
 A type the model stores with another set of fields, as documents written
 by different versions of Studio Pro are, is an element of its own
-(`DivContainer_2`).
+(`DivContainer_2`). An element that is mostly stated for one field names it
+— `element("Forms$ClientTemplate", { ... }, "template")` — and a prop that
+holds the element and says only that field is written as the field's
+value: `captionTemplate={{ en_US: "Save" }}` is a template with that text,
+`attributeRef="Sales.Order.Number"` an attribute reference,
+`appearance="card"` an appearance of that class. Saying more is the
+element in full.
 
 A pluggable widget stores its whole definition with every use. It is
 declared once, in `src/widgets/<Name>.tsx`, and a page uses it by that
 name: the fields of the widget itself as props, and its own properties, by
-their keys, in `properties` — each a `<WidgetValue>` stating what differs
-from the property's default, `missing` for a property this use of the
-widget does not store.
+their keys, in `properties`. A property is the one thing a property of its
+type is for — `advanced: true`, `header: { en_US: "Name" }`,
+`attribute: "Sales.Order.Number"`, the widgets a column shows, the objects
+a property holds (`columns: [{ ... }, { ... }]`) — or a `<WidgetValue>`
+when more of its value is said, and `missing` when this use of the widget
+does not store it. The definition also says what each property holds
+before a use says anything: the elements most uses store for it, with
+nothing said in them, so a new use is stored as the others are.
 
 The importer declares a form in the frontend only when its TSX reads back
 as the stored document; any other stays in the imported model

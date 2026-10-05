@@ -47,7 +47,7 @@ export type Value =
   | Int
   | Named
   | Identity
-  | { [key: string]: string | ReactElement | Missing }
+  | { [key: string]: Value | Missing }
   | Value[];
 
 /** A list that holds nothing by default; the number is how the model marks it. */
@@ -78,9 +78,9 @@ export type Texts = { [language: string]: string };
 
 /**
  * What a field holds, by what it holds by default: a text where the default
- * is a text, a number where it is a number, an element — or texts, or
- * nothing — where it is an element. A field that holds nothing by default
- * says nothing of its kind.
+ * is a text, a number where it is a number, a list where it is a list. A
+ * field that holds an element by default holds an element, nothing, or —
+ * written alone — the one thing that element is mostly stated for.
  */
 export type Holds<V> = V extends ListDefault
   ? Value[]
@@ -90,9 +90,7 @@ export type Holds<V> = V extends ListDefault
       ? number | Long | Int
       : V extends boolean
         ? boolean
-        : V extends null
-          ? Value
-          : ReactElement | Texts | null;
+        : Value;
 
 /** An element's props: its fields, each optional, and its children when it holds any. */
 export type Props<D> = {
@@ -132,18 +130,23 @@ function box(type: string, content: ReactNode): ReactElement {
   return createElement("div", { "data-element": type }, content);
 }
 
-/** An element: the stored document type it is, and what its fields hold by default. */
+/**
+ * An element: the stored document type it is, what its fields hold by
+ * default, and the one field it is mostly stated for — a prop that holds
+ * the element and says only that field is written as the field's value.
+ */
 export function element<D extends Record<string, Default>>(
   type: string,
   defaults: D,
+  main?: keyof D & string,
 ): Component<Props<D>> {
-  void defaults;
+  void [defaults, main];
   return (props) => box(type, (props as { children?: ReactNode }).children);
 }
 
 /** A pluggable widget's props: the fields of the widget it is stored as, and its own properties by their keys. */
 export type WidgetProps = Record<string, Value> & {
-  properties?: Record<string, ReactElement | Missing>;
+  properties?: Record<string, Value | Missing>;
 };
 
 /**

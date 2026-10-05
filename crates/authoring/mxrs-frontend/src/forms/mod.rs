@@ -90,6 +90,11 @@ pub struct Shape {
     pub fields: Vec<Field>,
     /// The key of the list written as the element's children.
     pub children: Option<String>,
+    /// The key of the one field the element is mostly stated for. Where a
+    /// prop holds this element and only that field is said, the prop is
+    /// written as the field's value: `captionTemplate={{ en_US: "Save" }}`
+    /// for a template that states its text and nothing else.
+    pub main: Option<String>,
 }
 
 impl Shape {
@@ -221,6 +226,17 @@ impl Shapes {
         self.shape(ty).map(|shape| self.default_for(shape))
     }
 
+    /// The element `value` is and the field it is mostly stated for, when
+    /// it is an element that has one.
+    pub(crate) fn main_of(&self, value: Option<&NativeValue>) -> Option<(&Shape, &Field)> {
+        let Some(NativeValue::Document(document)) = value else {
+            return None;
+        };
+        let shape = self.shape_of(document)?;
+        let field = shape.field(shape.main.as_deref()?)?;
+        Some((shape, field))
+    }
+
     /// The marker the translations of a text are listed with, when texts
     /// are stored the one way `{ en_US: "..." }` can state.
     pub(crate) fn text_marker(&self) -> Option<i32> {
@@ -298,6 +314,44 @@ pub struct Vocabulary {
 impl Vocabulary {
     pub(crate) fn widget_of(&self, ty: &NativeDocument) -> Option<&WidgetDefinition> {
         self.widgets.iter().find(|widget| &widget.ty == ty)
+    }
+}
+
+/// The field of a pluggable widget's value that a property of the type
+/// `value_type` is stated in: a property of a use is written as that
+/// field's value alone when nothing else of its value is said.
+pub(crate) fn property_main(value_type: &NativeDocument) -> Option<&'static str> {
+    Some(match value_type.text("Type")? {
+        "Boolean" | "String" | "Integer" | "Decimal" | "Enumeration" => "PrimitiveValue",
+        "TextTemplate" => "TextTemplate",
+        "TranslatableString" => "TranslatableValue",
+        "Expression" => "Expression",
+        "Attribute" => "AttributeRef",
+        "Action" => "Action",
+        "Object" => "Objects",
+        "DataSource" => "DataSource",
+        "Icon" => "Icon",
+        "Image" => "Image",
+        "Microflow" => "Microflow",
+        "Nanoflow" => "Nanoflow",
+        "Widgets" => "Widgets",
+        _ => return None,
+    })
+}
+
+/// Gives `value`, a pluggable widget's value with nothing said in it, the
+/// default its property's type declares: in the field a property of that
+/// type is stated in when that is a text, and as its primitive value
+/// otherwise.
+pub(crate) fn declare_default(value: &mut NativeDocument, value_type: &NativeDocument) {
+    let Some(default) = value_type.text("DefaultValue") else {
+        return;
+    };
+    let key = property_main(value_type)
+        .filter(|key| *key == "Expression")
+        .unwrap_or("PrimitiveValue");
+    if let Some(NativeValue::Text(_)) = value.get(key) {
+        value.set(key, default);
     }
 }
 
@@ -616,7 +670,7 @@ mod tests {
         let source = render_form("Sales", &document, &vocabulary).unwrap();
         assert_eq!(
             source,
-            r#"import { Appearance, DivContainer, Label, Page, WidgetValue } from "@/mxrs/elements";
+            r#"import { DivContainer, Label, Page } from "@/mxrs/elements";
 import { missing, named, page, unset } from "@/mxrs/forms";
 import { Grid } from "@/widgets/Grid";
 
@@ -629,20 +683,12 @@ export default page(
     owner={unset}
     title={{ en_US: "Orders", nl_NL: "Bestellingen" }}
   >
-    <DivContainer name="header" appearance={<Appearance class="card" />}>
+    <DivContainer name="header" appearance="card">
       <Label name="title" caption={{ en_US: "Orders & \"more\"" }} />
       <Label name="hint" />
     </DivContainer>
     <DivContainer name="body" />
-    <Grid
-      name="grid1"
-      properties={{
-        advanced: <WidgetValue primitiveValue="true" />,
-        columns: <WidgetValue
-          objects={[{ header: <WidgetValue primitiveValue="Number" /> }, {}]}
-        />,
-      }}
-    />
+    <Grid name="grid1" properties={{ advanced: true, columns: [{ header: "Number" }, {}] }} />
     <Grid name="grid2" properties={{ emptyText: missing }} />
   </Page>,
 );
@@ -714,7 +760,7 @@ export default page(
             (
                 "advanced:",
                 "advancd:",
-                22,
+                19,
                 "the widget has no property `advancd`",
             ),
             ("name=\"body\"", "name=\"a &amp; b\"", 18, "write it as"),
@@ -740,7 +786,7 @@ export default page(
             (
                 "name=\"grid2\"",
                 "name=\"grid2\" type={null}",
-                28,
+                20,
                 "it is not stated",
             ),
             (
@@ -868,6 +914,21 @@ export default page(
                 "export const DivContainer = element(\"Forms$DivContainer\", {\n  appearance: Appearance,\n  name: \"\",\n  tabIndex: 0,\n  widgets: children(2),\n});\n"
             ),
             "{source}"
+        );
+        // An element mostly stated for one field says which, and a prop
+        // that says only that is the field's value.
+        assert!(
+            source.contains(
+                "export const Appearance = element(\"Forms$Appearance\", {\n  class: \"\",\n  style: \"\",\n}, \"class\");\n"
+            ),
+            "{source}"
+        );
+        let unknown = source.replace("}, \"class\");", "}, \"colour\");");
+        assert!(
+            read_elements(&unknown, "elements.ts")
+                .unwrap_err()
+                .to_string()
+                .contains("one of the element's fields")
         );
         for (from, to, expected) in [
             (
