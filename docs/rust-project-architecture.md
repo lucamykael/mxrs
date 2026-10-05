@@ -97,8 +97,8 @@ src/
 ├── ui/                                     what Rust still declares of the
 │   │                                       user interface; absent from a fresh project
 │   ├── pages/<mendix_module>/<page>.rs     a page an earlier import kept in Rust
-│   └── nanoflows/<mendix_module>/in_frontend.rs  the frontend's nanoflows, named
-│                                           for those pages
+│   └── nanoflows/<mendix_module>/in_frontend.rs  the frontend's nanoflows those
+│                                           pages call, named for them
 ├── infrastructure/
 │   ├── adapters/
 │   └── persistence.rs
@@ -177,8 +177,8 @@ impl OrderService {
   that declares the thing — the type a flow's declaration generates in
   `calls(...)` and `used_by(...)`, an entity's struct in `uses(...)` — so
   the compiler checks it exists and an editor goes to its file; what no Rust
-  item declares, a page or an entity in `used_by(...)` for instance, is named
-  as the model names it. They write nothing: the body and the documents that refer
+  item declares — a page, a nanoflow of the frontend, an entity of a package —
+  is named as the model names it (`used_by("Sales.Order_Overview")`). They write nothing: the body and the documents that refer
   to the flow already say all of it. A build compares the two and reports
   each difference as a warning, so the lists stay true or say where they are
   not. A relation left out is not compared.

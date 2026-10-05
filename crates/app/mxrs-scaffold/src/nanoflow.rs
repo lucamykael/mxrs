@@ -1,7 +1,6 @@
 //! Where a scaffolded nanoflow goes: a method of a TypeScript service of the
 //! frontend, `frontend/src/services/<module>/<subject>Service.ts`, placed the
-//! way the importer places an imported one. Rust pages call it by the name
-//! `src/ui/nanoflows/<module>/in_frontend.rs` gives it.
+//! way the importer places an imported one.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -227,24 +226,4 @@ fn import_lines(words: &BTreeSet<String>) -> Vec<String> {
     lines.extend(words.iter().map(|word| format!("  {word},")));
     lines.push("} from \"@/mxrs/flows\";".to_string());
     lines
-}
-
-/// Names `name` in the module's `in_frontend.rs` for Rust pages: the line
-/// to add to its `mxrs::frontend_flows!`, or the whole file.
-pub(crate) fn marker_line(name: &str) -> String {
-    format!("    nanoflow {name};")
-}
-
-/// `source` of an `in_frontend.rs` naming `name` too.
-pub(crate) fn add_marker(source: &str, name: &str) -> Option<String> {
-    let closing = source.rfind("\n}")?;
-    let line = marker_line(name);
-    if source.contains(&format!("{line}\n")) {
-        return Some(source.to_string());
-    }
-    Some(format!(
-        "{}\n{line}{}",
-        &source[..closing],
-        &source[closing..]
-    ))
 }

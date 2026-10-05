@@ -1392,8 +1392,9 @@ fn add_microflow(
     )
 }
 
-/// Adds a nanoflow to the frontend's services and names it for Rust pages
-/// in the module's `in_frontend.rs`.
+/// Adds a nanoflow to the frontend's services. Nothing names it in Rust:
+/// a page of the frontend calls it by its own name, and a Rust page that
+/// should call it says so in its module's `in_frontend.rs`.
 fn add_frontend_nanoflow(
     transaction: &mut Transaction,
     root: &Path,
@@ -1401,26 +1402,7 @@ fn add_frontend_nanoflow(
     method: &crate::nanoflow::NanoflowMethod,
     entities: &[String],
 ) -> Result<()> {
-    crate::nanoflow::add_nanoflow(transaction, root, module_name, method, entities)?;
-    // A project whose Rust pages call the frontend's nanoflows names them
-    // in `in_frontend.rs`; the new one joins the names it already has. A
-    // page of the frontend calls a nanoflow by its own name.
-    let path = root
-        .join("src/ui/nanoflows")
-        .join(snake_case(module_name))
-        .join("in_frontend.rs");
-    match transaction.content(&path)? {
-        Some(source) => {
-            let source = crate::nanoflow::add_marker(&source, &method.name).ok_or_else(|| {
-                ScaffoldError::InvalidProjectSource {
-                    path: path.display().to_string(),
-                    reason: "its `mxrs::frontend_flows!` does not close".to_string(),
-                }
-            })?;
-            transaction.write(&path, source)
-        }
-        None => Ok(()),
-    }
+    crate::nanoflow::add_nanoflow(transaction, root, module_name, method, entities)
 }
 
 fn create_concept_file(

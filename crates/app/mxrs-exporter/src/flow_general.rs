@@ -246,6 +246,15 @@ impl Converter<'_> {
         Ok(binding)
     }
 
+    /// The variable a call declares for its result. A call to what returns
+    /// nothing stores a name all the same — the one Studio Pro proposes,
+    /// `Variable` — and declares nothing, so a flow may hold several of
+    /// them: the name is stated with the call, and only the first is a
+    /// binding.
+    fn result(scope: &Scope, keeps: bool, name: &str) -> Option<String> {
+        (keeps && !scope.contains_key(name)).then(|| name.to_string())
+    }
+
     fn entity(&self, name: &str) -> String {
         match crate::flow_export::marker(name) {
             Some(marker) if self.model.entities.contains(name) => format!("Ref::<{marker}>::new()"),
@@ -935,7 +944,7 @@ impl Converter<'_> {
                 Statement {
                     document,
                     lines: call_with_closure(head, closure("call", lines)),
-                    declares: keeps.then(|| result.to_string()),
+                    declares: Self::result(scope, keeps, result),
                 }
             }
             "Microflows$JavaActionCallAction" => {
@@ -1025,7 +1034,7 @@ impl Converter<'_> {
                 Statement {
                     document,
                     lines: call_with_closure(head, closure("call", lines)),
-                    declares: keeps.then(|| result.to_string()),
+                    declares: Self::result(scope, keeps, result),
                 }
             }
             "Microflows$NanoflowCallAction" => {
@@ -1082,7 +1091,7 @@ impl Converter<'_> {
                 Statement {
                     document,
                     lines: call_with_closure(head, closure("call", lines)),
-                    declares: keeps.then(|| result.to_string()),
+                    declares: Self::result(scope, keeps, result),
                 }
             }
             "Microflows$JavaScriptActionCallAction" => {
@@ -1172,7 +1181,7 @@ impl Converter<'_> {
                 Statement {
                     document,
                     lines: call_with_closure(head, closure("call", lines)),
-                    declares: keeps.then(|| result.to_string()),
+                    declares: Self::result(scope, keeps, result),
                 }
             }
             "Microflows$ShowMessageAction" => {

@@ -16,6 +16,12 @@ export interface MxObject<E extends string> {
   readonly __object: E;
 }
 
+/**
+ * The object an activity works on. A parameter the caller may leave out
+ * (`order?: MxObject<...>`) holds none, as any variable of a flow may.
+ */
+type AnObject = MxObject<string> | undefined;
+
 /** A list of objects of the entity `E`; a `for...of` goes over them. */
 export interface MxList<E extends string> extends Iterable<MxObject<E>> {
   readonly __list: E;
@@ -110,7 +116,7 @@ export function createObject<E extends string>(
 }
 
 export function changeObject(
-  object: MxObject<string>,
+  object: AnObject,
   members?: Members,
   options?: { commit?: boolean | "withoutEvents"; refresh?: boolean },
 ): Promise<void> {
@@ -119,7 +125,7 @@ export function changeObject(
 }
 
 export function commitObject(
-  object: MxObject<string> | MxList<string>,
+  object: AnObject | MxList<string>,
   options?: { withEvents?: boolean; refresh?: boolean },
 ): Promise<void> {
   void [object, options];
@@ -127,7 +133,7 @@ export function commitObject(
 }
 
 export function deleteObject(
-  object: MxObject<string> | MxList<string>,
+  object: AnObject | MxList<string>,
   options?: { refresh?: boolean },
 ): Promise<void> {
   void [object, options];
@@ -135,7 +141,7 @@ export function deleteObject(
 }
 
 export function rollbackObject(
-  object: MxObject<string> | MxList<string>,
+  object: AnObject | MxList<string>,
   options?: { refresh?: boolean },
 ): Promise<void> {
   void [object, options];
@@ -161,7 +167,7 @@ export function retrieve<E extends string>(
 ): Promise<MxList<E>>;
 /** What an object is associated with: `{ by: "Module.Association" }`. */
 export function retrieve(
-  object: MxObject<string>,
+  object: AnObject,
   options: { by: string; name?: string },
 ): Promise<MxResult>;
 export function retrieve(from: unknown, options?: unknown): Promise<MxResult> {
