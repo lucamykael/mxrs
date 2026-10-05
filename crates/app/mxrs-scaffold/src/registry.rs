@@ -111,6 +111,16 @@ pub fn destroy(root: impl AsRef<Path>, key: &str) -> Result<RegisteredScaffold> 
     for file in &files {
         std::fs::remove_file(file).map_err(|error| io_error(file, error))?;
     }
+    // A page leaves the navigation with the item its scaffold gave it,
+    // while that is still the line the scaffold wrote.
+    if let Some(page) = key.strip_prefix("page:") {
+        let navigation = root.join("frontend/src/navigation/index.ts");
+        if let Ok(source) = std::fs::read_to_string(&navigation)
+            && let Some(edited) = crate::forms::remove_navigation_item(&source, page)
+        {
+            std::fs::write(&navigation, edited).map_err(|error| io_error(&navigation, error))?;
+        }
+    }
     let document = serde_json::json!({ "scaffolds": payload });
     let mut text =
         serde_json::to_string_pretty(&document).map_err(|error| serialization(&path, &error))?;

@@ -270,7 +270,7 @@ fn project_files(
         (
             "src/lib.rs",
             format!(
-                "pub mod domain;\npub mod infrastructure;\npub mod services;\npub mod ui;\n\n#[mxrs::application(version = {version})]\npub struct Application;\n"
+                "pub mod domain;\npub mod infrastructure;\npub mod services;\n\n#[mxrs::application(version = {version})]\npub struct Application;\n"
             ),
         ),
         ("src/domain/mod.rs", templates::domain_layer()),
@@ -283,7 +283,6 @@ fn project_files(
             templates::module_declaration("Main"),
         ),
         ("src/services/mod.rs", templates::services_layer()),
-        ("src/ui/mod.rs", templates::ui_layer()),
         (
             "src/infrastructure/mod.rs",
             templates::infrastructure_layer(),
@@ -629,7 +628,7 @@ mod tests {
         generate_project(&ProjectScaffold::new("Demo", "11.12.1", &destination)).unwrap();
 
         let crate_root = std::fs::read_to_string(destination.join("src/lib.rs")).unwrap();
-        for layer in ["services", "domain", "infrastructure", "ui"] {
+        for layer in ["services", "domain", "infrastructure"] {
             assert!(
                 crate_root.contains(&format!("pub mod {layer};")),
                 "{layer} is not a public top-level module: {crate_root}"
@@ -640,9 +639,9 @@ mod tests {
         // outward to apply another.
         assert_eq!(
             crate_root,
-            "pub mod domain;\npub mod infrastructure;\npub mod services;\npub mod ui;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
+            "pub mod domain;\npub mod infrastructure;\npub mod services;\n\n#[mxrs::application(version = \"11.12.1\")]\npub struct Application;\n"
         );
-        for layer in ["domain", "services", "infrastructure", "ui"] {
+        for layer in ["domain", "services", "infrastructure"] {
             let source =
                 std::fs::read_to_string(destination.join(format!("src/{layer}/mod.rs"))).unwrap();
             for composing in ["fn build", "fn apply", "ProjectDecl", "crate::"] {
@@ -666,13 +665,11 @@ mod tests {
             home.contains("export default page(\n  \"Main\",") && home.contains("name=\"Home\""),
             "{home}"
         );
-        assert!(!destination.join("src/ui/pages").exists());
-        assert!(!destination.join("src/ui/layouts").exists());
+        // Nothing of the user interface is Rust's: there is no `ui` layer.
+        assert!(!destination.join("src/ui").exists());
         // The navigation is the frontend's, beside the application that
         // renders it.
         assert!(read("frontend/src/navigation/index.ts").contains("homePage: \"Main.Home\""));
-        assert!(!destination.join("src/ui/navigation.rs").exists());
-        assert!(!read("src/ui/mod.rs").contains("pub mod navigation;"));
 
         // There is no module tree at all: the authored tree is layer-first,
         // and a concept grows a folder for a module when the first artifact
@@ -706,7 +703,6 @@ mod tests {
             "src/infrastructure/mod.rs",
             "src/lib.rs",
             "src/main.rs",
-            "src/ui/mod.rs",
             // The home page and its layout are the frontend's, with the
             // elements they are written with.
             "frontend/src/components/layout/main/ApplicationLayout.tsx",

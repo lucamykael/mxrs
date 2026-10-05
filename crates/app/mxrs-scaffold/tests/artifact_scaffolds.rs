@@ -631,7 +631,6 @@ fn a_migrated_pre_layered_project_compiles_and_accepts_new_layered_scaffolds() {
     .unwrap();
     let domain = std::fs::read(root.join("src/domain/mod.rs")).unwrap();
     std::fs::remove_dir_all(root.join("src/services")).unwrap();
-    std::fs::remove_dir_all(root.join("src/ui")).unwrap();
     // Nor has it a frontend declaring the navigation.
     std::fs::remove_dir_all(root.join("frontend")).unwrap();
     std::fs::write(
@@ -1049,5 +1048,60 @@ fn a_scaffolded_nanoflow_joins_its_service_without_touching_other_imports() {
             "import { OtherService } from \"@/services/main/otherService\";\nimport { closePage, nanoflowService, type MxObject } from \"@/mxrs/flows\";\n"
         ) && source.contains("@nanoflow ACT_Refresh\n"),
         "{source}"
+    );
+}
+
+/// What a page shares with the module's other pages outlives it: the layout
+/// is a scaffold of its own, the elements are the project's, and the page
+/// takes only its own file and its navigation item with it.
+#[test]
+fn destroying_a_page_leaves_what_other_pages_are_written_with() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    let navigation = root.join("frontend/src/navigation/index.ts");
+    let fresh = std::fs::read_to_string(&navigation).unwrap();
+    scaffold(&root, ArtifactKind::Page, "Sales.Plain");
+    scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Dash", &root)
+            .page_template(Some("dashboard".to_string())),
+    )
+    .unwrap();
+    let layout = root.join("frontend/src/components/layout/sales/ApplicationLayout.tsx");
+    let elements = root.join("frontend/src/mxrs/elements.ts");
+    let keys: Vec<String> = registry::entries(&root)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect();
+    assert!(
+        keys.contains(&"layout:Sales.ApplicationLayout".to_string()),
+        "{keys:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&navigation)
+            .unwrap()
+            .contains("page: \"Sales.Dash\"")
+    );
+
+    registry::destroy(&root, "page:Sales.Plain").unwrap();
+    assert!(!root.join("frontend/src/pages/sales/Plain.tsx").exists());
+    assert!(layout.is_file() && elements.is_file());
+    registry::destroy(&root, "page:Sales.Dash").unwrap();
+    assert!(!root.join("frontend/src/pages/sales/Dash.tsx").exists());
+    assert!(layout.is_file() && elements.is_file());
+    // The item the page added to the navigation went with it.
+    assert_eq!(std::fs::read_to_string(&navigation).unwrap(), fresh);
+
+    // A name a file system may not tell from a page's is not a new page.
+    scaffold(&root, ArtifactKind::Page, "Sales.Plain");
+    let again = scaffold_artifact(&ArtifactScaffold::new(
+        ArtifactKind::Page,
+        "Sales.plain",
+        &root,
+    ));
+    assert!(
+        matches!(&again, Err(ScaffoldError::FileExists(_))),
+        "{again:?}"
     );
 }

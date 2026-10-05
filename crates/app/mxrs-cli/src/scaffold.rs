@@ -186,6 +186,7 @@ fn render(outcome: &ScaffoldOutcome, json: bool) {
                 "dry_run": outcome.dry_run,
                 "files": paths(&outcome.files),
                 "updated": paths(&outcome.updated),
+                "notes": outcome.notes,
             }))
             .expect("a scaffold outcome is serializable")
         );
@@ -201,6 +202,9 @@ fn render(outcome: &ScaffoldOutcome, json: bool) {
     }
     for file in &outcome.updated {
         println!("  update  {}", file.display());
+    }
+    for note in &outcome.notes {
+        println!("  note    {note}");
     }
     println!("\nDone. Run:\n  {BUILD_HINT}");
 }

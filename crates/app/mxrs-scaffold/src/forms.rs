@@ -79,6 +79,13 @@ pub(crate) fn declare(
             None => forms::render_elements(&Shapes::default()),
         };
         text.push_str(&extension.elements);
+        // What a build will read is this text: it declares what the forms
+        // below were written with, or nothing is written.
+        match forms::read_elements(&text, elements_path) {
+            Ok(read) if read == extension.vocabulary.shapes => {}
+            Ok(_) => return Err(invalid(elements_path, "its elements read back differently")),
+            Err(error) => return Err(invalid(elements_path, error)),
+        }
         declared.elements = Some(text);
     }
     for widget in &extension.widgets {
@@ -130,23 +137,43 @@ pub(crate) fn add_forms(
         }
     }
     let declared = declare(elements.as_deref(), &widgets, stored)?;
+    // The elements and the widgets are the project's vocabulary: every
+    // page is written with them, so no scaffold owns them.
     if let Some(text) = declared.elements {
         if elements.is_some() {
             transaction.write(&elements_path, text)?;
         } else {
             transaction.create(&elements_path, text)?;
+            transaction.owned_elsewhere(None, &elements_path);
         }
     }
-    for (file, text) in declared.widgets.into_iter().chain(declared.forms) {
+    for (file, text) in declared.widgets {
+        let path = source.join(file);
+        transaction.create(&path, text)?;
+        transaction.owned_elsewhere(None, path);
+    }
+    for (file, text) in declared.forms {
         transaction.create(source.join(file), text)?;
     }
     Ok(())
 }
 
+/// The Mendix version whose way of storing a page mxrs knows.
+pub(crate) const KNOWN_VERSION: &str = "11.12.1";
+
+/// Whether mxrs knows how Mendix `version` stores a page.
+pub(crate) fn knows(version: &str) -> bool {
+    mxrs_forms::Catalog::for_version(version).is_ok()
+}
+
 fn catalog(version: &str) -> Result<Rc<mxrs_forms::Catalog>> {
     mxrs_forms::Catalog::for_version(version)
         .map(Rc::new)
-        .map_err(|error| ScaffoldError::InvalidVersion(format!("{version}: {error}")))
+        .map_err(|_| {
+            ScaffoldError::InvalidVersion(format!(
+                "{version}: a project's first pages are written the way Mendix {KNOWN_VERSION} stores them, the one version mxrs knows that for"
+            ))
+        })
 }
 
 /// The document the model stores for `page`.
@@ -363,54 +390,121 @@ pub(crate) fn templated_page(
     page
 }
 
-/// `source` of a `frontend/src/navigation/index.ts` with an item for
-/// `page` added to the items of its Responsive profile — the first profile
-/// when none is named that. `None` when the file does not declare its
-/// profiles the way an import or `mxrs new` writes them.
-pub(crate) fn add_navigation_item(source: &str, caption: &str, page: &str) -> Option<String> {
-    let item = format!(
+fn navigation_item(caption: &str, page: &str) -> String {
+    format!(
         "{{ caption: {}, page: {}, icon: {{ glyph: \"file\" }} }},",
         serde_json::Value::String(caption.to_string()),
         serde_json::Value::String(page.to_string())
-    );
-    let profile = source
-        .find("name: \"Responsive\"")
-        .or_else(|| source.find("name: "))?;
-    // The profile's own text: from its name to the brace that closes it.
-    let opened = source[..profile].rfind('{')?;
-    let indent = source[..opened]
-        .rsplit('\n')
-        .next()
-        .filter(|line| line.trim().is_empty())?
-        .len();
-    let closing = format!("\n{}}}", " ".repeat(indent));
-    let end = profile + source[profile..].find(&closing)?;
-    let inner = " ".repeat(indent + 2);
-    let body = &source[profile..end];
-    if let Some(items) = body.find("items: [") {
-        let at = profile + items + "items: [".len();
-        // A list written on one line has no place for another line.
-        if !source[at..].starts_with('\n') {
-            if !source[at..].starts_with(']') {
-                return None;
-            }
-            return Some(format!(
-                "{}\n{inner}  {item}\n{inner}{}",
-                &source[..at],
-                &source[at..]
-            ));
-        }
-        return Some(format!(
-            "{}\n{inner}  {item}{}",
-            &source[..at],
-            &source[at..]
-        ));
+    )
+}
+
+/// Whether `source` is a navigation a build reads.
+fn reads_as_navigation(source: &str) -> bool {
+    let Ok(directory) = tempfile::tempdir() else {
+        return false;
+    };
+    let folder = directory.path().join("src/navigation");
+    std::fs::create_dir_all(&folder).is_ok()
+        && std::fs::write(folder.join("index.ts"), source).is_ok()
+        && mxrs_frontend::read_frontend(directory.path())
+            .is_ok_and(|frontend| frontend.navigation.is_some())
+}
+
+/// `source` of a `frontend/src/navigation/index.ts` with an item for
+/// `page` after the items of its Responsive profile; unchanged when the
+/// profile already opens the page. `None` when the file has no Responsive
+/// profile laid out the way an import or `mxrs new` writes one — a line to
+/// each field, its items a line each — or when what the edit gives would
+/// not read as a navigation: the file is its author's then.
+pub(crate) fn add_navigation_item(source: &str, caption: &str, page: &str) -> Option<String> {
+    if source.contains('\r') {
+        return None;
     }
-    Some(format!(
-        "{}\n{inner}items: [\n{inner}  {item}\n{inner}],{}",
-        &source[..end],
-        &source[end..]
-    ))
+    let lines: Vec<&str> = source.split('\n').collect();
+    let named = lines.iter().position(|line| {
+        matches!(
+            line.trim().trim_end_matches(','),
+            "name: \"Responsive\"" | "name: 'Responsive'"
+        )
+    })?;
+    // The profile's own lines: its fields are indented as its name is, and
+    // the brace that closes it stands two columns before them.
+    let indent = lines[named].len() - lines[named].trim_start().len();
+    let inner = " ".repeat(indent);
+    let closing = format!("{}}}", " ".repeat(indent.checked_sub(2)?));
+    let end = named
+        + lines[named..]
+            .iter()
+            .position(|line| line.trim_end_matches(',') == closing)?;
+    let start = lines[..named]
+        .iter()
+        .rposition(|line| line.len() - line.trim_start().len() < indent)?
+        + 1;
+    let opens = serde_json::Value::String(page.to_string()).to_string();
+    if lines[start..end]
+        .iter()
+        .any(|line| line.contains(&format!("page: {opens}")))
+    {
+        return Some(source.to_string());
+    }
+    let item = format!("{inner}  {}", navigation_item(caption, page));
+    let field = |text: &str| {
+        lines[start..end]
+            .iter()
+            .position(|line| line.strip_prefix(inner.as_str()) == Some(text))
+            .map(|index| start + index)
+    };
+    let mut edited: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+    if let Some(items) = field("items: [") {
+        // The item goes after the last of the profile's own items.
+        let close = items
+            + lines[items..end]
+                .iter()
+                .position(|line| line.strip_prefix(inner.as_str()) == Some("],"))?;
+        edited.insert(close, item);
+    } else if let Some(items) = field("items: [],") {
+        edited.splice(
+            items..=items,
+            [format!("{inner}items: ["), item, format!("{inner}],")],
+        );
+    } else if lines[start..end]
+        .iter()
+        .any(|line| line.trim_start().starts_with("items:"))
+    {
+        return None;
+    } else {
+        edited.splice(
+            end..end,
+            [format!("{inner}items: ["), item, format!("{inner}],")],
+        );
+    }
+    let edited = edited.join("\n");
+    reads_as_navigation(&edited).then_some(edited)
+}
+
+/// `source` without the item a scaffold added for `page`, when it is still
+/// the line the scaffold wrote.
+pub(crate) fn remove_navigation_item(source: &str, page: &str) -> Option<String> {
+    let opens = format!(
+        "page: {}, icon: {{ glyph: \"file\" }} }},",
+        serde_json::Value::String(page.to_string())
+    );
+    let lines: Vec<&str> = source.split('\n').collect();
+    let at = lines.iter().position(|line| {
+        let line = line.trim();
+        line.starts_with("{ caption: ") && line.ends_with(&opens)
+    })?;
+    let mut kept = lines;
+    kept.remove(at);
+    // An `items` the scaffold opened for it alone closes with it.
+    if at > 0
+        && kept[at - 1].trim() == "items: ["
+        && kept.get(at).is_some_and(|line| line.trim() == "],")
+    {
+        kept.drain(at - 1..=at);
+    }
+    let edited = kept.join("\n");
+    reads_as_navigation(&edited).then_some(edited)
 }
 
 #[cfg(test)]
@@ -430,15 +524,40 @@ mod tests {
         let twice = add_navigation_item(&once, "Invoices", "Sales.Invoices").unwrap();
         assert!(
             twice.contains(
-                "      items: [\n        { caption: \"Invoices\", page: \"Sales.Invoices\", icon: { glyph: \"file\" } },\n        { caption: \"Orders\", page: \"Sales.Orders\", icon: { glyph: \"file\" } },\n      ],\n"
+                "      items: [\n        { caption: \"Orders\", page: \"Sales.Orders\", icon: { glyph: \"file\" } },\n        { caption: \"Invoices\", page: \"Sales.Invoices\", icon: { glyph: \"file\" } },\n      ],\n"
             ),
             "{twice}"
         );
-        // A file written another way is left for its author.
+        // Said twice, it is there once; taken out, the file is as it was.
         assert_eq!(
-            add_navigation_item("export default {};\n", "A", "M.P"),
-            None
+            add_navigation_item(&twice, "Orders again", "Sales.Orders").as_deref(),
+            Some(twice.as_str())
         );
+        let without = remove_navigation_item(&twice, "Sales.Invoices").unwrap();
+        assert_eq!(without, once);
+        assert_eq!(
+            remove_navigation_item(&without, "Sales.Orders").unwrap(),
+            fresh
+        );
+        // The item is the Responsive profile's, wherever it stands and
+        // however its name is quoted — and nothing a comment says.
+        let several = "export default {\n  profiles: [\n    {\n      name: \"Phone\",\n      kind: \"Phone\",\n    },\n    {\n      name: 'Responsive',\n      // items: [\n      homePage: \"Main.Home\",\n    },\n  ],\n};\n";
+        let added = add_navigation_item(several, "Orders", "Sales.Orders").unwrap();
+        assert!(
+            added.contains(
+                "      homePage: \"Main.Home\",\n      items: [\n        { caption: \"Orders\", page: \"Sales.Orders\", icon: { glyph: \"file\" } },\n      ],\n    },\n  ],\n};\n"
+            ),
+            "{added}"
+        );
+        // A file written another way is left for its author.
+        for other in [
+            "export default {};\n",
+            "export default {\n  profiles: [\n    {\n      name: \"Phone\",\n    },\n    {\n      name: \"Web\",\n    },\n  ],\n};\n",
+            "export default { profiles: [{ name: \"Responsive\", items: [{ caption: \"A\", page: \"M.A\" }] }] };\n",
+            "export default {\r\n  profiles: [\r\n    {\r\n      name: \"Responsive\",\r\n    },\r\n  ],\r\n};\r\n",
+        ] {
+            assert_eq!(add_navigation_item(other, "A", "M.P"), None, "{other}");
+        }
     }
 
     #[test]

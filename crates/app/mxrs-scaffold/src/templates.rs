@@ -17,13 +17,6 @@ pub(crate) fn domain_layer() -> String {
         .to_string()
 }
 
-/// The user-interface layer of a fresh project: empty, because its pages,
-/// layouts, nanoflows and navigation are the frontend's.
-pub(crate) fn ui_layer() -> String {
-    "//! What Rust still declares of the user interface. Pages, layouts,\n//! nanoflows and the navigation are the frontend's: `frontend/src/`.\n"
-        .to_string()
-}
-
 pub(crate) fn services_layer() -> String {
     "//! What the application does: every module's microflows as services, one\n//! folder per Mendix module and one service per subject.\n".to_string()
 }
@@ -654,7 +647,6 @@ mod tests {
             module_registry("main"),
             domain_layer(),
             services_layer(),
-            ui_layer(),
         ] {
             assert!(index.starts_with("//!"), "{index}");
             assert!(!index.contains("fn "), "{index}");

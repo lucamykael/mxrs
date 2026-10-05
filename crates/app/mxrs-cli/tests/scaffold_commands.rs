@@ -426,7 +426,6 @@ fn upgrade_without_a_version_migrates_a_pre_layered_project_and_reports_every_ch
     let directory = tempfile::tempdir().unwrap();
     let root = project(directory.path());
     std::fs::remove_dir_all(root.join("src/services")).unwrap();
-    std::fs::remove_dir_all(root.join("src/ui")).unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
         concat!(

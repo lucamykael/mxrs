@@ -384,6 +384,8 @@ pub struct ScaffoldOutcome {
     pub dry_run: bool,
     pub files: Vec<PathBuf>,
     pub updated: Vec<PathBuf>,
+    /// What the scaffold left for its user to do, and why.
+    pub notes: Vec<String>,
 }
 
 pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> {
@@ -445,10 +447,33 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
 
     let mut files = transaction.created().to_vec();
     let updated = transaction.updated().to_vec();
+    let notes = transaction.notes().to_vec();
     if !options.dry_run {
         let key = format!("{}:{}", options.kind.as_str(), options.name);
-        let recorded = files.clone();
+        // What the scaffold created for the project to keep — the
+        // elements its pages are written with — or for another scaffold to
+        // own — the layout a module's pages share — is not removed with it.
+        let elsewhere = transaction.elsewhere().to_vec();
+        let recorded: Vec<PathBuf> = files
+            .iter()
+            .filter(|file| elsewhere.iter().all(|(_, other)| other != *file))
+            .cloned()
+            .collect();
         let registry_path = registry::stage(&mut transaction, &root, &key, &recorded)?;
+        let mut owners: Vec<&String> = elsewhere
+            .iter()
+            .filter_map(|(owner, _)| owner.as_ref())
+            .collect();
+        owners.sort();
+        owners.dedup();
+        for owner in owners {
+            let owned: Vec<PathBuf> = elsewhere
+                .iter()
+                .filter(|(other, _)| other.as_ref() == Some(owner))
+                .map(|(_, file)| file.clone())
+                .collect();
+            registry::stage(&mut transaction, &root, owner, &owned)?;
+        }
         files.retain(|file| file != &registry_path);
         transaction.commit()?;
     }
@@ -458,6 +483,7 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
         dry_run: options.dry_run,
         files,
         updated,
+        notes,
     })
 }
 
@@ -926,9 +952,8 @@ fn create_module_security(
 /// A `--template`/`--chain` page is not one file but a slice: optionally a
 /// backing entity and loader, the refresh flow(s) the chain names, and the
 /// page itself. Mirrors mxrb's `scaffold_templated_page`/`page_support_specs`.
-/// The page's own file also declares its navigation item, which extends the
-/// Responsive profile rather than replacing its home page or any items the
-/// application already declared.
+/// The page is the frontend's, and joins the items of the Responsive
+/// profile its navigation declares, after the ones already there.
 fn create_page_slice(
     transaction: &mut Transaction,
     root: &Path,
@@ -1002,7 +1027,6 @@ fn create_page_slice(
             templates::RefreshAction::Microflow
         }
     });
-    let _ = (&stem, refresh_service);
     let page = crate::forms::templated_page(
         module_name,
         artifact_name,
@@ -1015,25 +1039,45 @@ fn create_page_slice(
     // The page joins the navigation the frontend declares, when it
     // declares one the way an import or `mxrs new` writes it.
     let navigation = root.join("frontend/src/navigation/index.ts");
-    if let Some(source) = transaction.content(&navigation)? {
-        match crate::forms::add_navigation_item(
-            &source,
-            &templates::humanize(artifact_name),
-            &format!("{module_name}.{artifact_name}"),
-        ) {
-            Some(source) => transaction.write(&navigation, source)?,
-            None => eprintln!(
-                "[mxrs] note: {} is not laid out the way mxrs writes it; add {module_name}.{artifact_name} to its items yourself",
-                navigation.display()
-            ),
+    let qualified = format!("{module_name}.{artifact_name}");
+    match transaction.content(&navigation)? {
+        Some(source) => {
+            match crate::forms::add_navigation_item(
+                &source,
+                &templates::humanize(artifact_name),
+                &qualified,
+            ) {
+                Some(source) => transaction.write(&navigation, source)?,
+                None => transaction.note(format!(
+                    "{} has no Responsive profile laid out the way mxrs writes one: add {qualified} to its items yourself",
+                    navigation.display()
+                )),
+            }
         }
+        None => transaction.note(format!(
+            "the frontend declares no navigation ({} is absent): add {qualified} to the project's navigation yourself",
+            navigation.display()
+        )),
     }
     Ok(())
 }
 
-/// The Mendix version the project's forms are stored for.
-fn forms_version(root: &Path) -> Result<String> {
-    declared_version(root)?.ok_or(ScaffoldError::MissingVersionDeclaration)
+/// The Mendix version the project's forms are written for: its own where
+/// mxrs knows how that version stores a page, and the one it knows
+/// otherwise — said, because the page may then need Studio Pro's eye.
+fn forms_version(transaction: &mut Transaction, root: &Path) -> Result<String> {
+    let version = declared_version(root)?.ok_or(ScaffoldError::MissingVersionDeclaration)?;
+    if crate::forms::knows(&version) {
+        return Ok(version);
+    }
+    let note = format!(
+        "pages are written the way Mendix {} stores them; this project is {version}",
+        crate::forms::KNOWN_VERSION
+    );
+    if !transaction.notes().contains(&note) {
+        transaction.note(note);
+    }
+    Ok(crate::forms::KNOWN_VERSION.to_string())
 }
 
 /// Declares `page` in the frontend: `frontend/src/pages/<module>/`.
@@ -1043,7 +1087,28 @@ fn add_page(
     module_name: &str,
     page: &mxrs_ir::page::PageDecl,
 ) -> Result<()> {
-    let document = crate::forms::page_document(&forms_version(root)?, page)?;
+    // A page the project already declares — in Rust, or in the frontend
+    // under a name a file system may not tell from this one — is not
+    // declared again.
+    let stem = snake_case(module_name);
+    let rust = root.join(format!("src/ui/pages/{stem}/{}.rs", snake_case(&page.name)));
+    if transaction.content(&rust)?.is_some() {
+        return Err(ScaffoldError::FileExists(rust.display().to_string()));
+    }
+    let folder = root.join("frontend/src/pages").join(&stem);
+    if let Ok(entries) = std::fs::read_dir(&folder) {
+        for entry in entries.flatten() {
+            let existing = entry.path();
+            let same = existing
+                .file_stem()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(&page.name));
+            if same {
+                return Err(ScaffoldError::FileExists(existing.display().to_string()));
+            }
+        }
+    }
+    let version = forms_version(transaction, root)?;
+    let document = crate::forms::page_document(&version, page)?;
     crate::forms::add_forms(transaction, root, &[(module_name, document)])
 }
 
@@ -1247,8 +1312,16 @@ fn ensure_module_layout(
         return Ok(());
     }
     let layout = crate::forms::application_layout(LAYOUT_PARAMETER);
-    let document = crate::forms::layout_document(&forms_version(root)?, &layout)?;
-    crate::forms::add_forms(transaction, root, &[(module_name, document)])
+    let version = forms_version(transaction, root)?;
+    let document = crate::forms::layout_document(&version, &layout)?;
+    crate::forms::add_forms(transaction, root, &[(module_name, document)])?;
+    // The layout is the module's, shared by every page scaffolded into it:
+    // it is its own scaffold, not a part of the page that needed it first.
+    transaction.owned_elsewhere(
+        Some(format!("layout:{module_name}.ApplicationLayout")),
+        declared,
+    );
+    Ok(())
 }
 
 /// Which `<layer>/<concept>` folder a scaffolded artifact lives in. These are
@@ -1554,6 +1627,11 @@ fn require_module(root: &Path, module_name: &str) -> Result<()> {
         "src/services",
         "src/ui/pages",
         "src/ui/nanoflows",
+        // A module may have nothing but what the frontend declares of it.
+        "frontend/src/pages",
+        "frontend/src/services",
+        "frontend/src/components/layout",
+        "frontend/src/components/snippets",
     ]
     .iter()
     .any(|concept| root.join(concept).join(&stem).is_dir());
@@ -1633,8 +1711,8 @@ fn initialize_presentation(
         }
     }
     require_module(root, module_name)?;
-    let document =
-        crate::forms::layout_document(&forms_version(root)?, &crate::forms::presentation_layout())?;
+    let version = forms_version(transaction, root)?;
+    let document = crate::forms::layout_document(&version, &crate::forms::presentation_layout())?;
     crate::forms::add_forms(transaction, root, &[(module_name, document)])
 }
 

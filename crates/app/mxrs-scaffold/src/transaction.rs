@@ -31,6 +31,11 @@ pub(crate) struct Transaction {
     changes: BTreeMap<PathBuf, Change>,
     created: Vec<PathBuf>,
     updated: Vec<PathBuf>,
+    /// Created files this scaffold does not own: the project's, when no
+    /// key is given, or another scaffold's by its key.
+    elsewhere: Vec<(Option<String>, PathBuf)>,
+    /// What the scaffold could not do and leaves to its user.
+    notes: Vec<String>,
 }
 
 impl Transaction {
@@ -120,6 +125,26 @@ impl Transaction {
 
     pub(crate) fn created(&self) -> &[PathBuf] {
         &self.created
+    }
+
+    /// Says that a file this transaction creates is not the running
+    /// scaffold's to remove: it belongs to `owner`, or — without one — to
+    /// the project, which keeps it whatever is destroyed.
+    pub(crate) fn owned_elsewhere(&mut self, owner: Option<String>, path: impl Into<PathBuf>) {
+        self.elsewhere.push((owner, path.into()));
+    }
+
+    /// The created files that belong to another scaffold, by its key.
+    pub(crate) fn elsewhere(&self) -> &[(Option<String>, PathBuf)] {
+        &self.elsewhere
+    }
+
+    pub(crate) fn note(&mut self, note: String) {
+        self.notes.push(note);
+    }
+
+    pub(crate) fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     pub(crate) fn updated(&self) -> &[PathBuf] {

@@ -644,7 +644,10 @@ pub fn extend(vocabulary: &Vocabulary, documents: &[&NativeDocument]) -> Result<
         shape.component = names[&shape.component].clone();
         for field in &mut shape.fields {
             if let FieldDefault::Element(nested) = &mut field.default {
-                *nested = names[nested.as_str()].clone();
+                match names.get(nested.as_str()) {
+                    Some(name) => *nested = name.clone(),
+                    None => field.default = FieldDefault::Value(NativeValue::Null),
+                }
             }
         }
     }

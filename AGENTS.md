@@ -120,8 +120,9 @@ read-only behavioral oracle; never edit it.
   frontend's navigation. A page of the frontend calls a nanoflow by its
   name, so nothing names a scaffolded nanoflow in Rust; `src/ui/` is what
   a project imported earlier still declares there (a Rust page, the
-  `in_frontend.rs` names such pages call nanoflows by), and a fresh
-  project's is empty.
+  `in_frontend.rs` names such pages call nanoflows by, a nanoflow or a
+  navigation its TypeScript could not restate), and a fresh project has
+  none: the layer is declared when it is there, and only then.
 - A declaration is one annotated item in its own file, and it registers
   itself (user directive, 2026-10-01). `#[entity]`/`#[dto]`/`#[view]` on a
   struct, `#[enumeration]`/`#[module_roles]` on an enum, and `#[microflow]`/

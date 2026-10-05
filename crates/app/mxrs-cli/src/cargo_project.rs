@@ -135,7 +135,7 @@ fn unresolved_frontend_references(manifest: &Path, output: &Path) -> Result<Vec<
     let Ok(declared) = mxrs_frontend::read_frontend(&frontend) else {
         return Ok(Vec::new());
     };
-    if declared.nanoflow_origins.is_empty() {
+    if declared.nanoflow_origins.is_empty() && declared.form_origins.is_empty() {
         return Ok(Vec::new());
     }
     let project = mxrs_model::Project::open(output, true)?;
@@ -144,6 +144,28 @@ fn unresolved_frontend_references(manifest: &Path, output: &Path) -> Result<Vec<
     let mut dangling = Vec::new();
     for diagnostic in index.diagnostics() {
         if diagnostic.code != "unresolved_reference" {
+            continue;
+        }
+        // What a page, layout or snippet of the frontend names and the
+        // model lacks is said, not refused: a model may be imported with
+        // such a page, and the build must still be the model it was.
+        let form = [
+            ("page:", "Forms$Page"),
+            ("layout:", "Forms$Layout"),
+            ("snippet:", "Forms$Snippet"),
+        ]
+        .iter()
+        .find_map(|(prefix, kind)| {
+            let rest = diagnostic.message.strip_prefix(prefix)?;
+            let (qualified, what) = rest.split_once(' ')?;
+            let origin = declared.form_origins.get(&format!("{kind} {qualified}"))?;
+            Some(format!(
+                "{origin}: {}{qualified} {what}",
+                prefix.replace(':', " ")
+            ))
+        });
+        if let Some(warning) = form {
+            eprintln!("[mxrs] warning: {warning}");
             continue;
         }
         let Some(rest) = diagnostic.message.strip_prefix("nanoflow:") else {

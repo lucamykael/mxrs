@@ -95,7 +95,7 @@ src/
 │       ├── <published_service>.rs          the route table
 │       └── <resource>_controller.rs        one function per operation
 ├── ui/                                     what Rust still declares of the
-│   │                                       user interface; empty in a fresh project
+│   │                                       user interface; absent from a fresh project
 │   ├── pages/<mendix_module>/<page>.rs     a page an earlier import kept in Rust
 │   └── nanoflows/<mendix_module>/in_frontend.rs  the frontend's nanoflows, named
 │                                           for those pages

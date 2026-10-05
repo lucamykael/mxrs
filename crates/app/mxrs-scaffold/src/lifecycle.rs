@@ -228,7 +228,9 @@ fn layout_from(root: &Path, library: &str) -> ProjectLayout {
         {
             ProjectLayout::PreLayered
         }
-        (true, true) if complete_layered_layout(root, library) => {
+        // The user interface is the frontend's, so a project has a `ui`
+        // layer only while Rust still declares some of it.
+        (true, _) if complete_layered_layout(root, library, ui) => {
             // A `src/modules/` tree is the earlier layered shape. Naming it is
             // what keeps the diagnostic honest: the module is there, the
             // layout moved.
@@ -242,7 +244,8 @@ fn layout_from(root: &Path, library: &str) -> ProjectLayout {
     }
 }
 
-fn complete_layered_layout(root: &Path, library: &str) -> bool {
+fn complete_layered_layout(root: &Path, library: &str, ui: bool) -> bool {
+    let declared = |declaration: &str| library.lines().any(|line| line.trim() == declaration);
     ["src/domain/mod.rs", "src/infrastructure/mod.rs"]
         .iter()
         .all(|relative| root.join(relative).is_file())
@@ -250,10 +253,11 @@ fn complete_layered_layout(root: &Path, library: &str) -> bool {
             "pub mod domain;",
             "pub mod infrastructure;",
             "pub mod services;",
-            "pub mod ui;",
         ]
         .iter()
-        .all(|declaration| library.lines().any(|line| line.trim() == *declaration))
+        .all(|declaration| declared(declaration))
+        // A `ui` layer is declared when it is there, and only then.
+        && declared("pub mod ui;") == ui
         // The application either registers its declarations — the shape
         // `mxrs new` and the importer write — or names the entry point that
         // composes them; both are complete.
