@@ -1719,10 +1719,19 @@ fn flow_item(
         let list = |name: &str, items: Vec<String>| {
             (!items.is_empty()).then(|| format!("{name}({})", items.join(", ")))
         };
+        // A flow relates to what the frontend declares by its name: a
+        // nanoflow there is no Rust item, as a page is none. Rust names one
+        // by a type only where it calls it.
+        let in_frontend = |target: &String| {
+            names
+                .nanoflows
+                .get(target)
+                .is_some_and(|named| named.module_path.ends_with("::in_frontend"))
+        };
         let flow_item = |target: &String| {
             if names.microflows.contains_key(target) {
                 names::microflow(target)
-            } else if names.nanoflows.contains_key(target) {
+            } else if names.nanoflows.contains_key(target) && !in_frontend(target) {
                 names::nanoflow(target)
             } else {
                 rust_string(target)

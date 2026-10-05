@@ -397,7 +397,6 @@ fn import_cargo_project_inner(
     for directory in [
         destination.join("src/domain"),
         controllers_directory.clone(),
-        destination.join("src/ui"),
         infrastructure_directory.join("adapters"),
         infrastructure_directory.join("generated"),
     ] {
@@ -425,6 +424,10 @@ fn import_cargo_project_inner(
         &documents_export.derived_enumerations,
         java_macros,
         &frontend_nanoflows.declared,
+        // The frontend's nanoflows are named in Rust only for what Rust
+        // still declares of the user interface: a page, or a nanoflow its
+        // TypeScript could not restate. A service relates to them by name.
+        !converted_pages.is_empty() || converted_flows.iter().any(|flow| flow.is_nanoflow()),
         &mut generated_modules,
     );
     let microflow_files = flow_export::render_files(
@@ -611,6 +614,7 @@ fn import_cargo_project_inner(
     let has_packages = generated_modules
         .values()
         .any(|module| module.root == ModuleRoot::Package);
+    prune_frontend_names(&mut generated_modules);
     let authored_layers = write_modules_layer(destination, &generated_modules)?;
     // The services layer is always there, as `domain` is: a project with no
     // microflow yet still has the place its first one goes.
@@ -638,7 +642,7 @@ fn import_cargo_project_inner(
     write_text(
         &destination.join("src/lib.rs"),
         &format!(
-            "pub mod controllers;\npub mod domain;\npub mod infrastructure;\n{}{}{}pub mod ui;\n\n#[mxrs::application(version = {})]\npub struct Application;\n",
+            "pub mod controllers;\npub mod domain;\npub mod infrastructure;\n{}{}{}{}\n#[mxrs::application(version = {})]\npub struct Application;\n",
             if has_packages {
                 "pub mod packages;\n"
             } else {
@@ -650,11 +654,20 @@ fn import_cargo_project_inner(
                 ""
             },
             "pub mod services;\n",
+            // The user interface is the frontend's: the layer is there
+            // while Rust still declares some of it, and only then.
+            if authored_layers.contains_key("ui") {
+                "pub mod ui;\n"
+            } else {
+                ""
+            },
             rust_string(&manifest.mendix_version),
         ),
     )?;
     write_text(&destination.join("src/domain/mod.rs"), &domain_source)?;
-    write_text(&destination.join("src/ui/mod.rs"), &ui_source)?;
+    if authored_layers.contains_key("ui") {
+        write_text(&destination.join("src/ui/mod.rs"), &ui_source)?;
+    }
     if let Some(task_queues) = &task_queues_source {
         // The queues services run on are declared beside them.
         let index = destination.join("src/services/mod.rs");
@@ -3201,7 +3214,7 @@ fn generated_readme(
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`: the pages and layouts the model declares, until each moves to the frontend, and the names Rust pages call the frontend's nanoflows by.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `services/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. {navigation_note} Nanoflows are its services: `services/<module>/<subject>Service.ts` holds them as `async` methods in structured TypeScript, in the vocabulary of `mxrs/flows.ts`, which every build reads into the model. Pages, layouts and snippets are its TSX — `pages/<module>/`, `components/layout/<module>/` and `components/snippets/<module>/` — each stating the document the model stores for it with the elements of `mxrs/elements.ts`, which says what every field holds when a page leaves it unsaid, and the pluggable widgets `widgets/` defines.\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; every nanoflow a service of the frontend. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`, when the project has one: what Rust still declares of the user interface — a page, or a nanoflow its TypeScript could not restate — and the names those call the frontend's nanoflows by. A project whose whole interface is the frontend's has no such folder.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. It renders the imported page/widget tree and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `services/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. {navigation_note} Nanoflows are its services: `services/<module>/<subject>Service.ts` holds them as `async` methods in structured TypeScript, in the vocabulary of `mxrs/flows.ts`, which every build reads into the model. Pages, layouts and snippets are its TSX — `pages/<module>/`, `components/layout/<module>/` and `components/snippets/<module>/` — each stating the document the model stores for it with the elements of `mxrs/elements.ts`, which says what every field holds when a page leaves it unsaid, and the pluggable widgets `widgets/` defines.\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; every nanoflow a service of the frontend. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -3269,6 +3282,7 @@ fn model_names<'a>(
     enumerations: &HashMap<String, DerivedEnumeration>,
     java_actions: HashMap<String, names::FlowTarget>,
     frontend: &std::collections::BTreeMap<String, Vec<String>>,
+    name_frontend: bool,
     generated: &mut std::collections::BTreeMap<String, GeneratedModule>,
 ) -> names::ModelNames<'a> {
     let converted_stems: HashMap<(&str, &str, bool), &str> = converted
@@ -3333,6 +3347,9 @@ fn model_names<'a>(
                         .get(module_name)
                         .is_some_and(|names| names.iter().any(|declared| declared == name))
                 {
+                    if !name_frontend {
+                        continue;
+                    }
                     let mut marker = names::flow_marker(name);
                     if !frontend_markers.insert(marker.clone()) {
                         marker = (2..)
@@ -7282,6 +7299,70 @@ struct AuthoredConcept<'a> {
 /// (`domain`, `ui`). A concept is listed only when the writer
 /// created its folder: declaring one that was not written is what makes the
 /// generated crate fail to resolve its own modules.
+/// Keeps, of the names a module gives the frontend's nanoflows, the ones
+/// its project's Rust uses: a page, or a nanoflow still declared there. A
+/// module none of whose names is used has no such file — the frontend
+/// declares its nanoflows, and nothing in Rust needs to say so again.
+fn prune_frontend_names(modules: &mut std::collections::BTreeMap<String, GeneratedModule>) {
+    // Every other generated source, without its imports: a file imports
+    // more than it ends up naming, and what is not named is not used.
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for module in modules.values() {
+        for (stem, source) in module
+            .services
+            .iter()
+            .chain(&module.nanoflows)
+            .chain(&module.pages)
+        {
+            if stem == "in_frontend" {
+                continue;
+            }
+            let (imports, body): (Vec<&str>, Vec<&str>) = source
+                .lines()
+                .partition(|line| line.trim_start().starts_with("use "));
+            sources.push((imports.join("\n"), body.join("\n")));
+        }
+    }
+    // Whether `marker` stands in `body` as a name of its own.
+    let names = |body: &str, marker: &str| {
+        body.match_indices(marker).any(|(at, _)| {
+            let before = body[..at].chars().next_back();
+            let after = body[at + marker.len()..].chars().next();
+            let part_of_a_name =
+                |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            !part_of_a_name(before) && !part_of_a_name(after) && !matches!(before, Some('.' | '"'))
+        })
+    };
+    for (stem, module) in modules.iter_mut() {
+        let Some(at) = module
+            .nanoflows
+            .iter()
+            .position(|(file, _)| file == "in_frontend")
+        else {
+            continue;
+        };
+        let used = |line: &str| {
+            let Some(named) = line.trim().strip_prefix("nanoflow ") else {
+                return true;
+            };
+            let marker = named.split([' ', ';']).next().unwrap_or_default();
+            let import = format!("::{stem}::in_frontend::{marker};");
+            sources
+                .iter()
+                .any(|(imports, body)| imports.contains(&import) && names(body, marker))
+        };
+        let source = &module.nanoflows[at].1;
+        let kept: Vec<&str> = source.lines().filter(|line| used(line)).collect();
+        if kept.iter().any(|line| line.trim().starts_with("nanoflow ")) {
+            let mut text = kept.join("\n");
+            text.push('\n');
+            module.nanoflows[at].1 = text;
+        } else {
+            module.nanoflows.remove(at);
+        }
+    }
+}
+
 type AuthoredLayers = std::collections::BTreeMap<String, Vec<String>>;
 
 /// Records that `layer` holds `concept`.
@@ -9453,11 +9534,9 @@ pub enum ENUMStatus {
         mxrs_writer::write_project(&path, &builder.build()).unwrap();
         let generated = directory.path().join("shop");
         import_cargo_project(&path, &generated, None).unwrap();
-        let ui = std::fs::read_to_string(generated.join("src/ui/nanoflows/sales/mod.rs")).unwrap();
-        assert_eq!(
-            ui,
-            "//! The sales module's nanoflows.\n\npub mod in_frontend;\n"
-        );
+        // Every nanoflow is the frontend's, and nothing in Rust calls one:
+        // none is named there.
+        assert!(!generated.join("src/ui/nanoflows").exists());
         let service = std::fs::read_dir(generated.join("frontend/src/services/sales"))
             .unwrap()
             .flatten()
@@ -9593,7 +9672,7 @@ pub enum ENUMStatus {
             let read = |relative: &str| std::fs::read_to_string(generated.join(relative)).ok();
             (
                 read("frontend/src/navigation/index.ts"),
-                read("src/ui/mod.rs").unwrap(),
+                read("src/ui/mod.rs"),
                 read("README.md").unwrap(),
                 directory,
             )
@@ -9601,7 +9680,8 @@ pub enum ENUMStatus {
 
         let (navigation, ui, readme, _directory) = import(&|_| {});
         assert!(navigation.unwrap().contains("name: \"Responsive\""));
-        assert!(ui.contains("declared in the frontend"), "{ui}");
+        // Nothing of the user interface is Rust's, so it has no layer.
+        assert!(ui.is_none(), "{ui:?}");
         assert!(readme.contains("`src/navigation/index.ts` declares the navigation"));
 
         // Progressive web app settings are nothing the declaration says.
@@ -9620,8 +9700,7 @@ pub enum ENUMStatus {
             );
         });
         assert!(navigation.is_none());
-        assert!(ui.contains("stays in the imported model"), "{ui}");
-        assert!(!ui.contains("pub mod navigation"), "{ui}");
+        assert!(ui.is_none(), "{ui:?}");
         assert!(readme.contains("stays in `model/imported/`"), "{readme}");
     }
 

@@ -90,7 +90,9 @@ read-only behavioral oracle; never edit it.
   the declaration its Rust body declares, and keeps it in Rust otherwise
   (`MXRS_EXPLAIN_FLOWS=1` says why); Rust pages call the frontend's
   nanoflows by the names `src/ui/nanoflows/<module>/in_frontend.rs` gives
-  them (`mxrs::frontend_flows!`). A page, layout or snippet is TSX that
+  them (`mxrs::frontend_flows!`) — only the names Rust uses are there, and
+  a flow relates to a nanoflow of the frontend (`calls`, `used_by`) by its
+  qualified name, as it does to a page. A page, layout or snippet is TSX that
   states the document the model stores for it (`frontend/src/pages/<module>/`,
   `components/layout/<module>/`, `components/snippets/<module>/`): every
   stored document is an element named for its type (`Forms$DivContainer`
