@@ -47,30 +47,7 @@ pub fn return_type_document(return_type: Option<&FlowReturnType>) -> Option<Docu
 /// gets an identity of its own, and every list the marker it was declared
 /// with.
 pub(crate) fn native_document(document: &mxrs_ir::NativeDocument) -> Document {
-    let mut lowered = doc! {
-        "$ID": uuid::Uuid::new_v4().to_string(),
-        "$Type": document.ty.clone(),
-    };
-    for (key, value) in &document.fields {
-        lowered.insert(key.clone(), native_value(value));
-    }
-    lowered
-}
-
-fn native_value(value: &mxrs_ir::NativeValue) -> Bson {
-    use mxrs_ir::NativeValue;
-    match value {
-        NativeValue::Null => Bson::Null,
-        NativeValue::Bool(value) => Bson::Boolean(*value),
-        NativeValue::Int32(value) => Bson::Int32(*value),
-        NativeValue::Int64(value) => Bson::Int64(*value),
-        NativeValue::Text(value) => Bson::String(value.clone()),
-        NativeValue::Document(document) => Bson::Document(native_document(document)),
-        NativeValue::List(marker, items) => Bson::Array(mxrs_bson::build_array(
-            items.iter().map(native_value).collect(),
-            *marker,
-        )),
-    }
+    crate::native::lower(document, &mut |_| uuid::Uuid::new_v4().to_string(), false)
 }
 
 /// Lowers the body of a microflow or, with `nanoflow`, of a nanoflow. The

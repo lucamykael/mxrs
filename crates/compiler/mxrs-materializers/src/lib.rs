@@ -39,7 +39,7 @@ const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "2c663bfdaa1d2c977ac5b56ee296406aa14b341c018cf0422620e56cb7a5aeb4",
+    "10a2c6a611012233ba53a4594d46581d5feca7fb49a6c03f45a0cf9f1058d01a",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -116,6 +116,10 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     (
         "src/mxrs/flows.ts",
         include_bytes!("../frontend/src/mxrs/flows.ts"),
+    ),
+    (
+        "src/mxrs/forms.ts",
+        include_bytes!("../frontend/src/mxrs/forms.ts"),
     ),
     (
         "src/pages/ModelPage.tsx",

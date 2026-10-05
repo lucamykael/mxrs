@@ -655,6 +655,8 @@ pub struct ModuleDecl {
     pub nanoflows: Vec<MicroflowDecl>,
     pub pages: Vec<PageDecl>,
     pub layouts: Vec<LayoutDecl>,
+    /// Pages, layouts and snippets stated as the documents they are.
+    pub forms: Vec<crate::FormDecl>,
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
@@ -735,6 +737,7 @@ impl ProjectDecl {
         target.microflows.extend(declared.microflows);
         target.nanoflows.extend(declared.nanoflows);
         target.pages.extend(declared.pages);
+        target.forms.extend(declared.forms);
         target.layouts.extend(declared.layouts);
         if let Some(roles) = declared.roles {
             target.roles = Some(roles);

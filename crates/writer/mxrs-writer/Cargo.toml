@@ -21,7 +21,7 @@ mxrs-pluggable = { path = "../../model/mxrs-pluggable" }
 mxrs-widget-package = { path = "../../model/mxrs-widget-package" }
 mxrs-schema = { path = "../../model/mxrs-schema" }
 thiserror.workspace = true
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }

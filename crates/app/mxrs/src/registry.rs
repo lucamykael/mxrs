@@ -200,6 +200,7 @@ pub fn apply_with_frontend(
         }
     }
     let origins = frontend.nanoflow_origins;
+    let forms = frontend.forms;
     let mut navigation = frontend.navigation;
     let mut nanoflows = Some(frontend.nanoflows);
     let declarations = declarations(crate_name);
@@ -237,6 +238,38 @@ pub fn apply_with_frontend(
     }
     if let Some(declared) = navigation {
         project.navigation = Some(declared);
+    }
+    add_forms(project, forms)
+}
+
+/// Adds the pages, layouts and snippets the frontend's TSX declares to
+/// their modules; one Rust declares too is declared twice.
+fn add_forms(
+    project: &mut ProjectDecl,
+    forms: Vec<(String, mxrs_ir::FormDecl)>,
+) -> Result<(), mxrs_frontend::FrontendError> {
+    for (module, form) in forms {
+        let declared = project.module_mut(&module);
+        let twice = match form.kind() {
+            "Forms$Page" => declared.pages.iter().any(|page| page.name == form.name()),
+            "Forms$Layout" => declared
+                .layouts
+                .iter()
+                .any(|layout| layout.name == form.name()),
+            _ => false,
+        };
+        if twice {
+            let folder = mxrs_frontend::forms::folder(form.kind()).unwrap_or_default();
+            return Err(mxrs_frontend::FrontendError::Shape {
+                path: format!("frontend/src/{folder}"),
+                line: 1,
+                detail: format!(
+                    "{module}.{} is declared in the frontend and in Rust; keep one",
+                    form.name()
+                ),
+            });
+        }
+        declared.forms.push(form);
     }
     Ok(())
 }

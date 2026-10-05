@@ -2025,6 +2025,15 @@ fn native_value_source(value: &NativeValue) -> Vec<String> {
         NativeValue::Int32(value) => vec![format!("{value}_i32")],
         NativeValue::Int64(value) => vec![format!("{value}_i64")],
         NativeValue::Text(value) => vec![rust_string(value)],
+        NativeValue::Pointer(target) => {
+            vec![format!(
+                "NativeValue::Pointer({}.into())",
+                rust_string(target)
+            )]
+        }
+        NativeValue::Identity(id) => {
+            vec![format!("NativeValue::Identity({}.into())", rust_string(id))]
+        }
         NativeValue::Document(document) => native_source(document),
         NativeValue::List(marker, items) if items.is_empty() => {
             vec![format!("NativeValue::List({marker}, Vec::new())")]
@@ -2038,7 +2047,10 @@ fn native_value_source(value: &NativeValue) -> Vec<String> {
             for item in items {
                 let mut item_lines = native_value_source(item);
                 let last = item_lines.last_mut().expect("a value has a line");
-                if !matches!(item, NativeValue::Null) {
+                if !matches!(
+                    item,
+                    NativeValue::Null | NativeValue::Pointer(_) | NativeValue::Identity(_)
+                ) {
                     last.push_str(".into()");
                 }
                 last.push(',');

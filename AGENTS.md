@@ -90,11 +90,26 @@ read-only behavioral oracle; never edit it.
   the declaration its Rust body declares, and keeps it in Rust otherwise
   (`MXRS_EXPLAIN_FLOWS=1` says why); Rust pages call the frontend's
   nanoflows by the names `src/ui/nanoflows/<module>/in_frontend.rs` gives
-  them (`mxrs::frontend_flows!`). The importer, `mxrs new` and the
-  scaffolds write these files; what has not moved yet (pages, layouts)
-  stays in `src/ui/` until it does, and a page's `#[navigation_item]` joins
-  the frontend's profile. The backend keeps no user-interface folder once
-  the move is complete.
+  them (`mxrs::frontend_flows!`). A page, layout or snippet is TSX that
+  states the document the model stores for it (`frontend/src/pages/<module>/`,
+  `components/layout/<module>/`, `components/snippets/<module>/`): every
+  stored document is an element named for its type (`Forms$DivContainer`
+  is `<DivContainer>`), every field a prop, the widgets it holds its
+  children, texts `{ en_US: "..." }` — nothing is outside the vocabulary,
+  because the vocabulary is the model's own. `src/mxrs/elements.ts`, which
+  the importer writes from the project's own documents and every build
+  reads, says what each field holds when a page leaves it unsaid, so a
+  page states only what differs; a type stored with another set of fields
+  is an element of its own (`DivContainer_2`). A pluggable widget's
+  definition is declared once, in `src/widgets/<Name>.tsx`, and used by
+  that name with its properties by their keys. The importer declares a
+  form there only when its TSX reads back as the stored document, and a
+  build stores a form that says what is stored exactly as it is stored —
+  identities and the order of a widget's properties kept. The importer and
+  `mxrs new` write these files; the scaffolds still write a new page in
+  Rust (`src/ui/`), and a page's `#[navigation_item]` joins the frontend's
+  profile. The backend keeps no user-interface folder once the move is
+  complete.
 - A declaration is one annotated item in its own file, and it registers
   itself (user directive, 2026-10-01). `#[entity]`/`#[dto]`/`#[view]` on a
   struct, `#[enumeration]`/`#[module_roles]` on an enum, and `#[microflow]`/

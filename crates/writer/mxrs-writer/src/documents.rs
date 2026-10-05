@@ -592,7 +592,7 @@ fn caption_document(
 /// The enumeration/page/microflow paths each grew their own copy of this
 /// filter; constants and scheduled events share it rather than adding two
 /// more.
-fn existing_documents_by_name(
+pub(crate) fn existing_documents_by_name(
     mpr: &mut MprFile,
     module_id: &str,
     document_type: &str,

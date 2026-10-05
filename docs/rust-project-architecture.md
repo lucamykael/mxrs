@@ -59,9 +59,10 @@ infrastructure┘   (ports)
   this edge.
 - UI is the user interface the model declares, and it belongs to the
   frontend: its TypeScript is the source every build reads into the model.
-  The navigation and the nanoflows are already there; pages and layouts
-  stay in `src/ui/` until they move. It is not where the application's HTTP surface
-  lives.
+  The navigation, the nanoflows and the model's pages, layouts and
+  snippets are already there; a page the scaffold adds is still Rust, in
+  `src/ui/`, until the scaffolds move too. It is not where the application's
+  HTTP surface lives.
 - Infrastructure implements ports for persistence, runtimes, queues and
   external services.
 - Composition of the *model* needs no module at all: declarations register
@@ -268,12 +269,18 @@ frontend/
     ├── api/                     calls to the Rust runtime (model, actions)
     ├── components/
     │   ├── layout/              header and navigation
+    │   │   └── <module>/        the model's layouts, as TSX
+    │   ├── snippets/<module>/   the model's snippets, as TSX
     │   └── widgets/             one renderer per widget of the model
     ├── hooks/                   the loaded model, the hash route
     ├── mxrs/flows.ts            the vocabulary nanoflows are written in
+    ├── mxrs/forms.ts            what pages are written with
+    ├── mxrs/elements.ts         the project's elements and their defaults
     ├── navigation/index.ts      the project's navigation, read by every build
     ├── services/<module>/       nanoflows: one service per subject
     ├── pages/                   what a route shows
+    │   └── <module>/            the model's pages, as TSX
+    ├── widgets/                 the pluggable widgets' definitions
     ├── types/                   the model as the runtime publishes it, and
     │                            the shapes the declarations are checked against
     ├── utils/                   pure helpers
@@ -357,7 +364,69 @@ page — is text TypeScript cannot check, so `cargo mxrs build` checks it
 against the built model and fails with the file and line of the nanoflow
 that names something the model does not have. A nanoflow
 `in_frontend.rs` names for Rust pages must be one a service declares: one
-renamed or removed in the frontend is refused where Rust still names it. A page that still lives in Rust adds itself to a profile with
+renamed or removed in the frontend is refused where Rust still names it.
+
+A page, a layout and a snippet are TSX that states the document the model
+stores:
+
+```tsx
+// frontend/src/pages/sales/Order_Edit.tsx
+import { ActionButton, Appearance, DivContainer, FormCallArgument, LayoutCall, Page } from "@/mxrs/elements";
+import { page } from "@/mxrs/forms";
+import { Combobox } from "@/widgets/Combobox";
+
+export default page(
+  "Sales",
+  <Page
+    name="Order_Edit"
+    allowedModuleRoles={["Sales.User"]}
+    formCall={
+      <LayoutCall form="Atlas_Core.PopupLayout">
+        <FormCallArgument parameter="Atlas_Core.PopupLayout.Main">
+          <DivContainer name="card" appearance={<Appearance class="card" />}>
+            <Combobox name="status" properties={{ ... }} />
+            <ActionButton name="save" captionTemplate={...} />
+          </DivContainer>
+        </FormCallArgument>
+      </LayoutCall>
+    }
+    title={{ en_US: "Edit order" }}
+  />,
+);
+```
+
+Every stored document is an element named for its type —
+`Forms$DivContainer` is `<DivContainer>` — every field is a prop (`Name` is
+`name`), and the list of widgets a document holds is its children. A text
+is its translations by language code, `named("save")` points at the
+element of that name, and a number is itself. Nothing is outside the
+vocabulary, because the vocabulary is the model's own.
+
+`src/mxrs/elements.ts` is what keeps a page short: for each element, what
+every field holds when a page says nothing about it. The importer writes it
+from the project's own documents — the value most of them give a field,
+once enough of them hold it — and every build reads it, so the file is the
+project's: a default changed there changes every page that leaves the field
+unsaid, and what an unsaid prop means never depends on the version of mxrs.
+A type the model stores with another set of fields, as documents written
+by different versions of Studio Pro are, is an element of its own
+(`DivContainer_2`).
+
+A pluggable widget stores its whole definition with every use. It is
+declared once, in `src/widgets/<Name>.tsx`, and a page uses it by that
+name: the fields of the widget itself as props, and its own properties, by
+their keys, in `properties` — each a `<WidgetValue>` stating what differs
+from the property's default, `missing` for a property this use of the
+widget does not store.
+
+The importer declares a form in the frontend only when its TSX reads back
+as the stored document; any other stays in the imported model
+(`MXRS_EXPLAIN_FLOWS=1` says why). A build stores a form that says what is
+stored exactly as it is stored: each document keeps its identity where the
+declaration still has it, by its place or its name, so what points at a
+widget still finds it, and a widget's properties keep the order they were
+stored in. An element, a prop or a property the vocabulary does not have
+is refused with its file and line. A page that still lives in Rust adds itself to a profile with
 `#[navigation_item]`, and a navigation declared both here and with
 `#[navigation]` is refused.
 

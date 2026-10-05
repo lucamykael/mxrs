@@ -44,6 +44,7 @@ mod flow_parameters;
 pub mod instrumentation;
 pub mod layout_compiler;
 pub mod module;
+mod native;
 mod navigation;
 pub mod page_compiler;
 pub mod project;

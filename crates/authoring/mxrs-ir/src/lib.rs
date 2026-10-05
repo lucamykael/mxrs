@@ -41,6 +41,6 @@ pub use markers::{
     Reference, ReferenceSet,
 };
 pub use page::{
-    ButtonAction, DataSourceDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl, LayoutKind,
-    LayoutRef, PageDecl, PageParameterDecl, WidgetDecl,
+    ButtonAction, DataSourceDecl, FormDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl,
+    LayoutKind, LayoutRef, PageDecl, PageParameterDecl, WidgetDecl,
 };

@@ -260,6 +260,26 @@ impl LayoutDecl {
     }
 }
 
+/// A page, layout or snippet stated whole: the document Mendix stores for
+/// it, without identities. This is what the frontend's TSX declares — every
+/// widget and every option of it, with nothing outside the vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormDecl {
+    pub document: crate::NativeDocument,
+}
+
+impl FormDecl {
+    /// The document's own name; empty when it states none.
+    pub fn name(&self) -> &str {
+        self.document.text("Name").unwrap_or_default()
+    }
+
+    /// What the document is: `Forms$Page`, `Forms$Layout`, `Forms$Snippet`.
+    pub fn kind(&self) -> &str {
+        &self.document.ty
+    }
+}
+
 impl LayoutRef {
     pub fn new(qualified_name: impl Into<String>, parameter: impl Into<String>) -> Self {
         LayoutRef {

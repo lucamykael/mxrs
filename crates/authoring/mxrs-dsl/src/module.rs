@@ -56,6 +56,7 @@ impl ModuleBuilder {
                 nanoflows: vec![],
                 pages: vec![],
                 layouts: vec![],
+                forms: Vec::new(),
                 roles: None,
             },
         }

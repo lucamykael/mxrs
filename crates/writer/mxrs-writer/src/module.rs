@@ -121,6 +121,13 @@ pub fn write_module(
         &decl.pages,
         identity,
     )?;
+    crate::native::synchronize_forms_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.forms,
+        identity,
+    )?;
 
     Ok(())
 }

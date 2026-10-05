@@ -10,7 +10,12 @@
 //! |---|---|
 //! | `src/navigation/index.ts` | the navigation profiles |
 //! | `src/services/**/*.ts` | nanoflows, as methods of `nanoflowService(...)` |
+//! | `src/mxrs/elements.ts`, `src/widgets/*.tsx` | what pages are written with ([`forms`]) |
+//! | `src/pages/<module>/*.tsx` | pages |
+//! | `src/components/layout/<module>/*.tsx` | layouts |
+//! | `src/components/snippets/<module>/*.tsx` | snippets |
 
+pub mod forms;
 mod literal;
 pub mod naming;
 mod nanoflows;
@@ -29,6 +34,8 @@ pub struct FrontendDecl {
     /// Where each of those nanoflows is declared — `file:line` — by its
     /// qualified name.
     pub nanoflow_origins: std::collections::HashMap<String, String>,
+    /// Each page, layout and snippet its TSX declares, with its module.
+    pub forms: Vec<(String, mxrs_ir::FormDecl)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +107,113 @@ pub fn read_frontend(frontend: impl AsRef<Path>) -> Result<FrontendDecl, Fronten
     let services = source.join("services");
     if services.is_dir() {
         (declared.nanoflows, declared.nanoflow_origins) = nanoflows::read_with_origins(&services)?;
+    }
+    declared.forms = read_forms(&source)?;
+    Ok(declared)
+}
+
+/// The `.tsx` files directly in `folder`, in the order of their names.
+fn tsx_files(folder: &Path) -> Result<Vec<std::path::PathBuf>, FrontendError> {
+    let io = |source| FrontendError::Io {
+        path: folder.display().to_string(),
+        source,
+    };
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(folder).map_err(io)? {
+        let path = entry.map_err(io)?.path();
+        if path.is_file() && path.extension().is_some_and(|extension| extension == "tsx") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn read_source(path: &Path) -> Result<String, FrontendError> {
+    std::fs::read_to_string(path).map_err(|source| FrontendError::Io {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+/// The pages, layouts and snippets the frontend's TSX declares: each file
+/// of a module's folder under `pages/`, `components/layout/` and
+/// `components/snippets/`, read with the elements `mxrs/elements.ts`
+/// declares and the widgets `widgets/` defines.
+fn read_forms(source: &Path) -> Result<Vec<(String, mxrs_ir::FormDecl)>, FrontendError> {
+    let mut files = Vec::new();
+    for ty in ["Forms$Layout", "Forms$Snippet", "Forms$Page"] {
+        let folder = source.join(forms::folder(ty).expect("a form has a folder"));
+        if !folder.is_dir() {
+            continue;
+        }
+        let io = |source| FrontendError::Io {
+            path: folder.display().to_string(),
+            source,
+        };
+        let mut modules = Vec::new();
+        for entry in std::fs::read_dir(&folder).map_err(io)? {
+            let path = entry.map_err(io)?.path();
+            if path.is_dir() {
+                modules.push(path);
+            }
+        }
+        modules.sort();
+        for module in modules {
+            files.extend(tsx_files(&module)?.into_iter().map(|file| (ty, file)));
+        }
+    }
+    let elements = source.join("mxrs/elements.ts");
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !elements.is_file() {
+        return Err(FrontendError::Syntax {
+            path: elements.display().to_string(),
+            detail: "it is missing, and the pages are written with the elements it declares"
+                .to_string(),
+        });
+    }
+    let shapes = forms::read_elements(&read_source(&elements)?, &elements.display().to_string())?;
+    let mut widgets = Vec::new();
+    let folder = source.join(forms::WIDGETS_FOLDER);
+    if folder.is_dir() {
+        for file in tsx_files(&folder)? {
+            let path = file.display().to_string();
+            let widget = forms::read_widget(&read_source(&file)?, &path, &shapes)?;
+            if file.file_stem().and_then(|stem| stem.to_str()) != Some(widget.name.as_str()) {
+                return Err(FrontendError::Syntax {
+                    path,
+                    detail: format!("it declares {}, which is not its own name", widget.name),
+                });
+            }
+            widgets.push(widget);
+        }
+    }
+    let vocabulary = forms::Vocabulary { shapes, widgets };
+    let mut declared: Vec<(String, mxrs_ir::FormDecl)> = Vec::new();
+    for (ty, file) in files {
+        let path = file.display().to_string();
+        let (module, form) = forms::read_form(&read_source(&file)?, &path, &vocabulary)?;
+        if form.kind() != ty {
+            return Err(FrontendError::Syntax {
+                path,
+                detail: format!(
+                    "it declares a {}, whose place is src/{}",
+                    form.kind(),
+                    forms::folder(form.kind()).unwrap_or_default()
+                ),
+            });
+        }
+        if declared.iter().any(|(other, known)| {
+            other == &module && known.kind() == form.kind() && known.name() == form.name()
+        }) {
+            return Err(FrontendError::Syntax {
+                path,
+                detail: format!("{module}.{} is declared twice", form.name()),
+            });
+        }
+        declared.push((module, form));
     }
     Ok(declared)
 }

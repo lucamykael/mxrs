@@ -117,6 +117,19 @@ pub enum NativeValue {
     Document(NativeDocument),
     /// A stored list: the marker Mendix prefixes it with, then its items.
     List(i32, Vec<NativeValue>),
+    /// The identity of another document of the same tree, named by where
+    /// that document is from the root: `Type.ObjectType.PropertyTypes[3]`.
+    /// A document says nothing of identities, so one part pointing at
+    /// another says where the other is.
+    Pointer(String),
+    /// A stored identity that names nothing in the tree: a document outside
+    /// it, or — all zeros — nothing at all.
+    Identity(String),
+}
+
+impl NativeValue {
+    /// The identity that points at nothing.
+    pub const NOTHING: &'static str = "00000000-0000-0000-0000-000000000000";
 }
 
 impl From<bool> for NativeValue {
@@ -168,6 +181,30 @@ pub struct NativeDocument {
 }
 
 impl NativeDocument {
+    /// The document a pointer's `path` names from this one: this document
+    /// itself for the empty path.
+    pub fn at(&self, path: &str) -> Option<&NativeDocument> {
+        let Some((head, rest)) = path
+            .split_once('.')
+            .or((!path.is_empty()).then_some((path, "")))
+        else {
+            return Some(self);
+        };
+        let (key, index) = match head.split_once('[') {
+            Some((key, index)) => (key, Some(index.strip_suffix(']')?.parse::<usize>().ok()?)),
+            None => (head, None),
+        };
+        let found = match (self.get(key)?, index) {
+            (NativeValue::List(_, items), Some(index)) => items.get(index)?,
+            (value, None) => value,
+            _ => return None,
+        };
+        match found {
+            NativeValue::Document(document) => document.at(rest),
+            _ => None,
+        }
+    }
+
     pub fn new(ty: impl Into<String>) -> Self {
         Self {
             ty: ty.into(),
