@@ -23,6 +23,9 @@ pub struct PageTemplate {
 
 /// Order is meaningful: it is the order `templates` prints, and categories are
 /// grouped in first-appearance order the way mxrb's `group_by` leaves them.
+/// The template whose page name is an entity's: its overview and edit pages.
+pub const CRUD: &str = "crud";
+
 pub const ENTRIES: &[PageTemplate] = &[
     PageTemplate {
         category: "General",
@@ -47,6 +50,12 @@ pub const ENTRIES: &[PageTemplate] = &[
         name: "form-vertical",
         description: "DataView with vertical inputs and actions",
         data_backed: true,
+    },
+    PageTemplate {
+        category: "Data",
+        name: CRUD,
+        description: "Overview and edit pages of an entity the project declares (named by the entity)",
+        data_backed: false,
     },
 ];
 
@@ -117,8 +126,10 @@ mod tests {
              │   └── blank — Empty responsive content area\n\
              ├── Dashboards\n\
              │   └── dashboard — Header and three responsive cards\n\
-             └── Forms\n    \
-             └── form-vertical — DataView with vertical inputs and actions"
+             ├── Forms\n\
+             │   └── form-vertical — DataView with vertical inputs and actions\n\
+             └── Data\n    \
+             └── crud — Overview and edit pages of an entity the project declares (named by the entity)"
         );
     }
 

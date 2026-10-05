@@ -6,6 +6,7 @@ import {
   Fragment,
   isValidElement,
   useContext,
+  useEffect,
   useState,
   type CSSProperties,
   type ReactElement,
@@ -13,12 +14,14 @@ import {
 } from 'react';
 
 import { invokeAction } from '@/api/actions';
+import { data, type DataObject } from '@/api/data';
 
-import { OfPage, PageTitle, Placeholders, Shell, Sidebar } from './context';
+import { Draft, OfPage, PageTitle, Placeholders, Row, Shell, Sidebar } from './context';
 import {
   child,
   className,
   content,
+  entityOf,
   lastName,
   list,
   plain,
@@ -41,7 +44,9 @@ const held = (source: Source, field: string): ReactNode => {
  * arguments — a page holds no data to give it yet.
  */
 function useAction(source: Source, field: string): (() => void) | undefined {
-  const { open } = useContext(Shell);
+  const { open, changed, fail } = useContext(Shell);
+  const row = useContext(Row);
+  const draft = useContext(Draft);
   const action = child(source, field);
   if (!action) return undefined;
   const settings = (name: string, target: string) => {
@@ -52,12 +57,56 @@ function useAction(source: Source, field: string): (() => void) | undefined {
     const confirmation = asking ? child(asking, 'confirmationInfo') : null;
     const question = confirmation ? text(confirmation, 'question') : '';
     if (question && !window.confirm(question)) return;
-    invokeAction({ kind, handler }, null).catch(console.error);
+    invokeAction({ kind, handler }, null).catch(fail);
   };
+  // The object the widget is in: the one a form is filling, or a list's row.
+  const here = draft?.object ?? row;
   switch (action.type) {
     case 'Forms$FormAction': {
       const page = settings('formSettings', 'form');
-      return page ? () => open(page) : undefined;
+      if (!page) return undefined;
+      // Each parameter the page is given takes the object the button is in.
+      const pageSettings = child(action, 'formSettings');
+      const given: Record<string, DataObject> = {};
+      for (const mapping of pageSettings ? list(pageSettings, 'parameterMappings') : []) {
+        const stated = sourceOf(mapping);
+        if (stated && here) given[lastName(plain(stated, 'parameter', ''))] = here;
+      }
+      return () => open(page, given);
+    }
+    case 'Forms$CreateObjectClientAction': {
+      const entity = entityOf(action);
+      const page = settings('pageSettings', 'form');
+      if (!entity || !page) return undefined;
+      return () => {
+        data<DataObject>('create', { entity })
+          .then((created) => open(page, { [lastName(entity)]: created }))
+          .catch(fail);
+      };
+    }
+    case 'Forms$SaveChangesClientAction': {
+      if (!draft?.object) return undefined;
+      const { entity, id, members } = draft.object;
+      return () => {
+        data('save', { entity, id, members })
+          .then(() => {
+            changed();
+            if (plain(action, 'closePage', true)) history.back();
+          })
+          .catch(fail);
+      };
+    }
+    case 'Forms$DeleteClientAction': {
+      if (!here) return undefined;
+      const { entity, id } = here;
+      return () => {
+        data('delete', { entity, id })
+          .then(() => {
+            changed();
+            if (draft && plain(action, 'closePage', true)) history.back();
+          })
+          .catch(fail);
+      };
     }
     case 'Forms$MicroflowAction': {
       const microflow = settings('microflowSettings', 'microflow');
@@ -276,7 +325,9 @@ const DynamicText: Draw = (source) => {
     | 'h1'
     | 'p'
     | 'span';
-  return <Tag className={className(source, 'mx-text')}>{text(source, 'content')}</Tag>;
+  const row = useContext(Row);
+  const object = useContext(Draft)?.object ?? row;
+  return <Tag className={className(source, 'mx-text')}>{text(source, 'content', object)}</Tag>;
 };
 
 const StaticText: Draw = (source) => (
@@ -302,43 +353,136 @@ const ActionButton: Draw = (source) => {
   );
 };
 
-/** A widget bound to an attribute: its label, and a control of its kind. */
+/** What a control of a form is given: the attribute it fills, its value and how to change it. */
+type Bound = {
+  name: string;
+  placeholder: string;
+  value: unknown;
+  change: (value: unknown) => void;
+};
+
+/** A widget bound to an attribute: its label, and a control of its kind holding the form's value. */
 const input =
-  (control: (name: string, placeholder: string) => ReactElement): Draw =>
+  (control: (bound: Bound) => ReactElement): Draw =>
   (source) => {
+    const draft = useContext(Draft);
     const attribute = child(source, 'attributeRef');
     const name = lastName(attribute ? plain(attribute, 'attribute', '') : '');
-    const label = text(source, 'labelTemplate');
+    const label = text(source, 'labelTemplate') || name;
     return (
       <div className={className(source, 'form-group')}>
         {label ? <label className="control-label">{label}</label> : null}
-        {control(name, text(source, 'placeholderTemplate'))}
+        {control({
+          name,
+          placeholder: text(source, 'placeholderTemplate'),
+          value: draft?.object?.members[name],
+          change: (value) => draft?.set(name, value),
+        })}
       </div>
     );
   };
 
-const TextBox = input((name, placeholder) => (
-  <input className="form-control" name={name} placeholder={placeholder} />
-));
-const TextArea = input((name, placeholder) => (
-  <textarea className="form-control" name={name} placeholder={placeholder} />
-));
-const DatePicker = input((name) => <input className="form-control" type="date" name={name} />);
-const CheckBox = input((name) => <input type="checkbox" name={name} />);
-const Selector = input((name) => <select className="form-control" name={name} />);
+const written = (value: unknown) => (value === null || value === undefined ? '' : String(value));
 
-const DataView: Draw = (source) => (
-  <section className={className(source, 'mx-dataview')}>
-    <div className="mx-dataview-content">{each(list(source, 'widgets'))}</div>
-    {list(source, 'footerWidgets').length ? (
-      <footer className="mx-dataview-controls">{each(list(source, 'footerWidgets'))}</footer>
-    ) : null}
-  </section>
-);
+const TextBox = input(({ name, placeholder, value, change }) => (
+  <input
+    className="form-control"
+    name={name}
+    placeholder={placeholder}
+    value={written(value)}
+    onChange={(event) => change(event.target.value)}
+  />
+));
+const TextArea = input(({ name, placeholder, value, change }) => (
+  <textarea
+    className="form-control"
+    name={name}
+    placeholder={placeholder}
+    value={written(value)}
+    onChange={(event) => change(event.target.value)}
+  />
+));
+const DatePicker = input(({ name, value, change }) => (
+  <input
+    className="form-control"
+    type="date"
+    name={name}
+    value={written(value).slice(0, 10)}
+    onChange={(event) => change(event.target.value || null)}
+  />
+));
+const CheckBox = input(({ name, value, change }) => (
+  <input
+    type="checkbox"
+    name={name}
+    checked={value === true}
+    onChange={(event) => change(event.target.checked)}
+  />
+));
+const Selector = input(({ name }) => <select className="form-control" name={name} />);
 
-const ListView: Draw = (source) => (
-  <section className={className(source, 'mx-listview')}>{content(source)}</section>
-);
+/**
+ * A data view: the object its page was given, which its inputs fill and
+ * its buttons save. One whose source is a flow shows its widgets without
+ * an object, as a page does before its data arrives.
+ */
+const DataView: Draw = (source) => {
+  const { given } = useContext(Shell);
+  const origin = child(source, 'dataSource');
+  const variable = origin ? child(origin, 'sourceVariable') : null;
+  const parameter = variable ? plain(variable, 'pageParameter', '') : '';
+  const objects = Object.values(given);
+  const initial = given[lastName(parameter)] ?? (objects.length === 1 ? objects[0] : null);
+  const [object, setObject] = useState<DataObject | null>(initial);
+  const set = (member: string, value: unknown) =>
+    setObject((now) => (now ? { ...now, members: { ...now.members, [member]: value } } : now));
+  return (
+    <Draft.Provider value={{ object, set }}>
+      <section className={className(source, 'mx-dataview')}>
+        <div className="mx-dataview-content">{each(list(source, 'widgets'))}</div>
+        {list(source, 'footerWidgets').length ? (
+          <footer className="mx-dataview-controls">{each(list(source, 'footerWidgets'))}</footer>
+        ) : null}
+      </section>
+    </Draft.Provider>
+  );
+};
+
+/** A list: every object of its entity, each drawn as the widgets inside. */
+const ListView: Draw = (source) => {
+  const { changes, fail } = useContext(Shell);
+  const origin = child(source, 'dataSource');
+  const entity = origin ? entityOf(origin) : '';
+  const [objects, setObjects] = useState<DataObject[]>();
+  useEffect(() => {
+    if (!entity) return;
+    let current = true;
+    data<{ objects: DataObject[] }>('retrieve', { entity })
+      .then((answer) => current && setObjects(answer.objects))
+      .catch((error) => current && (setObjects([]), fail(error)));
+    return () => {
+      current = false;
+    };
+    // `fail` is the application's own and does not change what is listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entity, changes]);
+  // A list about no entity this page can read shows its widgets once.
+  if (!entity) {
+    return <section className={className(source, 'mx-listview')}>{content(source)}</section>;
+  }
+  return (
+    <section className={className(source, 'mx-listview')} aria-busy={objects === undefined}>
+      <ul>
+        {(objects ?? []).map((object) => (
+          <li key={object.id} className="mx-listview-item">
+            <Row.Provider value={object}>{content(source)}</Row.Provider>
+          </li>
+        ))}
+      </ul>
+      {objects?.length === 0 ? <div className="mx-listview-empty">No items</div> : null}
+    </section>
+  );
+};
 
 const GroupBox: Draw = (source) => (
   <fieldset className={className(source, 'mx-groupbox')}>

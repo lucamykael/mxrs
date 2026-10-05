@@ -15,9 +15,11 @@ export default defineConfig(({ mode }) => {
     server: {
       // Development stays same-origin from the browser's point of view while
       // the Rust runtime remains a separately supervised process.
+      // The request keeps the host the browser used: the runtime answers
+      // an action only to its own origin, and this server is that origin.
       proxy: {
-        '/api': runtime,
-        '/model.json': runtime,
+        '/api': { target: runtime, changeOrigin: false },
+        '/model.json': { target: runtime, changeOrigin: false },
       },
     },
     build: {

@@ -58,6 +58,19 @@ pub(crate) fn type_name(name: &str) -> (String, bool) {
     (type_name, explicit)
 }
 
+/// `Animal` → `Animals`, `Category` → `Categories`: what a list of them is called.
+pub(crate) fn plural(name: &str) -> String {
+    if let Some(stem) = name.strip_suffix('y')
+        && !stem.ends_with(['a', 'e', 'i', 'o', 'u'])
+    {
+        return format!("{stem}ies");
+    }
+    if name.ends_with(['s', 'x']) || name.ends_with("ch") || name.ends_with("sh") {
+        return format!("{name}es");
+    }
+    format!("{name}s")
+}
+
 /// `order_date` → `OrderDate`: the casing the declaration macros apply to a
 /// Rust identifier to get its Mendix name.
 pub(crate) fn pascal_case(value: &str) -> String {

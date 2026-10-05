@@ -98,7 +98,7 @@ use std::rc::Rc;
 use mxrs_bson::Document;
 use mxrs_forms::catalog::{Catalog, ReferenceKind};
 use mxrs_forms::node::{Node, Value};
-use mxrs_forms::values::{AttributeReference, Reference, Text, Translation};
+use mxrs_forms::values::{AttributeReference, EntityReference, Reference, Text, Translation};
 use mxrs_ir::page::{
     ButtonAction, DataSourceDecl, LayoutGridColumnDecl, LayoutGridRowDecl, PageDecl, WidgetDecl,
 };
@@ -373,6 +373,56 @@ pub(crate) fn compile_widget(
             if let Some(appearance) = appearance_node(catalog, class.as_deref(), None)? {
                 node.set("appearance", Value::Node(appearance))?;
             }
+            Ok(Value::Node(node))
+        }
+        WidgetDecl::AttributeText {
+            name,
+            attribute,
+            class,
+        } => {
+            let mut parameter = Node::new("ClientTemplateParameter", catalog.clone())?;
+            parameter.set(
+                "attributeRef",
+                Value::AttributeReference(AttributeReference {
+                    attribute: attribute.clone(),
+                    entity_reference: None,
+                }),
+            )?;
+            let mut template = client_template(catalog, "{1}")?;
+            template.set("parameters", Value::List(vec![Value::Node(parameter)]))?;
+            let mut node = Node::new("DynamicText", catalog.clone())?;
+            node.set("name", Value::String(widget_name(name, "text", counter)))?;
+            node.set("content", Value::Node(template))?;
+            if let Some(appearance) = appearance_node(catalog, class.as_deref(), None)? {
+                node.set("appearance", Value::Node(appearance))?;
+            }
+            Ok(Value::Node(node))
+        }
+        WidgetDecl::ListView {
+            name,
+            entity,
+            class,
+            children,
+        } => {
+            let mut source = Node::new("ListViewXPathSource", catalog.clone())?;
+            source.set(
+                "entityRef",
+                Value::EntityReference(EntityReference::direct(entity.clone())),
+            )?;
+            let mut node = Node::new("ListView", catalog.clone())?;
+            node.set(
+                "name",
+                Value::String(widget_name(name, "listView", counter)),
+            )?;
+            node.set("dataSource", Value::Node(source))?;
+            if let Some(appearance) = appearance_node(catalog, class.as_deref(), None)? {
+                node.set("appearance", Value::Node(appearance))?;
+            }
+            let compiled = children
+                .iter()
+                .map(|child| compile_widget(catalog, child, counter, packages_root))
+                .collect::<Result<Vec<_>>>()?;
+            node.set("widgets", Value::List(compiled))?;
             Ok(Value::Node(node))
         }
         WidgetDecl::Button {
@@ -826,6 +876,46 @@ fn button_action_node(catalog: &Rc<Catalog>, action: &ButtonAction) -> Result<No
             node.set("microflowSettings", Value::Node(settings))?;
             Ok(node)
         }
+        ButtonAction::ShowPage { page, pass } => {
+            let mut settings = page_settings(catalog, page)?;
+            if let Some(passed) = pass {
+                let mut variable = Node::new("PageVariable", catalog.clone())?;
+                variable.set(
+                    "widget",
+                    Value::Reference(Reference {
+                        target: passed.from_widget.clone(),
+                        kind: ReferenceKind::ByName,
+                    }),
+                )?;
+                let mut mapping = Node::new("PageParameterMapping", catalog.clone())?;
+                mapping.set(
+                    "parameter",
+                    Value::Reference(Reference {
+                        target: format!("{page}.{}", passed.parameter),
+                        kind: ReferenceKind::ByName,
+                    }),
+                )?;
+                mapping.set("variable", Value::Node(variable))?;
+                settings.set("parameterMappings", Value::List(vec![Value::Node(mapping)]))?;
+            }
+            let mut node = Node::new("PageClientAction", catalog.clone())?;
+            node.set("pageSettings", Value::Node(settings))?;
+            Ok(node)
+        }
+        ButtonAction::CreateObject { entity, page } => {
+            let mut node = Node::new("CreateObjectClientAction", catalog.clone())?;
+            node.set(
+                "entityRef",
+                Value::EntityReference(EntityReference::direct(entity.clone())),
+            )?;
+            node.set("pageSettings", Value::Node(page_settings(catalog, page)?))?;
+            Ok(node)
+        }
+        ButtonAction::DeleteObject { close_page } => {
+            let mut node = Node::new("DeleteClientAction", catalog.clone())?;
+            node.set("closePage", Value::Boolean(*close_page))?;
+            Ok(node)
+        }
         ButtonAction::CallNanoflow(qualified_name) => {
             let mut node = Node::new("CallNanoflowClientAction", catalog.clone())?;
             node.set(
@@ -838,6 +928,19 @@ fn button_action_node(catalog: &Rc<Catalog>, action: &ButtonAction) -> Result<No
             Ok(node)
         }
     }
+}
+
+/// The settings of a page a button opens.
+fn page_settings(catalog: &Rc<Catalog>, page: &str) -> Result<Node> {
+    let mut settings = Node::new("PageSettings", catalog.clone())?;
+    settings.set(
+        "page",
+        Value::Reference(Reference {
+            target: page.to_string(),
+            kind: ReferenceKind::ByName,
+        }),
+    )?;
+    Ok(settings)
 }
 
 pub(crate) fn appearance_node(

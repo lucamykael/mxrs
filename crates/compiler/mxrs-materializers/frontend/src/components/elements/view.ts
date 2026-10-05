@@ -91,7 +91,11 @@ const inLanguage = (texts: Record<string, string>) =>
   '';
 
 /** The text a field says in the user's language: a text, or a template with its parameters named. */
-export function text(source: Source, field: string): string {
+export function text(
+  source: Source,
+  field: string,
+  object?: { members: Record<string, unknown> } | null,
+): string {
   const stated = source.props[field];
   if (typeof stated === 'string') return stated;
   if (isTexts(stated)) return inLanguage(stated);
@@ -117,12 +121,34 @@ export function text(source: Source, field: string): string {
     .map((parameter) => {
       if (!parameter) return '…';
       const attribute = child(parameter, 'attributeRef');
-      const name = attribute ? plain(attribute, 'attribute', '') : '';
-      return name ? `{${name.split('.').pop()}}` : '…';
+      const name = lastName(attribute ? plain(attribute, 'attribute', '') : '');
+      if (!name) return '…';
+      // The value of the object being shown, or the attribute's name where
+      // there is none to show.
+      return object ? shown(object.members[name]) : `{${name}}`;
     });
   return text(held, 'template').replace(/\{(\d+)\}/g, (_all, index: string) => {
     return parameters[Number(index) - 1] ?? '…';
   });
+}
+
+/** A member's value as a page shows it. */
+export function shown(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+    const instant = new Date(value);
+    return Number.isNaN(instant.getTime()) ? value : instant.toLocaleDateString();
+  }
+  return String(value);
+}
+
+/** The entity a data source or an action is about. */
+export function entityOf(source: Source, field = 'entityRef'): string {
+  const stated = source.props[field];
+  if (typeof stated === 'string') return stated;
+  const held = child(source, field);
+  return held ? plain(held, 'entity', '') : '';
 }
 
 /** The class names an element's appearance gives it. */

@@ -47,14 +47,15 @@ pub(crate) fn add_service_method(
     let module_stem = snake_case(module_name);
     let folder = root.join("src/services").join(&module_stem);
     let mut known = declared_entities(root, &module_stem);
+    // An entity being scaffolded with the flow is named by the struct that
+    // declares it, which is not its Mendix name when that has an underscore.
     known.extend(entities.iter().map(|entity| {
-        (
-            entity.clone(),
-            format!(
-                "crate::domain::entities::{module_stem}::{}::{entity}",
-                snake_case(entity)
-            ),
-        )
+        let declared = crate::templates::type_name(entity).0;
+        let path = format!(
+            "crate::domain::entities::{module_stem}::{}::{declared}",
+            snake_case(entity)
+        );
+        (declared, path)
     }));
     let names: Vec<String> = known.iter().map(|(name, _)| name.clone()).collect();
     let (prefix, core) = split_prefix(&method.name);

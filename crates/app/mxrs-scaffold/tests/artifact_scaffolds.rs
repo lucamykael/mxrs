@@ -839,6 +839,10 @@ fn every_catalogued_page_template_compiles_on_its_own() {
     let root = application(directory.path());
     scaffold(&root, ArtifactKind::Module, "Sales");
     for template in mxrs_scaffold::page_templates::ENTRIES {
+        // The crud template is named by an entity, and has a test of its own.
+        if template.name == mxrs_scaffold::page_templates::CRUD {
+            continue;
+        }
         // One page per template, named after it so the generated slices do
         // not collide.
         let name = format!(
@@ -868,6 +872,92 @@ fn every_catalogued_page_template_compiles_on_its_own() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// An entity's CRUD is its overview and edit pages, written from its
+/// attributes; and a slice whose page name has an underscore names its
+/// entity by the struct that declares it. Both compile and reach the model.
+#[test]
+fn an_entity_crud_and_an_underscored_slice_compile_and_reach_the_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    let crud = |name: &str| {
+        scaffold_artifact(
+            &ArtifactScaffold::new(ArtifactKind::Page, name, &root)
+                .page_template(Some("crud".to_string())),
+        )
+    };
+    // Named by an entity the project declares, with something to show.
+    assert!(crud("Sales.Animal").is_err());
+    scaffold(&root, ArtifactKind::Entity, "Sales.Animal");
+    assert!(crud("Sales.Animal").is_err());
+    let entity = root.join("src/domain/entities/sales/animal.rs");
+    let source = std::fs::read_to_string(&entity).unwrap();
+    std::fs::write(
+        &entity,
+        source.replace(
+            "pub struct Animal {}",
+            "pub struct Animal {\n    #[mxrs(length = 80)]\n    pub name: MxString,\n    pub birth_date: MxDateTime,\n    pub active: MxBool,\n}",
+        ),
+    )
+    .unwrap();
+    crud("Sales.Animal").unwrap();
+    let pages = root.join("frontend/src/pages/sales");
+    let overview = std::fs::read_to_string(pages.join("Animal_Overview.tsx")).unwrap();
+    for expected in [
+        "<ListViewXPathSource entityRef=\"Sales.Animal\" />",
+        "<ClientTemplateParameter attributeRef=\"Sales.Animal.BirthDate\" />",
+        "<CreateObjectClientAction",
+        "parameter=\"Sales.Animal_Edit.Animal\"",
+        "<DeleteClientAction",
+    ] {
+        assert!(overview.contains(expected), "{expected}\n{overview}");
+    }
+    let edit = std::fs::read_to_string(pages.join("Animal_Edit.tsx")).unwrap();
+    for expected in [
+        "attributeRef=\"Sales.Animal.Name\"",
+        "<DatePicker",
+        "<CheckBox",
+        "<SaveChangesClientAction",
+    ] {
+        assert!(edit.contains(expected), "{expected}\n{edit}");
+    }
+    assert!(
+        std::fs::read_to_string(root.join("frontend/src/navigation/index.ts"))
+            .unwrap()
+            .contains("{ caption: \"Animals\", page: \"Sales.Animal_Overview\"")
+    );
+
+    scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Order_Edit", &root)
+            .page_chain(Some(PageChain::Microflow)),
+    )
+    .unwrap();
+
+    let output = cargo(
+        &root,
+        &["run", "--offline", "--quiet", "--", "build/Sales.mpr"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let project = mxrs_model::Project::open(root.join("build/Sales.mpr"), true).unwrap();
+    let module = project
+        .modules()
+        .unwrap()
+        .into_iter()
+        .find(|module| module.name.as_deref() == Some("Sales"))
+        .unwrap();
+    let mut pages: Vec<&str> = module
+        .pages
+        .iter()
+        .filter_map(|page| page.name.as_deref())
+        .collect();
+    pages.sort_unstable();
+    assert_eq!(pages, ["Animal_Edit", "Animal_Overview", "Order_Edit"]);
 }
 
 #[test]

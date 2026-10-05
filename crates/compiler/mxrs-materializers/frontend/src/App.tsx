@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import type { DataObject } from '@/api/data';
 import { Shell } from '@/components/elements/context';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Navigation } from '@/components/layout/Navigation';
@@ -16,8 +17,25 @@ import { findForm } from '@/utils/forms';
  */
 export function App() {
   const { manifest, failure } = useManifest();
-  const [route, open] = useHashRoute();
+  const [route, openRoute] = useHashRoute();
   const [sidebar, setSidebar] = useState<boolean>();
+  // What each page was given when it was opened, by the page's name.
+  const [given, setGiven] = useState<Record<string, Record<string, DataObject>>>({});
+  const [changes, setChanges] = useState(0);
+  const [problem, setProblem] = useState<string>();
+  // A layout that draws no menu of its own leaves the application's to the shell.
+  const [menuDrawn, setMenuDrawn] = useState(true);
+  useEffect(() => {
+    setMenuDrawn(document.querySelector('.mx-navigationtree') !== null);
+  }, [route, manifest]);
+  const open = useCallback(
+    (page: string, objects: Record<string, DataObject> = {}) => {
+      setGiven((all) => ({ ...all, [page]: objects }));
+      setProblem(undefined);
+      openRoute(page);
+    },
+    [openRoute],
+  );
   const pages = useMemo(
     () => (manifest ? manifest.modules.flatMap((module) => module.pages) : []),
     [manifest],
@@ -37,7 +55,30 @@ export function App() {
   // A page is what a route opens; a layout or a snippet is drawn inside one.
   if (declared?.kind === 'page') {
     return (
-      <Shell.Provider value={{ items: profile?.items || [], current: qualified, open, form: findForm, sidebar, setSidebar }}>
+      <Shell.Provider
+        value={{
+          items: profile?.items || [],
+          current: qualified,
+          open,
+          given: given[qualified] || {},
+          changes,
+          changed: () => setChanges((count) => count + 1),
+          fail: (error) => setProblem(error instanceof Error ? error.message : String(error)),
+          form: findForm,
+          sidebar,
+          setSidebar,
+        }}
+      >
+        {problem ? (
+          <div role="alert" className="mxrs-failure" onClick={() => setProblem(undefined)}>
+            {problem}
+          </div>
+        ) : null}
+        {menuDrawn ? null : (
+          <div className="mxrs-menu">
+            <Navigation items={profile?.items || []} onOpen={open} />
+          </div>
+        )}
         {/* Keyed by the page, so nothing one page holds — a tab, a text typed — is taken for another's. */}
         <div className="mxrs-app" data-page={qualified} key={qualified}>
           {declared.document}

@@ -540,6 +540,7 @@ fn the_page_template_catalog_renders_as_a_tree_and_as_json() {
     assert!(rendered.starts_with("Page templates\n"));
     assert!(rendered.contains("├── General\n"));
     assert!(rendered.contains("└── form-vertical — DataView with vertical inputs and actions"));
+    assert!(rendered.contains("└── crud — Overview and edit pages of an entity"));
 
     let output = cli(&["page", "templates", "--json"]);
     assert!(output.status.success(), "{:?}", output.stderr);
@@ -547,9 +548,12 @@ fn the_page_template_catalog_renders_as_a_tree_and_as_json() {
     assert_eq!(catalog[0]["category"], "General");
     assert_eq!(catalog[0]["templates"][0]["name"], "starter");
     assert_eq!(catalog[0]["templates"][0]["data_backed"], false);
-    let forms = catalog.last().unwrap();
+    let forms = &catalog[catalog.len() - 2];
     assert_eq!(forms["category"], "Forms");
     assert_eq!(forms["templates"][0]["data_backed"], true);
+    let data = catalog.last().unwrap();
+    assert_eq!(data["category"], "Data");
+    assert_eq!(data["templates"][0]["name"], "crud");
 
     // `templates` is a second form of the command, not a page name: it must
     // not be combinable with the generator's own options.

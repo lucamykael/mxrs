@@ -1451,6 +1451,17 @@ impl FlowBuilder {
         self
     }
 
+    /// Declares that the flow returns an object of the entity `M`:
+    /// `flow.returns_object::<Order>()`, then `flow.return_with(&order)`.
+    pub fn returns_object<M: mxrs_ir::EntityMarker>(&mut self) -> &mut Self {
+        self.returns(DataType::Object(M::qualified_name()))
+    }
+
+    /// Declares that the flow returns a list of objects of the entity `M`.
+    pub fn returns_list<M: mxrs_ir::EntityMarker>(&mut self) -> &mut Self {
+        self.returns(DataType::List(M::qualified_name()))
+    }
+
     /// Returns the value of `expression` from the flow. At the end of the
     /// flow's own body this is its result; inside a branch or a loop it ends
     /// the flow there.

@@ -19,27 +19,27 @@ use sha2::{Digest, Sha256};
 const INDEX: EmbeddedAsset = EmbeddedAsset::new(
     "index.html",
     include_bytes!("../assets/index.html"),
-    "6b5993e0557088823c32ceaa23e5b78ace9fb7d9cd873f064fa3180a1482a40b",
+    "33d59ca82a5eea90608d5f9cc96fb2daf84f37e5f861e453802ddf1f338264ee",
 );
 const SCRIPT: EmbeddedAsset = EmbeddedAsset::new(
-    "app-CH-0725k.js",
-    include_bytes!("../assets/app-CH-0725k.js"),
-    "c6f7cc50335144ab3f3efe716eea5de9eb43c1be6b72937abceeea89d8c209e4",
+    "app-Dr8gm4TY.js",
+    include_bytes!("../assets/app-Dr8gm4TY.js"),
+    "af9f39d22f1068c684484fca2ea7990822733a9da121182ccf363fa7f340eaca",
 );
 const STYLES: EmbeddedAsset = EmbeddedAsset::new(
-    "app-CtH-gR5O.css",
-    include_bytes!("../assets/app-CtH-gR5O.css"),
-    "1713947d707365e74d9484cecae86e2cc8158c569b79c3540bb0943c8c9cfc97",
+    "app-CSI3QfGi.css",
+    include_bytes!("../assets/app-CSI3QfGi.css"),
+    "a8d7f6e9f084d87d68fa5fb1957ae6b5330ade497353f0ba4e316088cab86b3b",
 );
 const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     ".vite/manifest.json",
     include_bytes!("../assets/.vite/manifest.json"),
-    "15012180e8f7e0160f4ec9610b27ec9952e6ae51f691885b723367049f0845ae",
+    "0e7f605f01b11b4e5e543e26c06d42353cbe188823886fdb85957cd83b873e94",
 );
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "9310fe58d8f73ce9bd824e41807dcbbbcc75329625bdce940ee99d4655630fb2",
+    "d37e1ef4bc60fc6f9f88d65c11afe53f938f6d512ec0f0d9910d5e1de7fb3160",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -84,6 +84,10 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     (
         "src/api/actions.ts",
         include_bytes!("../frontend/src/api/actions.ts"),
+    ),
+    (
+        "src/api/data.ts",
+        include_bytes!("../frontend/src/api/data.ts"),
     ),
     (
         "src/api/model.ts",

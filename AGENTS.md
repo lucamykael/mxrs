@@ -118,8 +118,11 @@ read-only behavioral oracle; never edit it.
   page is drawn from its TSX inside the layout it calls, under the
   project's compiled theme, each element the way `src/components/elements`
   draws its stored type and one nobody draws yet as a box holding its
-  children; a button opens its page or runs its flow, without arguments,
-  and no data is loaded yet. The bundle mxrs embeds holds no project's
+  children; a list shows the objects of its entity, a data view the object its
+  page was given, their inputs fill it, and a button opens a page with the
+  object it is in, creates, saves or deletes one through the runtime's
+  `/api/data/<operation>` (checked against the entity's access rules), or
+  runs its flow — without arguments yet. The bundle mxrs embeds holds no project's
   pages and draws what the manifest describes. The importer,
   `mxrs new` and the scaffolds write these files: a scaffolded page or
   layout is built as what it is, made the document the model would store,
@@ -210,6 +213,10 @@ read-only behavioral oracle; never edit it.
   between them is a defect, not a difference in taste.
 - Scaffolds must compile immediately, be transactional, refuse overwrites, and
   be configurable through explicit command options and project defaults.
+  `mxrs page new <Module.Entity> --template crud` writes the overview and
+  edit pages of an entity the project declares, from its attributes — a
+  list with a way to create, edit and delete, and a form — and adds the
+  overview to the navigation: an application is developed with mxrs alone.
 - Never commit private acceptance projects, their names, paths, metrics, or
   identifying references. Tests and documentation use neutral corpus names and
   environment variables. Public fixtures must be redistributable.

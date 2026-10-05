@@ -662,6 +662,126 @@ impl Runtime {
             .transaction(|store| action.execute(store, arguments))
     }
 
+    /// What a page does with the objects it shows, by the operation's name:
+    /// `retrieve` every object of an entity the caller may read, `create`
+    /// one with the entity's defaults, `save` the members a form holds and
+    /// commit them, or `delete` one. Each is checked against the entity's
+    /// access rules, as a page of the model would be.
+    pub fn data(
+        &mut self,
+        operation: &str,
+        arguments: &Value,
+        context: &SecurityContext,
+    ) -> Result<Value> {
+        let text = |key: &str| {
+            arguments
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| RuntimeError::Transaction(format!("{operation} needs `{key}`")))
+        };
+        let entity = text("entity")?;
+        let security = &self.security;
+        let allowed = |action: EntityAction,
+                       name: &str,
+                       member: Option<&str>,
+                       record: Option<&BTreeMap<String, Value>>| {
+            if security.entity_allowed(entity, action, member, record, context) {
+                Ok(())
+            } else {
+                Err(RuntimeError::NotAuthorized {
+                    action: name.to_string(),
+                    resource: match member {
+                        Some(member) => format!("{entity}.{member}"),
+                        None => entity.to_string(),
+                    },
+                })
+            }
+        };
+        match operation {
+            "retrieve" => {
+                let objects: Vec<Value> = self
+                    .store
+                    .retrieve(entity)?
+                    .into_iter()
+                    .filter(|object| {
+                        security.entity_allowed(
+                            entity,
+                            EntityAction::Read,
+                            None,
+                            Some(&object.members),
+                            context,
+                        )
+                    })
+                    .map(|object| shown(&object))
+                    .collect();
+                Ok(serde_json::json!({ "objects": objects }))
+            }
+            "create" => {
+                allowed(EntityAction::Create, "create", None, None)?;
+                // Shown to the form and not kept: the object exists once it
+                // is saved.
+                self.store.transaction(|store| {
+                    let object = store.create(entity)?;
+                    store.rollback(entity, &object.id)?;
+                    Ok(shown(&object))
+                })
+            }
+            "save" => {
+                let id = text("id")?;
+                let members = arguments
+                    .get("members")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| RuntimeError::Transaction("save needs `members`".into()))?;
+                let existing = self.store.find(entity, id)?;
+                match &existing {
+                    Some(object) => {
+                        for member in members.keys() {
+                            allowed(
+                                EntityAction::Write,
+                                "write",
+                                Some(member),
+                                Some(&object.members),
+                            )?;
+                        }
+                    }
+                    None => allowed(EntityAction::Create, "create", None, None)?,
+                }
+                self.store.transaction(|store| {
+                    let id = match existing {
+                        Some(object) => object.id,
+                        None => store.create(entity)?.id,
+                    };
+                    let current = store
+                        .find(entity, &id)?
+                        .map(|object| object.members)
+                        .unwrap_or_default();
+                    for (member, value) in members {
+                        if !current.contains_key(member) {
+                            return Err(RuntimeError::Transaction(format!(
+                                "{entity} has no member {member}"
+                            )));
+                        }
+                        store.set_member(
+                            entity,
+                            &id,
+                            member,
+                            stored(value, current.get(member)),
+                        )?;
+                    }
+                    store.commit(entity, &id).map(|object| shown(&object))
+                })
+            }
+            "delete" => {
+                let id = text("id")?;
+                let record = self.store.find(entity, id)?.map(|object| object.members);
+                allowed(EntityAction::Delete, "delete", None, record.as_ref())?;
+                self.store
+                    .transaction(|store| store.delete(entity, id).map(|object| shown(&object)))
+            }
+            other => Err(RuntimeError::UnknownAction(format!("data/{other}"))),
+        }
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }
@@ -671,9 +791,175 @@ impl Runtime {
     }
 }
 
+/// An object as a page shows it: a date and time is text a browser reads
+/// (`2026-10-06T12:00:00Z`), not the tag the store keeps it under.
+fn shown(object: &ObjectValue) -> Value {
+    let members: serde_json::Map<String, Value> = object
+        .members
+        .iter()
+        .map(|(member, value)| {
+            let value = match value.as_str().and_then(|text| {
+                text.strip_prefix(DATETIME_MEMBER_PREFIX)?
+                    .parse::<i64>()
+                    .ok()
+            }) {
+                Some(seconds) => Value::String(iso_instant(seconds)),
+                None => value.clone(),
+            };
+            (member.clone(), value)
+        })
+        .collect();
+    serde_json::json!({ "entity": object.entity, "id": object.id, "members": members })
+}
+
+/// What a form sent, as the store keeps it: a date and time stays one where
+/// the member holds one.
+fn stored(value: &Value, current: Option<&Value>) -> Value {
+    let holds_instant = current
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.starts_with(DATETIME_MEMBER_PREFIX));
+    match value
+        .as_str()
+        .filter(|_| holds_instant)
+        .and_then(instant_seconds)
+    {
+        Some(seconds) => Value::String(format!("{DATETIME_MEMBER_PREFIX}{seconds}")),
+        None => value.clone(),
+    }
+}
+
+/// `seconds` since the epoch as `YYYY-MM-DDTHH:MM:SSZ`.
+fn iso_instant(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let of_day = seconds.rem_euclid(86_400);
+    // Civil date from a day count (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        of_day / 3_600,
+        of_day % 3_600 / 60,
+        of_day % 60
+    )
+}
+
+/// The seconds since the epoch `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]` names, in UTC.
+fn instant_seconds(text: &str) -> Option<i64> {
+    let (date, time) = match text.split_once('T') {
+        Some((date, time)) => (date, time.trim_end_matches('Z')),
+        None => (text, "00:00:00"),
+    };
+    let mut date = date.split('-').map(|part| part.parse::<i64>().ok());
+    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
+    let mut time = time
+        .split(':')
+        .map(|part| part.split('.').next()?.parse::<i64>().ok());
+    let (hour, minute) = (time.next()??, time.next().flatten().unwrap_or(0));
+    let second = time.next().flatten().unwrap_or(0);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some((era * 146_097 + day_of_era - 719_468) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page's own operations: what it creates is kept once saved, a date
+    /// stays a date, and what it deletes is gone.
+    #[test]
+    fn a_page_creates_saves_lists_and_deletes_objects() {
+        let defaults = BTreeMap::from([
+            ("Name".to_string(), Value::String(String::new())),
+            ("Active".to_string(), Value::Bool(true)),
+            (
+                "BirthDate".to_string(),
+                Value::String(format!("{DATETIME_MEMBER_PREFIX}0")),
+            ),
+        ]);
+        let mut runtime = Runtime::new(
+            Store::new(StoreSchema::default().entity("Main.Animal", defaults, true)),
+            SecurityPolicy::default(),
+        );
+        let context = SecurityContext::default();
+        let entity = serde_json::json!({ "entity": "Main.Animal" });
+
+        let blank = runtime.data("create", &entity, &context).unwrap();
+        assert_eq!(blank["members"]["Active"], true);
+        assert_eq!(blank["members"]["BirthDate"], "1970-01-01T00:00:00Z");
+        // Nothing is kept until the form is saved.
+        let listed = runtime.data("retrieve", &entity, &context).unwrap();
+        assert_eq!(listed["objects"].as_array().unwrap().len(), 0);
+
+        let saved = runtime
+            .data(
+                "save",
+                &serde_json::json!({
+                    "entity": "Main.Animal",
+                    "id": blank["id"],
+                    "members": { "Name": "Rex", "BirthDate": "2020-02-29" },
+                }),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(saved["members"]["Name"], "Rex");
+        assert_eq!(saved["members"]["BirthDate"], "2020-02-29T00:00:00Z");
+        let id = saved["id"].as_str().unwrap().to_string();
+        assert!(runtime.store().is_committed("Main.Animal", &id));
+
+        // Saved again, it is the same object.
+        let renamed = runtime
+            .data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Animal", "id": id, "members": { "Name": "Max" } }),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(renamed["id"], id.as_str());
+        let listed = runtime.data("retrieve", &entity, &context).unwrap();
+        assert_eq!(listed["objects"][0]["members"]["Name"], "Max");
+        assert_eq!(listed["objects"].as_array().unwrap().len(), 1);
+
+        assert!(matches!(
+            runtime.data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Animal", "id": id, "members": { "Nope": 1 } }),
+                &context,
+            ),
+            Err(RuntimeError::Transaction(_))
+        ));
+        runtime
+            .data(
+                "delete",
+                &serde_json::json!({ "entity": "Main.Animal", "id": id }),
+                &context,
+            )
+            .unwrap();
+        let listed = runtime.data("retrieve", &entity, &context).unwrap();
+        assert_eq!(listed["objects"].as_array().unwrap().len(), 0);
+        assert!(matches!(
+            runtime.data("explode", &entity, &context),
+            Err(RuntimeError::UnknownAction(_))
+        ));
+    }
     use serde_json::json;
 
     fn schema() -> StoreSchema {

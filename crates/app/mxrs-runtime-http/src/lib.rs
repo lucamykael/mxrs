@@ -195,7 +195,7 @@ async fn invoke(
             "runtime actions require the application's own origin",
         );
     }
-    if !matches!(kind.as_str(), "action" | "microflow" | "nanoflow") {
+    if !matches!(kind.as_str(), "action" | "microflow" | "nanoflow" | "data") {
         return error_response(StatusCode::NOT_FOUND, "unknown_action_kind", &kind);
     }
     let permit = match state.action_slots.clone().try_acquire_owned() {
@@ -215,7 +215,11 @@ async fn invoke(
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         match state.runtime.lock() {
-            Ok(mut runtime) => match runtime.invoke(&handler, &arguments, &state.context) {
+            Ok(mut runtime) => match if kind == "data" {
+                runtime.data(&handler, &arguments, &state.context)
+            } else {
+                runtime.invoke(&handler, &arguments, &state.context)
+            } {
                 Ok(value) => Json(json!({ "result": value })).into_response(),
                 Err(error) => runtime_error_response(error),
             },

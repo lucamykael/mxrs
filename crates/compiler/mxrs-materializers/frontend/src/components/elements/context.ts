@@ -1,7 +1,17 @@
 import { createContext, type ReactNode } from 'react';
 
+import type { DataObject } from '@/api/data';
 import type { Form } from '@/mxrs/forms';
 import type { NavigationItem } from '@/types/model';
+
+/** The object the widgets being drawn are about: a row of a list, or a form's. */
+export const Row = createContext<DataObject | null>(null);
+
+/** The form the inputs being drawn fill: what it holds now, and how to change it. */
+export const Draft = createContext<{
+  object: DataObject | null;
+  set: (member: string, value: unknown) => void;
+} | null>(null);
 
 /** The title of the page being drawn. */
 export const PageTitle = createContext('');
@@ -26,7 +36,15 @@ export const Shell = createContext<{
   items: NavigationItem[];
   /** The page being shown, by qualified name. */
   current: string;
-  open: (page: string) => void;
+  /** Opens a page, giving it the objects its parameters take. */
+  open: (page: string, given?: Record<string, DataObject>) => void;
+  /** What the page being shown was given. */
+  given: Record<string, DataObject>;
+  /** Counts what changed in the data, so what shows it reads it again. */
+  changes: number;
+  changed: () => void;
+  /** Says what went wrong to the user. */
+  fail: (error: unknown) => void;
   form: (qualified: string) => Form | undefined;
   /** Whether the user opened or closed the sidebar, which every page of the layout keeps. */
   sidebar?: boolean;
@@ -36,5 +54,9 @@ export const Shell = createContext<{
   items: [],
   current: '',
   open: () => {},
+  given: {},
+  changes: 0,
+  changed: () => {},
+  fail: () => {},
   form: () => undefined,
 });

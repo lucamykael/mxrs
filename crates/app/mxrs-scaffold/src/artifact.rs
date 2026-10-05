@@ -967,6 +967,9 @@ fn create_page_slice(
         .clone()
         .unwrap_or_else(|| page_templates::DEFAULT_CHAIN_TEMPLATE.to_string());
     let template = page_templates::fetch(&template_name)?;
+    if template.name == page_templates::CRUD {
+        return create_crud(transaction, root, options, module_name, artifact_name);
+    }
     let stem = snake_case(artifact_name);
 
     if template.data_backed {
@@ -1054,6 +1057,148 @@ fn create_page_slice(
                 )),
             }
         }
+        None => transaction.note(format!(
+            "the frontend declares no navigation ({} is absent): add {qualified} to the project's navigation yourself",
+            navigation.display()
+        )),
+    }
+    Ok(())
+}
+
+/// The overview and edit pages of an entity the project declares, written
+/// from its attributes, with the overview in the navigation.
+fn create_crud(
+    transaction: &mut Transaction,
+    root: &Path,
+    options: &ArtifactScaffold,
+    module_name: &str,
+    entity: &str,
+) -> Result<()> {
+    if options.page_chain.is_some() {
+        return Err(ScaffoldError::InvalidProjectSource {
+            path: format!("{module_name}.{entity}"),
+            reason: "the crud template takes no --chain: its pages work on the entity itself"
+                .to_string(),
+        });
+    }
+    let module_stem = snake_case(module_name);
+    let declared = ["entities", "dtos"].iter().find_map(|concept| {
+        let path = root
+            .join("src/domain")
+            .join(concept)
+            .join(&module_stem)
+            .join(format!("{}.rs", snake_case(entity)));
+        transaction
+            .content(&path)
+            .ok()
+            .flatten()
+            .map(|source| (path, source))
+    });
+    let Some((path, source)) = declared else {
+        return Err(ScaffoldError::InvalidProjectSource {
+            path: format!(
+                "src/domain/entities/{module_stem}/{}.rs",
+                snake_case(entity)
+            ),
+            reason: format!(
+                "the crud template is named by an entity the project declares, and {module_name}.{entity} is not one: run `mxrs entity new {module_name}.{entity}` and give it its attributes first"
+            ),
+        });
+    };
+    let attributes = entity_attributes(&source);
+    if attributes.is_empty() {
+        return Err(ScaffoldError::InvalidProjectSource {
+            path: path.display().to_string(),
+            reason: format!("{module_name}.{entity} declares no attribute to show or edit"),
+        });
+    }
+    let (overview, _) = crate::forms::crud_page_names(entity);
+    for page in [
+        crate::forms::crud_edit_page(
+            module_name,
+            entity,
+            &attributes,
+            LAYOUT_PARAMETER,
+            &options.page_roles,
+        ),
+        crate::forms::crud_overview_page(
+            module_name,
+            entity,
+            &attributes,
+            LAYOUT_PARAMETER,
+            &options.page_roles,
+        ),
+    ] {
+        add_page(transaction, root, module_name, &page)?;
+    }
+    add_to_navigation(
+        transaction,
+        root,
+        &templates::humanize(&templates::plural(entity)),
+        &format!("{module_name}.{overview}"),
+    )
+}
+
+/// The attributes a struct declaring an entity has: each field that is not
+/// an association, by the name the model gives it.
+fn entity_attributes(source: &str) -> Vec<crate::forms::CrudAttribute> {
+    let mut explicit: Option<String> = None;
+    let mut attributes = Vec::new();
+    let mut inside = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line.starts_with("pub struct ") {
+            inside = line.ends_with('{');
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        if let Some(arguments) = line.strip_prefix("#[mxrs(") {
+            explicit = arguments
+                .split_once("name = \"")
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(name, _)| name.to_string());
+            continue;
+        }
+        let Some((field, rust_type)) = line
+            .strip_prefix("pub ")
+            .and_then(|field| field.split_once(": "))
+        else {
+            continue;
+        };
+        let rust_type = rust_type.trim_end_matches(',').to_string();
+        let name = explicit
+            .take()
+            .unwrap_or_else(|| templates::pascal_case(field));
+        if rust_type.starts_with("Reference") {
+            continue;
+        }
+        attributes.push(crate::forms::CrudAttribute { name, rust_type });
+    }
+    attributes
+}
+
+/// Adds a page to the navigation the frontend declares, when it declares
+/// one the way an import or `mxrs new` writes it.
+fn add_to_navigation(
+    transaction: &mut Transaction,
+    root: &Path,
+    caption: &str,
+    qualified: &str,
+) -> Result<()> {
+    let navigation = root.join("frontend/src/navigation/index.ts");
+    match transaction.content(&navigation)? {
+        Some(source) => match crate::forms::add_navigation_item(&source, caption, qualified) {
+            Some(source) => transaction.write(&navigation, source)?,
+            None => transaction.note(format!(
+                "{} has no Responsive profile laid out the way mxrs writes one: add {qualified} to its items yourself",
+                navigation.display()
+            )),
+        },
         None => transaction.note(format!(
             "the frontend declares no navigation ({} is absent): add {qualified} to the project's navigation yourself",
             navigation.display()

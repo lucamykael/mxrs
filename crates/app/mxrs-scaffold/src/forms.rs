@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mxrs_frontend::forms::{self, Shapes, Vocabulary};
-use mxrs_ir::page::{ButtonAction, DataSourceDecl, LayoutDecl, LayoutRef, PageDecl, WidgetDecl};
+use mxrs_ir::page::{
+    ButtonAction, DataSourceDecl, LayoutDecl, LayoutRef, PageDecl, PageParameterDecl, PassedObject,
+    WidgetDecl,
+};
 
 use crate::templates::{RefreshAction, humanize, snake_case};
 use crate::transaction::Transaction;
@@ -266,6 +269,150 @@ pub(crate) fn plain_page(
     let mut page = page(module_name, name, parameter, &title, roles);
     page.widgets.push(text(&title));
     page
+}
+
+/// An attribute of the entity a CRUD is about: its name in the model, and
+/// the Rust type its field has.
+pub(crate) struct CrudAttribute {
+    pub(crate) name: String,
+    pub(crate) rust_type: String,
+}
+
+/// The names of the two pages of an entity's CRUD.
+pub(crate) fn crud_page_names(entity: &str) -> (String, String) {
+    (format!("{entity}_Overview"), format!("{entity}_Edit"))
+}
+
+/// The overview of an entity: a button that creates one, and every object
+/// with what it holds, a way into its edit page and a way to delete it.
+pub(crate) fn crud_overview_page(
+    module_name: &str,
+    entity: &str,
+    attributes: &[CrudAttribute],
+    parameter: &str,
+    roles: &[String],
+) -> PageDecl {
+    let (overview, edit) = crud_page_names(entity);
+    let qualified_entity = format!("{module_name}.{entity}");
+    let edit_page = format!("{module_name}.{edit}");
+    let title = humanize(&crate::templates::plural(entity));
+    let mut page = page(module_name, &overview, parameter, &title, roles);
+    let list = "list";
+    let mut row: Vec<WidgetDecl> = attributes
+        .iter()
+        .map(|attribute| WidgetDecl::AttributeText {
+            name: Some(format!("{}Value", lower_first(&attribute.name))),
+            attribute: format!("{qualified_entity}.{}", attribute.name),
+            class: None,
+        })
+        .collect();
+    row.push(button(
+        "edit",
+        "Edit",
+        ButtonAction::ShowPage {
+            page: edit_page.clone(),
+            pass: Some(PassedObject {
+                parameter: entity.to_string(),
+                from_widget: list.to_string(),
+            }),
+        },
+    ));
+    row.push(button(
+        "delete",
+        "Delete",
+        ButtonAction::DeleteObject { close_page: false },
+    ));
+    page.widgets.push(container(
+        "pageHeader",
+        "mxrs-page-header",
+        vec![
+            text(&title),
+            button(
+                "create",
+                &format!("New {}", humanize(entity).to_lowercase()),
+                ButtonAction::CreateObject {
+                    entity: qualified_entity.clone(),
+                    page: edit_page,
+                },
+            ),
+        ],
+    ));
+    page.widgets.push(WidgetDecl::ListView {
+        name: Some(list.to_string()),
+        entity: qualified_entity,
+        class: Some("mxrs-list".to_string()),
+        children: vec![container("row", "mxrs-list-row", row)],
+    });
+    page
+}
+
+/// The edit page of an entity: the object it is given, an input per
+/// attribute, and Save and Cancel.
+pub(crate) fn crud_edit_page(
+    module_name: &str,
+    entity: &str,
+    attributes: &[CrudAttribute],
+    parameter: &str,
+    roles: &[String],
+) -> PageDecl {
+    let (_, edit) = crud_page_names(entity);
+    let qualified_entity = format!("{module_name}.{entity}");
+    let title = humanize(entity);
+    let mut page = page(module_name, &edit, parameter, &title, roles);
+    page.parameters.push(PageParameterDecl {
+        name: entity.to_string(),
+        entity: qualified_entity.clone(),
+        required: true,
+        default_value: None,
+    });
+    let mut children: Vec<WidgetDecl> = attributes
+        .iter()
+        .map(|attribute| {
+            let name = Some(lower_first(&attribute.name));
+            let bound = format!("{qualified_entity}.{}", attribute.name);
+            match attribute.rust_type.as_str() {
+                "MxBool" => WidgetDecl::CheckBox {
+                    name,
+                    attribute: bound,
+                    class: None,
+                },
+                "MxDateTime" => WidgetDecl::DatePicker {
+                    name,
+                    attribute: bound,
+                    class: None,
+                },
+                _ => WidgetDecl::TextBox {
+                    name,
+                    attribute: bound,
+                    class: None,
+                },
+            }
+        })
+        .collect();
+    children.push(button("save", "Save", ButtonAction::SaveChanges));
+    children.push(button("cancel", "Cancel", ButtonAction::CancelChanges));
+    page.widgets.push(container(
+        "pageHeader",
+        "mxrs-page-header",
+        vec![text(&title)],
+    ));
+    page.widgets.push(WidgetDecl::DataView {
+        name: Some("form".to_string()),
+        source: DataSourceDecl::Context {
+            parameter: entity.to_string(),
+            entity: qualified_entity,
+        },
+        children,
+    });
+    page
+}
+
+fn lower_first(name: &str) -> String {
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
 }
 
 /// The attributes of the entity a data-backed page binds, as the model

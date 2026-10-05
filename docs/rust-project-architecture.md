@@ -306,11 +306,20 @@ says how an element is drawn, by the type it is stored as — a container, a
 layout grid, a text, a button and what it opens or runs, an input and its
 label, a data view, tabs, a snippet, the widgets a pluggable widget holds —
 and an element nobody draws yet is a box holding its children. Drawing a
-type differently is an edit to that file. No data is loaded into a page
-yet: a button opens its page, or runs its flow without arguments once the
-user agrees to what it asks first; what saves, deletes or creates an object
-does nothing, and a pluggable widget shows the widgets it holds, not its
-own behaviour. A
+type differently is an edit to that file. A list view shows the objects of its entity and
+a data view the object its page was given; inputs fill that object; a
+button opens a page with the object it is in, creates, saves or deletes one
+— through the runtime's `POST /api/data/{retrieve,create,save,delete}`,
+each checked against the entity's access rules — or runs its flow, without
+arguments yet, once the user agrees to what it asks first. A data view
+over a flow, a grid and a pluggable widget show the widgets they hold, not
+data.
+
+`mxrs page new <Module.Entity> --template crud` writes both pages of an
+entity the project declares — `<Entity>_Overview` (a list, with New, Edit
+and Delete) and `<Entity>_Edit` (an input per attribute, Save and Cancel) —
+from the attributes its struct has, and adds the overview to the
+navigation. A
 declaration file exports data the frontend's own types check:
 
 ```ts

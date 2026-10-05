@@ -84,6 +84,30 @@ pub enum ButtonAction {
     /// Rolls the enclosing data view's object back to its last committed
     /// state — [`ButtonAction::SaveChanges`]'s counterpart.
     CancelChanges,
+    /// Opens a page, giving it the object of the widget the button is in
+    /// when the page takes one.
+    ShowPage {
+        /// Qualified page name.
+        page: String,
+        pass: Option<PassedObject>,
+    },
+    /// Creates an object of `entity` and opens `page` on it.
+    CreateObject {
+        entity: String,
+        page: String,
+    },
+    /// Deletes the object of the widget the button is in.
+    DeleteObject {
+        close_page: bool,
+    },
+}
+
+/// The object a button gives the page it opens: the one the named list or
+/// data view holds for the button, as the page's `parameter`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassedObject {
+    pub parameter: String,
+    pub from_widget: String,
 }
 
 /// What a [`WidgetDecl::DataView`] fetches its context object from. Both
@@ -139,11 +163,25 @@ pub enum WidgetDecl {
         caption: String,
         class: Option<String>,
     },
+    /// The value of an attribute of the object the widget is in.
+    AttributeText {
+        name: Option<String>,
+        attribute: String,
+        class: Option<String>,
+    },
     Button {
         name: Option<String>,
         caption: String,
         class: Option<String>,
         action: ButtonAction,
+    },
+    /// Every object of `entity` from the database, each drawn as the
+    /// widgets inside.
+    ListView {
+        name: Option<String>,
+        entity: String,
+        class: Option<String>,
+        children: Vec<WidgetDecl>,
     },
     /// The entity context every attribute-bound widget below needs — see
     /// this module's doc comment.

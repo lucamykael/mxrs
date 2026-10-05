@@ -1198,6 +1198,13 @@ fn render_widget(
                 ButtonAction::CancelChanges => {
                     let _ = writeln!(out, "{pad}    b.cancel_changes();");
                 }
+                // Stated only by a scaffold, which writes its page as TSX:
+                // no page read from a model is given one of these.
+                ButtonAction::ShowPage { .. }
+                | ButtonAction::CreateObject { .. }
+                | ButtonAction::DeleteObject { .. } => {
+                    unreachable!("a page read from a model holds no scaffold-only action")
+                }
             }
             let _ = writeln!(out, "{pad}}});");
         }
@@ -1308,6 +1315,9 @@ fn render_widget(
             let _ = writeln!(out, "{pad}{receiver}.{method}(|w| {{");
             render_name_and_class(&mut out, indent + 1, "w", name, class);
             let _ = writeln!(out, "{pad}}});");
+        }
+        WidgetDecl::AttributeText { .. } | WidgetDecl::ListView { .. } => {
+            unreachable!("a page read from a model holds no scaffold-only widget")
         }
     }
     out
