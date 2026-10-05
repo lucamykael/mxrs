@@ -1,19 +1,37 @@
-/* How the page vocabulary's elements are laid out before a theme says more. */
-.mx-scrollcontainer {
-  display: grid;
-  grid-template-areas: 'top top top' 'left center right' 'bottom bottom bottom';
-  grid-template-columns: auto 1fr auto;
-  grid-template-rows: auto 1fr auto;
-  min-height: 100vh;
-}
-.mx-scrollcontainer-top { grid-area: top; }
-.mx-scrollcontainer-left { grid-area: left; }
-.mx-scrollcontainer-center { grid-area: center; min-width: 0; padding: 1rem; }
-.mx-scrollcontainer-right { grid-area: right; }
-.mx-scrollcontainer-bottom { grid-area: bottom; }
+/*
+ * How the page vocabulary's elements are laid out before a theme says more.
+ * `index.css` puts the shell's styles in a layer, so every rule of the
+ * project's theme, which is in none, takes precedence over these.
+ */
+.mx-layout { display: flex; flex-direction: column; min-height: 100vh; }
 
-.mx-layoutgrid > .row { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
-.mx-layoutgrid > .row > .col { min-width: 0; }
+.mx-scrollcontainer { display: flex; flex: 1 0 0; }
+.mx-scrollcontainer-vertical { flex-direction: column; }
+.mx-scrollcontainer-horizontal { flex-direction: row; }
+.mx-scrollcontainer-nested { display: flex; }
+.mx-scrollcontainer-top,
+.mx-scrollcontainer-bottom,
+.mx-scrollcontainer-left,
+.mx-scrollcontainer-right { flex: 0 0 auto; }
+.mx-scrollcontainer-center { flex: 1 1 auto; min-width: 0; }
+
+.mx-layoutgrid > .row { display: flex; flex-wrap: wrap; }
+.mx-layoutgrid > .row > [class*='col'] { flex: 1 1 0; min-width: 0; padding: 0 0.5rem; }
+.mx-layoutgrid .col-lg-1 { flex: 0 0 8.3333%; }
+.mx-layoutgrid .col-lg-2 { flex: 0 0 16.6667%; }
+.mx-layoutgrid .col-lg-3 { flex: 0 0 25%; }
+.mx-layoutgrid .col-lg-4 { flex: 0 0 33.3333%; }
+.mx-layoutgrid .col-lg-5 { flex: 0 0 41.6667%; }
+.mx-layoutgrid .col-lg-6 { flex: 0 0 50%; }
+.mx-layoutgrid .col-lg-7 { flex: 0 0 58.3333%; }
+.mx-layoutgrid .col-lg-8 { flex: 0 0 66.6667%; }
+.mx-layoutgrid .col-lg-9 { flex: 0 0 75%; }
+.mx-layoutgrid .col-lg-10 { flex: 0 0 83.3333%; }
+.mx-layoutgrid .col-lg-11 { flex: 0 0 91.6667%; }
+.mx-layoutgrid .col-lg-12 { flex: 0 0 100%; }
+
+.mx-navigationtree ul { list-style: none; margin: 0; padding: 0; }
+.mx-navigationtree a { display: block; padding: 0.5rem 1rem; cursor: pointer; }
 
 .form-group { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.75rem; }
 .form-control { padding: 0.4rem 0.5rem; }

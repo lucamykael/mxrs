@@ -31,11 +31,14 @@ export function App() {
     (candidate) => candidate.qualified_name === requested || candidate.name === requested,
   );
 
-  const declared = findForm(page?.qualified_name ?? requested);
-  if (declared) {
+  const qualified = page?.qualified_name ?? requested;
+  const declared = findForm(qualified);
+  // A page is what a route opens; a layout or a snippet is drawn inside one.
+  if (declared?.kind === 'page') {
     return (
       <Shell.Provider value={{ items: profile?.items || [], open, form: findForm }}>
-        <div className="mxrs-app" data-page={requested}>
+        {/* Keyed by the page, so nothing one page holds — a tab, a text typed — is taken for another's. */}
+        <div className="mxrs-app" data-page={qualified} key={qualified}>
           {declared.document}
         </div>
       </Shell.Provider>

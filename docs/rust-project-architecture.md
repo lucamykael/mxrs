@@ -296,14 +296,21 @@ files, and its hash is pinned against them.
 
 The user interface the model declares is written here, in TypeScript, and
 every build reads it into the model — mxrs parses it and never runs it. The
-browser does: a page is drawn from its own TSX, inside the layout it calls,
-each placeholder holding what the page gives it. `components/elements/`
+project's own frontend build does (Vite: `mxrs run --frontend`, `npm run
+build`): a page is drawn from its own TSX, inside the layout it calls, each
+placeholder holding what the page gives it, under the theme the project
+carries compiled in `assets/theme-cache/web/`. The bundle mxrs embeds, which
+serves a project that has not built its frontend, holds no project's pages
+and draws what the manifest describes. `components/elements/`
 says how an element is drawn, by the type it is stored as — a container, a
 layout grid, a text, a button and what it opens or runs, an input and its
 label, a data view, tabs, a snippet, the widgets a pluggable widget holds —
 and an element nobody draws yet is a box holding its children. Drawing a
-type differently is an edit to that file; no data is loaded into a page
-yet. A
+type differently is an edit to that file. No data is loaded into a page
+yet: a button opens its page, or runs its flow without arguments once the
+user agrees to what it asks first; what saves, deletes or creates an object
+does nothing, and a pluggable widget shows the widgets it holds, not its
+own behaviour. A
 declaration file exports data the frontend's own types check:
 
 ```ts

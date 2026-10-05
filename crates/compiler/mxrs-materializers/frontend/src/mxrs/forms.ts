@@ -189,18 +189,19 @@ export function widget(
 
 /** A page, layout or snippet of a module. */
 export interface Form {
+  readonly kind: "page" | "layout" | "snippet";
   readonly module: string;
   readonly document: ReactElement;
 }
 
 export function page(module: string, document: ReactElement): Form {
-  return { module, document };
+  return { kind: "page", module, document };
 }
 
 export function layout(module: string, document: ReactElement): Form {
-  return { module, document };
+  return { kind: "layout", module, document };
 }
 
 export function snippet(module: string, document: ReactElement): Form {
-  return { module, document };
+  return { kind: "snippet", module, document };
 }

@@ -11,6 +11,8 @@ export default defineConfig(({ mode }) => {
     // `@/` is `src/`, read from tsconfig.json so the two never disagree.
     resolve: { tsconfigPaths: true },
     server: {
+      // The project's theme is beside `frontend/`, in `assets/`.
+      fs: { allow: ['..'] },
       // Development stays same-origin from the browser's point of view while
       // the Rust runtime remains a separately supervised process.
       proxy: {

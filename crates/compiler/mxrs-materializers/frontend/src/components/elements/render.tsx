@@ -12,10 +12,19 @@ import {
 } from 'react';
 
 import { invokeAction } from '@/api/actions';
-import { Navigation } from '@/components/layout/Navigation';
 
-import { Placeholders, Shell } from './context';
-import { child, className, content, lastName, plain, sourceOf, text, type Source } from './view';
+import { PageTitle, Placeholders, Shell } from './context';
+import {
+  child,
+  className,
+  content,
+  lastName,
+  list,
+  plain,
+  sourceOf,
+  text,
+  type Source,
+} from './view';
 
 type Draw = (source: Source) => ReactElement | null;
 
@@ -25,7 +34,11 @@ const held = (source: Source, field: string): ReactNode => {
   return isValidElement(stated) ? stated : null;
 };
 
-/** What happens when the user acts on a widget: the action its field holds. */
+/**
+ * What happens when the user acts on a widget: the action its field holds.
+ * A flow runs once the user agrees to what it asks first, and without
+ * arguments — a page holds no data to give it yet.
+ */
 function useAction(source: Source, field: string): (() => void) | undefined {
   const { open } = useContext(Shell);
   const action = child(source, field);
@@ -34,7 +47,10 @@ function useAction(source: Source, field: string): (() => void) | undefined {
     const held = child(action, name);
     return held ? plain(held, target, '') : '';
   };
-  const run = (kind: string, handler: string) => () => {
+  const run = (kind: string, handler: string, asking: Source | null) => () => {
+    const confirmation = asking ? child(asking, 'confirmationInfo') : null;
+    const question = confirmation ? text(confirmation, 'question') : '';
+    if (question && !window.confirm(question)) return;
     invokeAction({ kind, handler }, null).catch(console.error);
   };
   switch (action.type) {
@@ -44,11 +60,13 @@ function useAction(source: Source, field: string): (() => void) | undefined {
     }
     case 'Forms$MicroflowAction': {
       const microflow = settings('microflowSettings', 'microflow');
-      return microflow ? run('microflow', microflow) : undefined;
+      return microflow
+        ? run('microflow', microflow, child(action, 'microflowSettings'))
+        : undefined;
     }
     case 'Forms$CallNanoflowClientAction': {
       const nanoflow = plain(action, 'nanoflow', '');
-      return nanoflow ? run('nanoflow', nanoflow) : undefined;
+      return nanoflow ? run('nanoflow', nanoflow, action) : undefined;
     }
     case 'Forms$ClosePageClientAction':
     case 'Forms$CancelChangesClientAction':
@@ -66,7 +84,9 @@ const Box: Draw = (source) => (
 
 const Contents: Draw = (source) => <>{content(source)}</>;
 
-const Page: Draw = (source) => <>{held(source, 'formCall')}</>;
+const Page: Draw = (source) => (
+  <PageTitle.Provider value={text(source, 'title')}>{held(source, 'formCall')}</PageTitle.Provider>
+);
 
 const Layout: Draw = (source) => (
   <div className={className(source, 'mx-layout')}>{held(source, 'content')}</div>
@@ -118,18 +138,47 @@ const SnippetCallWidget: Draw = (source) => {
   return <div className={className(source)}>{snippet?.document}</div>;
 };
 
-const ScrollContainer: Draw = (source) => (
-  <div className={className(source, 'mx-scrollcontainer')}>
-    {(['top', 'left', 'centerRegion', 'right', 'bottom'] as const).map((region) => {
-      const stated = held(source, region);
-      return stated ? (
-        <div key={region} className={`mx-scrollcontainer-${region.replace('Region', '')}`}>
-          {stated}
-        </div>
-      ) : null;
-    })}
-  </div>
-);
+/** How wide or tall a region of a scroll container is, as its own settings say. */
+function regionSize(region: Source, side: 'width' | 'height') {
+  const size = plain(region, 'size', 0);
+  const unit = { Pixels: 'px', Percentage: '%' }[plain(region, 'sizeMode', 'Auto')];
+  return unit && size > 0 ? { [side]: `${size}${unit}`, flexBasis: `${size}${unit}` } : undefined;
+}
+
+/**
+ * A scroll container, in the structure the Mendix client gives it — which
+ * is what a theme styles: the top and bottom regions around a container
+ * of its own, laid out the other way, for the left, center and right ones.
+ */
+const ScrollContainer: Draw = (source) => {
+  const region = (name: string, place: string, side: 'width' | 'height') => {
+    const stated = child(source, name);
+    if (!stated || !isValidElement(source.props[name])) return null;
+    return (
+      <div className={className(stated, `mx-scrollcontainer-${place}`)} style={regionSize(stated, side)}>
+        <div className="mx-scrollcontainer-wrapper">{content(stated)}</div>
+      </div>
+    );
+  };
+  return (
+    <div
+      className={className(
+        source,
+        'mx-scrollcontainer',
+        'mx-scrollcontainer-vertical',
+        'mx-scrollcontainer-fixed',
+      )}
+    >
+      {region('top', 'top', 'height')}
+      <div className="mx-scrollcontainer mx-scrollcontainer-horizontal mx-scrollcontainer-nested mx-scrollcontainer-fixed">
+        {region('left', 'left', 'width')}
+        {region('centerRegion', 'center', 'width')}
+        {region('right', 'right', 'width')}
+      </div>
+      {region('bottom', 'bottom', 'height')}
+    </div>
+  );
+};
 
 const Region: Draw = (source) => <div className={className(source)}>{content(source)}</div>;
 
@@ -142,19 +191,33 @@ const DivContainer: Draw = (source) => {
   );
 };
 
-const LayoutGrid: Draw = (source) => (
-  <div className={className(source, 'mx-layoutgrid')}>{content(source)}</div>
-);
+const LayoutGrid: Draw = (source) => {
+  const width =
+    plain(source, 'width', 'FullWidth') === 'FullWidth'
+      ? ['mx-layoutgrid-fluid', 'container-fluid']
+      : ['mx-layoutgrid-fixed', 'container'];
+  return <div className={className(source, 'mx-layoutgrid', ...width)}>{content(source)}</div>;
+};
 
 const LayoutGridRow: Draw = (source) => (
   <div className={className(source, 'row')}>{content(source)}</div>
 );
 
+/** A column, as wide on each kind of screen as its weights say: the grid classes a theme styles. */
 const LayoutGridColumn: Draw = (source) => {
-  const weight = plain(source, 'weight', -1);
-  const width = weight > 0 ? { flex: `0 0 ${(weight / 12) * 100}%` } : { flex: '1 1 0' };
+  const sized = (prefix: string, field: string) => {
+    const weight = plain(source, field, -1);
+    return weight > 0 ? `${prefix}-${weight}` : prefix;
+  };
   return (
-    <div className={className(source, 'col')} style={width}>
+    <div
+      className={className(
+        source,
+        sized('col-lg', 'weight'),
+        sized('col-md', 'tabletWeight'),
+        sized('col', 'phoneWeight'),
+      )}
+    >
       {content(source)}
     </div>
   );
@@ -183,7 +246,7 @@ const ActionButton: Draw = (source) => {
   return (
     <button
       type="button"
-      className={className(source, 'btn', `btn-${style}`)}
+      className={className(source, 'btn', 'mx-button', `btn-${style}`)}
       title={text(source, 'tooltip') || undefined}
       onClick={act}
     >
@@ -219,9 +282,9 @@ const Selector = input((name) => <select className="form-control" name={name} />
 
 const DataView: Draw = (source) => (
   <section className={className(source, 'mx-dataview')}>
-    <div className="mx-dataview-content">{content(source)}</div>
-    {Array.isArray(source.props.footerWidgets) && source.props.footerWidgets.length ? (
-      <footer className="mx-dataview-controls">{each(source.props.footerWidgets)}</footer>
+    <div className="mx-dataview-content">{each(list(source, 'widgets'))}</div>
+    {list(source, 'footerWidgets').length ? (
+      <footer className="mx-dataview-controls">{each(list(source, 'footerWidgets'))}</footer>
     ) : null}
   </section>
 );
@@ -232,7 +295,7 @@ const ListView: Draw = (source) => (
 
 const GroupBox: Draw = (source) => (
   <fieldset className={className(source, 'mx-groupbox')}>
-    <legend>{text(source, 'caption')}</legend>
+    <legend>{text(source, 'captionTemplate') || text(source, 'caption')}</legend>
     {content(source)}
   </fieldset>
 );
@@ -240,7 +303,7 @@ const GroupBox: Draw = (source) => (
 const TabControl: Draw = (source) => {
   const [active, setActive] = useState(0);
   const pages = Children.toArray(content(source)).map(sourceOf);
-  const shown = pages[active];
+  const shown = pages[Math.min(active, pages.length - 1)];
   return (
     <div className={className(source, 'mx-tabcontainer')}>
       <div role="tablist" className="mx-tabcontainer-tabs">
@@ -249,7 +312,7 @@ const TabControl: Draw = (source) => {
             key={index}
             type="button"
             role="tab"
-            aria-selected={index === active}
+            aria-selected={pages[index] === shown}
             onClick={() => setActive(index)}
           >
             {page ? text(page, 'caption') || plain(page, 'name', '') : ''}
@@ -261,17 +324,40 @@ const TabControl: Draw = (source) => {
   );
 };
 
+/** The application's menu, in the structure the Mendix client gives a navigation tree. */
 const Menu: Draw = (source) => {
   const { items, open } = useContext(Shell);
+  const list = (entries: typeof items): ReactElement => (
+    <ul>
+      {entries.map((item, index) => (
+        <li key={index}>
+          <a
+            href={item.page ? `#${encodeURIComponent(item.page)}` : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              if (item.page) open(item.page);
+            }}
+          >
+            {item.caption || item.page || item.microflow}
+          </a>
+          {item.items?.length ? list(item.items) : null}
+        </li>
+      ))}
+    </ul>
+  );
   return (
-    <div className={className(source, 'mx-navigation')}>
-      <Navigation items={items} onOpen={open} />
+    <div className={className(source, 'mx-navigationtree')}>
+      <div className="navbar-inner">{list(items)}</div>
     </div>
   );
 };
 
 const SidebarToggle: Draw = (source) => (
-  <button type="button" className={className(source, 'btn')} title={text(source, 'tooltip')}>
+  <button
+    type="button"
+    className={className(source, 'btn', 'mx-button')}
+    title={text(source, 'tooltip')}
+  >
     {text(source, 'captionTemplate') || '☰'}
   </button>
 );
@@ -284,12 +370,25 @@ const each = (value: unknown): ReactNode =>
 
 const Header: Draw = (source) => (
   <header className={className(source, 'mx-header')}>
-    <div>{each(source.props.leftWidgets)}</div>
-    <div>{each(source.props.rightWidgets)}</div>
+    <div>{each(list(source, 'leftWidgets'))}</div>
+    <div>{each(list(source, 'rightWidgets'))}</div>
   </header>
 );
 
-const Title: Draw = (source) => <h1 className={className(source, 'mx-title')} />;
+/** The title of the page being drawn. */
+const Title: Draw = (source) => (
+  <h1 className={className(source, 'mx-title')}>{useContext(PageTitle)}</h1>
+);
+
+/** A button of a grid's control bar: its caption. What it does needs the grid's data. */
+const GridButton: Draw = (source) => (
+  <button
+    type="button"
+    className={className(source, 'btn', 'mx-button', `btn-${plain(source, 'buttonStyle', 'Default').toLowerCase() || 'default'}`)}
+  >
+    {text(source, 'captionTemplate')}
+  </button>
+);
 
 const Image: Draw = (source) => (
   <span
@@ -302,7 +401,7 @@ const Image: Draw = (source) => (
 /** A table: every cell where its row and column say, as wide and tall as it spans. */
 const Table: Draw = (source) => (
   <div className={className(source, 'mx-table')}>
-    {(Array.isArray(source.props.cells) ? source.props.cells : []).map((cell, index) => {
+    {list(source, 'cells').map((cell, index) => {
       const stated = sourceOf(cell);
       if (!stated) return null;
       const place = (start: string, span: string) =>
@@ -326,20 +425,24 @@ const Table: Draw = (source) => (
 const NavigationItem: Draw = (source) => {
   const act = useAction(source, 'action');
   return (
-    <div className={className(source, 'mx-navigationlist-item')} onClick={act} role="button">
+    <div
+      className={className(source, 'mx-navigationlist-item')}
+      onClick={act}
+      role={act ? 'button' : undefined}
+    >
       {content(source)}
     </div>
   );
 };
 
-/** A grid of the model's own kind: its caption, a heading per column, and its buttons. */
+/** A grid of the model's own kind: its buttons and a heading per column. */
 const DataGrid: Draw = (source) => (
   <section className={className(source, 'mx-datagrid')}>
     {held(source, 'controlBar')}
     <table>
       <thead>
         <tr>
-          {Children.toArray(content(source)).map((column, index) => {
+          {list(source, 'columns').map((column, index) => {
             const stated = sourceOf(column);
             return <th key={index}>{stated ? text(stated, 'caption') : null}</th>;
           })}
@@ -366,12 +469,15 @@ function nested(value: unknown): ReactNode[] {
   return [];
 }
 
-/** A pluggable widget: its name, and the widgets its properties hold. */
+/** A pluggable widget: its label, its name, and the widgets its properties hold. */
 const CustomWidget: Draw = (source) => {
   const definition = sourceOf(source.defaults.definition);
   const widget = definition ? plain(definition, 'widgetName', '') : '';
   return (
     <section className={className(source, 'mx-widget')} data-widget={widget}>
+      {text(source, 'labelTemplate') ? (
+        <label className="control-label">{text(source, 'labelTemplate')}</label>
+      ) : null}
       {each(nested(source.props.properties))}
     </section>
   );
@@ -422,6 +528,14 @@ const drawn: Record<string, Draw> = {
   Forms$NavigationListItem: NavigationItem,
   Forms$DataGrid: DataGrid,
   Forms$GridControlBar: Contents,
+  Forms$GridSearchButton: GridButton,
+  Forms$GridNewButton: GridButton,
+  Forms$GridEditButton: GridButton,
+  Forms$GridDeleteButton: GridButton,
+  Forms$GridActionButton: GridButton,
+  Forms$DataGridRemoveButton: GridButton,
+  Forms$DataGridSelectButton: GridButton,
+  Forms$DataGridAddButton: GridButton,
   CustomWidgets$CustomWidget: CustomWidget,
   CustomWidgets$WidgetValue: Contents,
 };

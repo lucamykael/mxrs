@@ -1,6 +1,6 @@
 // How a drawn element is read: what a field says — stated by the page, or
 // the default `mxrs/elements.ts` gives it — whichever way the page wrote it.
-import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { Children, isValidElement, type ReactElement, type ReactNode } from 'react';
 
 import type { Kind } from '@/mxrs/forms';
 
@@ -21,6 +21,13 @@ export function sourceOf(value: unknown): Source | null {
   return kind ? { ...kind, props: (value as ReactElement<Record<string, unknown>>).props } : null;
 }
 
+/** A number however a page writes it: itself, `long(5)` or `int(5)`. */
+function number(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) return value;
+  const sized = value as { long?: unknown; int?: unknown };
+  return typeof sized.long === 'number' ? sized.long : typeof sized.int === 'number' ? sized.int : value;
+}
+
 /** A field that holds a text, a number or a boolean. */
 export function plain(source: Source, field: string, otherwise: string): string;
 export function plain(source: Source, field: string, otherwise: number): number;
@@ -30,7 +37,7 @@ export function plain(
   field: string,
   otherwise: string | number | boolean,
 ): string | number | boolean {
-  const stated = source.props[field] ?? source.defaults[field];
+  const stated = number(source.props[field] ?? source.defaults[field]);
   return typeof stated === typeof otherwise ? (stated as typeof otherwise) : otherwise;
 }
 
@@ -51,8 +58,21 @@ export function child(source: Source, field: string): Source | null {
   return kind.main ? { ...kind, props: { [kind.main]: stated } } : null;
 }
 
-/** The widgets an element holds. */
+/** What an element holds as its children: the one list its page writes inside it. */
 export const content = (source: Source): ReactNode => source.props.children as ReactNode;
+
+/**
+ * The list a field holds. Which of an element's lists a page writes as its
+ * children is the project's own (`elements.ts` marks it), so a list is read
+ * from wherever this project's pages state it.
+ */
+export function list(source: Source, field: string): ReactNode[] {
+  const marker = source.defaults[field];
+  const inside = typeof marker === 'object' && marker !== null && 'children' in marker;
+  if (inside) return Children.toArray(source.props.children as ReactNode);
+  const stated = source.props[field];
+  return Array.isArray(stated) ? (stated as ReactNode[]) : [];
+}
 
 const isTexts = (value: unknown): value is Record<string, string> =>
   typeof value === 'object' &&
@@ -77,9 +97,22 @@ export function text(source: Source, field: string): string {
   if (isTexts(stated)) return inLanguage(stated);
   const held = child(source, field);
   if (!held) return '';
-  if (held.type === 'Texts$Text') return isTexts(held.props.texts) ? inLanguage(held.props.texts) : '';
+  if (held.type === 'Texts$Text') {
+    if (isTexts(held.props.texts)) return inLanguage(held.props.texts);
+    // Written whole: a translation per language.
+    const translations = list(held, 'items').map(sourceOf);
+    return inLanguage(
+      Object.fromEntries(
+        translations.flatMap((translation) =>
+          translation
+            ? [[plain(translation, 'languageCode', ''), plain(translation, 'text', '')]]
+            : [],
+        ),
+      ),
+    );
+  }
   if (held.type !== 'Forms$ClientTemplate') return '';
-  const parameters = (Array.isArray(held.props.parameters) ? held.props.parameters : [])
+  const parameters = list(held, 'parameters')
     .map(sourceOf)
     .map((parameter) => {
       if (!parameter) return '…';
@@ -96,7 +129,8 @@ export function text(source: Source, field: string): string {
 export function className(source: Source, ...own: string[]): string | undefined {
   const appearance = child(source, 'appearance');
   const stated = appearance ? plain(appearance, 'class', '') : '';
-  return [...own, stated].filter(Boolean).join(' ') || undefined;
+  // Some types store a class of their own besides.
+  return [...own, stated, plain(source, 'class', '')].filter(Boolean).join(' ') || undefined;
 }
 
 /** The last part of a qualified name: `Sales.Order.Number` is `Number`. */

@@ -1,4 +1,5 @@
-@import './base.css';
-@import './layout.css';
-@import './widgets.css';
-@import './elements.css';
+/* The shell's own styles, in a layer: a project's theme, which is in none, wins over every rule here. */
+@import './base.css' layer(mxrs);
+@import './layout.css' layer(mxrs);
+@import './widgets.css' layer(mxrs);
+@import './elements.css' layer(mxrs);
