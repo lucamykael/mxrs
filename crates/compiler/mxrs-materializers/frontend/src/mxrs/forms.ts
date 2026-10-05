@@ -60,7 +60,16 @@ export interface ChildrenDefault {
   readonly children: number;
 }
 
-export type Component<P> = (props: P) => ReactElement;
+/**
+ * A component of the page vocabulary. Besides its props it carries, for the
+ * types alone, the stored type it is (`T`) and what the field it is mostly
+ * stated for holds (`M`): a prop that holds the element may be written as
+ * that instead.
+ */
+export type Component<P, M = never, T extends string = string> = ((props: P) => ReactElement) & {
+  readonly __main?: M;
+  readonly __type?: T;
+};
 
 /** What a field holds when a page says nothing about it. */
 export type Default =
@@ -71,7 +80,7 @@ export type Default =
   | Long
   | ListDefault
   | ChildrenDefault
-  | Component<never>;
+  | Component<never, unknown, string>;
 
 /** Texts by language code: `{ en_US: "Save" }`. */
 export type Texts = { [language: string]: string };
@@ -80,7 +89,9 @@ export type Texts = { [language: string]: string };
  * What a field holds, by what it holds by default: a text where the default
  * is a text, a number where it is a number, a list where it is a list. A
  * field that holds an element by default holds an element, nothing, or —
- * written alone — the one thing that element is mostly stated for.
+ * written alone — the one thing that element is mostly stated for; texts by
+ * language where the element is a text. A field that holds nothing by
+ * default says nothing of its kind.
  */
 export type Holds<V> = V extends ListDefault
   ? Value[]
@@ -90,7 +101,11 @@ export type Holds<V> = V extends ListDefault
       ? number | Long | Int
       : V extends boolean
         ? boolean
-        : Value;
+        : V extends null
+          ? Value
+          : V extends Component<never, infer M, infer T>
+            ? ReactElement | null | M | (T extends "Texts$Text" ? Texts : never)
+            : never;
 
 /** An element's props: its fields, each optional, and its children when it holds any. */
 export type Props<D> = {
@@ -135,11 +150,11 @@ function box(type: string, content: ReactNode): ReactElement {
  * default, and the one field it is mostly stated for — a prop that holds
  * the element and says only that field is written as the field's value.
  */
-export function element<D extends Record<string, Default>>(
-  type: string,
-  defaults: D,
-  main?: keyof D & string,
-): Component<Props<D>> {
+export function element<
+  T extends string,
+  D extends Record<string, Default>,
+  M extends keyof D & string = never,
+>(type: T, defaults: D, main?: M): Component<Props<D>, [M] extends [never] ? never : Holds<D[M]>, T> {
   void [defaults, main];
   return (props) => box(type, (props as { children?: ReactNode }).children);
 }

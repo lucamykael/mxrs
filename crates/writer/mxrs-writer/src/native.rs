@@ -117,6 +117,196 @@ pub(crate) fn lower(
     build(document, "", &ids, stored)
 }
 
+type Stated<T> = std::result::Result<T, String>;
+
+/// Where each document of `root` is, by its identity.
+fn places(root: &Document, path: &str, found: &mut HashMap<String, String>) {
+    if let Some(id) = root.get("$ID").and_then(mxrs_bson::extract_id) {
+        found.insert(id, path.to_string());
+    }
+    for (key, value) in root {
+        let nested = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
+        match value {
+            Bson::Document(document) => places(document, &nested, found),
+            Bson::Array(items) => {
+                for (index, item) in items.iter().skip(1).enumerate() {
+                    if let Bson::Document(document) = item {
+                        places(document, &format!("{nested}[{index}]"), found);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn native(document: &Document, found: &HashMap<String, String>) -> Stated<NativeDocument> {
+    let ty = document
+        .get_str("$Type")
+        .map_err(|_| "a document without a type".to_string())?;
+    let mut out = NativeDocument::new(ty);
+    for (key, value) in document {
+        if matches!(key.as_str(), "$ID" | "$Type") {
+            continue;
+        }
+        out.fields
+            .push((key.clone(), native_value(value, ty, key, found)?));
+    }
+    Ok(out)
+}
+
+fn native_value(
+    value: &Bson,
+    ty: &str,
+    key: &str,
+    found: &HashMap<String, String>,
+) -> Stated<NativeValue> {
+    Ok(match value {
+        Bson::Null => NativeValue::Null,
+        Bson::Boolean(value) => NativeValue::Bool(*value),
+        Bson::Int32(value) => NativeValue::Int32(*value),
+        Bson::Int64(value) => NativeValue::Int64(*value),
+        Bson::String(value) => NativeValue::Text(value.clone()),
+        Bson::Document(value) => NativeValue::Document(native(value, found)?),
+        Bson::Array(values) => {
+            let Some(Bson::Int32(marker)) = values.first() else {
+                return Err(format!("{ty}.{key} is a list without a marker"));
+            };
+            NativeValue::List(
+                *marker,
+                values[1..]
+                    .iter()
+                    .map(|value| native_value(value, ty, key, found))
+                    .collect::<Stated<_>>()?,
+            )
+        }
+        // The identity of another part of the same document.
+        Bson::Binary(_) => match mxrs_bson::extract_id(value) {
+            Some(id) => match found.get(&id) {
+                Some(path) => NativeValue::Pointer(path.clone()),
+                None => NativeValue::Identity(id),
+            },
+            None => return Err(format!("{ty}.{key} holds data")),
+        },
+        other => {
+            return Err(format!(
+                "{ty}.{key} holds a value nothing here can state: {other:?}"
+            ));
+        }
+    })
+}
+
+/// The documents among a stored list's items.
+fn items(value: Option<&Bson>) -> Vec<&Document> {
+    match value {
+        Some(Bson::Array(items)) => items.iter().filter_map(Bson::as_document).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Puts the properties of a widget's object in the order its type defines
+/// them, here and in the objects its properties hold. The order they are
+/// stored in says nothing — each names its type — and a build keeps it.
+fn order_properties(object: &mut Document, object_type: &Document) {
+    let types = items(object_type.get("PropertyTypes"));
+    let position = |property: &Document| {
+        let pointer = property
+            .get("TypePointer")
+            .and_then(mxrs_bson::extract_id)?;
+        types
+            .iter()
+            .position(|ty| ty.get("$ID").and_then(mxrs_bson::extract_id).as_ref() == Some(&pointer))
+    };
+    let Some(Bson::Array(stored)) = object.get_mut("Properties") else {
+        return;
+    };
+    let mut properties: Vec<(usize, Document)> = Vec::new();
+    for item in stored.iter().skip(1) {
+        let Some(found) = item
+            .as_document()
+            .and_then(|property| Some((position(property)?, property.clone())))
+        else {
+            return;
+        };
+        properties.push(found);
+    }
+    properties.sort_by_key(|(index, _)| *index);
+    for (index, property) in &mut properties {
+        let nested = types[*index]
+            .get_document("ValueType")
+            .ok()
+            .and_then(|value_type| value_type.get_document("ObjectType").ok());
+        let Some(nested) = nested else {
+            continue;
+        };
+        let Some(Bson::Array(objects)) = property
+            .get_document_mut("Value")
+            .ok()
+            .and_then(|value| value.get_mut("Objects"))
+        else {
+            continue;
+        };
+        for object in objects.iter_mut().skip(1) {
+            if let Bson::Document(object) = object {
+                order_properties(object, nested);
+            }
+        }
+    }
+    stored.truncate(1);
+    stored.extend(
+        properties
+            .into_iter()
+            .map(|(_, property)| Bson::Document(property)),
+    );
+}
+
+/// `value` with every pluggable widget's properties in the order of its
+/// definition.
+fn ordered(value: &mut Bson) {
+    match value {
+        Bson::Document(document) => {
+            if document.get_str("$Type").ok() == Some("CustomWidgets$CustomWidget")
+                && let Some(object_type) = document
+                    .get_document("Type")
+                    .ok()
+                    .and_then(|ty| ty.get_document("ObjectType").ok())
+                    .cloned()
+                && let Ok(object) = document.get_document_mut("Object")
+            {
+                order_properties(object, &object_type);
+            }
+            for (_, nested) in document.iter_mut() {
+                ordered(nested);
+            }
+        }
+        Bson::Array(items) => {
+            for item in items {
+                ordered(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A stored page, layout or snippet as the document a declaration states:
+/// without identities, each pointer naming where its target is, and each
+/// widget's properties in the order of its definition. The reverse of what
+/// a build does to a form stated whole.
+pub fn stated_document(document: &Document) -> std::result::Result<NativeDocument, String> {
+    let mut canonical = Bson::Document(document.clone());
+    ordered(&mut canonical);
+    let Bson::Document(canonical) = canonical else {
+        unreachable!("a document stays one");
+    };
+    let mut found = HashMap::new();
+    places(&canonical, "", &mut found);
+    native(&canonical, &found)
+}
+
 fn id_of(document: &Document) -> Option<String> {
     document.get("$ID").and_then(mxrs_bson::extract_id)
 }

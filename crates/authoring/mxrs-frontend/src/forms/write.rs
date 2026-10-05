@@ -208,17 +208,36 @@ impl<'a> Writer<'a> {
                     .zip(&held.fields)
                     .all(|((key, said), (_, held))| key == &main.key || said == held);
             let inner = said.get(&main.key);
-            return match inner {
-                Some(inner) if only_main && !matches!(inner, NativeValue::Null) => {
-                    self.stated(inner, main, held.get(&main.key), &join(path, &main.key))
+            if let Some(inner) = inner
+                && only_main
+                && !matches!(inner, NativeValue::Null)
+            {
+                // What the field is written as must not itself be an
+                // element: an element here reads as the whole.
+                let used = (
+                    self.elements.clone(),
+                    self.widgets.clone(),
+                    self.helpers.clone(),
+                );
+                let written =
+                    self.stated(inner, main, held.get(&main.key), &join(path, &main.key))?;
+                if !matches!(written, Attr::Value(Js::Element(_))) {
+                    return Ok(written);
                 }
-                // Anything else is the element in full: what is not an
-                // element here reads as its main field.
-                _ => Ok(Attr::Value(Js::Element(self.element(said, path)?))),
-            };
+                (self.elements, self.widgets, self.helpers) = used;
+            }
+            // Anything else is the element in full: what is not an element
+            // here reads as its main field.
+            return Ok(Attr::Value(Js::Element(self.element(said, path)?)));
         }
         Ok(match value {
             NativeValue::Text(text) => tsx::text_attr(text),
+            // Texts by language are read as a text only where one belongs.
+            NativeValue::Document(document)
+                if document.ty == TEXT && !super::texts_fit(shapes, field, base) =>
+            {
+                Attr::Value(Js::Element(self.element(document, path)?))
+            }
             other => Attr::Value(self.expression(other, Some(field), path)?),
         })
     }
@@ -580,15 +599,25 @@ impl<'a> Writer<'a> {
                     {
                         Js::Raw(flag.clone())
                     }
-                    _ => match self.stated(
-                        said,
-                        main,
-                        unstated.get(&main.key),
-                        &join(&value_path, &main.key),
-                    )? {
-                        Attr::Text(text) => Js::Raw(tsx::text(&text)),
-                        Attr::Value(js) => js,
-                    },
+                    _ => {
+                        if super::property_kind(&main.key, said).is_some() {
+                            return Err(unreadable_for("a property holds what its type does not"));
+                        }
+                        let held = super::property_held(
+                            &vocabulary.shapes,
+                            &main.key,
+                            unstated.get(&main.key),
+                        );
+                        match self.stated(
+                            said,
+                            main,
+                            held.as_ref(),
+                            &join(&value_path, &main.key),
+                        )? {
+                            Attr::Text(text) => Js::Raw(tsx::text(&text)),
+                            Attr::Value(js) => js,
+                        }
+                    }
                 };
                 entries.push((key.to_string(), written));
                 continue;

@@ -290,8 +290,12 @@ pub fn read_elements(source: &str, path: &str) -> Result<Shapes, FrontendError> 
                     fields
                         .iter()
                         .find(|field| field.prop == prop.value.as_str())
+                        // A list is stated as a list, never as one thing.
+                        .filter(|field| !matches!(field.default, FieldDefault::List(_)))
                         .map(|field| field.key.clone())
-                        .ok_or_else(|| file.refuse(prop.span, "one of the element's fields"))?,
+                        .ok_or_else(|| {
+                            file.refuse(prop.span, "one of the element's fields that is no list")
+                        })?,
                 ),
                 Some((main, _)) => {
                     return Err(file.refuse(main.span(), "the name of the element's main field"));
@@ -329,16 +333,18 @@ fn kind_of(default: &FieldDefault, value: &NativeValue) -> Option<&'static str> 
         }
         FieldDefault::Value(_) => true,
     };
-    if fits {
-        return None;
-    }
-    Some(match default {
+    (!fits).then(|| kind_name(default))
+}
+
+/// What a field of this default holds, in words.
+fn kind_name(default: &FieldDefault) -> &'static str {
+    match default {
         FieldDefault::Value(NativeValue::Text(_)) => "a text",
         FieldDefault::Value(NativeValue::Bool(_)) => "true or false",
         FieldDefault::Value(_) => "a number",
         FieldDefault::List(_) => "a list",
         FieldDefault::Element(_) => "an element, or null",
-    })
+    }
 }
 
 /// Whether `name` is one a model gives: letters, digits and `_`, not
@@ -352,6 +358,21 @@ fn is_name(name: &str) -> bool {
 
 /// The helpers of `src/mxrs/forms.ts` a declaration's values call.
 const HELPERS: [&str; 6] = ["long", "int", "named", "identity", "unset", "missing"];
+
+/// `expression` without what only TypeScript reads: parentheses, `as`,
+/// `satisfies` and `!`.
+fn plain<'p, 'a>(expression: &'p Expression<'a>) -> &'p Expression<'a> {
+    let mut expression = expression;
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(inner) => &inner.expression,
+            Expression::TSAsExpression(cast) => &cast.expression,
+            Expression::TSSatisfiesExpression(check) => &check.expression,
+            Expression::TSNonNullExpression(sure) => &sure.expression,
+            other => return other,
+        };
+    }
+}
 
 /// What a prop is given: text between quotes, an expression, or an element.
 enum Given<'p, 'a> {
@@ -559,7 +580,7 @@ impl<'v> Reader<'v, '_> {
                 }
             };
             let held = document.get(&field.key).cloned();
-            let value = self.given(given, field, held.as_ref(), attribute.span, &nested)?;
+            let value = self.given(given, field, held.as_ref(), attribute.span, &nested, prop)?;
             document.set(&field.key, value);
         }
         let mut children = Vec::new();
@@ -600,6 +621,7 @@ impl<'v> Reader<'v, '_> {
     /// What a prop states for `field`, which holds `held` before it says
     /// anything. A value that is no element, where an element with a main
     /// field is held, is that field of it.
+    #[allow(clippy::too_many_arguments)]
     fn given(
         &mut self,
         given: Given<'_, '_>,
@@ -607,11 +629,29 @@ impl<'v> Reader<'v, '_> {
         held: Option<&NativeValue>,
         at: Span,
         path: &str,
+        named: &str,
     ) -> Outcome<NativeValue> {
         let shapes = self.shapes;
+        // What TypeScript alone reads — a cast, parentheses — says nothing.
+        let given = match given {
+            Given::Expression(expression) => Given::Expression(plain(expression)),
+            other => other,
+        };
         let expression = match &given {
-            Given::Expression(expression) => Some(expression.without_parentheses()),
+            Given::Expression(expression) => Some(*expression),
             _ => None,
+        };
+        // Where the prop states a field of the element it holds, the field
+        // is named beside the prop.
+        let holds = |expected: &str| {
+            if field.prop == named {
+                format!("`{named}` holds {expected}")
+            } else {
+                format!(
+                    "`{named}` states its `{}`, which holds {expected}",
+                    field.prop
+                )
+            }
         };
         let whole = matches!(given, Given::Element(_))
             || matches!(
@@ -629,9 +669,21 @@ impl<'v> Reader<'v, '_> {
                 element.get(&main.key).cloned().as_ref(),
                 at,
                 &join(path, &main.key),
+                named,
             )?;
             element.set(&main.key, inner);
             return Ok(NativeValue::Document(element));
+        }
+        if matches!(expression, Some(Expression::ObjectExpression(_)))
+            && !super::texts_fit(shapes, field, held)
+        {
+            return Err(self.file.shape(
+                at,
+                holds(&format!(
+                    "{}, not texts by language",
+                    kind_name(&field.default)
+                )),
+            ));
         }
         let value = match given {
             Given::Text(text) => NativeValue::Text(text),
@@ -639,9 +691,7 @@ impl<'v> Reader<'v, '_> {
             Given::Expression(expression) => self.value(expression, Some(field), path)?,
         };
         if let Some(expected) = kind_of(&field.default, &value) {
-            return Err(self
-                .file
-                .shape(at, format!("`{}` holds {expected}", field.prop)));
+            return Err(self.file.shape(at, holds(expected)));
         }
         Ok(value)
     }
@@ -724,9 +774,13 @@ impl<'v> Reader<'v, '_> {
             Expression::JSXElement(element) => NativeValue::Document(self.element(element, path)?),
             Expression::ArrayExpression(array) => {
                 let Some(FieldDefault::List(marker)) = field.map(|field| &field.default) else {
-                    return Err(self
-                        .file
-                        .shape(array.span, format!("`{path}` does not hold a list")));
+                    return Err(self.file.shape(
+                        array.span,
+                        format!(
+                            "`{}` does not hold a list",
+                            field.map_or(path, |field| field.prop.as_str())
+                        ),
+                    ));
                 };
                 let mut items = Vec::with_capacity(array.elements.len());
                 for (index, element) in array.elements.iter().enumerate() {
@@ -1025,7 +1079,7 @@ impl<'v> Reader<'v, '_> {
             let stated = entries
                 .iter()
                 .position(|(known, _)| known == key)
-                .map(|position| entries.remove(position).1);
+                .map(|position| plain(entries.remove(position).1));
             let value = match stated {
                 // A property the object does not store.
                 Some(Expression::Identifier(name)) if matches!(self.imports.get(name.name.as_str()), Some(Imported::Helper(helper)) if helper == "missing") =>
@@ -1053,8 +1107,8 @@ impl<'v> Reader<'v, '_> {
                             .refuse(other.span(), &format!("a <{}>", value_shape.component)));
                     };
                     let mut value = base;
-                    let held = value.get(&main.key).cloned();
-                    let said = match other.without_parentheses() {
+                    let held = super::property_held(shapes, &main.key, value.get(&main.key));
+                    let said = match other {
                         stated if main.key == "Objects" => {
                             let marker = match &held {
                                 Some(NativeValue::List(marker, _)) => Some(*marker),
@@ -1107,14 +1161,28 @@ impl<'v> Reader<'v, '_> {
                             }
                             NativeValue::List(marker, widgets)
                         }
-                        stated => self.given(
-                            Given::Expression(stated),
-                            main,
-                            held.as_ref(),
-                            stated.span(),
-                            &join(&value_path, &main.key),
-                        )?,
+                        stated => {
+                            // The property is what the page names, not the
+                            // field of its value it is stated in.
+                            let named = Field {
+                                prop: key.to_string(),
+                                ..main.clone()
+                            };
+                            self.given(
+                                Given::Expression(stated),
+                                &named,
+                                held.as_ref(),
+                                stated.span(),
+                                &join(&value_path, &main.key),
+                                key,
+                            )?
+                        }
                     };
+                    if let Some(expected) = super::property_kind(&main.key, &said) {
+                        return Err(self
+                            .file
+                            .shape(other.span(), format!("`{key}` holds {expected}")));
+                    }
                     value.set(&main.key, said);
                     value
                 }

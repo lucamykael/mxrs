@@ -339,6 +339,86 @@ pub(crate) fn property_main(value_type: &NativeDocument) -> Option<&'static str>
     })
 }
 
+/// The element a property stated in `main` holds there, where properties
+/// of that type hold one kind of element.
+pub(crate) fn property_element(main: &str) -> Option<&'static str> {
+    match main {
+        "TextTemplate" => Some("Forms$ClientTemplate"),
+        "AttributeRef" => Some("DomainModels$AttributeRef"),
+        "TranslatableValue" => Some(TEXT),
+        _ => None,
+    }
+}
+
+/// What the field a property is stated in holds before the property says
+/// anything: what its value holds there, or — where that is nothing and a
+/// property of this type holds one kind of element — that element with
+/// nothing said. So `header: { en_US: "Name" }` is a template whether or
+/// not the uses of the widget so far gave the property one.
+pub(crate) fn property_held(
+    shapes: &Shapes,
+    main: &str,
+    held: Option<&NativeValue>,
+) -> Option<NativeValue> {
+    match held {
+        Some(NativeValue::Null) => Some(
+            property_element(main)
+                .and_then(|ty| shapes.default_document(ty))
+                .map_or(NativeValue::Null, |element| {
+                    NativeValue::Document(element.clone())
+                }),
+        ),
+        other => other.cloned(),
+    }
+}
+
+/// What a property stated in `main` holds, when `value` is not that.
+pub(crate) fn property_kind(main: &str, value: &NativeValue) -> Option<&'static str> {
+    let element = |ty: &str| match value {
+        NativeValue::Null => true,
+        NativeValue::Document(document) => document.ty == ty,
+        _ => false,
+    };
+    let (fits, expected) = match main {
+        "TextTemplate" => (
+            element("Forms$ClientTemplate"),
+            "a template: its texts by language, or a <ClientTemplate>",
+        ),
+        "AttributeRef" => (
+            element("DomainModels$AttributeRef"),
+            "an attribute: its name, or an <AttributeRef>",
+        ),
+        "TranslatableValue" => (element(TEXT), "texts by language"),
+        "Action" | "DataSource" | "Icon" => (
+            matches!(value, NativeValue::Null)
+                || matches!(value, NativeValue::Document(document) if document.ty != TEXT),
+            "an element, or null",
+        ),
+        "Objects" | "Widgets" => (matches!(value, NativeValue::List(..)), "a list"),
+        _ => (
+            matches!(value, NativeValue::Text(_)),
+            "a text — a number too, between quotes",
+        ),
+    };
+    (!fits).then_some(expected)
+}
+
+/// Whether texts by language — `{ en_US: "..." }` — are what `field`
+/// holds, where it holds `held` before anything is said: a text already, a
+/// text by default, or nothing in particular.
+pub(crate) fn texts_fit(shapes: &Shapes, field: &Field, held: Option<&NativeValue>) -> bool {
+    if matches!(held, Some(NativeValue::Document(document)) if document.ty == TEXT) {
+        return true;
+    }
+    match &field.default {
+        FieldDefault::Value(NativeValue::Null) => true,
+        FieldDefault::Element(component) => shapes
+            .component(component)
+            .is_some_and(|shape| shape.ty == TEXT),
+        _ => false,
+    }
+}
+
 /// Gives `value`, a pluggable widget's value with nothing said in it, the
 /// default its property's type declares: in the field a property of that
 /// type is stated in when that is a text, and as its primitive value
@@ -902,6 +982,206 @@ export default page(
             templated("Widgets[2]", "three", ""),
         ]);
         assert_eq!(read.document, expected);
+    }
+
+    /// A use of a widget with a template, an attribute and a number, each
+    /// property holding `values` in the field a property of its type is for.
+    fn card(
+        path: &str,
+        name: &str,
+        title: Option<&str>,
+        attribute: Option<&str>,
+    ) -> NativeDocument {
+        let ty = format!("{path}.Type.ObjectType");
+        let value = |index: usize, template: NativeValue, attribute: NativeValue| {
+            NativeDocument::new(WIDGET_VALUE)
+                .with("AttributeRef", attribute)
+                .with("Objects", NativeValue::List(2, vec![]))
+                .with("PrimitiveValue", "")
+                .with("TextTemplate", template)
+                .with(
+                    "TypePointer",
+                    NativeValue::Pointer(format!("{ty}.PropertyTypes[{index}].ValueType")),
+                )
+        };
+        let template = title.map_or(NativeValue::Null, |title| {
+            NativeDocument::new("Forms$ClientTemplate")
+                .with("Fallback", "")
+                .with("Template", text(&[("en_US", title)]))
+                .into()
+        });
+        let attribute = attribute.map_or(NativeValue::Null, |attribute| {
+            NativeDocument::new("DomainModels$AttributeRef")
+                .with("Attribute", attribute)
+                .into()
+        });
+        NativeDocument::new(CUSTOM_WIDGET)
+            .with("Name", name)
+            .with(
+                "Object",
+                object(
+                    &ty,
+                    vec![
+                        (0, value(0, template, NativeValue::Null)),
+                        (1, value(1, NativeValue::Null, attribute)),
+                        (2, value(2, NativeValue::Null, NativeValue::Null)),
+                    ],
+                ),
+            )
+            .with(
+                "Type",
+                NativeDocument::new("CustomWidgets$CustomWidgetType")
+                    .with(
+                        "ObjectType",
+                        object_type(vec![
+                            property_type("title", value_type("TextTemplate", "", None)),
+                            property_type("attr", value_type("Attribute", "", None)),
+                            property_type("count", value_type("Integer", "", None)),
+                        ]),
+                    )
+                    .with("WidgetId", "com.example.widget.web.card.Card"),
+            )
+    }
+
+    #[test]
+    fn a_property_is_the_one_thing_its_type_is_for() {
+        // Most uses leave the template and the attribute out, so a property
+        // holds neither before it says anything.
+        let document = page(vec![
+            card(
+                "Widgets[0]",
+                "one",
+                Some("Filled"),
+                Some("Sales.Order.Number"),
+            ),
+            card("Widgets[1]", "two", None, None),
+            card("Widgets[2]", "three", None, None),
+        ]);
+        let vocabulary = vocabulary(&[&document]);
+        assert!(vocabulary.widgets[0].defaults.is_empty());
+        let source = render_form("Sales", &document, &vocabulary).unwrap();
+        assert!(
+            source.contains(
+                "<Card name=\"one\" properties={{ title: { en_US: \"Filled\" }, attr: \"Sales.Order.Number\" }} />"
+            ),
+            "{source}"
+        );
+        assert_eq!(
+            read_form(&source, "Orders.tsx", &vocabulary)
+                .unwrap()
+                .1
+                .document,
+            document
+        );
+        // Said of a use that held nothing there, it is the same elements.
+        let edited = source.replace(
+            "<Card name=\"two\" />",
+            "<Card name=\"two\" properties={{ title: { en_US: \"Filled\" }, attr: (\"Sales.Order.Number\" as string) }} />",
+        );
+        let read = read_form(&edited, "Orders.tsx", &vocabulary)
+            .unwrap()
+            .1
+            .document;
+        let expected = page(vec![
+            card(
+                "Widgets[0]",
+                "one",
+                Some("Filled"),
+                Some("Sales.Order.Number"),
+            ),
+            card(
+                "Widgets[1]",
+                "two",
+                Some("Filled"),
+                Some("Sales.Order.Number"),
+            ),
+            card("Widgets[2]", "three", None, None),
+        ]);
+        assert_eq!(read, expected);
+        // What a property of the type does not hold is refused by its key.
+        for (to, expected) in [
+            (
+                "attr: 5",
+                "`attr` states its `attribute`, which holds a text",
+            ),
+            (
+                "attr: { en_US: \"x\" }",
+                "`attr` states its `attribute`, which holds a text",
+            ),
+            ("count: 5", "`count` holds a text"),
+            (
+                "title: 5",
+                "`title` states its `template`, which holds an element",
+            ),
+            ("count: [1]", "`count` does not hold a list"),
+        ] {
+            let edited = source.replace(
+                "<Card name=\"two\" />",
+                &format!("<Card name=\"two\" properties={{{{ {to} }}}} />"),
+            );
+            let error = read_form(&edited, "Orders.tsx", &vocabulary)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{to}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_prop_that_says_one_thing_of_its_element_is_read_as_that_thing() {
+        let document = page(vec![
+            container("a", "card", vec![]),
+            container("b", "", vec![]),
+            container("c", "", vec![]),
+        ]);
+        let vocabulary = vocabulary(&[&document]);
+        let source = render_form("Sales", &document, &vocabulary).unwrap();
+        assert!(
+            source.contains("<DivContainer name=\"a\" appearance=\"card\" />"),
+            "{source}"
+        );
+        let read = |to: &str| {
+            read_form(
+                &source.replace("appearance=\"card\"", to),
+                "Orders.tsx",
+                &vocabulary,
+            )
+        };
+        // Nothing, however TypeScript is told to read it, is no element.
+        let nulled = read("appearance={null as never}").unwrap().1.document;
+        let Some(NativeValue::List(_, widgets)) = nulled.get("Widgets") else {
+            panic!("{nulled:?}");
+        };
+        let NativeValue::Document(first) = &widgets[0] else {
+            panic!("{widgets:?}");
+        };
+        assert_eq!(first.get("Appearance"), Some(&NativeValue::Null));
+        for (to, expected) in [
+            (
+                "appearance={5}",
+                "`appearance` states its `class`, which holds a text",
+            ),
+            (
+                "appearance={{ en_US: \"x\" }}",
+                "`appearance` states its `class`, which holds a text, not texts",
+            ),
+            ("appearance={[\"a\"]}", "`class` does not hold a list"),
+        ] {
+            let error = read(to).unwrap_err().to_string();
+            assert!(error.contains(expected), "{to}: {error}");
+        }
+        // The field an element is stated for is one of its own, and no list.
+        let elements = render_elements(&vocabulary.shapes);
+        let listed = elements.replace(
+            "  widgets: children(2),\n});",
+            "  widgets: children(2),\n}, \"widgets\");",
+        );
+        assert_ne!(listed, elements);
+        assert!(
+            read_elements(&listed, "elements.ts")
+                .unwrap_err()
+                .to_string()
+                .contains("that is no list")
+        );
     }
 
     #[test]
