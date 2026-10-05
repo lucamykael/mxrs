@@ -3,6 +3,8 @@ export type DataObject = {
   entity: string;
   id: string;
   members: Record<string, unknown>;
+  /** A blank object a form was given: it exists once it is saved. */
+  new?: boolean;
 };
 
 /**

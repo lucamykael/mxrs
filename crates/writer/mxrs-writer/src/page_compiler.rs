@@ -398,6 +398,17 @@ pub(crate) fn compile_widget(
             }
             Ok(Value::Node(node))
         }
+        WidgetDecl::Labeled { label, widget } => {
+            let compiled = compile_widget(catalog, widget, counter, packages_root)?;
+            let Value::Node(mut node) = compiled else {
+                return Ok(compiled);
+            };
+            node.set(
+                "labelTemplate",
+                Value::Node(client_template(catalog, label)?),
+            )?;
+            Ok(Value::Node(node))
+        }
         WidgetDecl::ListView {
             name,
             entity,

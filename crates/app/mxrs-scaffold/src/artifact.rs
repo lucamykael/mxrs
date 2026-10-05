@@ -1082,35 +1082,57 @@ fn create_crud(
         });
     }
     let module_stem = snake_case(module_name);
-    let declared = ["entities", "dtos"].iter().find_map(|concept| {
-        let path = root
-            .join("src/domain")
-            .join(concept)
-            .join(&module_stem)
-            .join(format!("{}.rs", snake_case(entity)));
-        transaction
-            .content(&path)
-            .ok()
-            .flatten()
-            .map(|source| (path, source))
-    });
-    let Some((path, source)) = declared else {
+    // The struct that declares the entity, by the name the model gives it:
+    // in the file named for it, or whichever of the module's declares it.
+    let folder = root.join("src/domain/entities").join(&module_stem);
+    let mut candidates = vec![folder.join(format!("{}.rs", snake_case(entity)))];
+    if let Ok(entries) = std::fs::read_dir(&folder) {
+        let mut others: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        others.sort();
+        candidates.extend(others);
+    }
+    let mut found = None;
+    for path in candidates {
+        let Some(source) = transaction.content(&path)? else {
+            continue;
+        };
+        match declared_entity(&source, module_name, entity) {
+            Ok(Some(declared)) => {
+                found = Some((path, declared));
+                break;
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                return Err(ScaffoldError::InvalidProjectSource {
+                    path: path.display().to_string(),
+                    reason,
+                });
+            }
+        }
+    }
+    let Some((path, declared)) = found else {
         return Err(ScaffoldError::InvalidProjectSource {
             path: format!(
                 "src/domain/entities/{module_stem}/{}.rs",
                 snake_case(entity)
             ),
             reason: format!(
-                "the crud template is named by an entity the project declares, and {module_name}.{entity} is not one: run `mxrs entity new {module_name}.{entity}` and give it its attributes first"
+                "the crud template is named by a persistable entity the project declares with `#[entity]`, and {module_name}.{entity} is not one: declare it (`mxrs entity new {module_name}.{entity}`) and give it its attributes first"
             ),
         });
     };
-    let attributes = entity_attributes(&source);
+    let attributes = declared.attributes;
     if attributes.is_empty() {
         return Err(ScaffoldError::InvalidProjectSource {
             path: path.display().to_string(),
             reason: format!("{module_name}.{entity} declares no attribute to show or edit"),
         });
+    }
+    // What the pages leave out is said, not dropped.
+    for (field, why) in declared.left_out {
+        transaction.note(format!(
+            "{module_name}.{entity}.{field} is not on the pages: {why}"
+        ));
     }
     let (overview, _) = crate::forms::crud_page_names(entity);
     for page in [
@@ -1139,47 +1161,105 @@ fn create_crud(
     )
 }
 
-/// The attributes a struct declaring an entity has: each field that is not
-/// an association, by the name the model gives it.
-fn entity_attributes(source: &str) -> Vec<crate::forms::CrudAttribute> {
-    let mut explicit: Option<String> = None;
-    let mut attributes = Vec::new();
-    let mut inside = false;
-    for line in source.lines() {
-        let line = line.trim();
-        if line.starts_with("pub struct ") {
-            inside = line.ends_with('{');
+/// What the struct declaring an entity says of it, for its CRUD.
+struct DeclaredEntity {
+    attributes: Vec<crate::forms::CrudAttribute>,
+    /// The fields its pages do not show, and why.
+    left_out: Vec<(String, String)>,
+}
+
+/// The `key = "text"` an attribute's arguments state, e.g. `name` in
+/// `#[entity(module = "Sales", name = "Order_Line")]`.
+fn stated(attribute: &syn::Attribute, key: &str) -> Option<String> {
+    let mut found = None;
+    let _ = attribute.parse_nested_meta(|meta| {
+        if meta.path.is_ident(key) {
+            let value: syn::LitStr = meta.value()?.parse()?;
+            found = Some(value.value());
+        } else if meta.input.peek(syn::Token![=]) {
+            let _: syn::Expr = meta.value()?.parse()?;
+        } else if meta.input.peek(syn::token::Paren) {
+            let content;
+            syn::parenthesized!(content in meta.input);
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated(&content)?;
+        }
+        Ok(())
+    });
+    found
+}
+
+/// The entity `module_name.entity` as `source` declares it with `#[entity]`,
+/// when it does: its attributes by the names the model gives them, and what
+/// its pages cannot show. An error when the file is not Rust.
+fn declared_entity(
+    source: &str,
+    module_name: &str,
+    entity: &str,
+) -> std::result::Result<Option<DeclaredEntity>, String> {
+    let file =
+        syn::parse_file(source).map_err(|error| format!("it does not read as Rust: {error}"))?;
+    for item in &file.items {
+        let syn::Item::Struct(declaration) = item else {
             continue;
-        }
-        if !inside {
-            continue;
-        }
-        if line == "}" {
-            break;
-        }
-        if let Some(arguments) = line.strip_prefix("#[mxrs(") {
-            explicit = arguments
-                .split_once("name = \"")
-                .and_then(|(_, rest)| rest.split_once('"'))
-                .map(|(name, _)| name.to_string());
-            continue;
-        }
-        let Some((field, rust_type)) = line
-            .strip_prefix("pub ")
-            .and_then(|field| field.split_once(": "))
+        };
+        let Some(attribute) = declaration
+            .attrs
+            .iter()
+            .find(|attribute| attribute.path().is_ident("entity"))
         else {
             continue;
         };
-        let rust_type = rust_type.trim_end_matches(',').to_string();
-        let name = explicit
-            .take()
-            .unwrap_or_else(|| templates::pascal_case(field));
-        if rust_type.starts_with("Reference") {
+        let name = stated(attribute, "name").unwrap_or_else(|| declaration.ident.to_string());
+        if name != entity || stated(attribute, "module").as_deref() != Some(module_name) {
             continue;
         }
-        attributes.push(crate::forms::CrudAttribute { name, rust_type });
+        let mut attributes = Vec::new();
+        let mut left_out = Vec::new();
+        for field in &declaration.fields {
+            let Some(ident) = &field.ident else {
+                continue;
+            };
+            let ident = ident.to_string();
+            let field_name = field
+                .attrs
+                .iter()
+                .filter(|attribute| attribute.path().is_ident("mxrs"))
+                .find_map(|attribute| stated(attribute, "name"))
+                .unwrap_or_else(|| templates::pascal_case(ident.trim_start_matches("r#")));
+            let last = match &field.ty {
+                syn::Type::Path(path) => path
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string()),
+                _ => None,
+            };
+            let holds = match last.as_deref() {
+                Some("Reference" | "ReferenceSet") => {
+                    left_out.push((field_name, "it is an association".to_string()));
+                    continue;
+                }
+                Some("MxBinary" | "MxHashedString" | "MxAutoNumber") | None => {
+                    left_out.push((field_name, "a form does not edit what it holds".to_string()));
+                    continue;
+                }
+                Some("MxBool") => crate::forms::CrudKind::Boolean,
+                Some("MxDateTime") => crate::forms::CrudKind::DateTime,
+                Some(other) if other.starts_with("Mx") => crate::forms::CrudKind::Text,
+                // A type of the project's own is an enumeration.
+                Some(_) => crate::forms::CrudKind::Choice,
+            };
+            attributes.push(crate::forms::CrudAttribute {
+                name: field_name,
+                holds,
+            });
+        }
+        return Ok(Some(DeclaredEntity {
+            attributes,
+            left_out,
+        }));
     }
-    attributes
+    Ok(None)
 }
 
 /// Adds a page to the navigation the frontend declares, when it declares
@@ -1861,5 +1941,85 @@ mod tests {
             Ordering::Greater
         );
         assert_eq!(version_order("sales", "sales"), Ordering::Equal);
+    }
+}
+
+#[cfg(test)]
+mod crud_tests {
+    use super::*;
+    use crate::forms::CrudKind;
+
+    /// An entity is read as Rust reads it, however its struct is laid out.
+    #[test]
+    fn an_entity_is_read_as_its_struct_declares_it() {
+        let source = r#"
+use mxrs::prelude::*;
+
+/// A kind of animal.
+#[entity(module = "Main", name = "Animal_Type")]
+#[mxrs(index(code))]
+pub struct AnimalType
+{
+    #[mxrs(length = 80, required)] pub code: MxString,
+    /// How many legs.
+    #[mxrs(
+        default = 4
+    )]
+    pub(crate) legs : MxInteger,
+    #[mxrs(name = "DOB")]
+    pub born: MxDateTime,
+    pub r#type: Size,
+    pub tame: MxBool,
+    pub picture: MxBinary,
+    pub keepers: mxrs::prelude::ReferenceSet<Keeper>,
+}
+
+#[dto(module = "Main")]
+pub struct Unrelated {
+    pub name: MxString,
+}
+"#;
+        let declared = declared_entity(source, "Main", "Animal_Type")
+            .unwrap()
+            .unwrap();
+        let attributes: Vec<(&str, CrudKind)> = declared
+            .attributes
+            .iter()
+            .map(|attribute| (attribute.name.as_str(), attribute.holds))
+            .collect();
+        assert_eq!(
+            attributes,
+            [
+                ("Code", CrudKind::Text),
+                ("Legs", CrudKind::Text),
+                ("DOB", CrudKind::DateTime),
+                ("Type", CrudKind::Choice),
+                ("Tame", CrudKind::Boolean),
+            ]
+        );
+        let left_out: Vec<&str> = declared
+            .left_out
+            .iter()
+            .map(|(field, _)| field.as_str())
+            .collect();
+        assert_eq!(left_out, ["Picture", "Keepers"]);
+        // Named by what the model calls it, in its own module, and an
+        // entity: not the struct's identifier, and not a dto.
+        assert!(
+            declared_entity(source, "Main", "AnimalType")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            declared_entity(source, "Sales", "Animal_Type")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            declared_entity(source, "Main", "Unrelated")
+                .unwrap()
+                .is_none()
+        );
+        assert!(declared_entity("pub struct {", "Main", "X").is_err());
     }
 }

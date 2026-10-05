@@ -121,8 +121,10 @@ read-only behavioral oracle; never edit it.
   children; a list shows the objects of its entity, a data view the object its
   page was given, their inputs fill it, and a button opens a page with the
   object it is in, creates, saves or deletes one through the runtime's
-  `/api/data/<operation>` (checked against the entity's access rules), or
-  runs its flow — without arguments yet. The bundle mxrs embeds holds no project's
+  `/api/data/<operation>` — each member read or written within the rights
+  of the caller's role, each value checked against what its attribute
+  holds; the entity's event handlers and validation rules are a flow's to
+  run and are not run there — or runs its flow, without arguments yet. The bundle mxrs embeds holds no project's
   pages and draws what the manifest describes. The importer,
   `mxrs new` and the scaffolds write these files: a scaffolded page or
   layout is built as what it is, made the document the model would store,
@@ -215,8 +217,12 @@ read-only behavioral oracle; never edit it.
   be configurable through explicit command options and project defaults.
   `mxrs page new <Module.Entity> --template crud` writes the overview and
   edit pages of an entity the project declares, from its attributes — a
-  list with a way to create, edit and delete, and a form — and adds the
-  overview to the navigation: an application is developed with mxrs alone.
+  list with a way to create, edit and delete, and a form with a labelled
+  input per attribute — and adds the overview to the navigation; what the
+  pages leave out (an association, a binary) is said. It is the first
+  screen of an application developed with mxrs alone, not all of one: its
+  pages work on the entity itself, and a flow of the project is not called
+  with arguments yet.
 - Never commit private acceptance projects, their names, paths, metrics, or
   identifying references. Tests and documentation use neutral corpus names and
   environment variables. Public fixtures must be redistributable.

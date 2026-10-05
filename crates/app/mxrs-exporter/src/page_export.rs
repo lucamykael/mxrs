@@ -1316,7 +1316,9 @@ fn render_widget(
             render_name_and_class(&mut out, indent + 1, "w", name, class);
             let _ = writeln!(out, "{pad}}});");
         }
-        WidgetDecl::AttributeText { .. } | WidgetDecl::ListView { .. } => {
+        WidgetDecl::AttributeText { .. }
+        | WidgetDecl::Labeled { .. }
+        | WidgetDecl::ListView { .. } => {
             unreachable!("a page read from a model holds no scaffold-only widget")
         }
     }

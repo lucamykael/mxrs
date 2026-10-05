@@ -270,7 +270,34 @@ pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, 
             // rows the writer cannot place, failing the whole shutdown save —
             // so the two filters have to state the same rule.
             let transient = !entity.persistable || entity.oql_view();
-            schema = schema.entity(qualified.clone(), defaults, transient);
+            // What each attribute holds, for a value a page writes.
+            let kinds = entity
+                .attributes
+                .iter()
+                .filter_map(|attribute| {
+                    let kind = match attribute.attribute_type {
+                        AttributeType::String => mxrs_runtime::MemberKind::Text {
+                            length: attribute
+                                .length
+                                .and_then(|length| usize::try_from(length).ok())
+                                .filter(|length| *length > 0),
+                        },
+                        AttributeType::Boolean => mxrs_runtime::MemberKind::Boolean,
+                        AttributeType::Integer
+                        | AttributeType::Long
+                        | AttributeType::AutoNumber => mxrs_runtime::MemberKind::Integer,
+                        AttributeType::Float | AttributeType::Decimal => {
+                            mxrs_runtime::MemberKind::Decimal
+                        }
+                        AttributeType::DateTime => mxrs_runtime::MemberKind::DateTime,
+                        _ => mxrs_runtime::MemberKind::Other,
+                    };
+                    Some((attribute.name.clone()?, kind))
+                })
+                .collect();
+            schema = schema
+                .entity(qualified.clone(), defaults, transient)
+                .members(&qualified, kinds);
             entities += 1;
             let mut rules = Vec::new();
             for rule in &entity.access_rules {

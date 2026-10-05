@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { DataObject } from '@/api/data';
 import { Shell } from '@/components/elements/context';
@@ -28,14 +28,22 @@ export function App() {
   useEffect(() => {
     setMenuDrawn(document.querySelector('.mx-navigationtree') !== null);
   }, [route, manifest]);
+  // The page a button is opening: a page reached any other way — the
+  // address bar, the browser's history — was given nothing.
+  const opening = useRef<string>(undefined);
   const open = useCallback(
     (page: string, objects: Record<string, DataObject> = {}) => {
+      opening.current = page;
       setGiven((all) => ({ ...all, [page]: objects }));
-      setProblem(undefined);
       openRoute(page);
     },
     [openRoute],
   );
+  useEffect(() => {
+    setProblem(undefined);
+    if (opening.current !== route) setGiven((all) => ({ ...all, [route]: {} }));
+    opening.current = undefined;
+  }, [route]);
   const pages = useMemo(
     () => (manifest ? manifest.modules.flatMap((module) => module.pages) : []),
     [manifest],
@@ -62,7 +70,10 @@ export function App() {
           open,
           given: given[qualified] || {},
           changes,
-          changed: () => setChanges((count) => count + 1),
+          changed: () => {
+            setProblem(undefined);
+            setChanges((count) => count + 1);
+          },
           fail: (error) => setProblem(error instanceof Error ? error.message : String(error)),
           form: findForm,
           sidebar,

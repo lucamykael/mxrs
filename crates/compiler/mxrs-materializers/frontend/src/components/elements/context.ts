@@ -10,7 +10,11 @@ export const Row = createContext<DataObject | null>(null);
 /** The form the inputs being drawn fill: what it holds now, and how to change it. */
 export const Draft = createContext<{
   object: DataObject | null;
+  /** The members the user changed, which are what a save sends. */
+  changed: ReadonlySet<string>;
   set: (member: string, value: unknown) => void;
+  /** Takes the object as the runtime saved it. */
+  saved: (object: DataObject) => void;
 } | null>(null);
 
 /** The title of the page being drawn. */

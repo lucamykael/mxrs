@@ -7,6 +7,7 @@ import {
   isValidElement,
   useContext,
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
   type ReactElement,
@@ -47,6 +48,18 @@ function useAction(source: Source, field: string): (() => void) | undefined {
   const { open, changed, fail } = useContext(Shell);
   const row = useContext(Row);
   const draft = useContext(Draft);
+  // One request at a time: a second click while the first is on its way
+  // does nothing.
+  const busy = useRef(false);
+  const once = (work: () => Promise<unknown>) => () => {
+    if (busy.current) return;
+    busy.current = true;
+    work()
+      .catch(fail)
+      .finally(() => {
+        busy.current = false;
+      });
+  };
   const action = child(source, field);
   if (!action) return undefined;
   const settings = (name: string, target: string) => {
@@ -78,34 +91,45 @@ function useAction(source: Source, field: string): (() => void) | undefined {
       const entity = entityOf(action);
       const page = settings('pageSettings', 'form');
       if (!entity || !page) return undefined;
-      return () => {
-        data<DataObject>('create', { entity })
-          .then((created) => open(page, { [lastName(entity)]: created }))
-          .catch(fail);
-      };
+      return once(() =>
+        data<DataObject>('create', { entity }).then((created) =>
+          open(page, { [lastName(entity)]: created }),
+        ),
+      );
     }
     case 'Forms$SaveChangesClientAction': {
       if (!draft?.object) return undefined;
       const { entity, id, members } = draft.object;
-      return () => {
-        data('save', { entity, id, members })
-          .then(() => {
-            changed();
-            if (plain(action, 'closePage', true)) history.back();
-          })
-          .catch(fail);
-      };
+      // What the user changed is what is saved: the rest is not this
+      // form's to overwrite.
+      const sent = Object.fromEntries(
+        Object.entries(members).filter(([member]) => draft.changed.has(member)),
+      );
+      return once(() =>
+        data<DataObject>('save', {
+          entity,
+          id,
+          new: draft.object?.new === true,
+          members: sent,
+        }).then((saved) => {
+          draft.saved(saved);
+          changed();
+          if (plain(action, 'closePage', true)) history.back();
+        }),
+      );
     }
     case 'Forms$DeleteClientAction': {
-      if (!here) return undefined;
+      if (!here || here.new) return undefined;
       const { entity, id } = here;
+      const confirm = once(() =>
+        data('delete', { entity, id }).then(() => {
+          changed();
+          if (draft?.object && plain(action, 'closePage', true)) history.back();
+        }),
+      );
+      // Deleting asks first, as the Mendix client does.
       return () => {
-        data('delete', { entity, id })
-          .then(() => {
-            changed();
-            if (draft && plain(action, 'closePage', true)) history.back();
-          })
-          .catch(fail);
+        if (window.confirm('Delete this item?')) confirm();
       };
     }
     case 'Forms$MicroflowAction': {
@@ -219,7 +243,11 @@ const ScrollContainer: Draw = (source) => {
   // Open as its mode says until the user says otherwise, which holds from page to page.
   const { sidebar: chosen, setSidebar } = useContext(Shell);
   const open = chosen ?? !toggling?.endsWith('InitiallyClosed');
-  const how = toggling?.startsWith('Push') ? 'push' : toggling?.startsWith('Slide') ? 'slide' : 'shrink';
+  const how = toggling?.startsWith('Push')
+    ? 'push'
+    : toggling?.startsWith('Slide')
+      ? 'slide'
+      : 'shrink';
 
   const region = (name: string, place: string, side: 'width' | 'height') => {
     const stated = child(source, name);
@@ -235,7 +263,10 @@ const ScrollContainer: Draw = (source) => {
         // A region that toggles is as wide as its container says it is now.
         style={toggles ? undefined : regionSize(stated, side)}
       >
-        <div className="mx-scrollcontainer-wrapper" style={toggles ? regionSize(stated, side) : undefined}>
+        <div
+          className="mx-scrollcontainer-wrapper"
+          style={toggles ? regionSize(stated, side) : undefined}
+        >
           {content(stated)}
         </div>
       </div>
@@ -322,9 +353,7 @@ const LayoutGridColumn: Draw = (source) => {
 const DynamicText: Draw = (source) => {
   const mode = plain(source, 'renderMode', 'Text');
   const Tag = (/^H[1-6]$/.test(mode) ? mode.toLowerCase() : mode === 'Paragraph' ? 'p' : 'span') as
-    | 'h1'
-    | 'p'
-    | 'span';
+    'h1' | 'p' | 'span';
   const row = useContext(Row);
   const object = useContext(Draft)?.object ?? row;
   return <Tag className={className(source, 'mx-text')}>{text(source, 'content', object)}</Tag>;
@@ -368,7 +397,7 @@ const input =
     const draft = useContext(Draft);
     const attribute = child(source, 'attributeRef');
     const name = lastName(attribute ? plain(attribute, 'attribute', '') : '');
-    const label = text(source, 'labelTemplate') || name;
+    const label = text(source, 'labelTemplate');
     return (
       <div className={className(source, 'form-group')}>
         {label ? <label className="control-label">{label}</label> : null}
@@ -430,14 +459,32 @@ const DataView: Draw = (source) => {
   const { given } = useContext(Shell);
   const origin = child(source, 'dataSource');
   const variable = origin ? child(origin, 'sourceVariable') : null;
-  const parameter = variable ? plain(variable, 'pageParameter', '') : '';
-  const objects = Object.values(given);
-  const initial = given[lastName(parameter)] ?? (objects.length === 1 ? objects[0] : null);
+  const parameter = variable ? lastName(plain(variable, 'pageParameter', '')) : '';
+  const initial = parameter ? (given[parameter] ?? null) : null;
   const [object, setObject] = useState<DataObject | null>(initial);
-  const set = (member: string, value: unknown) =>
+  const [changed, setChanged] = useState<ReadonlySet<string>>(new Set());
+  const set = (member: string, value: unknown) => {
     setObject((now) => (now ? { ...now, members: { ...now.members, [member]: value } } : now));
+    setChanged((now) => new Set(now).add(member));
+  };
+  const saved = (kept: DataObject) => {
+    setObject(kept);
+    setChanged(new Set());
+  };
+  // A page opened without the object it shows — from the address bar, or
+  // reloaded — has nothing to show, and says so.
+  if (parameter && !object) {
+    return (
+      <section className={className(source, 'mx-dataview')}>
+        <div className="mx-dataview-empty">
+          {text(source, 'noEntityMessage') ||
+            'Nothing to show: open this page from the list it belongs to.'}
+        </div>
+      </section>
+    );
+  }
   return (
-    <Draft.Provider value={{ object, set }}>
+    <Draft.Provider value={{ object, changed, set, saved }}>
       <section className={className(source, 'mx-dataview')}>
         <div className="mx-dataview-content">{each(list(source, 'widgets'))}</div>
         {list(source, 'footerWidgets').length ? (
@@ -475,7 +522,10 @@ const ListView: Draw = (source) => {
       <ul>
         {(objects ?? []).map((object) => (
           <li key={object.id} className="mx-listview-item">
-            <Row.Provider value={object}>{content(source)}</Row.Provider>
+            {/* A row is about its own object, whatever form the list is in. */}
+            <Row.Provider value={object}>
+              <Draft.Provider value={null}>{content(source)}</Draft.Provider>
+            </Row.Provider>
           </li>
         ))}
       </ul>
@@ -583,7 +633,12 @@ const Title: Draw = (source) => (
 const GridButton: Draw = (source) => (
   <button
     type="button"
-    className={className(source, 'btn', 'mx-button', `btn-${plain(source, 'buttonStyle', 'Default').toLowerCase() || 'default'}`)}
+    className={className(
+      source,
+      'btn',
+      'mx-button',
+      `btn-${plain(source, 'buttonStyle', 'Default').toLowerCase() || 'default'}`,
+    )}
   >
     {text(source, 'captionTemplate')}
   </button>

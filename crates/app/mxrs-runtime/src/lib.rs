@@ -95,6 +95,24 @@ pub struct StoreSchema {
 struct EntitySchema {
     defaults: BTreeMap<String, Value>,
     transient: bool,
+    /// What each attribute holds, where the model says.
+    kinds: BTreeMap<String, MemberKind>,
+}
+
+/// What an attribute holds, as far as a value written from outside a flow
+/// has to be checked against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberKind {
+    Text {
+        length: Option<usize>,
+    },
+    Boolean,
+    Integer,
+    Decimal,
+    DateTime,
+    /// An enumeration, a binary, a hashed string: text this runtime does
+    /// not look into.
+    Other,
 }
 
 impl StoreSchema {
@@ -109,8 +127,17 @@ impl StoreSchema {
             EntitySchema {
                 defaults,
                 transient,
+                kinds: BTreeMap::new(),
             },
         );
+        self
+    }
+
+    /// States what the attributes of an entity already declared hold.
+    pub fn members(mut self, entity: &str, kinds: BTreeMap<String, MemberKind>) -> Self {
+        if let Some(schema) = Arc::make_mut(&mut self.entities).get_mut(entity) {
+            schema.kinds = kinds;
+        }
         self
     }
 
@@ -167,6 +194,23 @@ impl Store {
         put_record(&mut self.records, Arc::new(value.clone()));
         self.mark_dirty(entity, &value.id);
         Ok(value)
+    }
+
+    /// Creates the object a form was shown before it existed, under the
+    /// identity the form knows it by — so saving it twice is saving one
+    /// object.
+    pub fn create_as(&mut self, entity: &str, id: &str) -> Result<ObjectValue> {
+        if uuid::Uuid::parse_str(id).is_err() {
+            return Err(RuntimeError::Transaction(
+                "a new object is known by a UUID".into(),
+            ));
+        }
+        let mut object = self.create(entity)?;
+        self.rollback(entity, &object.id)?;
+        object.id = id.to_string();
+        put_record(&mut self.records, Arc::new(object.clone()));
+        self.mark_dirty(entity, id);
+        Ok(object)
     }
 
     pub fn retrieve(&self, entity: &str) -> Result<Vec<ObjectValue>> {
@@ -663,10 +707,12 @@ impl Runtime {
     }
 
     /// What a page does with the objects it shows, by the operation's name:
-    /// `retrieve` every object of an entity the caller may read, `create`
-    /// one with the entity's defaults, `save` the members a form holds and
-    /// commit them, or `delete` one. Each is checked against the entity's
-    /// access rules, as a page of the model would be.
+    /// `retrieve` the objects of an entity the caller may read, `create` a
+    /// blank one for a form, `save` the members a form changed and commit
+    /// them, or `delete` one. Each is checked against the entity's access
+    /// rules member by member, and a value against what its attribute
+    /// holds. Event handlers of the entity are a flow's to run and are not
+    /// run here.
     pub fn data(
         &mut self,
         operation: &str,
@@ -680,25 +726,40 @@ impl Runtime {
                 .ok_or_else(|| RuntimeError::Transaction(format!("{operation} needs `{key}`")))
         };
         let entity = text("entity")?;
+        let schema = self
+            .store
+            .schema
+            .entities
+            .get(entity)
+            .cloned()
+            .ok_or_else(|| RuntimeError::UnknownEntity(entity.to_string()))?;
         let security = &self.security;
-        let allowed = |action: EntityAction,
-                       name: &str,
-                       member: Option<&str>,
-                       record: Option<&BTreeMap<String, Value>>| {
-            if security.entity_allowed(entity, action, member, record, context) {
-                Ok(())
-            } else {
-                Err(RuntimeError::NotAuthorized {
-                    action: name.to_string(),
-                    resource: match member {
-                        Some(member) => format!("{entity}.{member}"),
-                        None => entity.to_string(),
-                    },
-                })
-            }
+        let refused = |action: &str, member: Option<&str>| RuntimeError::NotAuthorized {
+            action: action.to_string(),
+            resource: match member {
+                Some(member) => format!("{entity}.{member}"),
+                None => entity.to_string(),
+            },
+        };
+        // An object as its caller may see it: the members it may read.
+        let seen = |object: &ObjectValue| {
+            let mut visible = object.clone();
+            visible.members.retain(|member, _| {
+                security.entity_allowed(
+                    entity,
+                    EntityAction::Read,
+                    Some(member),
+                    Some(&object.members),
+                    context,
+                )
+            });
+            shown(&visible)
         };
         match operation {
             "retrieve" => {
+                if !security.entity_allowed(entity, EntityAction::Read, None, None, context) {
+                    return Err(refused("read", None));
+                }
                 let objects: Vec<Value> = self
                     .store
                     .retrieve(entity)?
@@ -712,71 +773,107 @@ impl Runtime {
                             context,
                         )
                     })
-                    .map(|object| shown(&object))
+                    .map(|object| seen(&object))
                     .collect();
                 Ok(serde_json::json!({ "objects": objects }))
             }
             "create" => {
-                allowed(EntityAction::Create, "create", None, None)?;
+                if !security.entity_allowed(entity, EntityAction::Create, None, None, context) {
+                    return Err(refused("create", None));
+                }
                 // Shown to the form and not kept: the object exists once it
-                // is saved.
+                // is saved, as the new one the form says it is.
                 self.store.transaction(|store| {
                     let object = store.create(entity)?;
                     store.rollback(entity, &object.id)?;
-                    Ok(shown(&object))
+                    let mut blank = seen(&object);
+                    blank["new"] = Value::Bool(true);
+                    Ok(blank)
                 })
             }
             "save" => {
                 let id = text("id")?;
+                let new = arguments.get("new").and_then(Value::as_bool) == Some(true);
                 let members = arguments
                     .get("members")
                     .and_then(Value::as_object)
                     .ok_or_else(|| RuntimeError::Transaction("save needs `members`".into()))?;
                 let existing = self.store.find(entity, id)?;
-                match &existing {
-                    Some(object) => {
-                        for member in members.keys() {
-                            allowed(
-                                EntityAction::Write,
-                                "write",
-                                Some(member),
-                                Some(&object.members),
-                            )?;
+                let record = match (&existing, new) {
+                    (Some(object), _) => object.members.clone(),
+                    (None, true) => {
+                        if !security.entity_allowed(
+                            entity,
+                            EntityAction::Create,
+                            None,
+                            None,
+                            context,
+                        ) {
+                            return Err(refused("create", None));
                         }
+                        schema.defaults.clone()
                     }
-                    None => allowed(EntityAction::Create, "create", None, None)?,
+                    // Not a new object, and gone: saving it would bring back
+                    // what someone deleted.
+                    (None, false) => {
+                        return Err(RuntimeError::UnknownObject {
+                            entity: entity.to_string(),
+                            id: id.to_string(),
+                        });
+                    }
+                };
+                let mut values = Vec::with_capacity(members.len());
+                for (member, value) in members {
+                    if !schema.kinds.contains_key(member)
+                        && !schema.defaults.contains_key(member)
+                        && !record.contains_key(member)
+                    {
+                        return Err(RuntimeError::Transaction(format!(
+                            "{entity} has no member {member}"
+                        )));
+                    }
+                    if !security.entity_allowed(
+                        entity,
+                        EntityAction::Write,
+                        Some(member),
+                        Some(&record),
+                        context,
+                    ) {
+                        return Err(refused("write", Some(member)));
+                    }
+                    let value = stored(value, schema.kinds.get(member), record.get(member))
+                        .map_err(|reason| {
+                            RuntimeError::Transaction(format!("{entity}.{member}: {reason}"))
+                        })?;
+                    values.push((member, value));
                 }
-                self.store.transaction(|store| {
+                let saved = self.store.transaction(|store| {
                     let id = match existing {
                         Some(object) => object.id,
-                        None => store.create(entity)?.id,
+                        None => store.create_as(entity, id)?.id,
                     };
-                    let current = store
-                        .find(entity, &id)?
-                        .map(|object| object.members)
-                        .unwrap_or_default();
-                    for (member, value) in members {
-                        if !current.contains_key(member) {
-                            return Err(RuntimeError::Transaction(format!(
-                                "{entity} has no member {member}"
-                            )));
-                        }
-                        store.set_member(
-                            entity,
-                            &id,
-                            member,
-                            stored(value, current.get(member)),
-                        )?;
+                    for (member, value) in values {
+                        store.set_member(entity, &id, member, value)?;
                     }
-                    store.commit(entity, &id).map(|object| shown(&object))
-                })
+                    store.commit(entity, &id)
+                })?;
+                Ok(seen(&saved))
             }
             "delete" => {
                 let id = text("id")?;
                 let record = self.store.find(entity, id)?.map(|object| object.members);
-                allowed(EntityAction::Delete, "delete", None, record.as_ref())?;
+                if !security.entity_allowed(
+                    entity,
+                    EntityAction::Delete,
+                    None,
+                    record.as_ref(),
+                    context,
+                ) {
+                    return Err(refused("delete", None));
+                }
                 self.store
-                    .transaction(|store| store.delete(entity, id).map(|object| shown(&object)))
+                    .transaction(|store| store.delete(entity, id))
+                    .map(|object| serde_json::json!({ "entity": object.entity, "id": object.id }))
             }
             other => Err(RuntimeError::UnknownAction(format!("data/{other}"))),
         }
@@ -798,12 +895,13 @@ fn shown(object: &ObjectValue) -> Value {
         .members
         .iter()
         .map(|(member, value)| {
-            let value = match value.as_str().and_then(|text| {
-                text.strip_prefix(DATETIME_MEMBER_PREFIX)?
-                    .parse::<i64>()
-                    .ok()
-            }) {
-                Some(seconds) => Value::String(iso_instant(seconds)),
+            let instant = value
+                .as_str()
+                .and_then(|text| text.strip_prefix(DATETIME_MEMBER_PREFIX))
+                .and_then(|seconds| seconds.parse::<f64>().ok())
+                .filter(|seconds| seconds.is_finite());
+            let value = match instant {
+                Some(seconds) => Value::String(iso_instant(seconds.floor() as i64)),
                 None => value.clone(),
             };
             (member.clone(), value)
@@ -812,20 +910,68 @@ fn shown(object: &ObjectValue) -> Value {
     serde_json::json!({ "entity": object.entity, "id": object.id, "members": members })
 }
 
-/// What a form sent, as the store keeps it: a date and time stays one where
-/// the member holds one.
-fn stored(value: &Value, current: Option<&Value>) -> Value {
-    let holds_instant = current
+/// What a form sent for a member, as the store keeps what the member's
+/// attribute holds — or why it cannot be that.
+fn stored(
+    value: &Value,
+    kind: Option<&MemberKind>,
+    current: Option<&Value>,
+) -> std::result::Result<Value, String> {
+    let blank = value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty());
+    // A member the model says nothing about holds a date where it holds one now.
+    let dated = current
         .and_then(Value::as_str)
         .is_some_and(|text| text.starts_with(DATETIME_MEMBER_PREFIX));
-    match value
-        .as_str()
-        .filter(|_| holds_instant)
-        .and_then(instant_seconds)
-    {
-        Some(seconds) => Value::String(format!("{DATETIME_MEMBER_PREFIX}{seconds}")),
-        None => value.clone(),
+    match kind {
+        Some(MemberKind::Text { length }) => match value {
+            Value::Null => Ok(Value::String(String::new())),
+            Value::String(text) => match length {
+                Some(length) if text.chars().count() > *length => {
+                    Err(format!("longer than {length} characters"))
+                }
+                _ => Ok(value.clone()),
+            },
+            _ => Err("not a text".to_string()),
+        },
+        Some(MemberKind::Boolean) => match value {
+            Value::Bool(_) => Ok(value.clone()),
+            Value::String(text) if text == "true" => Ok(Value::Bool(true)),
+            Value::String(text) if text == "false" => Ok(Value::Bool(false)),
+            _ => Err("neither true nor false".to_string()),
+        },
+        Some(MemberKind::Integer) if blank => Ok(Value::Null),
+        Some(MemberKind::Integer) => value
+            .as_i64()
+            .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+            .map(Value::from)
+            .ok_or_else(|| "not a whole number".to_string()),
+        Some(MemberKind::Decimal) if blank => Ok(Value::Null),
+        Some(MemberKind::Decimal) => value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+            .filter(|number| number.is_finite())
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(|| "not a number".to_string()),
+        Some(MemberKind::DateTime) if blank => Ok(Value::String(String::new())),
+        None if dated && blank => Ok(Value::String(String::new())),
+        Some(MemberKind::DateTime) => instant(value),
+        None if dated => instant(value),
+        Some(MemberKind::Other) => match value {
+            Value::Null => Ok(Value::String(String::new())),
+            Value::String(_) => Ok(value.clone()),
+            _ => Err("not a text".to_string()),
+        },
+        None => Ok(value.clone()),
     }
+}
+
+fn instant(value: &Value) -> std::result::Result<Value, String> {
+    value
+        .as_str()
+        .and_then(instant_seconds)
+        .map(|seconds| Value::String(format!("{DATETIME_MEMBER_PREFIX}{seconds}")))
+        .ok_or_else(|| "not a date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)".to_string())
 }
 
 /// `seconds` since the epoch as `YYYY-MM-DDTHH:MM:SSZ`.
@@ -855,20 +1001,69 @@ fn iso_instant(seconds: i64) -> String {
     )
 }
 
-/// The seconds since the epoch `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]` names, in UTC.
+/// The seconds since the epoch a date (`YYYY-MM-DD`, midnight UTC) or an
+/// instant (`YYYY-MM-DDTHH:MM[:SS[.fff]]` with `Z`, an offset or neither,
+/// which is UTC) names — a real one: the 31st of February is none.
 fn instant_seconds(text: &str) -> Option<i64> {
     let (date, time) = match text.split_once('T') {
-        Some((date, time)) => (date, time.trim_end_matches('Z')),
-        None => (text, "00:00:00"),
+        Some((date, time)) => (date, time),
+        None => (text, "00:00:00Z"),
     };
-    let mut date = date.split('-').map(|part| part.parse::<i64>().ok());
-    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
-    let mut time = time
-        .split(':')
-        .map(|part| part.split('.').next()?.parse::<i64>().ok());
-    let (hour, minute) = (time.next()??, time.next().flatten().unwrap_or(0));
-    let second = time.next().flatten().unwrap_or(0);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let mut parts = date.split('-');
+    let number = |part: Option<&str>, digits: usize| {
+        let part = part?;
+        (part.len() == digits && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse::<i64>().ok())
+            .flatten()
+    };
+    let (year, month, day) = (
+        number(parts.next(), 4)?,
+        number(parts.next(), 2)?,
+        number(parts.next(), 2)?,
+    );
+    if parts.next().is_some() || year == 0 || !(1..=12).contains(&month) {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=days).contains(&day) {
+        return None;
+    }
+    // The offset, when the time states one.
+    let (time, offset) = if let Some(time) = time.strip_suffix('Z') {
+        (time, 0)
+    } else if let Some(at) = time.rfind(['+', '-']) {
+        let (time, zone) = time.split_at(at);
+        let mut zone_parts = zone[1..].split(':');
+        let (hours, minutes) = (number(zone_parts.next(), 2)?, number(zone_parts.next(), 2)?);
+        if zone_parts.next().is_some() || hours > 14 || minutes > 59 {
+            return None;
+        }
+        let seconds = hours * 3_600 + minutes * 60;
+        (
+            time,
+            if zone.starts_with('-') {
+                -seconds
+            } else {
+                seconds
+            },
+        )
+    } else {
+        (time, 0)
+    };
+    let mut clock = time.split(':');
+    let hour = number(clock.next(), 2)?;
+    let minute = number(clock.next(), 2)?;
+    let second = match clock.next() {
+        Some(second) => number(Some(second.split('.').next()?), 2)?,
+        None => 0,
+    };
+    if clock.next().is_some() || hour > 23 || minute > 59 || second > 59 {
         return None;
     }
     let year = year - i64::from(month <= 2);
@@ -876,7 +1071,10 @@ fn instant_seconds(text: &str) -> Option<i64> {
     let year_of_era = year.rem_euclid(400);
     let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    Some((era * 146_097 + day_of_era - 719_468) * 86_400 + hour * 3_600 + minute * 60 + second)
+    Some(
+        (era * 146_097 + day_of_era - 719_468) * 86_400 + hour * 3_600 + minute * 60 + second
+            - offset,
+    )
 }
 
 #[cfg(test)]
@@ -896,7 +1094,7 @@ mod tests {
             ),
         ]);
         let mut runtime = Runtime::new(
-            Store::new(StoreSchema::default().entity("Main.Animal", defaults, true)),
+            Store::new(StoreSchema::default().entity("Main.Animal", defaults, false)),
             SecurityPolicy::default(),
         );
         let context = SecurityContext::default();
@@ -915,6 +1113,7 @@ mod tests {
                 &serde_json::json!({
                     "entity": "Main.Animal",
                     "id": blank["id"],
+                    "new": true,
                     "members": { "Name": "Rex", "BirthDate": "2020-02-29" },
                 }),
                 &context,
@@ -958,6 +1157,151 @@ mod tests {
         assert!(matches!(
             runtime.data("explode", &entity, &context),
             Err(RuntimeError::UnknownAction(_))
+        ));
+        // What was deleted is not brought back by a form still open on it,
+        // and a new object saved twice is one object.
+        let stale = serde_json::json!({ "entity": "Main.Animal", "id": id, "members": { "Name": "Ghost" } });
+        assert!(matches!(
+            runtime.data("save", &stale, &context),
+            Err(RuntimeError::UnknownObject { .. })
+        ));
+        let fresh = serde_json::json!({
+            "entity": "Main.Animal",
+            "id": uuid::Uuid::new_v4().to_string(),
+            "new": true,
+            "members": { "Name": "Twice" },
+        });
+        runtime.data("save", &fresh, &context).unwrap();
+        runtime.data("save", &fresh, &context).unwrap();
+        let listed = runtime.data("retrieve", &entity, &context).unwrap();
+        assert_eq!(listed["objects"].as_array().unwrap().len(), 1);
+    }
+
+    /// A value written by a page is what its attribute holds, or is refused.
+    #[test]
+    fn a_page_writes_only_what_an_attribute_holds() {
+        let kinds = BTreeMap::from([
+            ("Name".to_string(), MemberKind::Text { length: Some(5) }),
+            ("Active".to_string(), MemberKind::Boolean),
+            ("Legs".to_string(), MemberKind::Integer),
+            ("Weight".to_string(), MemberKind::Decimal),
+            ("BirthDate".to_string(), MemberKind::DateTime),
+        ]);
+        let mut runtime = Runtime::new(
+            Store::new(
+                StoreSchema::default()
+                    .entity("Main.Animal", BTreeMap::new(), false)
+                    .members("Main.Animal", kinds),
+            ),
+            SecurityPolicy::default(),
+        );
+        let context = SecurityContext::default();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut save = |members: Value| {
+            runtime.data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Animal", "id": id, "new": true, "members": members }),
+                &context,
+            )
+        };
+        let saved = save(serde_json::json!({
+            "Name": "Rex", "Active": "true", "Legs": "4", "Weight": "1.5",
+            "BirthDate": "2020-02-29T10:00:00+02:00",
+        }))
+        .unwrap();
+        assert_eq!(saved["members"]["Active"], true);
+        assert_eq!(saved["members"]["Legs"], 4);
+        assert_eq!(saved["members"]["Weight"], 1.5);
+        assert_eq!(saved["members"]["BirthDate"], "2020-02-29T08:00:00Z");
+        // Cleared, a number or a date holds nothing.
+        let cleared = save(serde_json::json!({ "Legs": "", "BirthDate": null })).unwrap();
+        assert_eq!(cleared["members"]["Legs"], Value::Null);
+        assert_eq!(cleared["members"]["BirthDate"], "");
+        for refused in [
+            serde_json::json!({ "Name": "Too long" }),
+            serde_json::json!({ "Name": { "a": 1 } }),
+            serde_json::json!({ "Active": "yes" }),
+            serde_json::json!({ "Legs": "four" }),
+            serde_json::json!({ "Weight": "1,5" }),
+            serde_json::json!({ "BirthDate": "2023-02-31" }),
+            serde_json::json!({ "BirthDate": "2023-01-01T25:00:00Z" }),
+            serde_json::json!({ "BirthDate": "99999999999-01-01" }),
+            serde_json::json!({ "Nope": 1 }),
+        ] {
+            assert!(
+                matches!(save(refused.clone()), Err(RuntimeError::Transaction(_))),
+                "{refused}"
+            );
+        }
+        assert_eq!(instant_seconds("1970-01-01"), Some(0));
+        assert_eq!(instant_seconds("1969-12-31T23:59:59Z"), Some(-1));
+        assert_eq!(instant_seconds("2100-02-29"), None);
+        assert_eq!(
+            iso_instant(instant_seconds("2000-02-29T23:59:59.999Z").unwrap()),
+            "2000-02-29T23:59:59Z"
+        );
+    }
+
+    /// A page sees and writes what its user's role may, member by member.
+    #[test]
+    fn a_page_reads_and_writes_within_the_rights_of_its_role() {
+        let defaults = BTreeMap::from([
+            ("Name".to_string(), Value::String(String::new())),
+            ("Secret".to_string(), Value::String("hidden".into())),
+        ]);
+        let rule = EntityRule {
+            module_roles: BTreeSet::from(["Main.User".to_string()]),
+            create: true,
+            delete: false,
+            default_member_right: None,
+            member_rights: BTreeMap::from([
+                ("Name".to_string(), MemberRight::Write),
+                ("Secret".to_string(), MemberRight::None),
+            ]),
+            xpath: String::new(),
+        };
+        let security = SecurityPolicy {
+            enabled: true,
+            entities: BTreeMap::from([("Main.Animal".to_string(), vec![rule])]),
+            ..Default::default()
+        };
+        let mut runtime = Runtime::new(
+            Store::new(StoreSchema::default().entity("Main.Animal", defaults, false)),
+            security,
+        );
+        let user = SecurityContext {
+            module_roles: BTreeSet::from(["Main.User".to_string()]),
+            ..Default::default()
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let save = |members: Value| serde_json::json!({ "entity": "Main.Animal", "id": id, "new": true, "members": members });
+        // A member the role may not write is refused on a new object too.
+        assert!(matches!(
+            runtime.data("save", &save(serde_json::json!({ "Secret": "x" })), &user),
+            Err(RuntimeError::NotAuthorized { .. })
+        ));
+        let saved = runtime
+            .data("save", &save(serde_json::json!({ "Name": "Rex" })), &user)
+            .unwrap();
+        assert_eq!(saved["members"], serde_json::json!({ "Name": "Rex" }));
+        let entity = serde_json::json!({ "entity": "Main.Animal" });
+        let listed = runtime.data("retrieve", &entity, &user).unwrap();
+        assert_eq!(
+            listed["objects"][0]["members"],
+            serde_json::json!({ "Name": "Rex" })
+        );
+        assert!(matches!(
+            runtime.data(
+                "delete",
+                &serde_json::json!({ "entity": "Main.Animal", "id": id }),
+                &user
+            ),
+            Err(RuntimeError::NotAuthorized { .. })
+        ));
+        // Someone with no role is told so, not shown an empty list.
+        assert!(matches!(
+            runtime.data("retrieve", &entity, &SecurityContext::default()),
+            Err(RuntimeError::NotAuthorized { .. })
         ));
     }
     use serde_json::json;

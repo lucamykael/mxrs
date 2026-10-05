@@ -198,18 +198,33 @@ async fn invoke(
     if !matches!(kind.as_str(), "action" | "microflow" | "nanoflow" | "data") {
         return error_response(StatusCode::NOT_FOUND, "unknown_action_kind", &kind);
     }
-    let permit = match state.action_slots.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            let mut response = error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "runtime_busy",
-                "another runtime action is still running",
-            );
-            response
-                .headers_mut()
-                .insert("retry-after", "1".parse().unwrap());
-            return response;
+    // A page asks for its data as it draws, several lists at once: those
+    // wait their turn. A flow that finds the runtime busy is told so.
+    let permit = if kind == "data" {
+        match state.action_slots.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "runtime_stopping",
+                    "the runtime is shutting down",
+                );
+            }
+        }
+    } else {
+        match state.action_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let mut response = error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "runtime_busy",
+                    "another runtime action is still running",
+                );
+                response
+                    .headers_mut()
+                    .insert("retry-after", "1".parse().unwrap());
+                return response;
+            }
         }
     };
     match tokio::task::spawn_blocking(move || {
@@ -335,6 +350,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(index.status(), StatusCode::OK);
+    }
+
+    /// A page's lists ask for their data together: each is answered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn data_requests_made_together_are_all_answered() {
+        let web = web_root();
+        let runtime = Runtime::new(
+            Store::new(StoreSchema::default().entity("Sales.Order", BTreeMap::new(), false)),
+            SecurityPolicy::default(),
+        );
+        let router = RuntimeHttp::new(runtime, web.path()).router().unwrap();
+        let ask = |operation: &'static str| {
+            let router = router.clone();
+            async move {
+                router
+                    .oneshot(
+                        Request::post(format!("/api/data/{operation}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"entity":"Sales.Order"}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        let answers = tokio::join!(
+            ask("retrieve"),
+            ask("retrieve"),
+            ask("retrieve"),
+            ask("create")
+        );
+        assert_eq!(
+            answers,
+            (
+                StatusCode::OK,
+                StatusCode::OK,
+                StatusCode::OK,
+                StatusCode::OK
+            )
+        );
+        assert_eq!(ask("explode").await, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

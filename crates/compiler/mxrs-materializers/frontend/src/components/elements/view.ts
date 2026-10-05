@@ -138,7 +138,10 @@ export function shown(value: unknown): string {
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
     const instant = new Date(value);
-    return Number.isNaN(instant.getTime()) ? value : instant.toLocaleDateString();
+    // The day the form's date input shows for it: the instant's own, in UTC.
+    return Number.isNaN(instant.getTime())
+      ? value
+      : instant.toLocaleDateString(undefined, { timeZone: 'UTC' });
   }
   return String(value);
 }

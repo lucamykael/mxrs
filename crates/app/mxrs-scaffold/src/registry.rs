@@ -113,12 +113,30 @@ pub fn destroy(root: impl AsRef<Path>, key: &str) -> Result<RegisteredScaffold> 
     }
     // A page leaves the navigation with the item its scaffold gave it,
     // while that is still the line the scaffold wrote.
+    // That is the page the scaffold is named for, or — for an entity's
+    // CRUD — one of the pages it wrote.
     if let Some(page) = key.strip_prefix("page:") {
         let navigation = root.join("frontend/src/navigation/index.ts");
-        if let Ok(source) = std::fs::read_to_string(&navigation)
-            && let Some(edited) = crate::forms::remove_navigation_item(&source, page)
-        {
-            std::fs::write(&navigation, edited).map_err(|error| io_error(&navigation, error))?;
+        let module = page.split('.').next().unwrap_or_default();
+        let mut pages = vec![page.to_string()];
+        pages.extend(files.iter().filter_map(|file| {
+            let written = file.strip_prefix(root.join("frontend/src/pages")).ok()?;
+            (written.extension()? == "tsx")
+                .then(|| {
+                    written
+                        .file_stem()?
+                        .to_str()
+                        .map(|stem| format!("{module}.{stem}"))
+                })
+                .flatten()
+        }));
+        for page in pages {
+            if let Ok(source) = std::fs::read_to_string(&navigation)
+                && let Some(edited) = crate::forms::remove_navigation_item(&source, &page)
+            {
+                std::fs::write(&navigation, edited)
+                    .map_err(|error| io_error(&navigation, error))?;
+            }
         }
     }
     let document = serde_json::json!({ "scaffolds": payload });

@@ -175,6 +175,11 @@ pub enum WidgetDecl {
         class: Option<String>,
         action: ButtonAction,
     },
+    /// An input with the label a form shows beside it.
+    Labeled {
+        label: String,
+        widget: Box<WidgetDecl>,
+    },
     /// Every object of `entity` from the database, each drawn as the
     /// widgets inside.
     ListView {

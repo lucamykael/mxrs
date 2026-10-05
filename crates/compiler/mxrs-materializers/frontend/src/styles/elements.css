@@ -59,3 +59,4 @@
 .mxrs-menu nav ul { display: flex; gap: 0.5rem; }
 .mxrs-menu nav button { width: auto; }
 .mx-page { padding: 1rem; }
+.mx-dataview-empty { padding: 1rem 0; opacity: 0.7; }

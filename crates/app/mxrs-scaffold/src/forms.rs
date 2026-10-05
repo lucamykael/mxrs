@@ -275,7 +275,17 @@ pub(crate) fn plain_page(
 /// the Rust type its field has.
 pub(crate) struct CrudAttribute {
     pub(crate) name: String,
-    pub(crate) rust_type: String,
+    pub(crate) holds: CrudKind,
+}
+
+/// What an attribute holds, as far as its input goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrudKind {
+    Text,
+    Boolean,
+    DateTime,
+    /// One of an enumeration's values.
+    Choice,
 }
 
 /// The names of the two pages of an entity's CRUD.
@@ -370,22 +380,31 @@ pub(crate) fn crud_edit_page(
         .map(|attribute| {
             let name = Some(lower_first(&attribute.name));
             let bound = format!("{qualified_entity}.{}", attribute.name);
-            match attribute.rust_type.as_str() {
-                "MxBool" => WidgetDecl::CheckBox {
+            let input = match attribute.holds {
+                CrudKind::Boolean => WidgetDecl::CheckBox {
                     name,
                     attribute: bound,
                     class: None,
                 },
-                "MxDateTime" => WidgetDecl::DatePicker {
+                CrudKind::DateTime => WidgetDecl::DatePicker {
                     name,
                     attribute: bound,
                     class: None,
                 },
-                _ => WidgetDecl::TextBox {
+                CrudKind::Choice => WidgetDecl::DropDown {
                     name,
                     attribute: bound,
                     class: None,
                 },
+                CrudKind::Text => WidgetDecl::TextBox {
+                    name,
+                    attribute: bound,
+                    class: None,
+                },
+            };
+            WidgetDecl::Labeled {
+                label: humanize(&attribute.name),
+                widget: Box::new(input),
             }
         })
         .collect();

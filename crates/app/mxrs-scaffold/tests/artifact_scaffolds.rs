@@ -929,6 +929,22 @@ fn an_entity_crud_and_an_underscored_slice_compile_and_reach_the_model() {
             .contains("{ caption: \"Animals\", page: \"Sales.Animal_Overview\"")
     );
 
+    assert!(
+        edit.contains("labelTemplate={{ en_US: \"Birth Date\" }}"),
+        "{edit}"
+    );
+
+    // Destroyed, the CRUD leaves the navigation with its pages; scaffolded
+    // again, it is what the build below reads.
+    registry::destroy(&root, "page:Sales.Animal").unwrap();
+    assert!(!pages.join("Animal_Overview.tsx").exists());
+    assert!(
+        !std::fs::read_to_string(root.join("frontend/src/navigation/index.ts"))
+            .unwrap()
+            .contains("Sales.Animal_Overview")
+    );
+    crud("Sales.Animal").unwrap();
+
     scaffold_artifact(
         &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Order_Edit", &root)
             .page_chain(Some(PageChain::Microflow)),
