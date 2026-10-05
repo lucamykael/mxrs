@@ -58,16 +58,33 @@ pub(crate) fn add_nanoflow(
     let path = folder.join(service_file(&service));
     let existing = transaction.content(&path)?;
     let mut function = camel_from_snake(&method_name(&action, &method.name));
-    if let Some(existing) = &existing {
-        if existing.contains(&format!("@nanoflow {}\n", method.name))
-            || existing.contains(&format!("@nanoflow {}\r\n", method.name))
-        {
+    // The module's services, wherever the subject rule now places the flow:
+    // a service that already declares it is the one that keeps it.
+    let mut services: Vec<std::path::PathBuf> = match std::fs::read_dir(&folder) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|file| file.extension().is_some_and(|extension| extension == "ts"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    services.sort();
+    for service in services {
+        let declares = transaction.content(&service)?.is_some_and(|source| {
+            source.lines().any(|line| {
+                let mut words = line.trim().trim_start_matches('*').split_whitespace();
+                words.next() == Some("@nanoflow") && words.next() == Some(method.name.as_str())
+            })
+        });
+        if declares {
             return Err(ScaffoldError::FileExists(format!(
                 "{} already declares {module_name}.{}",
-                path.display(),
+                service.display(),
                 method.name
             )));
         }
+    }
+    if let Some(existing) = &existing {
         let taken = |candidate: &str| existing.contains(&format!("  async {candidate}("));
         if taken(&function) {
             // Two flows of one subject doing the same: the kind tells them
@@ -178,11 +195,14 @@ pub(crate) fn add_nanoflow(
 
 /// Where the import from `@/mxrs/flows` is, and what it names.
 fn imported_words(lines: &[&str]) -> Option<(usize, usize, BTreeSet<String>)> {
-    let start = lines.iter().position(|line| line.starts_with("import {"))?;
-    let end = start
-        + lines[start..]
-            .iter()
-            .position(|line| line.contains("from \"@/mxrs/flows\""))?;
+    // The statement that ends at the flows module opens at the last
+    // `import` before it; other imports are not its.
+    let end = lines
+        .iter()
+        .position(|line| line.contains("from \"@/mxrs/flows\""))?;
+    let start = (0..=end)
+        .rev()
+        .find(|index| lines[*index].starts_with("import "))?;
     let text = lines[start..=end].join(" ");
     let inside = text.split_once('{')?.1.split_once('}')?.0;
     let words = inside

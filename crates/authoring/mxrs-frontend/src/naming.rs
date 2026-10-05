@@ -59,6 +59,20 @@ pub fn service_file(service: &str) -> String {
     format!("{}.ts", camel(service))
 }
 
+/// Whether `folder` is the folder of the module `module`: its name in snake
+/// case, however the words of an acronym are cut, with `_module` after a
+/// name Rust keeps for itself.
+pub fn is_module_folder(folder: &str, module: &str) -> bool {
+    let letters = |text: &str| -> String {
+        text.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let (folder, module) = (letters(folder), letters(module));
+    folder == module || folder.strip_suffix("module") == Some(module.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

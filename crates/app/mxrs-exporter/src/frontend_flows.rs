@@ -71,6 +71,7 @@ pub(crate) fn translate(
         loops: Vec::new(),
         switches: 0,
         pending: None,
+        returns: false,
     };
     let mut parameters = Vec::new();
     let mut returns = None;
@@ -84,6 +85,7 @@ pub(crate) fn translate(
         }
         if let Some(ty) = returns_type(statement) {
             returns = Some(translator.data_type(ty)?.0);
+            translator.returns = true;
             statements.next();
             continue;
         }
@@ -241,6 +243,8 @@ struct Translator<'a> {
     /// the innermost loop.
     switches: usize,
     pending: Option<Pending>,
+    /// Whether the nanoflow returns a value.
+    returns: bool,
 }
 
 /// A macro's arguments: the flow first, then the rest.
@@ -925,6 +929,15 @@ impl Translator<'_> {
                     return Err("a return of an unexpected shape".to_string());
                 };
                 let value = self.builder_value(value)?;
+                // A model can store a value where its nanoflow returns
+                // none: TypeScript returns it as nothing, on purpose.
+                let value = match (self.returns, value.strip_prefix("mx(")) {
+                    (true, _) => value,
+                    (false, Some(rest)) => format!("mx<void>({rest}"),
+                    (false, None) => {
+                        return Err("a value returned where the nanoflow returns none".to_string());
+                    }
+                };
                 lines.push(format!("return {value};"));
                 Ok(())
             }
@@ -3075,10 +3088,14 @@ pub(crate) fn declare_in_frontend(
             let qualified = format!("{}.{}", key.0, key.1);
             let mut expected = flow.declaration.clone();
             expected.relations = Default::default();
-            expected.allowed_roles = relations
-                .get(&qualified)
-                .map(|related| related.roles.iter().cloned().collect::<Vec<_>>())
-                .filter(|roles| !roles.is_empty());
+            // A service's method says who may run it: no one in
+            // particular when its comment names no role.
+            expected.allowed_roles = Some(
+                relations
+                    .get(&qualified)
+                    .map(|related| related.roles.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            );
             let same = read
                 .get(&key)
                 .is_some_and(|found| format!("{found:?}") == format!("{expected:?}"));

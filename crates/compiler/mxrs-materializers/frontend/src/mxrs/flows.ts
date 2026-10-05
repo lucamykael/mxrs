@@ -112,12 +112,7 @@ export function createObject<E extends string>(
 export function changeObject(
   object: MxObject<string>,
   members?: Members,
-  options?: {
-    commit?: boolean | "withoutEvents";
-    refresh?: boolean;
-    add?: Members;
-    remove?: Members;
-  },
+  options?: { commit?: boolean | "withoutEvents"; refresh?: boolean },
 ): Promise<void> {
   void [object, members, options];
   return notRunHere();

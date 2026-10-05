@@ -1000,3 +1000,47 @@ fn a_scaffolded_flow_is_named_by_the_service_it_joins() {
         "{request}"
     );
 }
+
+#[test]
+fn a_scaffolded_nanoflow_joins_its_service_without_touching_other_imports() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    let services = root.join("frontend/src/services/main");
+
+    // Before the module has an `Order`, the flow is the module's own.
+    scaffold(&root, ArtifactKind::Nanoflow, "Main.ACT_Order_Open");
+    let main = services.join("mainService.ts");
+    assert!(
+        std::fs::read_to_string(&main)
+            .unwrap()
+            .contains("@nanoflow ACT_Order_Open\n")
+    );
+    // Once it has one the subject rule would place it elsewhere: the service
+    // that declares it still does, and a second declaration is refused.
+    scaffold(&root, ArtifactKind::Entity, "Main.Order");
+    let again = scaffold_artifact(&ArtifactScaffold::new(
+        ArtifactKind::Nanoflow,
+        "Main.ACT_Order_Open",
+        &root,
+    ));
+    assert!(
+        matches!(&again, Err(mxrs_scaffold::ScaffoldError::FileExists(at)) if at.contains("mainService.ts")),
+        "{again:?}"
+    );
+    assert!(!services.join("orderService.ts").exists());
+
+    // Another import above the vocabulary's is another statement.
+    std::fs::write(
+        &main,
+        "import { OtherService } from \"@/services/main/otherService\";\nimport { closePage, nanoflowService, type MxObject } from \"@/mxrs/flows\";\n\nexport const MainService = nanoflowService(\"Main\", {\n  /** @nanoflow ACT_Close */\n  async close(order: MxObject<\"Main.Order\">): Promise<void> {\n    await closePage();\n    await OtherService.f();\n  },\n});\n",
+    )
+    .unwrap();
+    scaffold(&root, ArtifactKind::Nanoflow, "Main.ACT_Refresh");
+    let source = std::fs::read_to_string(&main).unwrap();
+    assert!(
+        source.starts_with(
+            "import { OtherService } from \"@/services/main/otherService\";\nimport { closePage, nanoflowService, type MxObject } from \"@/mxrs/flows\";\n"
+        ) && source.contains("@nanoflow ACT_Refresh\n"),
+        "{source}"
+    );
+}

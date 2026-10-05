@@ -57,7 +57,14 @@ fn service_files(services: &Path) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 folders.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "ts") {
+            } else if path.extension().is_some_and(|extension| extension == "ts")
+                && !path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    [".d.ts", ".test.ts", ".spec.ts"]
+                        .iter()
+                        .any(|suffix| name.ends_with(suffix))
+                })
+            {
                 files.push(path);
             }
         }
@@ -67,7 +74,26 @@ fn service_files(services: &Path) -> Vec<PathBuf> {
 }
 
 /// The nanoflows the services under `services` declare.
+#[cfg(test)]
 pub(crate) fn read(services: &Path) -> Result<Vec<Declared>, FrontendError> {
+    Ok(read_with_origins(services)?.0)
+}
+
+/// Where a declaration is: its file and line.
+fn origin(path: &Path, source: &str, span: Span) -> String {
+    let start = (span.start as usize).min(source.len());
+    format!(
+        "{}:{}",
+        path.display(),
+        source[..start].matches('\n').count() + 1
+    )
+}
+
+/// The nanoflows the services under `services` declare, and where each is
+/// declared, by its qualified name.
+pub(crate) fn read_with_origins(
+    services: &Path,
+) -> Result<(Vec<Declared>, HashMap<String, String>), FrontendError> {
     let mut sources = Vec::new();
     for path in service_files(services) {
         let source = std::fs::read_to_string(&path).map_err(|source| FrontendError::Io {
@@ -79,19 +105,77 @@ pub(crate) fn read(services: &Path) -> Result<Vec<Declared>, FrontendError> {
     // What each service declares first, so a call reads whichever file its
     // service is in.
     let mut registry = Registry::new();
+    // Where each service and each nanoflow is declared: a second one of the
+    // same name is refused, saying where the first is.
+    let mut service_origins: HashMap<String, String> = HashMap::new();
+    let mut origins: HashMap<String, String> = HashMap::new();
     for (path, source) in &sources {
         let allocator = Allocator::default();
         let program = parse(&allocator, path, source)?;
         for service in services_in(&program, path, source)? {
+            // A module's services are in the module's folder: a module
+            // named otherwise is a module of its own, made by a typo.
+            let folder = path
+                .strip_prefix(services)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .map(|folder| folder.as_os_str().to_string_lossy().to_string())
+                .filter(|_| path.parent() != Some(services));
+            if let Some(folder) = folder
+                && !crate::naming::is_module_folder(&folder, &service.module)
+            {
+                return Err(at(
+                    path,
+                    source,
+                    service.span,
+                    &format!(
+                        "a service of the module whose folder `{folder}` is: {:?} has its own",
+                        service.module
+                    ),
+                ));
+            }
+            if let Some(first) =
+                service_origins.insert(service.name.clone(), origin(path, source, service.span))
+            {
+                return Err(at(
+                    path,
+                    source,
+                    service.span,
+                    &format!(
+                        "a service of its own name: {first} declares {}",
+                        service.name
+                    ),
+                ));
+            }
             let mut methods = HashMap::new();
             for method in &service.methods {
-                methods.insert(
-                    method.name.clone(),
-                    Signature {
-                        qualified: format!("{}.{}", service.module, method.nanoflow),
-                        parameters: method.parameters.iter().map(|p| p.mendix.clone()).collect(),
-                    },
-                );
+                let qualified = format!("{}.{}", service.module, method.nanoflow);
+                if let Some(first) =
+                    origins.insert(qualified.clone(), origin(path, source, method.span))
+                {
+                    return Err(at(
+                        path,
+                        source,
+                        method.span,
+                        &format!("a nanoflow of its own name: {first} declares {qualified}"),
+                    ));
+                }
+                if methods
+                    .insert(
+                        method.name.clone(),
+                        Signature {
+                            qualified,
+                            parameters: method
+                                .parameters
+                                .iter()
+                                .map(|p| p.mendix.clone())
+                                .collect(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(at(path, source, method.span, "each method once"));
+                }
             }
             registry.insert(service.name.clone(), methods);
         }
@@ -114,7 +198,7 @@ pub(crate) fn read(services: &Path) -> Result<Vec<Declared>, FrontendError> {
             }
         }
     }
-    Ok(declared)
+    Ok((declared, origins))
 }
 
 fn parse<'a>(
@@ -124,10 +208,11 @@ fn parse<'a>(
 ) -> Result<oxc_ast::ast::Program<'a>, FrontendError> {
     let parsed = Parser::new(allocator, source, SourceType::ts()).parse();
     if let Some(error) = parsed.diagnostics.first() {
-        return Err(FrontendError::Syntax {
-            path: path.display().to_string(),
-            detail: error.to_string(),
-        });
+        return Err(crate::syntax_error(
+            &path.display().to_string(),
+            source,
+            error,
+        ));
     }
     Ok(parsed.program)
 }
@@ -135,6 +220,7 @@ fn parse<'a>(
 struct Service<'p, 'a> {
     name: String,
     module: String,
+    span: Span,
     methods: Vec<Method<'p, 'a>>,
 }
 
@@ -151,9 +237,11 @@ struct Method<'p, 'a> {
     name: String,
     nanoflow: String,
     documentation: String,
-    roles: Option<Vec<String>>,
+    /// Who may run it: no one in particular when its comment names no role.
+    roles: Vec<String>,
     parameters: Vec<Parameter>,
     returns: Option<DataType>,
+    span: Span,
     body: &'p [Statement<'a>],
 }
 
@@ -176,23 +264,35 @@ fn services_in<'p, 'a>(
 ) -> Result<Vec<Service<'p, 'a>>, FrontendError> {
     let refuse = |span: Span, expected: &str| at(path, source, span, expected);
     let mut services = Vec::new();
+    // A service file declares services, and a service is declared one way:
+    // anything else would be a nanoflow the build does not see.
+    let declares = "`export const XService = nanoflowService(\"Module\", { ... })`";
     for statement in &program.body {
-        let Statement::ExportDeclaration(export) = statement else {
-            continue;
+        let export = match statement {
+            Statement::ImportDeclaration(_)
+            | Statement::TSTypeAliasDeclaration(_)
+            | Statement::TSInterfaceDeclaration(_) => continue,
+            Statement::ExportDeclaration(export) => export,
+            other => return Err(refuse(other.span(), declares)),
         };
-        let oxc_ast::ast::Declaration::VariableDeclaration(declaration) = &export.declaration
-        else {
-            continue;
+        let declaration = match &export.declaration {
+            oxc_ast::ast::Declaration::VariableDeclaration(declaration) => declaration,
+            oxc_ast::ast::Declaration::TSTypeAliasDeclaration(_)
+            | oxc_ast::ast::Declaration::TSInterfaceDeclaration(_) => continue,
+            _ => return Err(refuse(export.span, declares)),
         };
+        if declaration.kind != oxc_ast::ast::VariableDeclarationKind::Const {
+            return Err(refuse(declaration.span, declares));
+        }
         for declarator in &declaration.declarations {
             let Some(Expression::CallExpression(call)) = &declarator.init else {
-                continue;
+                return Err(refuse(declarator.span, declares));
             };
             let Expression::Identifier(callee) = &call.callee else {
-                continue;
+                return Err(refuse(declarator.span, declares));
             };
             if callee.name != "nanoflowService" {
-                continue;
+                return Err(refuse(declarator.span, declares));
             }
             let BindingPattern::BindingIdentifier(name) = &declarator.id else {
                 return Err(refuse(declarator.span, "a service's name"));
@@ -214,25 +314,44 @@ fn services_in<'p, 'a>(
                 let Expression::FunctionExpression(function) = &property.value else {
                     return Err(refuse(property.span, "an async method"));
                 };
-                if !property.method || !function.r#async {
+                if !property.method
+                    || !function.r#async
+                    || function.generator
+                    || function.type_parameters.is_some()
+                    || function.this_param.is_some()
+                {
                     return Err(refuse(property.span, "an async method"));
                 }
                 let Some(name) = property.key.static_name() else {
                     return Err(refuse(property.key.span(), "a method name"));
                 };
-                let doc = documentation(program, source, property.span.start).ok_or_else(|| {
-                    refuse(
-                        property.span,
-                        "a documentation comment naming the nanoflow (`@nanoflow ...`)",
-                    )
+                let (doc, doc_line) = documentation(program, source, property.span.start)
+                    .ok_or_else(|| {
+                        refuse(
+                            property.span,
+                            "a documentation comment naming the nanoflow (`@nanoflow ...`)",
+                        )
+                    })?;
+                let tags = Tags::parse(&doc).map_err(|(line, detail)| FrontendError::Shape {
+                    path: path.display().to_string(),
+                    line: doc_line + line,
+                    detail,
                 })?;
-                let tags = Tags::parse(&doc);
                 let nanoflow = tags
                     .nanoflow
                     .clone()
                     .ok_or_else(|| refuse(property.span, "`@nanoflow <Name>` in its comment"))?;
+                if let Some(rest) = &function.params.rest {
+                    return Err(refuse(rest.span, "named parameters, without a rest"));
+                }
                 let mut parameters = Vec::new();
                 for parameter in &function.params.items {
+                    if let Some(initializer) = &parameter.initializer {
+                        return Err(refuse(
+                            initializer.span(),
+                            "no default here: `@defaultValue <parameter> <expression>` in the comment",
+                        ));
+                    }
                     let BindingPattern::BindingIdentifier(ident) = &parameter.pattern else {
                         return Err(refuse(parameter.span, "a named parameter"));
                     };
@@ -261,8 +380,29 @@ fn services_in<'p, 'a>(
                         ty,
                     });
                 }
+                for ident in tags
+                    .parameters
+                    .keys()
+                    .chain(tags.names.keys())
+                    .chain(tags.defaults.keys())
+                {
+                    if !parameters
+                        .iter()
+                        .any(|parameter: &Parameter| &parameter.ident == ident)
+                    {
+                        return Err(refuse(
+                            property.span,
+                            &format!("a parameter `{ident}`, which its comment names"),
+                        ));
+                    }
+                }
                 let returns = match &function.return_type {
-                    None => None,
+                    None => {
+                        return Err(refuse(
+                            function.params.span,
+                            "its return type after the parameters: `Promise<void>` or `Promise<a Mendix type>`",
+                        ));
+                    }
                     Some(annotation) => promised(&annotation.type_annotation)
                         .ok_or_else(|| refuse(annotation.span, "Promise<a Mendix type>"))?,
                 };
@@ -274,26 +414,28 @@ fn services_in<'p, 'a>(
                     name: name.to_string(),
                     nanoflow,
                     documentation: tags.documentation,
-                    roles: tags.roles.map(|roles| {
-                        roles
-                            .into_iter()
-                            .map(|role| {
-                                if role.contains('.') {
-                                    role
-                                } else {
-                                    format!("{}.{role}", module.value)
-                                }
-                            })
-                            .collect()
-                    }),
+                    roles: tags
+                        .roles
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|role| {
+                            if role.contains('.') {
+                                role
+                            } else {
+                                format!("{}.{role}", module.value)
+                            }
+                        })
+                        .collect(),
                     parameters,
                     returns,
+                    span: property.key.span(),
                     body: &body.statements,
                 });
             }
             services.push(Service {
                 name: name.name.to_string(),
                 module: module.value.to_string(),
+                span: declarator.span,
                 methods,
             });
         }
@@ -301,8 +443,13 @@ fn services_in<'p, 'a>(
     Ok(services)
 }
 
-/// The text of the `/** ... */` comment right before `start`.
-fn documentation(program: &oxc_ast::ast::Program<'_>, source: &str, start: u32) -> Option<String> {
+/// The text of the `/** ... */` comment right before `start`, and the line
+/// its first line is on.
+fn documentation(
+    program: &oxc_ast::ast::Program<'_>,
+    source: &str,
+    start: u32,
+) -> Option<(String, usize)> {
     let comment = program
         .comments
         .iter()
@@ -326,7 +473,8 @@ fn documentation(program: &oxc_ast::ast::Program<'_>, source: &str, start: u32) 
         .iter()
         .rposition(|line| !line.is_empty())
         .map_or(0, |end| end + 1);
-    Some(lines[start..end.max(start)].join("\n"))
+    let first = source[..comment.span.start as usize].matches('\n').count() + 1;
+    Some((lines[start..end.max(start)].join("\n"), first + start))
 }
 
 /// What a method's comment says.
@@ -340,40 +488,102 @@ struct Tags {
     defaults: HashMap<String, String>,
 }
 
+/// Whether `name` is one a model gives: letters, digits and `_`, not
+/// opening with a digit.
+fn is_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl Tags {
-    fn parse(comment: &str) -> Self {
+    /// What a comment says, or the line of it — counted from its first —
+    /// that says something no tag does.
+    fn parse(comment: &str) -> Result<Self, (usize, String)> {
         let mut tags = Tags::default();
         let mut documentation = Vec::new();
-        for line in comment.lines() {
+        for (index, line) in comment.lines().enumerate() {
             let Some(tag) = line.strip_prefix('@') else {
                 documentation.push(line);
                 continue;
             };
-            let (name, rest) = tag.split_once(' ').unwrap_or((tag, ""));
+            let refuse = |detail: &str| Err((index, format!("`{line}`: expected {detail}")));
+            let (name, rest) = tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
             let rest = rest.trim();
-            let (ident, value) = rest.split_once(' ').unwrap_or((rest, ""));
+            let (ident, value) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let value = value.trim();
+            let once = |taken: bool| {
+                if taken {
+                    Err((index, format!("`@{name}` is said twice")))
+                } else {
+                    Ok(())
+                }
+            };
             match name {
-                "nanoflow" => tags.nanoflow = Some(rest.to_string()),
+                "nanoflow" => {
+                    once(tags.nanoflow.is_some())?;
+                    if !is_name(rest) {
+                        return refuse("`@nanoflow <Name>`, the nanoflow's name in the model");
+                    }
+                    tags.nanoflow = Some(rest.to_string());
+                }
                 "roles" => {
-                    tags.roles = Some(rest.split_whitespace().map(str::to_string).collect());
+                    once(tags.roles.is_some())?;
+                    let roles: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+                    let named = |role: &String| match role.split_once('.') {
+                        Some((module, role)) => is_name(module) && is_name(role),
+                        None => is_name(role),
+                    };
+                    if !roles.iter().all(named) {
+                        return refuse(
+                            "`@roles` and module roles between spaces: `User` or `Module.User`",
+                        );
+                    }
+                    tags.roles = Some(roles);
                 }
                 "param" => {
-                    tags.parameters.insert(ident.to_string(), value.to_string());
+                    if !is_name(ident) {
+                        return refuse("`@param <parameter> <what it is>`");
+                    }
+                    once(
+                        tags.parameters
+                            .insert(ident.to_string(), value.to_string())
+                            .is_some(),
+                    )?;
                 }
                 "mendixName" => {
-                    tags.names.insert(ident.to_string(), value.to_string());
+                    if !is_name(ident) || !is_name(value) {
+                        return refuse("`@mendixName <parameter> <Name>`");
+                    }
+                    once(
+                        tags.names
+                            .insert(ident.to_string(), value.to_string())
+                            .is_some(),
+                    )?;
                 }
                 "defaultValue" => {
-                    tags.defaults.insert(ident.to_string(), value.to_string());
+                    if !is_name(ident) || value.is_empty() {
+                        return refuse("`@defaultValue <parameter> <expression>`");
+                    }
+                    once(
+                        tags.defaults
+                            .insert(ident.to_string(), value.to_string())
+                            .is_some(),
+                    )?;
                 }
-                _ => documentation.push(line),
+                _ => {
+                    return refuse(
+                        "a tag of a nanoflow: @nanoflow, @roles, @param, @mendixName or @defaultValue",
+                    );
+                }
             }
         }
         while documentation.last().is_some_and(|line| line.is_empty()) {
             documentation.pop();
         }
         tags.documentation = documentation.join("\n");
-        tags
+        Ok(tags)
     }
 }
 
@@ -453,9 +663,18 @@ struct Variable {
 #[derive(Default)]
 struct State {
     scopes: Vec<HashMap<String, Variable>>,
-    /// The labels of the loops being read.
-    loops: Vec<Option<String>>,
+    /// The loops and switches being read, the innermost last.
+    frames: Vec<Frame>,
+    /// Whether the nanoflow returns a value.
+    returns: bool,
     error: Option<FrontendError>,
+}
+
+/// What a `break` or `continue` can be inside.
+enum Frame {
+    /// A loop, with its label.
+    Loop(Option<String>),
+    Switch,
 }
 
 struct Reader<'s> {
@@ -490,19 +709,30 @@ impl Reader<'_> {
         self.state.borrow().error.is_some()
     }
 
-    fn declare(&self, ident: &str, mendix: &str, entity: Option<String>) {
-        self.state
-            .borrow_mut()
-            .scopes
-            .last_mut()
-            .expect("a scope is open")
-            .insert(
-                ident.to_string(),
-                Variable {
-                    mendix: mendix.to_string(),
-                    entity,
-                },
-            );
+    /// Declares `ident` as the variable `mendix`. A flow names each of its
+    /// variables once wherever the other is still in scope.
+    fn declare(&self, ident: &str, mendix: &str, entity: Option<String>, span: Span) -> Read<()> {
+        let mut state = self.state.borrow_mut();
+        let taken = state.scopes.iter().any(|scope| {
+            scope
+                .iter()
+                .any(|(known, variable)| known == ident || variable.mendix == mendix)
+        });
+        if taken {
+            drop(state);
+            return Err(self.refuse(
+                span,
+                &format!("a variable of its own name: `${mendix}` is already in scope"),
+            ));
+        }
+        state.scopes.last_mut().expect("a scope is open").insert(
+            ident.to_string(),
+            Variable {
+                mendix: mendix.to_string(),
+                entity,
+            },
+        );
+        Ok(())
     }
 
     fn lookup(&self, ident: &str) -> Option<Variable> {
@@ -516,19 +746,18 @@ impl Reader<'_> {
 
     fn method(&self, method: &Method<'_, '_>) -> Read<MicroflowDecl> {
         self.state.borrow_mut().scopes.push(HashMap::new());
+        self.state.borrow_mut().returns = method.returns.is_some();
         for parameter in &method.parameters {
             let entity = match &parameter.ty {
                 DataType::Object(entity) | DataType::List(entity) => Some(entity.clone()),
                 _ => None,
             };
-            self.declare(&parameter.ident, &parameter.mendix, entity);
+            self.declare(&parameter.ident, &parameter.mendix, entity, method.span)?;
         }
         let mut module = NanoflowModuleBuilder::new(self.module);
         module.nanoflow(method.nanoflow.as_str(), |flow| {
             flow.documentation(method.documentation.as_str());
-            if let Some(roles) = &method.roles {
-                flow.allowed_roles(roles.iter().map(String::as_str));
-            }
+            flow.allowed_roles(method.roles.iter().map(String::as_str));
             for parameter in &method.parameters {
                 flow.parameter_of(parameter.mendix.as_str(), parameter.ty.clone(), |options| {
                     if !parameter.documentation.is_empty() {
@@ -575,13 +804,49 @@ impl Reader<'_> {
     }
 
     fn statements(&self, flow: &mut FlowBuilder, statements: &[Statement<'_>]) -> Read<()> {
+        let mut ended = false;
         for statement in statements {
+            let label = Self::helper_call(statement) == Some("label");
+            if ended && !label {
+                return Err(self.refuse(
+                    statement.span(),
+                    "nothing after what ends the path, unless a `label(...)` is jumped to",
+                ));
+            }
             self.statement(flow, statement)?;
             if self.failed() {
                 break;
             }
+            ended = Self::ends_path(statement);
         }
         Ok(())
+    }
+
+    /// The path helper a statement calls: `label`, `jump` or `raiseError`.
+    fn helper_call<'p>(statement: &'p Statement<'_>) -> Option<&'p str> {
+        let Statement::ExpressionStatement(expression) = statement else {
+            return None;
+        };
+        let Expression::CallExpression(call) = &expression.expression else {
+            return None;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            return None;
+        };
+        match callee.name.as_str() {
+            name @ ("label" | "jump" | "raiseError") => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Whether nothing runs after `statement` in its block.
+    fn ends_path(statement: &Statement<'_>) -> bool {
+        matches!(
+            statement,
+            Statement::ReturnStatement(_)
+                | Statement::BreakStatement(_)
+                | Statement::ContinueStatement(_)
+        ) || matches!(Self::helper_call(statement), Some("jump" | "raiseError"))
     }
 
     fn block<'p, 'a>(&self, statement: &'p Statement<'a>) -> Read<&'p [Statement<'a>]> {
@@ -639,6 +904,12 @@ impl Reader<'_> {
                 )
             }
             Statement::IfStatement(decision) => {
+                if matches!(
+                    decision.test.without_parentheses(),
+                    Expression::StringLiteral(_) | Expression::NumericLiteral(_)
+                ) {
+                    return Err(self.refuse(decision.test.span(), "a condition: true or false"));
+                }
                 let condition = self.value(&decision.test)?;
                 let then = self.block(&decision.consequent)?;
                 let otherwise: &[Statement<'_>] = match &decision.alternate {
@@ -665,9 +936,24 @@ impl Reader<'_> {
                 other => Err(self.refuse(other.span(), "a loop")),
             },
             Statement::ReturnStatement(returned) => {
+                let returns = self.state.borrow().returns;
                 match &returned.argument {
+                    None if returns => {
+                        return Err(self.refuse(
+                            returned.span,
+                            "the value the nanoflow returns: its type is not `Promise<void>`",
+                        ));
+                    }
                     None => {
                         flow.end();
+                    }
+                    // A model can store a value where its nanoflow returns
+                    // none; `mx<void>(...)` says so on purpose.
+                    Some(value) if !returns && !Self::stored_only(value) => {
+                        return Err(self.refuse(
+                            value.span(),
+                            "no value: the nanoflow returns none (`Promise<void>`)",
+                        ));
                     }
                     Some(value) => {
                         flow.return_with(self.value(value)?);
@@ -676,26 +962,68 @@ impl Reader<'_> {
                 Ok(())
             }
             Statement::BreakStatement(stop) => {
-                let state = self.state.borrow();
-                let known = match &stop.label {
-                    None => !state.loops.is_empty(),
-                    Some(label) => state
-                        .loops
-                        .iter()
-                        .any(|seen| seen.as_deref() == Some(label.name.as_str())),
-                };
-                drop(state);
-                if !known {
-                    return Err(self.refuse(stop.span, "a loop to break"));
-                }
+                self.leaves_loop(
+                    stop.span,
+                    stop.label.as_ref().map(|label| label.name.as_str()),
+                    true,
+                )?;
                 flow.break_loop();
                 Ok(())
             }
-            Statement::ContinueStatement(_) => {
+            Statement::ContinueStatement(next) => {
+                self.leaves_loop(
+                    next.span,
+                    next.label.as_ref().map(|label| label.name.as_str()),
+                    false,
+                )?;
                 flow.continue_loop();
                 Ok(())
             }
             other => Err(self.refuse(other.span(), "a statement a nanoflow can say")),
+        }
+    }
+
+    /// Whether `value` is `mx<void>("...")`: an expression the model stores
+    /// as what a nanoflow returns although it returns nothing.
+    fn stored_only(value: &Expression<'_>) -> bool {
+        let Expression::CallExpression(call) = value.without_parentheses() else {
+            return false;
+        };
+        matches!(&call.callee, Expression::Identifier(callee) if callee.name == "mx")
+            && call.type_arguments.as_ref().is_some_and(|arguments| {
+                matches!(arguments.params.as_slice(), [TSType::TSVoidKeyword(_)])
+            })
+    }
+
+    /// Checks that a `break` or `continue` is about the loop it is in: the
+    /// only one a flow can break or continue.
+    fn leaves_loop(&self, span: Span, label: Option<&str>, breaks: bool) -> Read<()> {
+        let state = self.state.borrow();
+        let innermost = state.frames.iter().rev().find_map(|frame| match frame {
+            Frame::Loop(label) => Some(label.as_deref()),
+            Frame::Switch => None,
+        });
+        let Some(own) = innermost else {
+            return Err(self.refuse(
+                span,
+                if breaks {
+                    "a loop to break"
+                } else {
+                    "a loop to continue"
+                },
+            ));
+        };
+        match label {
+            Some(label) if own != Some(label) => Err(self.refuse(
+                span,
+                "the label of the loop it is in: a flow leaves only that one",
+            )),
+            None if breaks && matches!(state.frames.last(), Some(Frame::Switch)) => Err(self
+                .refuse(
+                    span,
+                    "the loop's label: inside a `switch`, `break` alone leaves the switch",
+                )),
+            _ => Ok(()),
         }
     }
 
@@ -709,7 +1037,8 @@ impl Reader<'_> {
         // that ends it.
         let mut branches: Vec<(Vec<Option<String>>, &[Statement<'_>])> = Vec::new();
         let mut values = Vec::new();
-        for case in &switch.cases {
+        let last = switch.cases.len().saturating_sub(1);
+        for (index, case) in switch.cases.iter().enumerate() {
             let value = match &case.test {
                 Some(Expression::StringLiteral(text)) => Some(text.value.to_string()),
                 Some(Expression::NullLiteral(_)) => None,
@@ -728,8 +1057,28 @@ impl Reader<'_> {
                 ] if stop.label.is_none() => &block.body,
                 other => other,
             };
+            let ended_outside = matches!(
+                case.consequent.as_slice(),
+                [Statement::BlockStatement(_), Statement::BreakStatement(stop)] if stop.label.is_none()
+            );
             let body = match body {
-                [rest @ .., Statement::BreakStatement(stop)] if stop.label.is_none() => rest,
+                [rest @ .., Statement::BreakStatement(stop)]
+                    if stop.label.is_none() && !ended_outside =>
+                {
+                    rest
+                }
+                // TypeScript would go on into the next case; a flow's cases
+                // are apart.
+                other
+                    if !ended_outside
+                        && index != last
+                        && !other.last().is_some_and(Self::ends_path) =>
+                {
+                    return Err(self.refuse(
+                        case.span,
+                        "a case that ends — `break`, `return`, `continue`, `jump(...)` or `raiseError()`: cases do not fall through",
+                    ));
+                }
                 other => other,
             };
             branches.push((std::mem::take(&mut values), body));
@@ -737,6 +1086,7 @@ impl Reader<'_> {
         if !values.is_empty() {
             return Err(self.refuse(switch.span, "a body for every case"));
         }
+        self.state.borrow_mut().frames.push(Frame::Switch);
         flow.switch(on, |cases| {
             for (values, body) in &branches {
                 match values.as_slice() {
@@ -758,6 +1108,7 @@ impl Reader<'_> {
                 }
             }
         });
+        self.state.borrow_mut().frames.pop();
         Ok(())
     }
 
@@ -792,19 +1143,21 @@ impl Reader<'_> {
             .lookup(list)
             .ok_or_else(|| self.refuse(each.right.span(), "a variable in scope"))?;
         let body = self.block(&each.body)?;
-        self.state.borrow_mut().loops.push(label);
+        self.state.borrow_mut().frames.push(Frame::Loop(label));
         flow.for_each(&var(list.mendix.as_str()), iterator.as_str(), |flow, _| {
             if self.failed() {
                 return;
             }
             self.state.borrow_mut().scopes.push(HashMap::new());
-            self.declare(&item.name, &iterator, list.entity.clone());
-            if let Err(error) = self.statements(flow, body) {
+            let read = self
+                .declare(&item.name, &iterator, list.entity.clone(), item.span)
+                .and_then(|()| self.statements(flow, body));
+            if let Err(error) = read {
                 self.fail(error);
             }
             self.state.borrow_mut().scopes.pop();
         });
-        self.state.borrow_mut().loops.pop();
+        self.state.borrow_mut().frames.pop();
         Ok(())
     }
 
@@ -816,9 +1169,9 @@ impl Reader<'_> {
     ) -> Read<()> {
         let condition = self.value(&each.test)?;
         let body = self.block(&each.body)?;
-        self.state.borrow_mut().loops.push(label);
+        self.state.borrow_mut().frames.push(Frame::Loop(label));
         flow.while_loop(condition, |flow| self.nested(flow, body));
-        self.state.borrow_mut().loops.pop();
+        self.state.borrow_mut().frames.pop();
         Ok(())
     }
 
@@ -854,21 +1207,14 @@ impl Reader<'_> {
     fn value(&self, expression: &Expression<'_>) -> Read<Mx> {
         match expression {
             Expression::StringLiteral(text) => Ok(Mx::from(mxrs_expr::string(text.value.as_str()))),
-            Expression::NumericLiteral(number) => Ok(mx(number
-                .raw
-                .as_ref()
-                .map_or_else(|| number.value.to_string(), ToString::to_string))),
+            Expression::NumericLiteral(number) => Ok(mx(self.number(number)?)),
             Expression::UnaryExpression(unary)
                 if unary.operator == oxc_ast::ast::UnaryOperator::UnaryNegation =>
             {
                 match &unary.argument {
-                    Expression::NumericLiteral(number) => Ok(mx(format!(
-                        "-{}",
-                        number
-                            .raw
-                            .as_ref()
-                            .map_or_else(|| number.value.to_string(), ToString::to_string)
-                    ))),
+                    Expression::NumericLiteral(number) => {
+                        Ok(mx(format!("-{}", self.number(number)?)))
+                    }
                     other => Err(self.refuse(other.span(), "a number")),
                 }
             }
@@ -894,6 +1240,50 @@ impl Reader<'_> {
                 other.span(),
                 "a value: text, a number, a variable or mx(\"...\")",
             )),
+        }
+    }
+
+    /// A number as Mendix reads it: its digits, with a decimal point when
+    /// it has decimals. TypeScript's other ways to write one — `0x10`,
+    /// `1_000`, `1e3`, `.5` — are not Mendix's.
+    fn number(&self, number: &oxc_ast::ast::NumericLiteral<'_>) -> Read<String> {
+        let source = &self.source[number.span.start as usize..number.span.end as usize];
+        let (whole, decimals) = source.split_once('.').unwrap_or((source, "0"));
+        let digits = |text: &str| !text.is_empty() && text.chars().all(|c| c.is_ascii_digit());
+        if digits(whole) && digits(decimals) {
+            Ok(source.to_string())
+        } else {
+            Err(self.refuse(number.span, "a number in plain digits: `16`, `0.5`"))
+        }
+    }
+
+    /// Checks that `options` states nothing but what the activity reads.
+    fn only(&self, options: &[(String, &Expression<'_>, Span)], allowed: &[&str]) -> Read<()> {
+        let mut seen: Vec<&str> = Vec::new();
+        for (key, _, span) in options {
+            if !allowed.contains(&key.as_str()) {
+                return Err(self.refuse(
+                    *span,
+                    &if allowed.is_empty() {
+                        "no options".to_string()
+                    } else {
+                        format!("one of its options: {}", allowed.join(", "))
+                    },
+                ));
+            }
+            if seen.contains(&key.as_str()) {
+                return Err(self.refuse(*span, "each option once"));
+            }
+            seen.push(key);
+        }
+        Ok(())
+    }
+
+    /// Checks that a call has no more arguments than the activity takes.
+    fn at_most(&self, arguments: &[&Expression<'_>], count: usize, shape: &str) -> Read<()> {
+        match arguments.get(count) {
+            Some(extra) => Err(self.refuse(extra.span(), &format!("no more arguments: {shape}"))),
+            None => Ok(()),
         }
     }
 
@@ -1063,7 +1453,7 @@ impl Reader<'_> {
         if let Some(ident) = binding.ident {
             let mendix =
                 mendix.ok_or_else(|| self.refuse(span, "an activity with a result to bind"))?;
-            self.declare(ident, mendix, entity);
+            self.declare(ident, mendix, entity, span)?;
         }
         Ok(())
     }
@@ -1130,16 +1520,32 @@ impl Reader<'_> {
         let Expression::Identifier(callee) = &call.callee else {
             return Err(self.refuse(call.callee.span(), "an activity"));
         };
-        let empty: Vec<(String, &Expression<'_>, Span)> = Vec::new();
-        let options_at = |index: usize| -> Read<Vec<(String, &Expression<'_>, Span)>> {
-            match arguments.get(index) {
-                Some(options) => self.entries(options),
-                None => Ok(Vec::new()),
-            }
-        };
         match callee.name.as_str() {
             "onError" | "disabled" => {
-                let (activity, handler) = match (callee.name.as_str(), arguments.as_slice()) {
+                let read = self.modified(flow, callee.name.as_str(), &arguments, binding, span);
+                if read.is_err() || self.failed() {
+                    // The activity the modifier is about was not read.
+                    flow.forget_pending();
+                }
+                read
+            }
+            _ => self.plain_activity(flow, callee, call, &arguments, binding, span),
+        }
+    }
+
+    /// `onError(kind, () => activity, handler?)` and `disabled(() =>
+    /// activity)`: the activity, with what is said about it.
+    fn modified(
+        &self,
+        flow: &mut FlowBuilder,
+        name: &str,
+        arguments: &[&Expression<'_>],
+        binding: Binding<'_>,
+        span: Span,
+    ) -> Read<()> {
+        {
+            {
+                let (activity, handler) = match (name, arguments) {
                     ("onError", [kind, activity]) => {
                         if self.expression_text(kind)? != "continue" {
                             return Err(self.refuse(kind.span(), "\"continue\" without a handler"));
@@ -1192,8 +1598,30 @@ impl Reader<'_> {
                 let Some(inner) = activity.body.as_expression() else {
                     return Err(self.refuse(activity.span, "() => activity"));
                 };
+                if !activity.params.items.is_empty() || activity.params.rest.is_some() {
+                    return Err(self.refuse(activity.span, "() => activity"));
+                }
                 self.activity(flow, inner, binding)
             }
+        }
+    }
+
+    fn plain_activity(
+        &self,
+        flow: &mut FlowBuilder,
+        callee: &oxc_ast::ast::IdentifierReference<'_>,
+        call: &oxc_ast::ast::CallExpression<'_>,
+        arguments: &[&Expression<'_>],
+        binding: Binding<'_>,
+        span: Span,
+    ) -> Read<()> {
+        let options_at = |index: usize| -> Read<Vec<(String, &Expression<'_>, Span)>> {
+            match arguments.get(index) {
+                Some(options) => self.entries(options),
+                None => Ok(Vec::new()),
+            }
+        };
+        match callee.name.as_str() {
             "createObject" => {
                 let entity = self.expression_text(
                     arguments
@@ -1205,6 +1633,8 @@ impl Reader<'_> {
                     None => Vec::new(),
                 };
                 let options = options_at(2)?;
+                self.at_most(arguments, 3, "createObject(entity, members, options)")?;
+                self.only(&options, &["commit", "refresh", "name"])?;
                 let short = entity
                     .rsplit_once('.')
                     .map_or(entity.as_str(), |(_, name)| name);
@@ -1243,6 +1673,8 @@ impl Reader<'_> {
                     None => Vec::new(),
                 };
                 let options = options_at(2)?;
+                self.at_most(arguments, 3, "changeObject(object, members, options)")?;
+                self.only(&options, &["commit", "refresh"])?;
                 let mut sets = Vec::new();
                 for (key, value, at) in &members {
                     sets.push((
@@ -1274,6 +1706,12 @@ impl Reader<'_> {
                         .ok_or_else(|| self.refuse(span, "the object"))?,
                 )?;
                 let options = options_at(1)?;
+                self.at_most(arguments, 2, "the object and its options")?;
+                if callee.name == "commitObject" {
+                    self.only(&options, &["withEvents", "refresh"])?;
+                } else {
+                    self.only(&options, &["refresh"])?;
+                }
                 let refresh = Self::option(&options, "refresh")
                     .map(|value| self.boolean(value))
                     .transpose()?;
@@ -1314,7 +1752,9 @@ impl Reader<'_> {
                     .first()
                     .ok_or_else(|| self.refuse(span, "what it retrieves"))?;
                 let options = options_at(1)?;
+                self.at_most(arguments, 2, "retrieve(from, options)")?;
                 if let Some(by) = Self::option(&options, "by") {
+                    self.only(&options, &["by", "name"])?;
                     let start = self.variable(from)?;
                     let association = self.expression_text(by)?;
                     let name = self
@@ -1343,6 +1783,7 @@ impl Reader<'_> {
                 let name = self
                     .result_name(&binding, &options, Some(default), span)?
                     .expect("a default");
+                self.only(&options, &["xpath", "sort", "first", "range", "name"])?;
                 let mut calls: Vec<RetrieveCall> = Vec::new();
                 for (key, value, _) in &options {
                     match key.as_str() {
@@ -1395,6 +1836,8 @@ impl Reader<'_> {
                         .ok_or_else(|| self.refuse(span, "the entity"))?,
                 )?;
                 let options = options_at(1)?;
+                self.at_most(arguments, 2, "createList(entity, options)")?;
+                self.only(&options, &["name"])?;
                 let short = entity
                     .rsplit_once('.')
                     .map_or(entity.as_str(), |(_, name)| name);
@@ -1404,7 +1847,7 @@ impl Reader<'_> {
                 flow.create_list_of(name.as_str(), entity.as_str());
                 self.bind(&binding, Some(&name), Some(entity.clone()), span)
             }
-            "changeList" => self.change_list(flow, &arguments, &binding, span),
+            "changeList" => self.change_list(flow, arguments, &binding, span),
             "aggregateList" => {
                 let list = self.variable(
                     arguments
@@ -1417,6 +1860,8 @@ impl Reader<'_> {
                         .ok_or_else(|| self.refuse(span, "what it computes"))?,
                 )?;
                 let options = options_at(2)?;
+                self.at_most(arguments, 3, "aggregateList(list, aggregate, options)")?;
+                self.only(&options, &["name"])?;
                 let name = self
                     .result_name(&binding, &options, None, span)?
                     .ok_or_else(|| self.refuse(span, "a name for its result"))?;
@@ -1462,13 +1907,15 @@ impl Reader<'_> {
                 self.bind(&binding, Some(&name), None, span)
             }
             "createVariable" => {
-                let [ty, value, rest @ ..] = arguments.as_slice() else {
+                let [ty, value, rest @ ..] = arguments else {
                     return Err(self.refuse(span, "createVariable(type, value)"));
                 };
                 let options = match rest.first() {
                     Some(options) => self.entries(options)?,
                     None => Vec::new(),
                 };
+                self.at_most(arguments, 3, "createVariable(type, value, options)")?;
+                self.only(&options, &["name"])?;
                 let (ty, entity) = self.variable_type(ty)?;
                 let value = self.value(value)?;
                 let name = self
@@ -1478,7 +1925,7 @@ impl Reader<'_> {
                 self.bind(&binding, Some(&name), entity, span)
             }
             "changeVariable" => {
-                let [variable, value] = arguments.as_slice() else {
+                let [variable, value] = arguments else {
                     return Err(self.refuse(span, "changeVariable(variable, value)"));
                 };
                 let variable = self.variable(variable)?;
@@ -1497,6 +1944,16 @@ impl Reader<'_> {
                     None => Vec::new(),
                 };
                 let options = options_at(2)?;
+                self.at_most(
+                    arguments,
+                    3,
+                    "the target, its arguments and the call's options",
+                )?;
+                if callee.name == "callMicroflow" {
+                    self.only(&options, &["name", "discardResult", "queue"])?;
+                } else {
+                    self.only(&options, &["name", "discardResult"])?;
+                }
                 let result = match Self::option(&options, "name") {
                     Some(name) => Some(self.expression_text(name)?),
                     None => binding.ident.map(pascal),
@@ -1519,7 +1976,7 @@ impl Reader<'_> {
                 self.bind(&binding, result.as_deref(), None, span)
             }
             "log" => {
-                let [level, node, message, rest @ ..] = arguments.as_slice() else {
+                let [level, node, message, rest @ ..] = arguments else {
                     return Err(self.refuse(span, "log(level, node, message)"));
                 };
                 let level = match self.expression_text(level)?.as_str() {
@@ -1537,6 +1994,8 @@ impl Reader<'_> {
                     Some(options) => self.entries(options)?,
                     None => Vec::new(),
                 };
+                self.at_most(arguments, 4, "log(level, node, message, options)")?;
+                self.only(&options, &["parameters", "stackTrace"])?;
                 let parameters = match Self::option(&options, "parameters") {
                     Some(parameters) => self.values(parameters)?,
                     None => Vec::new(),
@@ -1561,6 +2020,11 @@ impl Reader<'_> {
                         .ok_or_else(|| self.refuse(span, "the page"))?,
                 )?;
                 let options = options_at(1)?;
+                self.at_most(arguments, 2, "showPage(page, options)")?;
+                self.only(
+                    &options,
+                    &["args", "title", "titleParameters", "closePages"],
+                )?;
                 let page_arguments = match Self::option(&options, "args") {
                     Some(entries) => self
                         .entries(entries)?
@@ -1601,7 +2065,7 @@ impl Reader<'_> {
                 self.bind(&binding, None, None, span)
             }
             "closePage" => {
-                match arguments.as_slice() {
+                match arguments {
                     [] => {
                         flow.close_page();
                     }
@@ -1613,7 +2077,7 @@ impl Reader<'_> {
                 self.bind(&binding, None, None, span)
             }
             "showMessage" => {
-                let [kind, text, rest @ ..] = arguments.as_slice() else {
+                let [kind, text, rest @ ..] = arguments else {
                     return Err(self.refuse(span, "showMessage(kind, text)"));
                 };
                 let kind = match self.expression_text(kind)?.as_str() {
@@ -1631,6 +2095,8 @@ impl Reader<'_> {
                     Some(options) => self.entries(options)?,
                     None => Vec::new(),
                 };
+                self.at_most(arguments, 3, "showMessage(kind, text, options)")?;
+                self.only(&options, &["parameters", "blocking"])?;
                 let parameters = match Self::option(&options, "parameters") {
                     Some(values) => self.values(values)?,
                     None => Vec::new(),
@@ -1651,10 +2117,7 @@ impl Reader<'_> {
                 });
                 self.bind(&binding, None, None, span)
             }
-            _ => {
-                let _ = &empty;
-                Err(self.refuse(call.callee.span(), "an activity of src/mxrs/flows.ts"))
-            }
+            _ => Err(self.refuse(call.callee.span(), "an activity of src/mxrs/flows.ts")),
         }
     }
 
@@ -1859,6 +2322,8 @@ impl Reader<'_> {
             Some(options) => self.entries(options)?,
             None => Vec::new(),
         };
+        self.at_most(arguments, 3, "changeList(list, { operation }, options)")?;
+        self.only(&options, &["name"])?;
         let source = var(list.mendix.as_str());
         let changes = match key.as_str() {
             "add" => Some(ListChange::Add),
@@ -1868,6 +2333,7 @@ impl Reader<'_> {
             _ => None,
         };
         if let Some(change) = changes {
+            self.only(&options, &[])?;
             let value = if change == ListChange::Clear {
                 mx("")
             } else {
@@ -2049,5 +2515,301 @@ and true`);
             let error = read(directory.path()).err().unwrap().to_string();
             assert!(error.contains(expected), "{source}\n{error}");
         }
+    }
+    /// One method `f` of a service of `M`, with `body` as its body.
+    fn method(signature: &str, body: &str) -> String {
+        format!(
+            "export const S = nanoflowService(\"M\", {{\n  /** @nanoflow F */\n  async f({signature} {{\n{body}\n  }},\n}});\n"
+        )
+    }
+
+    fn read_one(source: &str) -> Result<MicroflowDecl, String> {
+        let directory = services(&[("m/s.ts", source)]);
+        read(directory.path())
+            .map(|mut declared| declared.remove(0).1)
+            .map_err(|error| error.to_string())
+    }
+
+    const LISTS: &str = "outer: MxList<\"M.E\">, inner: MxList<\"M.E\">): Promise<void>";
+
+    #[test]
+    fn a_break_or_continue_is_about_the_loop_it_is_in() {
+        let nested = |statement: &str| {
+            method(
+                LISTS,
+                &format!(
+                    "    outer: for (const a of outer) {{\n      inner: for (const b of inner) {{\n        {statement}\n      }}\n    }}"
+                ),
+            )
+        };
+        for statement in ["break outer;", "continue outer;"] {
+            let error = read_one(&nested(statement)).unwrap_err();
+            assert!(
+                error.contains(":6:") && error.contains("the label of the loop it is in"),
+                "{error}"
+            );
+        }
+        for statement in ["break inner;", "continue inner;", "break;", "continue;"] {
+            read_one(&nested(statement)).unwrap();
+        }
+        let error = read_one(&method("): Promise<void>", "    continue;")).unwrap_err();
+        assert!(error.contains("a loop to continue"), "{error}");
+    }
+
+    #[test]
+    fn the_cases_of_a_switch_are_apart() {
+        let switch = |cases: &str| {
+            method(
+                "s: string, l: MxList<\"M.E\">): Promise<void>",
+                &format!(
+                    "    loop: for (const a of l) {{\n      switch (mx<string | null>(\"$S\")) {{\n{cases}\n      }}\n    }}"
+                ),
+            )
+        };
+        // TypeScript would run the second case after the first.
+        let error = read_one(&switch(
+            "        case \"A\":\n          await closePage(1);\n        case \"B\":\n          await closePage(2);\n          break;",
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains(":6:") && error.contains("do not fall through"),
+            "{error}"
+        );
+        // In TypeScript this `break` leaves the switch, not the loop.
+        let error = read_one(&switch(
+            "        case \"A\": {\n          if (mx<boolean>(\"true\")) {\n            break;\n          }\n          break;\n        }",
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains(":8:") && error.contains("the loop's label"),
+            "{error}"
+        );
+        let read = read_one(&switch(
+            "        case \"A\": {\n          if (mx<boolean>(\"true\")) {\n            break loop;\n          }\n          break;\n        }\n        case \"B\":\n        case \"C\":\n          return;\n        case null: {\n          await closePage();\n        }",
+        ))
+        .unwrap();
+        let body = format!("{:?}", read.activities);
+        assert!(
+            body.contains("BreakLoop") || body.contains("Break"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn an_error_in_what_a_modifier_wraps_is_reported_not_panicked() {
+        for statement in [
+            "await onError(\"custom\", () => sendEmail(), async () => {});",
+            "await onError(\"continue\", () => sendEmail());",
+            "await disabled(() => sendEmail());",
+            "await onError(\"custom\", () => closePage(1, 2), async () => { await closePage(); });",
+            "await onError(\"custom\", async () => { await closePage(); }, async () => {});",
+            "await onError(\"custom\", () => closePage(), async () => { await sendEmail(); });",
+        ] {
+            let error =
+                read_one(&method("): Promise<void>", &format!("    {statement}"))).unwrap_err();
+            assert!(error.contains(":4:"), "{statement}: {error}");
+        }
+    }
+
+    #[test]
+    fn what_typescript_accepts_and_a_flow_cannot_say_is_refused() {
+        for (signature, body, expected) in [
+            ("a: string = \"x\"): Promise<void>", "", "@defaultValue"),
+            ("...rest: string[]): Promise<void>", "", "without a rest"),
+            (")", "", "its return type"),
+            ("): Promise<void>", "    return \"x\";", "no value"),
+            (
+                "): Promise<boolean>",
+                "    return;",
+                "the value the nanoflow returns",
+            ),
+            (
+                "): Promise<void>",
+                "    return;\n    await closePage();",
+                "nothing after what ends the path",
+            ),
+            (
+                "): Promise<void>",
+                "    await closePage(0x10);",
+                "plain digits",
+            ),
+            (
+                "): Promise<void>",
+                "    await closePage(1_000);",
+                "plain digits",
+            ),
+            (
+                "): Promise<void>",
+                "    await closePage(1e3);",
+                "plain digits",
+            ),
+            (
+                "): Promise<void>",
+                "    await closePage(.5);",
+                "plain digits",
+            ),
+            (
+                "): Promise<void>",
+                "    await showPage(\"M.P\", { arg: {} });",
+                "one of its options: args",
+            ),
+            (
+                "a: MxObject<\"M.E\">): Promise<void>",
+                "    await commitObject(a, { withEvent: false });",
+                "one of its options: withEvents",
+            ),
+            (
+                "a: MxObject<\"M.E\">): Promise<void>",
+                "    await deleteObject(a, { withEvents: false });",
+                "one of its options: refresh",
+            ),
+            (
+                "a: MxObject<\"M.E\">): Promise<void>",
+                "    await changeObject(a, {}, { add: {} });",
+                "one of its options: commit",
+            ),
+            (
+                "): Promise<void>",
+                "    await callMicroflow(\"M.F\", {}, {}, \"extra\");",
+                "no more arguments",
+            ),
+            (
+                "a: MxObject<\"M.E\">): Promise<void>",
+                "    const a = await createObject(\"M.E\");",
+                "already in scope",
+            ),
+            (
+                "): Promise<void>",
+                "    const x = await createObject(\"M.E\", {}, { name: \"Same\" });\n    const y = await createObject(\"M.E\", {}, { name: \"Same\" });",
+                "already in scope",
+            ),
+            (
+                "): Promise<void>",
+                "    if (\"text\") {\n    }",
+                "a condition",
+            ),
+        ] {
+            let error = read_one(&method(signature, body)).unwrap_err();
+            assert!(error.contains(expected), "{signature} {body}: {error}");
+        }
+        read_one(&method("): Promise<void>", "    await closePage(16);")).unwrap();
+        // A value the model stores where its nanoflow returns none.
+        let stored = read_one(&method(
+            "): Promise<void>",
+            "    return mx<void>(\"$Kept\");",
+        ))
+        .unwrap();
+        assert_eq!(stored.return_expression.as_deref(), Some("$Kept"));
+        assert!(stored.return_type.is_none());
+        let jumped = read_one(&method(
+            "): Promise<void>",
+            "    jump(\"again\");\n    label(\"again\");\n    await closePage();",
+        ));
+        assert!(jumped.is_ok() || !jumped.unwrap_err().contains("nothing after"));
+    }
+
+    #[test]
+    fn a_comment_says_only_what_its_tags_say() {
+        let service = |comment: &str, signature: &str| {
+            format!(
+                "export const S = nanoflowService(\"M\", {{\n  /**\n{comment}\n   */\n  async f({signature}): Promise<void> {{}},\n}});\n"
+            )
+        };
+        for (comment, signature, expected) in [
+            (
+                "   * @nanoflow F\n   * @role User",
+                "",
+                "a tag of a nanoflow",
+            ),
+            (
+                "   * @nanoflow F\n   * @roles Admin, User",
+                "",
+                "between spaces",
+            ),
+            ("   * @nanoflow F extra words", "", "the nanoflow's name"),
+            (
+                "   * @nanoflow F\n   * @mendixName b",
+                "b: string",
+                "@mendixName <parameter> <Name>",
+            ),
+            (
+                "   * @nanoflow F\n   * @param c What",
+                "b: string",
+                "a parameter `c`",
+            ),
+            ("   * @nanoflow F\n   * @nanoflow G", "", "said twice"),
+            (
+                "   * @nanoflow F\n   * @returns nothing",
+                "",
+                "a tag of a nanoflow",
+            ),
+        ] {
+            let error = read_one(&service(comment, signature)).unwrap_err();
+            assert!(error.contains(expected), "{comment}: {error}");
+        }
+        // The line is the tag's own.
+        let error = read_one(&service("   * @nanoflow F\n   * @role User", "")).unwrap_err();
+        assert!(error.contains("s.ts:4:"), "{error}");
+        // A tab separates as a space does, and no `@roles` is no role.
+        let read = read_one(&service("   * @nanoflow\tF", "")).unwrap();
+        assert_eq!(read.name, "F");
+        assert_eq!(read.allowed_roles, Some(Vec::new()));
+        let read = read_one(&service("   * @nanoflow F\n   * @roles", "")).unwrap();
+        assert_eq!(read.allowed_roles, Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_service_file_declares_services_each_once() {
+        let service = |name: &str, module: &str, nanoflow: &str| {
+            format!(
+                "export const {name} = nanoflowService(\"{module}\", {{\n  /** @nanoflow {nanoflow} */\n  async f(): Promise<void> {{}},\n}});\n"
+            )
+        };
+        let refusal =
+            |files: &[(&str, &str)]| read(services(files).path()).err().unwrap().to_string();
+        // A service declared any other way would be a nanoflow no build sees.
+        let hidden = "const S = nanoflowService(\"M\", {\n  /** @nanoflow F */\n  async f(): Promise<void> {},\n});\nexport default S;\n";
+        assert!(refusal(&[("m/s.ts", hidden)]).contains("export const XService"));
+        let wrapped = "export const S = wrap(nanoflowService(\"M\", {}));\n";
+        assert!(refusal(&[("m/s.ts", wrapped)]).contains("export const XService"));
+        let error = refusal(&[
+            ("m/a.ts", &service("S", "M", "F")),
+            ("m/b.ts", &service("S", "M", "G")),
+        ]);
+        assert!(
+            error.contains("b.ts:1:") && error.contains("a.ts:1 declares S"),
+            "{error}"
+        );
+        let error = refusal(&[
+            ("m/a.ts", &service("A", "M", "F")),
+            ("m/b.ts", &service("B", "M", "F")),
+        ]);
+        assert!(
+            error.contains("b.ts:3:") && error.contains("a.ts:3 declares M.F"),
+            "{error}"
+        );
+        let twice = "export const S = nanoflowService(\"M\", {\n  /** @nanoflow F */\n  async f(): Promise<void> {},\n  /** @nanoflow G */\n  async f(): Promise<void> {},\n});\n";
+        assert!(refusal(&[("m/s.ts", twice)]).contains("each method once"));
+        // A module named otherwise than its folder is a typo, not a module.
+        let error = refusal(&[("main/s.ts", &service("S", "Mian", "F"))]);
+        assert!(error.contains("whose folder `main` is"), "{error}");
+        read(services(&[("spc_program/s.ts", &service("S", "SPCProgram", "F"))]).path()).unwrap();
+        // What is not a service's source is not read as one.
+        read(
+            services(&[
+                ("m/s.ts", &service("S", "M", "F")),
+                ("m/s.test.ts", "this is not a service"),
+                ("m/types.d.ts", "declare const x: number;"),
+            ])
+            .path(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_file_typescript_cannot_read_is_refused_at_its_line() {
+        let error = read_one("export const S = nanoflowService(\"M\", {\n  /** @nanoflow F */\n  async f(b?: string, c: string): Promise<void> {},\n});\n")
+            .unwrap_err();
+        assert!(error.contains("s.ts:3:"), "{error}");
     }
 }

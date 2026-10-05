@@ -195,6 +195,15 @@ impl FlowBuilder {
         );
     }
 
+    /// Drops a `disabled()` or an error handler that waits for its
+    /// activity. For a reader that met an error where the activity should
+    /// be: it reports that error, and the flow it was building is not used.
+    #[doc(hidden)]
+    pub fn forget_pending(&mut self) {
+        self.disable_next = false;
+        self.handle_next = None;
+    }
+
     pub(crate) fn push(&mut self, activity: Activity) -> &mut Self {
         let activity = match self.handle_next.take() {
             Some((handling, handler)) => Activity::OnError {

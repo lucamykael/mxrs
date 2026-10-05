@@ -13,6 +13,10 @@ pub enum CargoProjectError {
     Validate(#[from] mxrs_mpr::MprError),
     #[error("the generated Mendix artifact is invalid: {0:?}")]
     InvalidArtifact(Vec<String>),
+    #[error("the frontend's nanoflows name what the model does not have:\n  {}", .0.join("\n  "))]
+    UnresolvedReferences(Vec<String>),
+    #[error("cannot check what the built model refers to: {0}")]
+    References(String),
     #[error(transparent)]
     Project(#[from] mxrs_project::ProjectError),
     #[error(transparent)]
@@ -110,8 +114,50 @@ pub fn build_with_web_output(
     if !report.is_valid() {
         return Err(CargoProjectError::InvalidArtifact(report.errors));
     }
+    let dangling = unresolved_frontend_references(manifest, &output)?;
+    if !dangling.is_empty() {
+        return Err(CargoProjectError::UnresolvedReferences(dangling));
+    }
     mxrs_materializers::materialize_mpr(&output, web_output)?;
     Ok(output)
+}
+
+/// What the nanoflows the frontend declares name — an entity, a member, a
+/// flow, a page — that the built model does not have, each where its
+/// nanoflow is declared. TypeScript names them as text, so nothing before
+/// the build could tell.
+fn unresolved_frontend_references(manifest: &Path, output: &Path) -> Result<Vec<String>> {
+    let frontend = manifest
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("frontend");
+    // A frontend the build could not read has already failed it.
+    let Ok(declared) = mxrs_frontend::read_frontend(&frontend) else {
+        return Ok(Vec::new());
+    };
+    if declared.nanoflow_origins.is_empty() {
+        return Ok(Vec::new());
+    }
+    let project = mxrs_model::Project::open(output, true)?;
+    let index = mxrs_semantic::SemanticIndex::build(&project)
+        .map_err(|error| CargoProjectError::References(error.to_string()))?;
+    let mut dangling = Vec::new();
+    for diagnostic in index.diagnostics() {
+        if diagnostic.code != "unresolved_reference" {
+            continue;
+        }
+        let Some(rest) = diagnostic.message.strip_prefix("nanoflow:") else {
+            continue;
+        };
+        let Some((qualified, what)) = rest.split_once(' ') else {
+            continue;
+        };
+        if let Some(origin) = declared.nanoflow_origins.get(qualified) {
+            dangling.push(format!("{origin}: nanoflow {qualified} {what}"));
+        }
+    }
+    dangling.sort();
+    Ok(dangling)
 }
 
 pub fn frontend_sources(output: impl AsRef<Path>) -> Result<PathBuf> {

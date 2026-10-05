@@ -97,6 +97,38 @@ impl Declaration {
 
 inventory::collect!(Declaration);
 
+/// A nanoflow Rust names so its pages can call it, which the frontend
+/// declares (`mxrs::frontend_flows!`).
+pub struct FrontendMarker {
+    module_path: &'static str,
+    file: &'static str,
+    line: u32,
+    module: &'static str,
+    name: &'static str,
+}
+
+impl FrontendMarker {
+    /// Called by `mxrs::frontend_flows!`; `module_path`, `file` and `line`
+    /// are the expansion site's.
+    pub const fn new(
+        module_path: &'static str,
+        file: &'static str,
+        line: u32,
+        module: &'static str,
+        name: &'static str,
+    ) -> Self {
+        Self {
+            module_path,
+            file,
+            line,
+            module,
+            name,
+        }
+    }
+}
+
+inventory::collect!(FrontendMarker);
+
 /// The crate a `module_path!()` value belongs to.
 pub fn crate_of(module_path: &str) -> &str {
     module_path.split("::").next().unwrap_or(module_path)
@@ -142,6 +174,32 @@ pub fn apply_with_frontend(
     project: &mut ProjectDecl,
     frontend: mxrs_frontend::FrontendDecl,
 ) -> Result<(), mxrs_frontend::FrontendError> {
+    // A nanoflow Rust names as the frontend's is one the frontend declares:
+    // a page would otherwise call a nanoflow that was renamed or removed.
+    let mut markers: Vec<&FrontendMarker> = inventory::iter::<FrontendMarker>
+        .into_iter()
+        .filter(|marker| crate_of(marker.module_path) == crate_name)
+        .collect();
+    markers.sort_by_key(|marker| (marker.file.replace('\\', "/"), marker.line, marker.name));
+    for marker in markers {
+        let declared = frontend
+            .nanoflows
+            .iter()
+            .any(|(module, nanoflow)| module == marker.module && nanoflow.name == marker.name);
+        if !declared {
+            return Err(mxrs_frontend::FrontendError::Shape {
+                path: marker.file.to_string(),
+                line: marker.line as usize,
+                detail: format!(
+                    "it names the nanoflow {}.{} as the frontend's, and no service in \
+                     frontend/src/services declares it; declare it there, or take its name \
+                     out of here and out of what calls it",
+                    marker.module, marker.name
+                ),
+            });
+        }
+    }
+    let origins = frontend.nanoflow_origins;
     let mut navigation = frontend.navigation;
     let mut nanoflows = Some(frontend.nanoflows);
     let declarations = declarations(crate_name);
@@ -165,7 +223,7 @@ pub fn apply_with_frontend(
         if declaration.stage > Stage::Nanoflow
             && let Some(declared) = nanoflows.take()
         {
-            add_nanoflows(project, declared)?;
+            add_nanoflows(project, declared, &origins)?;
         }
         if declaration.stage > Stage::Navigation
             && let Some(declared) = navigation.take()
@@ -175,7 +233,7 @@ pub fn apply_with_frontend(
         declaration.apply(project);
     }
     if let Some(declared) = nanoflows {
-        add_nanoflows(project, declared)?;
+        add_nanoflows(project, declared, &origins)?;
     }
     if let Some(declared) = navigation {
         project.navigation = Some(declared);
@@ -188,6 +246,7 @@ pub fn apply_with_frontend(
 fn add_nanoflows(
     project: &mut ProjectDecl,
     nanoflows: Vec<(String, mxrs_ir::flow::MicroflowDecl)>,
+    origins: &std::collections::HashMap<String, String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     for (module, nanoflow) in nanoflows {
         let declared = project.module_mut(&module);
@@ -196,12 +255,19 @@ fn add_nanoflows(
             .iter()
             .any(|existing| existing.name == nanoflow.name)
         {
+            // Two services declaring one nanoflow are refused where they
+            // are read, so the other declaration is Rust's.
+            let qualified = format!("{module}.{}", nanoflow.name);
+            let (path, line) = origins
+                .get(&qualified)
+                .and_then(|origin| origin.rsplit_once(':'))
+                .and_then(|(path, line)| Some((path.to_string(), line.parse().ok()?)))
+                .unwrap_or_else(|| ("frontend/src/services".to_string(), 1));
             return Err(mxrs_frontend::FrontendError::Shape {
-                path: "src/services".to_string(),
-                line: 1,
+                path,
+                line,
                 detail: format!(
-                    "nanoflow {module}.{} is declared in the frontend and with #[nanoflow]; keep one",
-                    nanoflow.name
+                    "nanoflow {qualified} is declared here and in Rust with #[nanoflow]; keep one"
                 ),
             });
         }

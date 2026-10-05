@@ -45,6 +45,7 @@ mxrs-runtime-scheduler = { path = "../mxrs-runtime-scheduler" }
 mxrs-runtime-sqlite = { path = "../mxrs-runtime-sqlite" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
+mxrs-frontend = { path = "../../authoring/mxrs-frontend" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
 regex = "1"
 serde_json.workspace = true

@@ -341,7 +341,23 @@ control flow and one `await` per activity of `src/mxrs/flows.ts`. A value is
 text, a number, a boolean, a variable, or `mx("...")` for what Mendix writes
 as an expression; an attribute is its name and an association its qualified
 name. mxrs reads each statement as the flow builder call it stands for and
-never runs it. A page that still lives in Rust adds itself to a profile with
+never runs it.
+
+What TypeScript accepts and a flow cannot say is refused with its line,
+never read as something else. A comment without `@roles` names no role — a
+tag deleted is a role taken away, not one the imported model keeps. A
+`break` or `continue` is about the loop it is in, by that loop's label when
+it has one; the cases of a `switch` do not fall through, and inside one a
+loop is broken by its label. An option or an argument an activity does not
+read is an error, as is a tag that is not `@nanoflow`, `@roles`, `@param`,
+`@mendixName` or `@defaultValue`. A service is `export const XService =
+nanoflowService("Module", { ... })` in its module's folder, and a nanoflow
+is declared once. What a nanoflow names — an entity, a member, a flow, a
+page — is text TypeScript cannot check, so `cargo mxrs build` checks it
+against the built model and fails with the file and line of the nanoflow
+that names something the model does not have. A nanoflow
+`in_frontend.rs` names for Rust pages must be one a service declares: one
+renamed or removed in the frontend is refused where Rust still names it. A page that still lives in Rust adds itself to a profile with
 `#[navigation_item]`, and a navigation declared both here and with
 `#[navigation]` is refused.
 

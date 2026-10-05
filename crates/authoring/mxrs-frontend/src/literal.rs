@@ -53,10 +53,11 @@ pub(crate) fn read_default_export(path: &Path) -> Result<Declared, FrontendError
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::ts());
     let parsed = Parser::new(&allocator, &source, source_type).parse();
     if let Some(error) = parsed.diagnostics.first() {
-        return Err(FrontendError::Syntax {
-            path: path.display().to_string(),
-            detail: error.to_string(),
-        });
+        return Err(crate::syntax_error(
+            &path.display().to_string(),
+            &source,
+            error,
+        ));
     }
     let reader = Reader {
         path,

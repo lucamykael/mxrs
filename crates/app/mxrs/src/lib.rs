@@ -148,7 +148,32 @@ macro_rules! imported {
 #[macro_export]
 macro_rules! frontend_flows {
     (module = $module:literal; $($kind:ident $marker:ident $(= $name:literal)?;)*) => {
-        $($crate::__imported_flow!($kind, $module, $marker $(, $name)?);)*
+        $(
+            $crate::__imported_flow!($kind, $module, $marker $(, $name)?);
+            $crate::__frontend_marker!($kind, $module, $marker $(, $name)?);
+        )*
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __frontend_marker {
+    ($kind:ident, $module:literal, $marker:ident) => {
+        $crate::__frontend_marker!($kind, $module, $marker, ::core::stringify!($marker));
+    };
+    (nanoflow, $module:literal, $marker:ident, $name:expr) => {
+        $crate::inventory::submit! {
+            $crate::registry::FrontendMarker::new(
+                ::core::module_path!(),
+                ::core::file!(),
+                ::core::line!(),
+                $module,
+                $name,
+            )
+        }
+    };
+    ($kind:ident, $module:literal, $marker:ident, $name:expr) => {
+        ::core::compile_error!("the frontend declares nanoflows: `nanoflow Name;`");
     };
 }
 

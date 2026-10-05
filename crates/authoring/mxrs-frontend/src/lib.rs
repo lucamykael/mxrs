@@ -26,6 +26,9 @@ pub struct FrontendDecl {
     pub navigation: Option<NavigationDecl>,
     /// Each nanoflow its services declare, with its module.
     pub nanoflows: Vec<(String, mxrs_ir::flow::MicroflowDecl)>,
+    /// Where each of those nanoflows is declared — `file:line` — by its
+    /// qualified name.
+    pub nanoflow_origins: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +59,29 @@ pub enum FrontendError {
     Duplicate(String),
 }
 
+/// A file TypeScript itself cannot read, at the line that says why.
+pub(crate) fn syntax_error(
+    path: &str,
+    source: &str,
+    error: &oxc_diagnostics::OxcDiagnostic,
+) -> FrontendError {
+    let offset = error
+        .labels
+        .first()
+        .map(|label| (label.offset() as usize).min(source.len()));
+    match offset {
+        Some(offset) => FrontendError::Shape {
+            path: path.to_string(),
+            line: source[..offset].matches('\n').count() + 1,
+            detail: error.to_string(),
+        },
+        None => FrontendError::Syntax {
+            path: path.to_string(),
+            detail: error.to_string(),
+        },
+    }
+}
+
 /// Reads what the frontend rooted at `frontend` declares.
 pub fn read_frontend(frontend: impl AsRef<Path>) -> Result<FrontendDecl, FrontendError> {
     let source = frontend.as_ref().join("src");
@@ -73,7 +99,7 @@ pub fn read_frontend(frontend: impl AsRef<Path>) -> Result<FrontendDecl, Fronten
     }
     let services = source.join("services");
     if services.is_dir() {
-        declared.nanoflows = nanoflows::read(&services)?;
+        (declared.nanoflows, declared.nanoflow_origins) = nanoflows::read_with_origins(&services)?;
     }
     Ok(declared)
 }
