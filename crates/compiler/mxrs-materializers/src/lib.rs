@@ -19,27 +19,27 @@ use sha2::{Digest, Sha256};
 const INDEX: EmbeddedAsset = EmbeddedAsset::new(
     "index.html",
     include_bytes!("../assets/index.html"),
-    "f5a1b7cc0e893c9af11344c182b85008dda83cd28b819089a275101fe92f11cb",
+    "6b5993e0557088823c32ceaa23e5b78ace9fb7d9cd873f064fa3180a1482a40b",
 );
 const SCRIPT: EmbeddedAsset = EmbeddedAsset::new(
-    "app-Bcf4qytL.js",
-    include_bytes!("../assets/app-Bcf4qytL.js"),
-    "f7f51238119c1ad8055022ef26a54d8a9acd83f00b3f94cb0410f140bea907e8",
+    "app-CH-0725k.js",
+    include_bytes!("../assets/app-CH-0725k.js"),
+    "c6f7cc50335144ab3f3efe716eea5de9eb43c1be6b72937abceeea89d8c209e4",
 );
 const STYLES: EmbeddedAsset = EmbeddedAsset::new(
-    "app-CRkc8pPr.css",
-    include_bytes!("../assets/app-CRkc8pPr.css"),
-    "2359cd521dababe2d56d19a605aa95b23bf4bf1e70a72a29fe56a6c85f1fbe13",
+    "app-CtH-gR5O.css",
+    include_bytes!("../assets/app-CtH-gR5O.css"),
+    "1713947d707365e74d9484cecae86e2cc8158c569b79c3540bb0943c8c9cfc97",
 );
 const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     ".vite/manifest.json",
     include_bytes!("../assets/.vite/manifest.json"),
-    "f09a051a3f2c1043198853eb767ff6206381ca26083fe4380975058e225dfe31",
+    "15012180e8f7e0160f4ec9610b27ec9952e6ae51f691885b723367049f0845ae",
 );
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "484b10151b9b474ba25855cc2f0321ce74013e06e5fa0426400017ec13f51b96",
+    "9310fe58d8f73ce9bd824e41807dcbbbcc75329625bdce940ee99d4655630fb2",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -176,6 +176,14 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     (
         "src/utils/widgets.ts",
         include_bytes!("../frontend/src/utils/widgets.ts"),
+    ),
+    (
+        "scripts/project-theme.d.mts",
+        include_bytes!("../frontend/scripts/project-theme.d.mts"),
+    ),
+    (
+        "scripts/project-theme.mjs",
+        include_bytes!("../frontend/scripts/project-theme.mjs"),
     ),
     (
         "scripts/sync-assets.mjs",

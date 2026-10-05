@@ -130,7 +130,8 @@ export function className(source: Source, ...own: string[]): string | undefined 
   const appearance = child(source, 'appearance');
   const stated = appearance ? plain(appearance, 'class', '') : '';
   // Some types store a class of their own besides.
-  return [...own, stated, plain(source, 'class', '')].filter(Boolean).join(' ') || undefined;
+  const names = [...own, stated, plain(source, 'class', '')].join(' ').split(/\s+/).filter(Boolean);
+  return [...new Set(names)].join(' ') || undefined;
 }
 
 /** The last part of a qualified name: `Sales.Order.Number` is `Number`. */

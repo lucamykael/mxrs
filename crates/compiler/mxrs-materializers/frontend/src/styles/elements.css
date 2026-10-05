@@ -14,6 +14,9 @@
 .mx-scrollcontainer-left,
 .mx-scrollcontainer-right { flex: 0 0 auto; }
 .mx-scrollcontainer-center { flex: 1 1 auto; min-width: 0; }
+.mx-scrollcontainer-toggleable { overflow: hidden; transition: flex-basis 0.2s; }
+.mx-scrollcontainer:not(.mx-scrollcontainer-open) > .mx-scrollcontainer-toggleable { flex-basis: 0; }
+.mx-scrollcontainer-open > .mx-scrollcontainer-toggleable { flex-basis: var(--sidebar-size); }
 
 .mx-layoutgrid > .row { display: flex; flex-wrap: wrap; }
 .mx-layoutgrid > .row > [class*='col'] { flex: 1 1 0; min-width: 0; padding: 0 0.5rem; }

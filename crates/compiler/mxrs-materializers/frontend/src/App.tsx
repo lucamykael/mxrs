@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 import { Shell } from '@/components/elements/context';
 import { AppHeader } from '@/components/layout/AppHeader';
@@ -17,6 +17,7 @@ import { findForm } from '@/utils/forms';
 export function App() {
   const { manifest, failure } = useManifest();
   const [route, open] = useHashRoute();
+  const [sidebar, setSidebar] = useState<boolean>();
   const pages = useMemo(
     () => (manifest ? manifest.modules.flatMap((module) => module.pages) : []),
     [manifest],
@@ -36,7 +37,7 @@ export function App() {
   // A page is what a route opens; a layout or a snippet is drawn inside one.
   if (declared?.kind === 'page') {
     return (
-      <Shell.Provider value={{ items: profile?.items || [], open, form: findForm }}>
+      <Shell.Provider value={{ items: profile?.items || [], current: qualified, open, form: findForm, sidebar, setSidebar }}>
         {/* Keyed by the page, so nothing one page holds — a tab, a text typed — is taken for another's. */}
         <div className="mxrs-app" data-page={qualified} key={qualified}>
           {declared.document}

@@ -7,13 +7,14 @@ import {
   isValidElement,
   useContext,
   useState,
+  type CSSProperties,
   type ReactElement,
   type ReactNode,
 } from 'react';
 
 import { invokeAction } from '@/api/actions';
 
-import { PageTitle, Placeholders, Shell } from './context';
+import { OfPage, PageTitle, Placeholders, Shell, Sidebar } from './context';
 import {
   child,
   className,
@@ -85,7 +86,9 @@ const Box: Draw = (source) => (
 const Contents: Draw = (source) => <>{content(source)}</>;
 
 const Page: Draw = (source) => (
-  <PageTitle.Provider value={text(source, 'title')}>{held(source, 'formCall')}</PageTitle.Provider>
+  <PageTitle.Provider value={text(source, 'title')}>
+    <OfPage.Provider value>{held(source, 'formCall')}</OfPage.Provider>
+  </PageTitle.Provider>
 );
 
 const Layout: Draw = (source) => (
@@ -97,13 +100,17 @@ const LayoutCall: Draw = (source) => {
   // What an argument holds is the caller's: a placeholder in it is one of
   // the layout the caller is itself drawn in.
   const outer = useContext(Placeholders);
+  const ofPage = useContext(OfPage);
   const filled = new Map<string, ReactNode>();
   for (const argument of Children.toArray(content(source))) {
     const stated = sourceOf(argument);
     if (!stated) continue;
     filled.set(
       lastName(plain(stated, 'parameter', '')),
-      <Placeholders.Provider value={outer}>{content(stated)}</Placeholders.Provider>,
+      <Placeholders.Provider value={outer}>
+        {/* A page's content is what the Mendix client calls `mx-page`. */}
+        {ofPage ? <div className="mx-page">{content(stated)}</div> : content(stated)}
+      </Placeholders.Provider>,
     );
   }
   const layout = useContext(Shell).form(plain(source, 'form', ''));
@@ -116,7 +123,11 @@ const LayoutCall: Draw = (source) => {
       </>
     );
   }
-  return <Placeholders.Provider value={filled}>{layout.document}</Placeholders.Provider>;
+  return (
+    <OfPage.Provider value={false}>
+      <Placeholders.Provider value={filled}>{layout.document}</Placeholders.Provider>
+    </OfPage.Provider>
+  );
 };
 
 /** A layout's content: the layout it is based on, when it is, and its own widgets. */
@@ -151,32 +162,68 @@ function regionSize(region: Source, side: 'width' | 'height') {
  * of its own, laid out the other way, for the left, center and right ones.
  */
 const ScrollContainer: Draw = (source) => {
+  // A side region that toggles: how it does, and whether it starts open.
+  const toggling = (['left', 'right'] as const)
+    .map((side) => child(source, side))
+    .map((side) => (side ? plain(side, 'toggleMode', 'None') : 'None'))
+    .find((mode) => mode !== 'None');
+  // Open as its mode says until the user says otherwise, which holds from page to page.
+  const { sidebar: chosen, setSidebar } = useContext(Shell);
+  const open = chosen ?? !toggling?.endsWith('InitiallyClosed');
+  const how = toggling?.startsWith('Push') ? 'push' : toggling?.startsWith('Slide') ? 'slide' : 'shrink';
+
   const region = (name: string, place: string, side: 'width' | 'height') => {
     const stated = child(source, name);
     if (!stated || !isValidElement(source.props[name])) return null;
+    const toggles = plain(stated, 'toggleMode', 'None') !== 'None';
     return (
-      <div className={className(stated, `mx-scrollcontainer-${place}`)} style={regionSize(stated, side)}>
-        <div className="mx-scrollcontainer-wrapper">{content(stated)}</div>
+      <div
+        className={className(
+          stated,
+          `mx-scrollcontainer-${place}`,
+          toggles ? 'mx-scrollcontainer-toggleable' : '',
+        )}
+        // A region that toggles is as wide as its container says it is now.
+        style={toggles ? undefined : regionSize(stated, side)}
+      >
+        <div className="mx-scrollcontainer-wrapper" style={toggles ? regionSize(stated, side) : undefined}>
+          {content(stated)}
+        </div>
       </div>
     );
   };
+  const sidebar = (['left', 'right'] as const)
+    .map((side) => child(source, side))
+    .find((side) => side && plain(side, 'toggleMode', 'None') !== 'None');
+  const size = sidebar ? regionSize(sidebar, 'width')?.width : undefined;
   return (
-    <div
-      className={className(
-        source,
-        'mx-scrollcontainer',
-        'mx-scrollcontainer-vertical',
-        'mx-scrollcontainer-fixed',
-      )}
-    >
-      {region('top', 'top', 'height')}
-      <div className="mx-scrollcontainer mx-scrollcontainer-horizontal mx-scrollcontainer-nested mx-scrollcontainer-fixed">
-        {region('left', 'left', 'width')}
-        {region('centerRegion', 'center', 'width')}
-        {region('right', 'right', 'width')}
+    <Sidebar.Provider value={{ open, toggle: () => setSidebar(!open) }}>
+      <div
+        className={className(
+          source,
+          'mx-scrollcontainer',
+          'mx-scrollcontainer-vertical',
+          'mx-scrollcontainer-fixed',
+        )}
+      >
+        {region('top', 'top', 'height')}
+        <div
+          className={[
+            'mx-scrollcontainer mx-scrollcontainer-horizontal mx-scrollcontainer-nested mx-scrollcontainer-fixed',
+            toggling ? `mx-scrollcontainer-${how}` : '',
+            toggling && open ? 'mx-scrollcontainer-open' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          style={size ? ({ '--sidebar-size': size } as CSSProperties) : undefined}
+        >
+          {region('left', 'left', 'width')}
+          {region('centerRegion', 'center', 'width')}
+          {region('right', 'right', 'width')}
+        </div>
+        {region('bottom', 'bottom', 'height')}
       </div>
-      {region('bottom', 'bottom', 'height')}
-    </div>
+    </Sidebar.Provider>
   );
 };
 
@@ -326,12 +373,13 @@ const TabControl: Draw = (source) => {
 
 /** The application's menu, in the structure the Mendix client gives a navigation tree. */
 const Menu: Draw = (source) => {
-  const { items, open } = useContext(Shell);
+  const { items, current, open } = useContext(Shell);
   const list = (entries: typeof items): ReactElement => (
     <ul>
       {entries.map((item, index) => (
-        <li key={index}>
+        <li key={index} className={item.page === current ? 'active' : undefined}>
           <a
+            className={item.page === current ? 'active' : undefined}
             href={item.page ? `#${encodeURIComponent(item.page)}` : undefined}
             onClick={(event) => {
               event.preventDefault();
@@ -352,15 +400,22 @@ const Menu: Draw = (source) => {
   );
 };
 
-const SidebarToggle: Draw = (source) => (
-  <button
-    type="button"
-    className={className(source, 'btn', 'mx-button')}
-    title={text(source, 'tooltip')}
-  >
-    {text(source, 'captionTemplate') || '☰'}
-  </button>
-);
+/** Opens and closes the sidebar of the layout it is in. */
+const SidebarToggle: Draw = (source) => {
+  const { open, toggle } = useContext(Sidebar);
+  const style = plain(source, 'buttonStyle', 'Default').toLowerCase();
+  return (
+    <button
+      type="button"
+      className={className(source, 'btn', 'mx-button', `btn-${style}`, 'mx-sidebartoggle')}
+      title={text(source, 'tooltip')}
+      aria-expanded={open}
+      onClick={toggle}
+    >
+      {text(source, 'captionTemplate') || '☰'}
+    </button>
+  );
+};
 
 /** A list of elements a field states, each drawn. */
 const each = (value: unknown): ReactNode =>
