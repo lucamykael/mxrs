@@ -64,6 +64,15 @@ impl InstallPlan {
         let descriptor = package.descriptor()?;
         let source_path = package.extract_project(&descriptor, staging.path())?;
         let staged = package.stage_files(&descriptor, staging.path())?;
+        // A widget the project already has stays unless this package's is newer.
+        let staged: Vec<(String, PathBuf)> = staged
+            .into_iter()
+            .filter(|(relative, source)| {
+                !shared_widget(relative)
+                    || safe_destination(&self.target_root, relative)
+                        .is_ok_and(|existing| replaces_widget(source, &existing))
+            })
+            .collect();
 
         let source = MprFile::open(&source_path, true)?;
         let mut target = MprFile::open(&self.mpr_path, false)?;
@@ -194,7 +203,10 @@ pub fn plan_install(
         .files
         .iter()
         .map(|relative| {
-            if protected.contains(relative) {
+            // A widget is the project's, shared by the modules that use
+            // it: another package's is not overwritten blindly, but the
+            // newer of the two is the one that stays (decided at apply).
+            if protected.contains(relative) && !shared_widget(relative) {
                 return Err(MarketplaceError::ProtectedPackagePath(relative.clone()));
             }
             let destination = safe_destination(&target_root, relative)?;
@@ -300,6 +312,42 @@ fn numeric_version(value: &str) -> Vec<u64> {
         .collect();
     parts.resize(4, 0);
     parts
+}
+
+/// Whether a declared asset is a pluggable widget: a file the project's
+/// modules share.
+fn shared_widget(relative: &str) -> bool {
+    relative
+        .strip_prefix("widgets/")
+        .is_some_and(|name| !name.contains('/') && name.to_ascii_lowercase().ends_with(".mpk"))
+}
+
+/// Whether the widget a package brings takes the place of the one the
+/// project has: when there is none, or when it is a newer version. The same
+/// file, an older one, or one whose version cannot be read leaves the
+/// project's alone.
+fn replaces_widget(incoming: &Path, existing: &Path) -> bool {
+    if !existing.is_file() {
+        return true;
+    }
+    match (widget_version(incoming), widget_version(existing)) {
+        (Some(incoming), Some(existing)) => incoming > existing,
+        _ => false,
+    }
+}
+
+/// The version a widget package states for its client module.
+fn widget_version(path: &Path) -> Option<Vec<u64>> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut archive.by_name("package.xml").ok()?, &mut text).ok()?;
+    let module = &text[text.find("<clientModule")?..];
+    let stated = module[..module.find('>')?].split("version=\"").nth(1)?;
+    stated[..stated.find('"')?]
+        .split('.')
+        .map(|part| part.parse().ok())
+        .collect()
 }
 
 fn validate_target(

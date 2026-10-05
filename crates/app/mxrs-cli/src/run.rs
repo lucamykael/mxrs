@@ -282,6 +282,7 @@ enum Stop {
 
 pub fn start(options: &RunOptions) -> Result<(), RunError> {
     let target = resolve_target(&options.root)?;
+    crate::theme::compile_and_report(&options.root);
     let address = bind_address(options)?;
     let profile = EnvironmentProfile::load(&options.root, options.environment.as_deref())?;
     let boot = mxrs_runtime_boot::boot(&target.mpr)?;

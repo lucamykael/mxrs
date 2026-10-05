@@ -146,6 +146,13 @@ fn run_build(mut args: Vec<String>) -> ExitCode {
         eprintln!("[mxrs] error: unexpected arguments: {}", args.join(" "));
         return ExitCode::FAILURE;
     }
+    let project = std::path::Path::new(&manifest)
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
     let result = match web_output {
         Some(web) => {
             mxrs_cli::cargo_project::build_with_web_output(manifest, output, web, release, offline)
@@ -155,6 +162,8 @@ fn run_build(mut args: Vec<String>) -> ExitCode {
     match result {
         Ok(path) => {
             println!("[mxrs] built and validated {}", path.display());
+            // The stylesheet its pages load is part of what a build makes.
+            mxrs_cli::theme::compile_and_report(&project);
             ExitCode::SUCCESS
         }
         Err(error) => {

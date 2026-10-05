@@ -71,6 +71,7 @@ pub mod run;
 pub mod scaffold;
 pub mod serve;
 pub mod team_server;
+pub mod theme;
 pub mod uml;
 pub mod update;
 pub mod validate;

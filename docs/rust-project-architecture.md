@@ -323,6 +323,13 @@ knows none of it. A data view
 over a flow, a grid and a pluggable widget show the widgets they hold, not
 data.
 
+The theme is Sass, as Studio Pro keeps it: every build and `mxrs run`
+compile what each module publishes under `assets/themesource/<module>/web/`
+— Atlas Core's first — and then the project's `assets/theme/web/main.scss`
+into `assets/theme-cache/web/theme.compiled.css`, when a source is newer
+than the stylesheet. A project needs no Sass toolchain of its own, and a
+theme that does not compile is a warning.
+
 `mxrs page new <Module.Entity> --template crud` writes both pages of an
 entity the project declares — `<Entity>_Overview` (a list, with New, Edit
 and Delete) and `<Entity>_Edit` (an input per attribute, Save and Cancel) —

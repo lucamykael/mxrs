@@ -48,6 +48,9 @@ mxrs-writer = { path = "../../writer/mxrs-writer" }
 mxrs-frontend = { path = "../../authoring/mxrs-frontend" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
 regex = "1"
+# The project's theme is Sass (Atlas); compiled here so a project needs no
+# Sass toolchain of its own.
+grass = { version = "0.13", default-features = false }
 serde_json.workspace = true
 serde.workspace = true
 sha2 = "0.10"
