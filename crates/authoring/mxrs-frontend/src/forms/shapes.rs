@@ -221,6 +221,7 @@ fn components(tallies: &BTreeMap<Variant, Tally>) -> BTreeMap<Variant, String> {
         *uses.entry(short(ty)).or_default() += 1;
     }
     let mut named = BTreeMap::new();
+    let mut taken: HashSet<String> = HashSet::new();
     for ty in types {
         let name = short(ty);
         let base = if uses[&name] > 1 {
@@ -242,7 +243,12 @@ fn components(tallies: &BTreeMap<Variant, Tally>) -> BTreeMap<Variant, String> {
             } else {
                 format!("{base}_{}", index + 1)
             };
-            named.insert(variant.clone(), component);
+            // A type may itself be named like another's second shape.
+            let mut free = component.clone();
+            while !taken.insert(free.clone()) {
+                free.push('_');
+            }
+            named.insert(variant.clone(), free);
         }
     }
     named
@@ -337,10 +343,183 @@ pub fn mine(documents: &[&NativeDocument]) -> Vocabulary {
             widgets.push(WidgetDefinition {
                 name,
                 ty: ty.clone(),
+                defaults: BTreeMap::new(),
             });
         });
     }
+    // What each property mostly holds, where that is more than its type's
+    // own default: a new use of the widget is then stored as the others.
+    let mut held: Vec<BTreeMap<String, Held>> = vec![BTreeMap::new(); widgets.len()];
+    for document in documents {
+        super::walk(document, "", &mut |path, nested| {
+            if nested.ty != CUSTOM_WIDGET {
+                return;
+            }
+            let (Some(NativeValue::Document(ty)), Some(NativeValue::Document(object))) =
+                (nested.get("Type"), nested.get("Object"))
+            else {
+                return;
+            };
+            let Some(index) = widgets.iter().position(|known| &known.ty == ty) else {
+                return;
+            };
+            if let Some(NativeValue::Document(object_type)) = ty.get("ObjectType") {
+                hold(
+                    object,
+                    object_type,
+                    &format!("{}.ObjectType", super::join(path, "Type")),
+                    "",
+                    &shapes,
+                    &mut held[index],
+                );
+            }
+        });
+    }
+    for (widget, held) in widgets.iter_mut().zip(held) {
+        for (key, held) in held {
+            // The first of the values most uses hold.
+            let mut most: Option<&(NativeDocument, usize)> = None;
+            for candidate in &held.values {
+                if most.is_none_or(|(_, count)| candidate.1 > *count) {
+                    most = Some(candidate);
+                }
+            }
+            if let Some((value, _)) = most
+                && Some(value) != held.plain.as_ref()
+            {
+                widget.defaults.insert(key, value.clone());
+            }
+        }
+    }
     Vocabulary { shapes, widgets }
+}
+
+/// The values the uses of a widget hold for one property, and the value
+/// its type alone would give it.
+#[derive(Clone, Default)]
+struct Held {
+    plain: Option<NativeDocument>,
+    values: Vec<(NativeDocument, usize)>,
+}
+
+/// `document` with nothing said in it: the elements it is made of, each
+/// field at its element's default — or at the nothing of its kind — and
+/// each list empty. `None` when it is no element of the project.
+fn blank(shapes: &Shapes, document: &NativeDocument) -> Option<NativeDocument> {
+    let shape = shapes.shape_of(document)?;
+    let mut out = NativeDocument::new(document.ty.as_str());
+    for (field, (key, value)) in shape.fields.iter().zip(&document.fields) {
+        let said = match (value, &field.default) {
+            (NativeValue::Document(nested), _) => NativeValue::Document(blank(shapes, nested)?),
+            (NativeValue::List(marker, _), _) => NativeValue::List(*marker, Vec::new()),
+            (NativeValue::Null | NativeValue::Pointer(_) | NativeValue::Identity(_), _) => {
+                NativeValue::Null
+            }
+            (_, FieldDefault::Value(default)) if !matches!(default, NativeValue::Null) => {
+                default.clone()
+            }
+            (NativeValue::Text(_), _) => NativeValue::Text(String::new()),
+            (NativeValue::Bool(_), _) => NativeValue::Bool(false),
+            (NativeValue::Int32(_), _) => NativeValue::Int32(0),
+            (NativeValue::Int64(_), _) => NativeValue::Int64(0),
+        };
+        out.fields.push((key.clone(), said));
+    }
+    Some(out)
+}
+
+/// Counts what each property of `object` holds, by its key after `prefix`.
+fn hold(
+    object: &NativeDocument,
+    object_type: &NativeDocument,
+    type_path: &str,
+    prefix: &str,
+    shapes: &Shapes,
+    held: &mut BTreeMap<String, Held>,
+) {
+    let (Some(NativeValue::List(_, properties)), Some(NativeValue::List(_, types))) =
+        (object.get("Properties"), object_type.get("PropertyTypes"))
+    else {
+        return;
+    };
+    for property in properties {
+        let NativeValue::Document(property) = property else {
+            continue;
+        };
+        let (Some(NativeValue::Pointer(pointer)), Some(NativeValue::Document(value))) =
+            (property.get("TypePointer"), property.get("Value"))
+        else {
+            continue;
+        };
+        let index = pointer
+            .strip_prefix(type_path)
+            .and_then(|rest| rest.strip_prefix(".PropertyTypes["))
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|index| index.parse::<usize>().ok());
+        let Some(NativeValue::Document(property_type)) = index.and_then(|index| types.get(index))
+        else {
+            continue;
+        };
+        let (Some(key), Some(NativeValue::Document(value_type))) = (
+            property_type.text("PropertyKey"),
+            property_type.get("ValueType"),
+        ) else {
+            continue;
+        };
+        let keys = super::write::keys(prefix, key);
+        let value_type_path = format!("{pointer}.ValueType");
+        let objects: &[NativeValue] = match value.get("Objects") {
+            Some(NativeValue::List(_, objects)) => objects,
+            _ => &[],
+        };
+        if let Some(NativeValue::Document(nested_type)) = value_type.get("ObjectType") {
+            for item in objects {
+                if let NativeValue::Document(item) = item {
+                    hold(
+                        item,
+                        nested_type,
+                        &format!("{value_type_path}.ObjectType"),
+                        &keys,
+                        shapes,
+                        held,
+                    );
+                }
+            }
+        }
+        // What a use holds is its own; what it is made of — which elements
+        // its value has, with nothing said in them — is how the widget's
+        // uses are stored.
+        if value.get("TypePointer").is_none() {
+            continue;
+        }
+        let Some(mut candidate) = blank(shapes, value) else {
+            continue;
+        };
+        candidate.set("TypePointer", NativeValue::Null);
+        if let (Some(NativeValue::Text(_)), Some(default)) = (
+            candidate.get("PrimitiveValue"),
+            value_type.text("DefaultValue"),
+        ) {
+            candidate.set("PrimitiveValue", default);
+        }
+        let entry = held.entry(keys).or_default();
+        if entry.plain.is_none() {
+            entry.plain = shapes.shape(super::WIDGET_VALUE).and_then(|shape| {
+                let mut plain =
+                    super::write::property_default(shapes, shape, value_type, "", None)?;
+                plain.set("TypePointer", NativeValue::Null);
+                Some(plain)
+            });
+        }
+        match entry
+            .values
+            .iter_mut()
+            .find(|(known, _)| known == &candidate)
+        {
+            Some((_, count)) => *count += 1,
+            None => entry.values.push((candidate, 1)),
+        }
+    }
 }
 
 /// The component a pluggable widget is used by: the last word of its id,

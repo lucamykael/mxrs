@@ -320,6 +320,7 @@ pub(crate) fn declare_in_frontend(
     let vocabulary = Vocabulary { shapes, widgets };
     let mut declared = FrontendForms::default();
     let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut paths: BTreeSet<String> = BTreeSet::new();
     for form in &stored {
         if !authored(&form.module) || keeps(&form.module, &form.ty, &form.name) {
             continue;
@@ -337,6 +338,12 @@ pub(crate) fn declare_in_frontend(
             crate::module_stem(&form.module),
             form.name
         );
+        // Two forms whose files a file system would not tell apart: the
+        // second stays where it is.
+        if !paths.insert(path.to_lowercase()) {
+            stays(form, "another form already has its file's name");
+            continue;
+        }
         let source = match forms::render_form(&form.module, document, &vocabulary) {
             Ok(source) => source,
             Err(reason) => {

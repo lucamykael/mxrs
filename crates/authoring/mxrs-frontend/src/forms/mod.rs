@@ -102,7 +102,7 @@ impl Shape {
     }
 
     /// Whether `document` has exactly this element's fields, in order.
-    fn fits(&self, document: &NativeDocument) -> bool {
+    pub(crate) fn fits(&self, document: &NativeDocument) -> bool {
         self.ty == document.ty
             && self.fields.len() == document.fields.len()
             && self
@@ -252,6 +252,40 @@ pub struct WidgetDefinition {
     pub name: String,
     /// The `CustomWidgets$CustomWidgetType` document.
     pub ty: NativeDocument,
+    /// What a property holds when a use of the widget says nothing about
+    /// it, where that is more than its type's own default: by the
+    /// property's key, a nested object's after its property's
+    /// (`columns.header`). Each is a value element, pointing nowhere yet.
+    pub defaults: BTreeMap<String, NativeDocument>,
+}
+
+impl WidgetDefinition {
+    /// The type of the value the property at `keys` holds.
+    pub(crate) fn value_type(&self, keys: &str) -> Option<&NativeDocument> {
+        let Some(NativeValue::Document(object_type)) = self.ty.get("ObjectType") else {
+            return None;
+        };
+        let mut object_type = object_type;
+        let mut found = None;
+        for key in keys.split('.') {
+            let Some(NativeValue::List(_, types)) = object_type.get("PropertyTypes") else {
+                return None;
+            };
+            let property = types.iter().find_map(|ty| match ty {
+                NativeValue::Document(ty) if ty.text("PropertyKey") == Some(key) => Some(ty),
+                _ => None,
+            })?;
+            let Some(NativeValue::Document(value_type)) = property.get("ValueType") else {
+                return None;
+            };
+            found = Some(value_type);
+            match value_type.get("ObjectType") {
+                Some(NativeValue::Document(nested)) => object_type = nested,
+                _ => object_type = value_type,
+            }
+        }
+        found
+    }
 }
 
 /// What a project's pages are written with.
@@ -710,6 +744,38 @@ export default page(
                 "it is not stated",
             ),
             (
+                "name=\"body\"",
+                "name=\"body\" tabIndex=\"3\"",
+                18,
+                "`tabIndex` holds a number",
+            ),
+            ("name=\"body\"", "name={3}", 18, "`name` holds a text"),
+            (
+                "<Label name=\"hint\" />",
+                "<Page name=\"Inner\" />",
+                16,
+                "is a file of its own",
+            ),
+            (
+                "import { missing, named, page, unset }",
+                "import { missing, page, unset }",
+                10,
+                "`named` is not imported",
+            ),
+            (
+                "from \"@/widgets/Grid\"",
+                "from \"@/widgets/Other\"",
+                19,
+                "an element imported",
+            ),
+            (
+                "name=\"Orders\"",
+                "name=\"Or ders\"",
+                7,
+                "the name the model knows it by",
+            ),
+            ("\"Sales\",", "\"\",", 6, "a module's name"),
+            (
                 "page(\n  \"Sales\"",
                 "snippet(\n  \"Sales\"",
                 5,
@@ -740,6 +806,59 @@ export default page(
     }
 
     #[test]
+    fn a_new_use_of_a_widget_is_stored_as_its_uses_are() {
+        // Every use holds a template in `emptyText`, with its own text.
+        let templated = |path: &str, name: &str, caption: &str| {
+            let mut widget = grid(path, name, "false", &[], true);
+            let pointer = format!("{path}.Type.ObjectType.PropertyTypes[1].ValueType");
+            let property = widget
+                .document_mut("Object")
+                .and_then(|object| object.list_mut("Properties"))
+                .and_then(|properties| match &mut properties[1] {
+                    NativeValue::Document(property) => property.document_mut("Value"),
+                    _ => None,
+                })
+                .unwrap();
+            *property = NativeDocument::new(WIDGET_VALUE)
+                .with("Objects", NativeValue::List(2, vec![]))
+                .with("PrimitiveValue", "")
+                .with(
+                    "TextTemplate",
+                    NativeDocument::new("Forms$ClientTemplate").with("Template", caption),
+                )
+                .with("TypePointer", NativeValue::Pointer(pointer));
+            widget
+        };
+        let document = page(vec![
+            templated("Widgets[0]", "one", "Nothing here"),
+            templated("Widgets[1]", "two", ""),
+        ]);
+        let vocabulary = vocabulary(&[&document]);
+        // What the definition keeps is what the value is made of, not what
+        // one use says in it.
+        let defined = &vocabulary.widgets[0].defaults["emptyText"];
+        assert_eq!(
+            defined.get("TextTemplate"),
+            Some(&NativeValue::Document(
+                NativeDocument::new("Forms$ClientTemplate").with("Template", "")
+            ))
+        );
+        let source = render_form("Sales", &document, &vocabulary).unwrap();
+        assert!(source.contains("<Grid name=\"two\" />"), "{source}");
+        let added = source.replace(
+            "<Grid name=\"two\" />",
+            "<Grid name=\"two\" />\n    <Grid name=\"three\" />",
+        );
+        let read = read_form(&added, "Orders.tsx", &vocabulary).unwrap().1;
+        let expected = page(vec![
+            templated("Widgets[0]", "one", "Nothing here"),
+            templated("Widgets[1]", "two", ""),
+            templated("Widgets[2]", "three", ""),
+        ]);
+        assert_eq!(read.document, expected);
+    }
+
+    #[test]
     fn the_elements_file_is_read_as_it_is_written() {
         let document = orders();
         let mined = mine(&[&document]);
@@ -767,6 +886,16 @@ export default page(
                 "each field once",
             ),
             ("name: \"\",", "Name: \"\",", "a field's name as a prop"),
+            (
+                "element(\"Forms$DivContainer\"",
+                "element(\"DivContainer\"",
+                "a stored type",
+            ),
+            (
+                "export const DivContainer =",
+                "export const divContainer =",
+                "a component's name",
+            ),
         ] {
             assert!(source.contains(from), "{from}");
             let error = read_elements(&source.replacen(from, to, 1), "elements.ts")

@@ -73,9 +73,30 @@ export type Default =
   | ChildrenDefault
   | Component<never>;
 
+/** Texts by language code: `{ en_US: "Save" }`. */
+export type Texts = { [language: string]: string };
+
+/**
+ * What a field holds, by what it holds by default: a text where the default
+ * is a text, a number where it is a number, an element — or texts, or
+ * nothing — where it is an element. A field that holds nothing by default
+ * says nothing of its kind.
+ */
+export type Holds<V> = V extends ListDefault
+  ? Value[]
+  : V extends string
+    ? string
+    : V extends number | Long
+      ? number | Long | Int
+      : V extends boolean
+        ? boolean
+        : V extends null
+          ? Value
+          : ReactElement | Texts | null;
+
 /** An element's props: its fields, each optional, and its children when it holds any. */
 export type Props<D> = {
-  [K in keyof D as D[K] extends ChildrenDefault ? never : K]?: Value;
+  [K in keyof D as D[K] extends ChildrenDefault ? never : K]?: Holds<D[K]>;
 } & (ChildrenDefault extends D[keyof D] ? { children?: ReactNode } : { children?: never });
 
 export function list(marker: number): ListDefault {
@@ -125,9 +146,17 @@ export type WidgetProps = Record<string, Value> & {
   properties?: Record<string, ReactElement | Missing>;
 };
 
-/** A pluggable widget, by its definition. */
-export function widget(definition: ReactElement): Component<WidgetProps> {
-  void definition;
+/**
+ * A pluggable widget, by its definition and — where a property mostly holds
+ * more than its type's own default — what its properties hold when a use of
+ * the widget says nothing about them, by their keys (`"columns.header"` for
+ * a property of the objects another holds).
+ */
+export function widget(
+  definition: ReactElement,
+  defaults?: Record<string, ReactElement>,
+): Component<WidgetProps> {
+  void [definition, defaults];
   return () => box("CustomWidgets$CustomWidget", null);
 }
 

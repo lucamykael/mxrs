@@ -103,4 +103,27 @@ fn a_page_is_read_with_the_elements_the_frontend_declares() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("whose place is src/pages"), "{error}");
+    // A form is directly in its module's folder, and of that module.
+    let nested = frontend(&[
+        ("mxrs/elements.ts", ELEMENTS),
+        ("pages/sales/orders/Orders.tsx", ORDERS),
+    ]);
+    let error = Application::build_with_frontend(nested.path())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("a folder inside a module's folder is not read"),
+        "{error}"
+    );
+    let elsewhere = frontend(&[
+        ("mxrs/elements.ts", ELEMENTS),
+        ("pages/billing/Orders.tsx", ORDERS),
+    ]);
+    let error = Application::build_with_frontend(elsewhere.path())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Orders.tsx") && error.contains("which is another module's"),
+        "{error}"
+    );
 }

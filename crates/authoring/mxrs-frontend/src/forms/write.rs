@@ -26,27 +26,56 @@ struct Writer<'a> {
     helpers: BTreeSet<&'static str>,
 }
 
-/// The value a pluggable widget's property has when a page says nothing
-/// about it: the value element's own defaults, holding the default the
-/// property's type declares and pointing at that type.
+/// The value element `shape` as a property of type `value_type` holds it
+/// before a page says anything: what the widget's definition says its uses
+/// hold (`defined`), when that is stored this way, and otherwise the
+/// element's own defaults with the default the property's type declares.
+/// Either way it points at its type.
 pub(crate) fn property_default(
     shapes: &super::Shapes,
     shape: &Shape,
     value_type: &NativeDocument,
     value_type_path: &str,
+    defined: Option<&NativeDocument>,
 ) -> Option<NativeDocument> {
-    let mut base = shapes.default_for(shape).clone();
-    if let (Some(NativeValue::Text(_)), Some(default)) =
-        (base.get("PrimitiveValue"), value_type.text("DefaultValue"))
-    {
-        base.set("PrimitiveValue", default);
-    }
+    let mut base = match defined {
+        Some(defined) if shape.fits(defined) => defined.clone(),
+        _ => {
+            let mut base = shapes.default_for(shape).clone();
+            if let (Some(NativeValue::Text(_)), Some(default)) =
+                (base.get("PrimitiveValue"), value_type.text("DefaultValue"))
+            {
+                base.set("PrimitiveValue", default);
+            }
+            base
+        }
+    };
     base.get("TypePointer")?;
     base.set(
         "TypePointer",
         NativeValue::Pointer(value_type_path.to_string()),
     );
     Some(base)
+}
+
+/// The element a property's value is when a use of the widget does not
+/// state it: the one the definition's default is, or the plain one.
+pub(crate) fn unstated_shape<'s>(
+    shapes: &'s super::Shapes,
+    defined: Option<&NativeDocument>,
+) -> Option<&'s Shape> {
+    defined
+        .and_then(|defined| shapes.shape_of(defined))
+        .or_else(|| shapes.shape(WIDGET_VALUE))
+}
+
+/// `prefix` continued by a property's key.
+pub(crate) fn keys(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        key.to_string()
+    } else {
+        format!("{prefix}.{key}")
+    }
 }
 
 impl<'a> Writer<'a> {
@@ -289,6 +318,8 @@ impl<'a> Writer<'a> {
             object_type,
             &format!("{}.ObjectType", join(path, "Type")),
             &join(path, "Object"),
+            definition,
+            "",
         )?;
         let base = vocabulary
             .shapes
@@ -318,6 +349,8 @@ impl<'a> Writer<'a> {
         object_type: &NativeDocument,
         type_path: &str,
         path: &str,
+        definition: &WidgetDefinition,
+        prefix: &str,
     ) -> Outcome<Vec<(String, Js)>> {
         let vocabulary = self.vocabulary;
         let unreadable_for = |what: &str| {
@@ -336,7 +369,6 @@ impl<'a> Writer<'a> {
             .shapes
             .default_document(WIDGET_PROPERTY)
             .ok_or_else(unreadable)?;
-        let plain_value = self.shape(WIDGET_VALUE, path)?;
         let mut properties: &[NativeValue] = &[];
         for (field, (key, value)) in object_shape.fields.iter().zip(&object.fields) {
             match (key.as_str(), value, &field.default) {
@@ -417,16 +449,29 @@ impl<'a> Writer<'a> {
             // A value stored another way than most says so by its
             // component, and is then always stated.
             let value_shape = self.shaped(value, &value_path)?;
+            let defined = definition.defaults.get(&keys(prefix, key));
+            let unstated = unstated_shape(&vocabulary.shapes, defined)
+                .and_then(|shape| {
+                    property_default(
+                        &vocabulary.shapes,
+                        shape,
+                        value_type,
+                        &value_type_path,
+                        defined,
+                    )
+                })
+                .ok_or_else(unreadable)?;
+            if value == &unstated {
+                continue;
+            }
             let base = property_default(
                 &vocabulary.shapes,
                 value_shape,
                 value_type,
                 &value_type_path,
+                defined,
             )
             .ok_or_else(unreadable)?;
-            if value == &base && value_shape.component == plain_value.component {
-                continue;
-            }
             if value.get("TypePointer") != base.get("TypePointer") {
                 return Err(unreadable_for("a value points at another type"));
             }
@@ -452,6 +497,8 @@ impl<'a> Writer<'a> {
                         nested_type,
                         &format!("{value_type_path}.ObjectType"),
                         &format!("{value_path}.Objects[{item_index}]"),
+                        definition,
+                        &keys(prefix, key),
                     )?));
                 }
                 objects = Some(Js::Array(written));
@@ -552,6 +599,29 @@ pub fn render_widget(
     let element = writer.element(&definition.ty, "")?;
     let mut body = tsx::lines(&Js::Element(element), 2);
     body.last_mut().expect("an element has a line").push(',');
+    if !definition.defaults.is_empty() {
+        // What its properties hold before a page says anything.
+        let mut defaults = Vec::with_capacity(definition.defaults.len());
+        for (key, value) in &definition.defaults {
+            let shape = writer.shaped(value, key)?;
+            if shape.ty != WIDGET_VALUE {
+                return Err(format!("the default of `{key}` is not a property's value"));
+            }
+            let base = vocabulary.shapes.default_for(shape);
+            let (attrs, children) = writer.fields(value, shape, base, &["TypePointer"], key)?;
+            writer.elements.insert(shape.component.clone());
+            defaults.push((
+                key.clone(),
+                Js::Element(Element {
+                    tag: shape.component.clone(),
+                    attrs,
+                    children,
+                }),
+            ));
+        }
+        body.extend(tsx::lines(&Js::Object(defaults), 2));
+        body.last_mut().expect("an object has a line").push(',');
+    }
     Ok(format!(
         "{}\nexport const {} = widget(\n{}\n);\n",
         writer.imports("widget"),

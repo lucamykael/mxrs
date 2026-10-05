@@ -13,7 +13,7 @@ use oxc_ast::ast::{
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 
-use super::write::property_default;
+use super::write::{keys, property_default, unstated_shape};
 use super::{
     CUSTOM_WIDGET, ELEMENTS_MODULE, FORMS_MODULE, Field, FieldDefault, Shape, Shapes, TEXT,
     TRANSLATION, Vocabulary, WIDGET_OBJECT, WIDGET_PROPERTY, WIDGET_VALUE, WIDGETS_FOLDER,
@@ -173,6 +173,19 @@ pub fn read_elements(source: &str, path: &str) -> Result<Shapes, FrontendError> 
             if callee.name != "element" {
                 return Err(file.refuse(call.callee.span(), "`element`"));
             }
+            let typed = ty
+                .value
+                .split_once('$')
+                .is_some_and(|(space, name)| is_name(space) && is_name(name));
+            if !typed {
+                return Err(file.refuse(ty.span, "a stored type: `Forms$DivContainer`"));
+            }
+            if !name.name.starts_with(|c: char| c.is_ascii_uppercase()) || !is_name(&name.name) {
+                return Err(file.refuse(
+                    name.span,
+                    "a component's name: a capital, then letters, digits and `_`",
+                ));
+            }
             let mut fields: Vec<Field> = Vec::new();
             let mut children = None;
             for property in &defaults.properties {
@@ -283,6 +296,46 @@ pub fn read_elements(source: &str, path: &str) -> Result<Shapes, FrontendError> 
     })
 }
 
+/// What a field holds, when `value` is not of that kind: a field whose
+/// default is a text holds texts, and so on. A field that holds nothing by
+/// default says nothing of its kind.
+fn kind_of(default: &FieldDefault, value: &NativeValue) -> Option<&'static str> {
+    let fits = match default {
+        FieldDefault::Value(NativeValue::Text(_)) => matches!(value, NativeValue::Text(_)),
+        FieldDefault::Value(NativeValue::Bool(_)) => matches!(value, NativeValue::Bool(_)),
+        FieldDefault::Value(NativeValue::Int32(_) | NativeValue::Int64(_)) => {
+            matches!(value, NativeValue::Int32(_) | NativeValue::Int64(_))
+        }
+        FieldDefault::List(_) => matches!(value, NativeValue::List(..)),
+        FieldDefault::Element(_) => {
+            matches!(value, NativeValue::Document(_) | NativeValue::Null)
+        }
+        FieldDefault::Value(_) => true,
+    };
+    if fits {
+        return None;
+    }
+    Some(match default {
+        FieldDefault::Value(NativeValue::Text(_)) => "a text",
+        FieldDefault::Value(NativeValue::Bool(_)) => "true or false",
+        FieldDefault::Value(_) => "a number",
+        FieldDefault::List(_) => "a list",
+        FieldDefault::Element(_) => "an element, or null",
+    })
+}
+
+/// Whether `name` is one a model gives: letters, digits and `_`, not
+/// opening with a digit.
+fn is_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The helpers of `src/mxrs/forms.ts` a declaration's values call.
+const HELPERS: [&str; 6] = ["long", "int", "named", "identity", "unset", "missing"];
+
 /// What a name a file imports stands for.
 enum Imported {
     Element(String),
@@ -315,11 +368,8 @@ impl<'v> Reader<'v, '_> {
                     Imported::Element(imported)
                 } else if source == FORMS_MODULE {
                     Imported::Helper(imported)
-                } else if source
-                    .strip_prefix("@/")
-                    .and_then(|rest| rest.strip_prefix(WIDGETS_FOLDER))
-                    .is_some_and(|rest| rest.starts_with('/'))
-                {
+                } else if source == format!("@/{WIDGETS_FOLDER}/{imported}") {
+                    // A widget is the one export of the file named for it.
                     Imported::Widget(imported)
                 } else {
                     continue;
@@ -328,6 +378,27 @@ impl<'v> Reader<'v, '_> {
                     .insert(specifier.local.name.to_string(), stands_for);
             }
         }
+    }
+
+    /// Why a call is not a value: a helper the file does not import, or
+    /// no helper at all.
+    fn unknown_call(&self, call: &oxc_ast::ast::CallExpression<'_>) -> FrontendError {
+        if let Expression::Identifier(callee) = &call.callee
+            && HELPERS.contains(&callee.name.as_str())
+            && !self.imports.contains_key(callee.name.as_str())
+        {
+            return self.file.shape(
+                call.span,
+                format!(
+                    "`{}` is not imported: import it from \"{FORMS_MODULE}\"",
+                    callee.name
+                ),
+            );
+        }
+        self.file.refuse(
+            call.span,
+            "`long(n)`, `int(n)`, `named(name)` or `identity(id)`",
+        )
     }
 
     /// The helper of `src/mxrs/forms.ts` a call calls.
@@ -356,6 +427,21 @@ impl<'v> Reader<'v, '_> {
                         "an element src/mxrs/elements.ts declares",
                     ));
                 };
+                if !path.is_empty() && super::declarer(&shape.ty).is_some() {
+                    return Err(self.file.shape(
+                        jsx.opening_element.name.span(),
+                        format!(
+                            "<{}> is a file of its own, not a part of another",
+                            shape.component
+                        ),
+                    ));
+                }
+                if shape.ty == CUSTOM_WIDGET {
+                    return Err(self.file.shape(
+                        jsx.opening_element.name.span(),
+                        "a pluggable widget is used by the name src/widgets defines it with",
+                    ));
+                }
                 let base = shapes.default_for(shape).clone();
                 self.fill(jsx, shape, base, path, &[], &[])
             }
@@ -450,6 +536,11 @@ impl<'v> Reader<'v, '_> {
                     return Err(self.file.refuse(fragment.span, "one element"));
                 }
             };
+            if let Some(expected) = kind_of(&field.default, &value) {
+                return Err(self
+                    .file
+                    .shape(attribute.span, format!("`{prop}` holds {expected}")));
+            }
             document.set(&field.key, value);
         }
         let mut children = Vec::new();
@@ -585,13 +676,20 @@ impl<'v> Reader<'v, '_> {
                     self.named.entry(name.clone()).or_insert(call.span);
                     NativeValue::Pointer(format!("{NAMED}{name}"))
                 }
-                _ => {
-                    return Err(self.file.refuse(
-                        call.span,
-                        "`long(n)`, `int(n)`, `named(name)` or `identity(id)`",
-                    ));
-                }
+                _ => return Err(self.unknown_call(call)),
             },
+            Expression::Identifier(name)
+                if HELPERS.contains(&name.name.as_str())
+                    && !self.imports.contains_key(name.name.as_str()) =>
+            {
+                return Err(self.file.shape(
+                    name.span,
+                    format!(
+                        "`{}` is not imported: import it from \"{FORMS_MODULE}\"",
+                        name.name
+                    ),
+                ));
+            }
             Expression::TSAsExpression(cast) => self.value(&cast.expression, field, path)?,
             Expression::TSSatisfiesExpression(check) => {
                 self.value(&check.expression, field, path)?
@@ -734,6 +832,8 @@ impl<'v> Reader<'v, '_> {
             properties,
             jsx.opening_element.span,
             &join(path, "Object"),
+            definition,
+            "",
         )?;
         document.set("Type", NativeValue::Document(definition.ty.clone()));
         document.set("Object", NativeValue::Document(object));
@@ -742,6 +842,7 @@ impl<'v> Reader<'v, '_> {
 
     /// The object of type `object_type`, at `type_path`, whose properties
     /// are the ones `given` states and the defaults of the rest.
+    #[allow(clippy::too_many_arguments)]
     fn object(
         &mut self,
         object_type: &NativeDocument,
@@ -749,6 +850,8 @@ impl<'v> Reader<'v, '_> {
         given: Option<&ObjectExpression<'_>>,
         at: Span,
         path: &str,
+        definition: &WidgetDefinition,
+        prefix: &str,
     ) -> Outcome<NativeDocument> {
         let shapes = self.shapes;
         let undeclared = |file: &File<'_>| {
@@ -801,8 +904,10 @@ impl<'v> Reader<'v, '_> {
             ) else {
                 return Err(malformed(&self.file));
             };
-            let Some(base) = property_default(shapes, value_shape, value_type, &value_type_path)
-            else {
+            let defined = definition.defaults.get(&keys(prefix, key));
+            let Some(base) = unstated_shape(shapes, defined).and_then(|shape| {
+                property_default(shapes, shape, value_type, &value_type_path, defined)
+            }) else {
                 return Err(undeclared(&self.file));
             };
             let stated = entries
@@ -816,9 +921,14 @@ impl<'v> Reader<'v, '_> {
                     continue;
                 }
                 None => base,
-                Some(Expression::JSXElement(element)) => {
-                    self.widget_value(element, value_type, &value_type_path, &value_path)?
-                }
+                Some(Expression::JSXElement(element)) => self.widget_value(
+                    element,
+                    value_type,
+                    &value_type_path,
+                    &value_path,
+                    definition,
+                    &keys(prefix, key),
+                )?,
                 Some(other) => {
                     return Err(self
                         .file
@@ -846,6 +956,8 @@ impl<'v> Reader<'v, '_> {
         value_type: &NativeDocument,
         value_type_path: &str,
         path: &str,
+        definition: &WidgetDefinition,
+        keys: &str,
     ) -> Outcome<NativeDocument> {
         let shapes = self.shapes;
         let tag = match &jsx.opening_element.name {
@@ -866,7 +978,13 @@ impl<'v> Reader<'v, '_> {
                 "a property's value element",
             ));
         };
-        let Some(base) = property_default(shapes, shape, value_type, value_type_path) else {
+        let Some(base) = property_default(
+            shapes,
+            shape,
+            value_type,
+            value_type_path,
+            definition.defaults.get(keys),
+        ) else {
             return Err(self.file.shape(
                 jsx.opening_element.span,
                 "src/mxrs/elements.ts does not declare what a widget's properties are stored as",
@@ -906,6 +1024,8 @@ impl<'v> Reader<'v, '_> {
                     Some(object),
                     object.span,
                     &format!("{path}.Objects[{index}]"),
+                    definition,
+                    keys,
                 )?));
             }
             document.set("Objects", NativeValue::List(marker, items));
@@ -1014,9 +1134,12 @@ pub fn read_widget(
         if reader.helper(call) != Some("widget") || found.is_some() {
             return Err(reader.file.refuse(call.span, expected));
         }
-        let Expression::JSXElement(element) =
-            argument(&reader.file, call, expected)?.without_parentheses()
-        else {
+        let (element, stated) = match call.arguments.as_slice() {
+            [element] => (element, None),
+            [element, stated] => (element, Some(stated)),
+            _ => return Err(reader.file.refuse(call.span, expected)),
+        };
+        let Some(Expression::JSXElement(element)) = argument_expression(element) else {
             return Err(reader.file.refuse(call.span, expected));
         };
         let ty = reader.element(element, "")?;
@@ -1025,10 +1148,51 @@ pub fn read_widget(
                 .file
                 .shape(element.span, "a widget's definition is a CustomWidgetType"));
         }
-        found = Some(WidgetDefinition {
+        let mut definition = WidgetDefinition {
             name: name.name.to_string(),
             ty,
-        });
+            defaults: std::collections::BTreeMap::new(),
+        };
+        if let Some(stated) = stated {
+            let Some(Expression::ObjectExpression(stated)) = argument_expression(stated) else {
+                return Err(reader
+                    .file
+                    .refuse(stated.span(), "its properties' defaults, by their keys"));
+            };
+            for (key, value) in reader.entries(stated)? {
+                if definition.value_type(&key).is_none() {
+                    return Err(reader
+                        .file
+                        .shape(value.span(), format!("the widget has no property `{key}`")));
+                }
+                let Expression::JSXElement(value) = value.without_parentheses() else {
+                    return Err(reader
+                        .file
+                        .refuse(value.span(), "a property's value element"));
+                };
+                let tag = match &value.opening_element.name {
+                    JSXElementName::IdentifierReference(name) => name.name.as_str(),
+                    JSXElementName::Identifier(name) => name.name.as_str(),
+                    other => return Err(reader.file.refuse(other.span(), "an element")),
+                };
+                let shape = match reader.imports.get(tag) {
+                    Some(Imported::Element(component)) => shapes
+                        .component(component)
+                        .filter(|shape| shape.ty == WIDGET_VALUE),
+                    _ => None,
+                };
+                let Some(shape) = shape else {
+                    return Err(reader.file.refuse(
+                        value.opening_element.name.span(),
+                        "a property's value element",
+                    ));
+                };
+                let base = shapes.default_for(shape).clone();
+                let read = reader.fill(value, shape, base, "", &[], &["TypePointer"])?;
+                definition.defaults.insert(key, read);
+            }
+        }
+        found = Some(definition);
     }
     found.ok_or_else(|| FrontendError::Syntax {
         path: path.to_string(),
@@ -1089,8 +1253,16 @@ pub fn read_form(
                 format!("`{declarer}(...)` does not declare a {}", document.ty),
             ));
         }
-        if document.text("Name").is_none_or(str::is_empty) {
-            return Err(reader.file.shape(element.span, "it has no name"));
+        if !document.text("Name").is_some_and(is_name) {
+            return Err(reader.file.shape(
+                element.span,
+                "its `name` is the name the model knows it by: letters, digits and `_`",
+            ));
+        }
+        if !is_name(module.value.as_str()) {
+            return Err(reader
+                .file
+                .shape(module.span, "a module's name: letters, digits and `_`"));
         }
         found = Some((module.value.to_string(), FormDecl { document }));
     }

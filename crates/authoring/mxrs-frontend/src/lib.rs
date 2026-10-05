@@ -21,7 +21,11 @@ pub mod naming;
 mod nanoflows;
 mod navigation;
 
+use std::collections::HashMap;
 use std::path::Path;
+
+/// The forms a frontend declares, each with its module.
+type Forms = Vec<(String, mxrs_ir::FormDecl)>;
 
 use mxrs_ir::NavigationDecl;
 
@@ -33,9 +37,12 @@ pub struct FrontendDecl {
     pub nanoflows: Vec<(String, mxrs_ir::flow::MicroflowDecl)>,
     /// Where each of those nanoflows is declared — `file:line` — by its
     /// qualified name.
-    pub nanoflow_origins: std::collections::HashMap<String, String>,
+    pub nanoflow_origins: HashMap<String, String>,
     /// Each page, layout and snippet its TSX declares, with its module.
     pub forms: Vec<(String, mxrs_ir::FormDecl)>,
+    /// The file that declares each of those forms, by its type and
+    /// qualified name: `Forms$Page Sales.Orders`.
+    pub form_origins: HashMap<String, String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -108,7 +115,7 @@ pub fn read_frontend(frontend: impl AsRef<Path>) -> Result<FrontendDecl, Fronten
     if services.is_dir() {
         (declared.nanoflows, declared.nanoflow_origins) = nanoflows::read_with_origins(&services)?;
     }
-    declared.forms = read_forms(&source)?;
+    (declared.forms, declared.form_origins) = read_forms(&source)?;
     Ok(declared)
 }
 
@@ -140,7 +147,8 @@ fn read_source(path: &Path) -> Result<String, FrontendError> {
 /// of a module's folder under `pages/`, `components/layout/` and
 /// `components/snippets/`, read with the elements `mxrs/elements.ts`
 /// declares and the widgets `widgets/` defines.
-fn read_forms(source: &Path) -> Result<Vec<(String, mxrs_ir::FormDecl)>, FrontendError> {
+fn read_forms(source: &Path) -> Result<(Forms, HashMap<String, String>), FrontendError> {
+    let mut origins = HashMap::new();
     let mut files = Vec::new();
     for ty in ["Forms$Layout", "Forms$Snippet", "Forms$Page"] {
         let folder = source.join(forms::folder(ty).expect("a form has a folder"));
@@ -160,12 +168,26 @@ fn read_forms(source: &Path) -> Result<Vec<(String, mxrs_ir::FormDecl)>, Fronten
         }
         modules.sort();
         for module in modules {
+            // A module's forms are directly in its folder: one in a folder
+            // of that folder would be a form no build sees.
+            for entry in std::fs::read_dir(&module).map_err(io)? {
+                let nested = entry.map_err(io)?.path();
+                if nested.is_dir() {
+                    return Err(FrontendError::Syntax {
+                        path: nested.display().to_string(),
+                        detail: format!(
+                            "a folder inside a module's folder is not read: its files belong in {}",
+                            module.display()
+                        ),
+                    });
+                }
+            }
             files.extend(tsx_files(&module)?.into_iter().map(|file| (ty, file)));
         }
     }
     let elements = source.join("mxrs/elements.ts");
     if files.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), origins));
     }
     if !elements.is_file() {
         return Err(FrontendError::Syntax {
@@ -213,9 +235,24 @@ fn read_forms(source: &Path) -> Result<Vec<(String, mxrs_ir::FormDecl)>, Fronten
                 detail: format!("{module}.{} is declared twice", form.name()),
             });
         }
+        // A module named otherwise than its folder is a typo, not a module.
+        let folder = file
+            .parent()
+            .and_then(Path::file_name)
+            .map(|folder| folder.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !naming::is_module_folder(&folder, &module) {
+            return Err(FrontendError::Syntax {
+                path,
+                detail: format!(
+                    "it declares a form of {module:?} in the folder `{folder}`, which is another module's"
+                ),
+            });
+        }
+        origins.insert(format!("{} {module}.{}", form.kind(), form.name()), path);
         declared.push((module, form));
     }
-    Ok(declared)
+    Ok((declared, origins))
 }
 
 #[cfg(test)]

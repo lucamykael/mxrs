@@ -188,13 +188,29 @@ fn pair<'a>(
                         None => unnamed.push(*item),
                     }
                 }
-                // What no name matched stands for what is left, in order.
+                // An item without a name stands for the stored one that says
+                // the same, so taking one out of a list leaves the others
+                // who they were.
+                let mut changed = Vec::new();
+                for item in unnamed {
+                    let found = old.iter().enumerate().position(|(index, other)| {
+                        !taken[index] && named(other).is_none() && says_the_same(other, item)
+                    });
+                    match found {
+                        Some(index) => {
+                            taken[index] = true;
+                            pair(old[index], item, adopted, waiting);
+                        }
+                        None => changed.push(item),
+                    }
+                }
+                // What is left stands for what is left, in order.
                 let mut left = old
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| !taken[*index])
                     .map(|(_, document)| *document);
-                for item in unnamed {
+                for item in changed {
                     let Some(other) = left.next() else {
                         break;
                     };
@@ -205,6 +221,51 @@ fn pair<'a>(
             }
             _ => {}
         }
+    }
+}
+
+/// Whether two documents say the same, whatever their identities and
+/// whatever they point at.
+fn says_the_same(left: &Document, right: &Document) -> bool {
+    fn same(left: &Bson, right: &Bson) -> bool {
+        match (left, right) {
+            (Bson::Document(left), Bson::Document(right)) => says_the_same(left, right),
+            (Bson::Array(left), Bson::Array(right)) => {
+                left.len() == right.len() && left.iter().zip(right).all(|(a, b)| same(a, b))
+            }
+            (Bson::Binary(_), Bson::Binary(_)) => true,
+            // A number is the same number however wide it is stored.
+            (Bson::Int32(left), Bson::Int64(right)) | (Bson::Int64(right), Bson::Int32(left)) => {
+                i64::from(*left) == *right
+            }
+            _ => left == right,
+        }
+    }
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|((left_key, left), (right_key, right))| {
+                left_key == right_key && (left_key == "$ID" || same(left, right))
+            })
+}
+
+fn identities(value: &Bson, found: &mut std::collections::HashSet<String>) {
+    match value {
+        Bson::Document(document) => {
+            if let Some(id) = id_of(document) {
+                found.insert(id);
+            }
+            for value in document.values() {
+                identities(value, found);
+            }
+        }
+        Bson::Array(items) => {
+            for item in items {
+                identities(item, found);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -325,6 +386,30 @@ pub(crate) fn keep_identities(previous: &Document, fresh: Document) -> Document 
             }
         }
     }
+    // A document that stands for no stored one keeps the identity it was
+    // given, unless a stored document already has it: an earlier build
+    // gave identities by place too, and places shift.
+    let mut stored = std::collections::HashSet::new();
+    identities(&Bson::Document(previous.clone()), &mut stored);
+    let mut given = std::collections::HashSet::new();
+    identities(&Bson::Document(fresh.clone()), &mut given);
+    let mut unpaired: Vec<&String> = given
+        .iter()
+        .filter(|id| !adopted.contains_key(*id) && stored.contains(*id))
+        .collect();
+    unpaired.sort();
+    let mut renamed = HashMap::new();
+    for id in unpaired {
+        let namespace = uuid::Uuid::parse_str(id).unwrap_or(uuid::Uuid::NAMESPACE_OID);
+        let free = (0_u32..)
+            .map(|attempt| {
+                uuid::Uuid::new_v5(&namespace, format!("again {attempt}").as_bytes()).to_string()
+            })
+            .find(|candidate| !stored.contains(candidate) && !given.contains(candidate))
+            .expect("an identity nothing has yet");
+        renamed.insert(id.clone(), free);
+    }
+    adopted.extend(renamed);
     let mut kept = Bson::Document(fresh);
     adopt(&mut kept, &adopted);
     let mut orders = HashMap::new();
@@ -474,10 +559,65 @@ mod tests {
         assert_eq!(after[1], before[0]);
         assert_eq!(after[2], before[1]);
         assert!(before.iter().all(|(_, id)| id != &after[0].1));
+        // A document that stands for no stored one never takes the identity
+        // of one: an earlier build gave identities by place too.
+        let before_again = keep_identities(
+            &edited,
+            lowered(
+                &page(vec![
+                    widget("first"),
+                    widget("new"),
+                    widget("a"),
+                    widget("b"),
+                ]),
+                "fresh",
+            ),
+        );
+        let mut ids: Vec<String> = widgets(&before_again)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(widgets(&before_again)[1], after[0]);
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4);
         // The pointer follows the document it names.
         assert_eq!(
             mxrs_bson::extract_id(edited.get("DefaultPagePointer").unwrap()),
             Some(after[0].1.clone())
         );
+    }
+
+    #[test]
+    fn an_unnamed_item_taken_out_leaves_the_others_who_they_were() {
+        let column = |caption: &str, inner: &str| {
+            NativeDocument::new("Forms$Column")
+                .with("Caption", caption)
+                .with("Widgets", NativeValue::List(2, vec![widget(inner).into()]))
+        };
+        let grid = |columns: Vec<NativeDocument>| {
+            NativeDocument::new("Forms$Grid").with(
+                "Columns",
+                NativeValue::List(2, columns.into_iter().map(NativeValue::from).collect()),
+            )
+        };
+        let stored = lowered(
+            &grid(vec![column("A", "a"), column("B", "b"), column("C", "c")]),
+            "stored",
+        );
+        let edited = keep_identities(
+            &stored,
+            lowered(&grid(vec![column("B", "b"), column("C", "c")]), "fresh"),
+        );
+        let columns = |document: &Document| -> Vec<Document> {
+            document
+                .get_array("Columns")
+                .unwrap()
+                .iter()
+                .filter_map(Bson::as_document)
+                .cloned()
+                .collect()
+        };
+        assert_eq!(columns(&edited), columns(&stored)[1..]);
     }
 }

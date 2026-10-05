@@ -201,6 +201,7 @@ pub fn apply_with_frontend(
     }
     let origins = frontend.nanoflow_origins;
     let forms = frontend.forms;
+    let form_origins = frontend.form_origins;
     let mut navigation = frontend.navigation;
     let mut nanoflows = Some(frontend.nanoflows);
     let declarations = declarations(crate_name);
@@ -239,7 +240,7 @@ pub fn apply_with_frontend(
     if let Some(declared) = navigation {
         project.navigation = Some(declared);
     }
-    add_forms(project, forms)
+    add_forms(project, forms, &form_origins)
 }
 
 /// Adds the pages, layouts and snippets the frontend's TSX declares to
@@ -247,6 +248,7 @@ pub fn apply_with_frontend(
 fn add_forms(
     project: &mut ProjectDecl,
     forms: Vec<(String, mxrs_ir::FormDecl)>,
+    origins: &std::collections::HashMap<String, String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     for (module, form) in forms {
         let declared = project.module_mut(&module);
@@ -261,7 +263,10 @@ fn add_forms(
         if twice {
             let folder = mxrs_frontend::forms::folder(form.kind()).unwrap_or_default();
             return Err(mxrs_frontend::FrontendError::Shape {
-                path: format!("frontend/src/{folder}"),
+                path: origins
+                    .get(&format!("{} {module}.{}", form.kind(), form.name()))
+                    .cloned()
+                    .unwrap_or_else(|| format!("frontend/src/{folder}")),
                 line: 1,
                 detail: format!(
                     "{module}.{} is declared in the frontend and in Rust; keep one",
