@@ -323,6 +323,13 @@ knows none of it. A data view
 over a flow, a grid and a pluggable widget show the widgets they hold, not
 data.
 
+A widget is styled mostly by the design properties its page states for it
+("Flex container: Horizontal (row)", "Spacing: S"): the frontend reads what
+each module's `design-properties.json` says an option stands for — a class,
+or a variable — and gives the drawn element that, as the Mendix client
+does. A menu item shows its icon, which is what a closed sidebar keeps of
+it.
+
 The theme is Sass, as Studio Pro keeps it: every build and `mxrs run`
 compile what each module publishes under `assets/themesource/<module>/web/`
 — Atlas Core's first — and then the project's `assets/theme/web/main.scss`

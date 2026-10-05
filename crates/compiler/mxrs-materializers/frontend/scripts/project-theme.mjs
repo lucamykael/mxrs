@@ -3,7 +3,14 @@
 // what the theme and every module publish beside it (`assets/theme/web/`,
 // `assets/themesource/<module>/public/`), all at the root of the site —
 // where the stylesheet's own `url(...)`s expect its fonts and images.
-import { cpSync, createReadStream, existsSync, readdirSync, statSync } from 'node:fs';
+import {
+  cpSync,
+  createReadStream,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -38,10 +45,46 @@ function roots() {
 /** What a theme is written in, not what a browser asks for. */
 const source = (file) => /\.(scss|map)$/.test(file) || file.endsWith('settings.json');
 
+/**
+ * What every module's `design-properties.json` declares, merged: the
+ * properties of a widget type are those each module gives it, Atlas Core's
+ * first.
+ */
+function designProperties() {
+  const merged = {};
+  const modules = join(assets, 'themesource');
+  if (!existsSync(modules)) return merged;
+  const names = readdirSync(modules).sort(
+    (left, right) => (right === 'atlas_core') - (left === 'atlas_core') || left.localeCompare(right),
+  );
+  for (const module of names) {
+    const file = join(modules, module, 'web', 'design-properties.json');
+    if (!existsSync(file)) continue;
+    let declared;
+    try {
+      declared = JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    for (const [type, properties] of Object.entries(declared)) {
+      if (Array.isArray(properties)) (merged[type] ??= []).push(...properties);
+    }
+  }
+  return merged;
+}
+
+const DESIGN = 'virtual:mxrs-design-properties';
+
 export function projectTheme() {
   let output = '';
   return {
     name: 'mxrs-project-theme',
+    resolveId(id) {
+      return id === DESIGN ? `\0${DESIGN}` : null;
+    },
+    load(id) {
+      return id === `\0${DESIGN}` ? `export default ${JSON.stringify(designProperties())};` : null;
+    },
     configResolved(config) {
       output = resolve(config.root, config.build.outDir);
     },

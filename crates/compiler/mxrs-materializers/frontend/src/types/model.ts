@@ -32,8 +32,10 @@ export type Page = {
 
 export type NavigationItem = {
   caption?: string;
-  page?: string;
-  microflow?: string;
+  page?: string | null;
+  microflow?: string | null;
+  /** A glyph of the theme's icon font, by name. */
+  icon?: string | number | null;
   items?: NavigationItem[];
 };
 

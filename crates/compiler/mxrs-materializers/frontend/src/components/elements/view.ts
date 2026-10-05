@@ -4,6 +4,8 @@ import { Children, isValidElement, type ReactElement, type ReactNode } from 'rea
 
 import type { Kind } from '@/mxrs/forms';
 
+import { design, type Design } from './design';
+
 /** An element being drawn: what it is, and what the page states of it. */
 export interface Source extends Kind {
   readonly props: Readonly<Record<string, unknown>>;
@@ -154,13 +156,33 @@ export function entityOf(source: Source, field = 'entityRef'): string {
   return held ? plain(held, 'entity', '') : '';
 }
 
-/** The class names an element's appearance gives it. */
+/** The pluggable widget an element is, by the id its definition states. */
+function widgetId(source: Source): string | undefined {
+  const definition = sourceOf(source.defaults.definition);
+  return definition ? plain(definition, 'widgetId', '') || undefined : undefined;
+}
+
+/** What an element's design properties stand for. */
+export function designOf(source: Source): Design {
+  return design(source.type, child(source, 'appearance'), widgetId(source));
+}
+
+/** The class names an element's appearance gives it: its own, and its design properties'. */
 export function className(source: Source, ...own: string[]): string | undefined {
   const appearance = child(source, 'appearance');
   const stated = appearance ? plain(appearance, 'class', '') : '';
   // Some types store a class of their own besides.
-  const names = [...own, stated, plain(source, 'class', '')].join(' ').split(/\s+/).filter(Boolean);
+  const names = [...own, stated, plain(source, 'class', ''), ...designOf(source).classes]
+    .join(' ')
+    .split(/\s+/)
+    .filter(Boolean);
   return [...new Set(names)].join(' ') || undefined;
+}
+
+/** The style an element's appearance gives it: the variables its design properties set. */
+export function styleOf(source: Source): Record<string, string> | undefined {
+  const { style } = designOf(source);
+  return Object.keys(style).length ? style : undefined;
 }
 
 /** The last part of a qualified name: `Sales.Order.Number` is `Number`. */

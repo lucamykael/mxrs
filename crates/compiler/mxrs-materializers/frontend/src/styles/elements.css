@@ -41,8 +41,8 @@
 .mx-dataview-controls { display: flex; gap: 0.5rem; margin-top: 1rem; }
 .mx-tabcontainer-tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid currentColor; }
 .mx-tabcontainer-tabs [aria-selected='true'] { font-weight: 600; }
-.mx-widget { border: 1px dashed currentColor; padding: 0.5rem; min-height: 1.5rem; }
-.mx-widget::before { content: attr(data-widget); font-size: 0.75rem; opacity: 0.7; }
+/* A pluggable widget is drawn as the widgets it holds: one that holds none takes no room. */
+.mx-widget:empty { display: none; }
 .mx-header { display: flex; justify-content: space-between; align-items: center; }
 .mx-table { display: grid; gap: 0.5rem; }
 .mx-navigationlist-item { cursor: pointer; padding: 0.5rem 0; }

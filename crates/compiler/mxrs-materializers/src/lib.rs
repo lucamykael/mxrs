@@ -19,27 +19,27 @@ use sha2::{Digest, Sha256};
 const INDEX: EmbeddedAsset = EmbeddedAsset::new(
     "index.html",
     include_bytes!("../assets/index.html"),
-    "9d0d01ece32b9d4dc8244b0968629f07b537db4a66304f9eb4382049ab69b9e4",
+    "bb9f8e2b4a214a88def8617c16da63c78ee04664824e1d7334266fded133f20c",
 );
 const SCRIPT: EmbeddedAsset = EmbeddedAsset::new(
-    "app-hndFm23s.js",
-    include_bytes!("../assets/app-hndFm23s.js"),
+    "app-B10ucf_4.js",
+    include_bytes!("../assets/app-B10ucf_4.js"),
     "84e98c0e85b67cbc43f19e0fbc3881bb7ebd037f7db451be74f3efeb1b35c4e4",
 );
 const STYLES: EmbeddedAsset = EmbeddedAsset::new(
-    "app-BHJ4xHVW.css",
-    include_bytes!("../assets/app-BHJ4xHVW.css"),
-    "269b27d75f0b98d5b70116a3219ebfb926ab8c8a691c5251caecd7bfc94d76ac",
+    "app-C3MoKBUP.css",
+    include_bytes!("../assets/app-C3MoKBUP.css"),
+    "43a6efdd6f848259d49fa86d17e26e22eae3bcd39b1a67ae025a6c4f3a11c07f",
 );
 const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     ".vite/manifest.json",
     include_bytes!("../assets/.vite/manifest.json"),
-    "10f966561e9610d66e8db890f4d84e8d9eebfecd20d0af29bef68d816cc81c59",
+    "1855db9b9d29508bce428cda69cecab0cdcbda6cfca36238e872c79dfd1138b0",
 );
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "53c58f77866995f89f9a14051d79c3cf75119819e39e4fb329f14aa6b1e1aaf5",
+    "6b7e5a10e3e3641c9074f17b347a374812d579e7f3dd6c0e327df69a82a5d352",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -108,6 +108,10 @@ const SOURCE_FILES: &[(&str, &[u8])] = &[
     (
         "src/components/elements/context.ts",
         include_bytes!("../frontend/src/components/elements/context.ts"),
+    ),
+    (
+        "src/components/elements/design.ts",
+        include_bytes!("../frontend/src/components/elements/design.ts"),
     ),
     (
         "src/components/elements/render.tsx",

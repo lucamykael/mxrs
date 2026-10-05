@@ -27,6 +27,7 @@ import {
   list,
   plain,
   sourceOf,
+  styleOf,
   text,
   type Source,
 } from './view';
@@ -312,7 +313,12 @@ const Region: Draw = (source) => <div className={className(source)}>{content(sou
 const DivContainer: Draw = (source) => {
   const act = useAction(source, 'onClickAction');
   return (
-    <div className={className(source)} onClick={act} role={act ? 'button' : undefined}>
+    <div
+      className={className(source, 'mx-container')}
+      style={styleOf(source)}
+      onClick={act}
+      role={act ? 'button' : undefined}
+    >
       {content(source)}
     </div>
   );
@@ -571,8 +577,19 @@ const Menu: Draw = (source) => {
   const list = (entries: typeof items): ReactElement => (
     <ul>
       {entries.map((item, index) => (
-        <li key={index} className={item.page === current ? 'active' : undefined}>
+        <li
+          key={index}
+          className={
+            [
+              item.page === current ? 'active' : '',
+              item.items?.length ? 'mx-navigationtree-has-items' : '',
+            ]
+              .filter(Boolean)
+              .join(' ') || undefined
+          }
+        >
           <a
+            title={item.caption || undefined}
             className={item.page === current ? 'active' : undefined}
             href={item.page ? `#${encodeURIComponent(item.page)}` : undefined}
             onClick={(event) => {
@@ -580,6 +597,10 @@ const Menu: Draw = (source) => {
               if (item.page) open(item.page);
             }}
           >
+            {/* The icon is what a closed sidebar shows of the item. */}
+            {typeof item.icon === 'string' && item.icon ? (
+              <span className={`glyphicon glyphicon-${item.icon}`} aria-hidden="true" />
+            ) : null}
             {item.caption || item.page || item.microflow}
           </a>
           {item.items?.length ? list(item.items) : null}
