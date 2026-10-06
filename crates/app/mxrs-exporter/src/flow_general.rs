@@ -2074,6 +2074,23 @@ fn native_value_source(value: &NativeValue) -> Vec<String> {
 
 /// Whether a statement's first line is an activity macro (`let order =
 /// create_object!(...`), not a builder call.
+/// A page parameter `show_page!` can name as written: an identifier that is
+/// no Rust keyword and not the option the macro reserves (`close_pages`).
+fn is_macro_parameter(name: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+        "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+        "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait",
+        "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+        "gen",
+    ];
+    name != "close_pages"
+        && !KEYWORDS.contains(&name)
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn is_activity_macro(line: &str) -> bool {
     let call = line
         .trim_start()
@@ -2919,6 +2936,85 @@ impl Converter<'_> {
                 }
                 line.push_str(");");
                 line
+            }
+            "Microflows$CloseFormAction" => {
+                let pages = text("NumberOfPagesToClose").unwrap_or_default();
+                if pages.is_empty() {
+                    "close_page!(flow);".to_string()
+                } else {
+                    format!("close_page!(flow, {});", self.macro_value(pages, scope))
+                }
+            }
+            // A message in English alone is the macro's; one in other
+            // languages is the builder's, which names each.
+            "Microflows$ShowMessageAction" => {
+                let kind = MessageKind::from_native(text("Type")?)?;
+                let template = action.get_document("Template").ok()?;
+                let translations = template
+                    .get_document("Text")
+                    .ok()?
+                    .get("Items")
+                    .and_then(mxrs_writer::flow_graph::documents)?;
+                let [translation] = translations.as_slice() else {
+                    return None;
+                };
+                if translation.get_str("LanguageCode").ok()? != "en_US" {
+                    return None;
+                }
+                let parameters = template
+                    .get("Parameters")
+                    .and_then(mxrs_writer::flow_graph::documents)?
+                    .into_iter()
+                    .map(|parameter| {
+                        parameter
+                            .get_str("Expression")
+                            .ok()
+                            .map(|value| self.macro_value(value, scope))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let mut options = String::new();
+                if !parameters.is_empty() {
+                    options.push_str(&format!(", parameters = [{}]", parameters.join(", ")));
+                }
+                if !action.get_bool("Blocking").unwrap_or(true) {
+                    options.push_str(", blocking = false");
+                }
+                format!(
+                    "show_message!(flow, {kind:?}, {}{options});",
+                    rust_string(translation.get_str("Text").ok()?)
+                )
+            }
+            // A page opened under a title of its own is the builder's.
+            "Microflows$ShowFormAction" => {
+                let settings = action.get_document("FormSettings").ok()?;
+                let page = settings.get_str("Form").ok()?;
+                if !matches!(settings.get("TitleOverride"), None | Some(Bson::Null)) {
+                    return None;
+                }
+                let mut arguments = vec![rust_string(page)];
+                let mappings = match settings.get("ParameterMappings") {
+                    Some(mappings) => mxrs_writer::flow_graph::documents(mappings)?,
+                    None => Vec::new(),
+                };
+                for mapping in mappings {
+                    let parameter = mapping.get_str("Parameter").ok()?;
+                    let name = parameter
+                        .strip_prefix(page)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .filter(|name| is_macro_parameter(name))?;
+                    arguments.push(format!(
+                        "{name} = {}",
+                        self.macro_value(mapping.get_str("Argument").ok()?, scope)
+                    ));
+                }
+                let closing = text("NumberOfPagesToClose").unwrap_or_default();
+                if !closing.is_empty() {
+                    arguments.push(format!(
+                        "close_pages = {}",
+                        self.macro_value(closing, scope)
+                    ));
+                }
+                format!("show_page!(flow, {});", arguments.join(", "))
             }
             "Microflows$LogMessageAction" => {
                 let level = LogSeverity::from_native(text("Level")?)?;

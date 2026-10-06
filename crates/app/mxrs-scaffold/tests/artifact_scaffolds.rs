@@ -608,7 +608,7 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
     }
     // Guards against the loop silently degenerating if `destination` spellings
     // ever change shape.
-    assert_eq!(checked, 17);
+    assert_eq!(checked, 19);
 }
 
 /// Module content composes through `src/domain/mod.rs`'s `build()` and the

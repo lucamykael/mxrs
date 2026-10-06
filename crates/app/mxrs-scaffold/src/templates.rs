@@ -112,6 +112,22 @@ pub(crate) fn entity(module_name: &str, name: &str) -> String {
     )
 }
 
+pub(crate) fn dto(module_name: &str, name: &str) -> String {
+    let (type_name, explicit) = type_name(name);
+    let arguments = declaration_arguments(module_name, name, explicit);
+    format!(
+        "//! Non-persistable entity `{module_name}.{name}`: what a page or a flow\n\
+         //! holds and the database does not.\n\
+         //!\n\
+         //! Fields are attributes (`MxString`, `MxDecimal`, `MxBool`, ...) and\n\
+         //! associations (`Reference<T>`, `ReferenceSet<T>`); `#[mxrs(...)]`\n\
+         //! states what a type cannot: `length`, `required`, `default`.\n\n\
+         use mxrs::prelude::*;\n\n\
+         #[dto({arguments})]\n\
+         pub struct {type_name} {{}}\n"
+    )
+}
+
 pub(crate) fn enumeration(module_name: &str, name: &str) -> String {
     let (type_name, explicit) = type_name(name);
     let arguments = declaration_arguments(module_name, name, explicit);

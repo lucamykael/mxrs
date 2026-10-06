@@ -41,10 +41,12 @@ const RESERVED_ENTITY_NAMES: &[&str] = &["Owner", "ChangedBy", "CreatedDate", "C
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactKind {
     Entity,
+    Dto,
     Enumeration,
     Constant,
     ScheduledEvent,
     UseCase,
+    Microflow,
     Page,
     Nanoflow,
     PublishedRest,
@@ -133,6 +135,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         summary: "Create a domain entity declaration",
         destination: "src/domain/entities/<module>",
         kind: ArtifactKind::Entity,
+    },
+    ScaffoldCommand {
+        name: "dto",
+        action: "new",
+        argument: "<Module.Dto>",
+        summary: "Create a non-persistable entity (DTO) declaration",
+        destination: "src/domain/dtos/<module>",
+        kind: ArtifactKind::Dto,
     },
     ScaffoldCommand {
         name: "enumeration",
@@ -249,6 +259,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         destination: "src/services/<module>",
         kind: ArtifactKind::UseCase,
     },
+    ScaffoldCommand {
+        name: "microflow",
+        action: "new",
+        argument: "<Module.Flow>",
+        summary: "Create a microflow in the service of what it is about",
+        destination: "src/services/<module>",
+        kind: ArtifactKind::Microflow,
+    },
 ];
 
 impl ArtifactKind {
@@ -257,10 +275,12 @@ impl ArtifactKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Entity => "entity",
+            Self::Dto => "dto",
             Self::Enumeration => "enumeration",
             Self::Constant => "constant",
             Self::ScheduledEvent => "scheduled_event",
             Self::UseCase => "use_case",
+            Self::Microflow => "microflow",
             Self::Page => "page",
             Self::Nanoflow => "nanoflow",
             Self::PublishedRest => "published_rest",
@@ -1654,6 +1674,9 @@ fn create_artifact(
         ArtifactKind::UseCase => Some(vec![format!(
             "Application service `{module_name}.{artifact_name}`."
         )]),
+        ArtifactKind::Microflow => {
+            Some(vec![format!("Microflow `{module_name}.{artifact_name}`.")])
+        }
         ArtifactKind::Validation => Some(vec![format!(
             "Application validation `{module_name}.{artifact_name}`."
         )]),
@@ -1683,6 +1706,8 @@ fn create_artifact(
     }
     let source = match options.kind {
         ArtifactKind::Entity => templates::entity(module_name, artifact_name),
+        ArtifactKind::Dto => templates::dto(module_name, artifact_name),
+        ArtifactKind::Microflow => unreachable!("a microflow is a method of its service"),
         ArtifactKind::Enumeration => templates::enumeration(module_name, artifact_name),
         ArtifactKind::Constant => templates::constant(module_name, artifact_name),
         ArtifactKind::ScheduledEvent => templates::scheduled_event(module_name, artifact_name),
@@ -1855,14 +1880,16 @@ fn ensure_module_layout(
 fn module_folder(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::Entity => "domain/entities",
+        ArtifactKind::Dto => "domain/dtos",
         ArtifactKind::Enumeration => "domain/enumerations",
         ArtifactKind::Constant | ArtifactKind::ScheduledEvent => "domain/documents",
         // The microflow a published operation calls is a service like any
         // other; `controllers/` is the route tables and handlers an import
         // generates from the published service itself.
-        ArtifactKind::UseCase | ArtifactKind::Validation | ArtifactKind::PublishedRest => {
-            "services"
-        }
+        ArtifactKind::UseCase
+        | ArtifactKind::Microflow
+        | ArtifactKind::Validation
+        | ArtifactKind::PublishedRest => "services",
         ArtifactKind::Page => "ui/pages",
         ArtifactKind::Nanoflow => "ui/nanoflows",
         ArtifactKind::ConsumedRest | ArtifactKind::Integration => "domain/integrations",

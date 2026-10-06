@@ -42,6 +42,9 @@ pub enum Activity {
     CallJavaAction,
     CallJavaScriptAction,
     Log,
+    ShowPage,
+    ClosePage,
+    ShowMessage,
 }
 
 pub fn expand(activity: Activity, input: TokenStream) -> syn::Result<TokenStream> {
@@ -71,6 +74,9 @@ pub fn expand(activity: Activity, input: TokenStream) -> syn::Result<TokenStream
         Activity::CallJavaAction => call_code_action(&flow, &rest, CodeAction::Java),
         Activity::CallJavaScriptAction => call_code_action(&flow, &rest, CodeAction::JavaScript),
         Activity::Log => log(&flow, &rest),
+        Activity::ShowPage => show_page(&flow, &rest),
+        Activity::ClosePage => close_page(&flow, &rest),
+        Activity::ShowMessage => show_message(&flow, &rest),
     }
 }
 
@@ -907,6 +913,118 @@ fn entity_type(argument: &Expr) -> Option<syn::Path> {
         }
         _ => None,
     }
+}
+
+/// `show_page!(flow, "Sales.Order_Edit", Order = order, close_pages = 1)`:
+/// opens a page, named `Module.Page`, giving each parameter it names its
+/// value; `close_pages` closes as many pages first.
+fn show_page(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
+    let page = first(arguments, "the page it opens, named `Module.Page`")?;
+    let mut statements = Vec::new();
+    let mut closing = None;
+    for argument in &arguments[1..] {
+        let Expr::Assign(assign) = argument else {
+            return Err(syn::Error::new_spanned(
+                argument,
+                "expected `Parameter = value` or `close_pages = count`",
+            ));
+        };
+        let Expr::Path(path) = &*assign.left else {
+            return Err(syn::Error::new_spanned(
+                &assign.left,
+                "expected a parameter's name",
+            ));
+        };
+        let Some(name) = path.path.get_ident() else {
+            return Err(syn::Error::new_spanned(
+                &assign.left,
+                "expected a parameter's name",
+            ));
+        };
+        let value = value(&assign.right);
+        if name == "close_pages" {
+            if closing.is_some() {
+                return Err(syn::Error::new(name.span(), "`close_pages` is stated once"));
+            }
+            closing = Some(quote! { __mxrs_page.close_pages(#value); });
+            continue;
+        }
+        let parameter = name.to_string();
+        let parameter = parameter
+            .strip_prefix("r#")
+            .unwrap_or(&parameter)
+            .to_string();
+        statements.push(quote! { __mxrs_page.argument(#parameter, #value); });
+    }
+    Ok(quote! {
+        (#flow).show_page(#page, |__mxrs_page| {
+            #(#statements)*
+            #closing
+        })
+    })
+}
+
+/// `close_page!(flow)` closes the page the flow was called from;
+/// `close_page!(flow, 2)` closes as many pages as the value says.
+fn close_page(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
+    match arguments {
+        [] => Ok(quote! { (#flow).close_page() }),
+        [count] => {
+            let count = value(count);
+            Ok(quote! { (#flow).close_pages(#count) })
+        }
+        [_, extra, ..] => Err(syn::Error::new_spanned(
+            extra,
+            "expected only how many pages it closes",
+        )),
+    }
+}
+
+/// `show_message!(flow, Warning, "Order {1} is late", parameters = [number],
+/// blocking = false)`: a message in English, with `{n}` placeholders.
+fn show_message(flow: &Expr, arguments: &[Expr]) -> syn::Result<TokenStream> {
+    let kind = first(
+        arguments,
+        "the kind of message (Information, Warning, Error)",
+    )?;
+    let kind = match kind {
+        Expr::Path(path) if path.path.get_ident().is_some() => {
+            let kind = path.path.get_ident().expect("checked");
+            quote! { ::mxrs::MessageKind::#kind }
+        }
+        other => other.to_token_stream(),
+    };
+    let text = arguments
+        .get(1)
+        .ok_or_else(|| syn::Error::new(Span::call_site(), "expected the message after its kind"))?;
+    let options = Options::parse(&arguments[2..], &[], &["parameters", "blocking"])?;
+    let parameters = match options.get("parameters") {
+        Some(Expr::Array(array)) => array
+            .elems
+            .iter()
+            .map(|parameter| {
+                let parameter = value(parameter);
+                quote! { __mxrs_message.parameter(#parameter); }
+            })
+            .collect(),
+        Some(other) => {
+            return Err(syn::Error::new_spanned(
+                other,
+                "expected `parameters = [value, ...]`",
+            ));
+        }
+        None => Vec::new(),
+    };
+    let blocking = options
+        .get("blocking")
+        .map(|blocking| quote! { __mxrs_message.blocking(#blocking); });
+    Ok(quote! {
+        (#flow).show_message(#kind, |__mxrs_message| {
+            __mxrs_message.text("en_US", #text);
+            #(#parameters)*
+            #blocking
+        })
+    })
 }
 
 /// `log!(flow, Info, "Node", "{1} shipped", parameters = [order_number],

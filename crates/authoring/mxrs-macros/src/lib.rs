@@ -281,6 +281,35 @@ pub fn log(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Opens a page: `show_page!(flow, "Sales.Order_Edit", Order = order)`.
+///
+/// Every argument is a Rust expression; a value is the Mendix expression it
+/// reads as. See the `activity` module of `mxrs-macros`.
+#[proc_macro]
+pub fn show_page(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::ShowPage, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Closes the page the flow was called from (`close_page!(flow)`), or as
+/// many as a value says (`close_page!(flow, 2)`).
+#[proc_macro]
+pub fn close_page(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::ClosePage, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+/// Shows the user a message:
+/// `show_message!(flow, Warning, "Order {1} is late", parameters = [number])`.
+#[proc_macro]
+pub fn show_message(input: TokenStream) -> TokenStream {
+    activity::expand(activity::Activity::ShowMessage, input.into())
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
 /// Calls a Java action: `call_java_action!(flow, "OQL.ExecuteOQLStatement",
 /// "Result", statement = "...", returnEntity = SPCProgramView)`. A module's
 /// generated `<action>!` macro names the action for you.

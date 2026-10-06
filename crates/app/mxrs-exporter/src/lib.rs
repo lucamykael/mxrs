@@ -9583,7 +9583,7 @@ pub enum ENUMStatus {
             "case null: {\n          continue;",
             "await callNanoflow(\"Sales.NF_Check\", { Order: order }, { name: \"Checked\" });",
             "await showPage(\"Sales.Home\", { title: { en_US: \"Orders\" } });",
-            "{ parameters: [mx(\"$Counter\")], blocking: false },",
+            "{ parameters: [counter], blocking: false },",
             "await log(\"Info\", \"Sales\", \"Done\", { stackTrace: true });",
         ] {
             assert!(service.contains(expected), "{expected}\n{service}");

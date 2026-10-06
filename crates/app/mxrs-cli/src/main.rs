@@ -126,7 +126,7 @@ fn command_options(
             &[],
         ),
         "package" => (&["--web", "--output", "-o"], &[], &[]),
-        "search" => (&["--limit"], &["--json"], &[]),
+        "search" | "find" => (&["--limit"], &["--json"], &[]),
         "translate-oql" => (&["--dialect"], &[], &[]),
         "page" => (
             &["--target", "--template", "--chain"],
@@ -142,11 +142,10 @@ fn command_options(
         "diagram-er" => (&[], &["--apply", "--json"], &["--module"]),
         "update" => (&[], &["--check", "--changelog"], &[]),
         "widgets" => (&["--project"], &[], &[]),
-        "ci" | "constant" | "consumed-rest" | "entity" | "enumeration" | "evaluation"
-        | "functional-test" | "integration" | "java-action" | "nanoflow" | "published-rest"
-        | "repository" | "scheduled-event" | "security" | "use-case" | "validation" => {
-            (&["--target"], &["--dry-run", "--json"], &[])
-        }
+        "ci" | "constant" | "consumed-rest" | "dto" | "entity" | "enumeration" | "evaluation"
+        | "functional-test" | "integration" | "java-action" | "microflow" | "nanoflow"
+        | "published-rest" | "repository" | "scheduled-event" | "security" | "use-case"
+        | "validation" => (&["--target"], &["--dry-run", "--json"], &[]),
         "module" => (&["--target", "--registry"], &["--dry-run", "--json"], &[]),
         "presentation" => (
             &["--target"],
@@ -216,6 +215,7 @@ commands! {
     "diagram-er", "<file.mpr> [--module NAME] [--json] | layout <file.mpr> <layout.json> [--apply] [--json]", "Project the domain ER diagram or apply audited visual layout", run_diagram_er;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
+    "dto", "new <Module.Dto> [--target DIR] [--dry-run] [--json]", "Scaffold a non-persistable entity (DTO) declaration", run_dto;
     "dump-unit", "<file.mpr> <unit_id> [--no-progress]", "Dump native unit metadata and bytes", run_dump_unit;
     "entity", "new <Module.Entity> [--target DIR] [--dry-run] [--json]", "Scaffold a domain entity declaration", run_entity;
     "enumeration", "new <Module.Enumeration> [--target DIR] [--dry-run] [--json]", "Scaffold an enumeration declaration", run_enumeration;
@@ -223,6 +223,7 @@ commands! {
     "evaluate", "<file.mpr> <evaluation.json> [--json]", "Run declarative static model checks", run_evaluate;
     "evaluation", "new <Name> [--target DIR] [--dry-run] [--json]", "Create declarative static model checks", run_evaluation;
     "export", "<file.mpr> [-o <out.rs>]", "Export complete editable Rust declarations", run_export;
+    "find", "<file.mpr> <query> [--limit N] [--json]", "Find artifacts by name and documentation (as search does)", run_semantic_search;
     "functional-test", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create a declarative runtime test suite", run_functional_test;
     "functional-instrument", "<writable.mpr> <suite.json> [--json]", "Instrument a disposable MPR with a functional test runner", run_functional_instrument;
     "help", "[command]", "Show command usage", run_help;
@@ -236,6 +237,7 @@ commands! {
     "module", "new <Module> [--target DIR] [--dry-run] [--json] | search [query] --registry SOURCE [--json] | add <name|directory> --registry SOURCE [--target DIR] [--json]", "Scaffold an editable module declaration layer, or search/install from a private module catalog", run_module;
     "marketplace", "<search|show|versions|download> <name-or-id> [--version V] [--mendix-version V] [-o FILE] [--limit N] [--json] | install <package.mpk> <file.mpr> [--target-root DIR] [--allow-model-upgrade] [--apply] [--json] | list [--target-root DIR] [--json] | remove <name> [--target-root DIR] [--mpr FILE] [--apply] [--json] | dependencies <name> [--target-root DIR] [--mendix-version V] [--apply] [--json] | update <name[@version]> [--target-root DIR] [--mendix-version V] [--apply] [--json] | audit [--target-root DIR] [--mendix-version V] [--json] | verify [--target-root DIR] [--json]", "Search, download, install, list, remove, update, audit, verify, or resolve dependencies of official Marketplace content", run_marketplace;
     "mda", "<inspect|compare> ...", "Inspect or compare Mendix deployment archives", run_mda;
+    "microflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a microflow in the service of what it is about", run_microflow;
     "migrate", "<check|plan> [DIR] [--json]", "Compare a Cargo-native build with its imported MPR snapshot", run_migrate;
     "modules", "<file.mpr> [--json | --names] [--no-progress]", "List modules with entity, page and microflow counts", run_modules;
     "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a unit move, composing rename across modules", run_move;
@@ -1072,6 +1074,20 @@ fn run_constant(args: Vec<String>) -> ExitCode {
 fn run_scheduled_event(args: Vec<String>) -> ExitCode {
     reported(mxrs_cli::scaffold::generate(
         mxrs_scaffold::ArtifactKind::ScheduledEvent,
+        args,
+    ))
+}
+
+fn run_dto(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Dto,
+        args,
+    ))
+}
+
+fn run_microflow(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::Microflow,
         args,
     ))
 }

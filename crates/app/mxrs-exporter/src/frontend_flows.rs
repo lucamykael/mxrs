@@ -1491,6 +1491,18 @@ impl Translator<'_> {
     fn macro_call(&mut self, mac: &syn::Macro, binding: Option<&str>) -> Outcome<Call> {
         let name = macro_name(mac);
         let arguments = macro_arguments(mac)?;
+        // The one activity whose macro may say nothing but the flow.
+        if name == "close_page" {
+            self.no_result(binding)?;
+            self.uses("closePage");
+            return Ok(Call {
+                binding: None,
+                text: match arguments.first() {
+                    None => "closePage()".to_string(),
+                    Some(count) => format!("closePage({})", self.macro_value(count)?),
+                },
+            });
+        }
         let first = arguments
             .first()
             .ok_or_else(|| format!("{name}! without arguments"))?;
@@ -1697,6 +1709,83 @@ impl Translator<'_> {
                     entries.push((parameter, value));
                 }
                 self.javascript_call(&action, entries, result, None, binding)
+            }
+            "show_page" => {
+                let page = string_literal(first).ok_or("a page by name")?;
+                let mut entries = Vec::new();
+                let mut call_options = Options::new();
+                for argument in &arguments[1..] {
+                    let Expr::Assign(assign) = argument else {
+                        return Err("an unexpected page argument".to_string());
+                    };
+                    let Expr::Path(parameter) = &*assign.left else {
+                        return Err("an unexpected page argument".to_string());
+                    };
+                    let parameter = parameter
+                        .path
+                        .get_ident()
+                        .ok_or("a page parameter's name")?
+                        .to_string();
+                    let value = self.macro_value(&assign.right)?;
+                    if parameter == "close_pages" {
+                        call_options.push("closePages", value);
+                    } else {
+                        let parameter = parameter
+                            .strip_prefix("r#")
+                            .unwrap_or(&parameter)
+                            .to_string();
+                        entries.push((parameter, value));
+                    }
+                }
+                let mut leading = Vec::new();
+                if !entries.is_empty() {
+                    leading.push(("args".to_string(), object(&entries)));
+                }
+                leading.extend(call_options.0);
+                self.no_result(binding)?;
+                self.uses("showPage");
+                Ok(Call {
+                    binding: None,
+                    text: format!("showPage({}{})", json(&page), Options(leading).trailing()),
+                })
+            }
+            "show_message" => {
+                let kind = match first {
+                    Expr::Path(path) => path
+                        .path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string().to_lowercase())
+                        .ok_or("a message kind")?,
+                    _ => return Err("a message kind".to_string()),
+                };
+                let message =
+                    string_literal(arguments.get(1).ok_or("show_message! without a text")?)
+                        .ok_or("show_message! without a text")?;
+                let options = MacroOptions::parse(&arguments[2..])?;
+                let mut call_options = Options::new();
+                if let Some(Expr::Array(parameters)) = options.get("parameters") {
+                    let values = parameters
+                        .elems
+                        .iter()
+                        .map(|value| self.macro_value(value))
+                        .collect::<Outcome<Vec<_>>>()?;
+                    call_options.push("parameters", format!("[{}]", values.join(", ")));
+                }
+                if let Some(blocking) = options.get("blocking") {
+                    call_options.push("blocking", bool_literal(blocking)?);
+                }
+                self.no_result(binding)?;
+                self.uses("showMessage");
+                Ok(Call {
+                    binding: None,
+                    text: format!(
+                        "showMessage({}, {}{})",
+                        json(&kind),
+                        object(&[("en_US".to_string(), json(&message))]),
+                        call_options.trailing()
+                    ),
+                })
             }
             "log" => {
                 let level = match first {

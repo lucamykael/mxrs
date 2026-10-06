@@ -141,6 +141,20 @@ pub fn with_macros(flow: &mut FlowBuilder) {
 
     call_java_action!(flow, "CommunityCommons.TimeMeasureStart", TimerName = "t");
 
+    show_page!(flow, "Sales.Order_Edit", Order = order, close_pages = 1);
+
+    show_message!(
+        flow,
+        Warning,
+        "Saved {1}",
+        parameters = [counter],
+        blocking = false
+    );
+
+    close_page!(flow);
+
+    close_page!(flow, 2);
+
     delete_object!(flow, &order, refresh);
 
     rollback_object!(flow, &order);
@@ -217,6 +231,17 @@ pub fn with_builders(flow: &mut FlowBuilder) {
     flow.call_java("CommunityCommons.TimeMeasureStart", |call| {
         call.argument("TimerName", mx("'t'"));
     });
+    flow.show_page("Sales.Order_Edit", |page| {
+        page.argument("Order", mx("$NewOrder"));
+        page.close_pages(mx("1"));
+    });
+    flow.show_message(MessageKind::Warning, |message| {
+        message.text("en_US", "Saved {1}");
+        message.parameter(mx("$Counter"));
+        message.blocking(false);
+    });
+    flow.close_page();
+    flow.close_pages(mx("2"));
     flow.delete_with(&order, |delete| {
         delete.refresh_in_client(true);
     });
