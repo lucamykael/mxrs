@@ -19,6 +19,7 @@ name = "cargo-mxrs"
 path = "src/cargo_mxrs.rs"
 
 [dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
 mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-compiler-flow = { path = "../../compiler/mxrs-compiler-flow" }
 mxrs-compiler-widgets = { path = "../../compiler/mxrs-compiler-widgets" }

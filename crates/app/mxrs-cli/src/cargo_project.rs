@@ -158,6 +158,15 @@ fn unresolved_frontend_references(manifest: &Path, output: &Path) -> Result<Vec<
     let project = mxrs_model::Project::open(output, true)?;
     let index = mxrs_semantic::SemanticIndex::build(&project)
         .map_err(|error| CargoProjectError::References(error.to_string()))?;
+    // What a form of a module the project installed names is the
+    // package's affair — Atlas Core's feedback snippet calls a module a
+    // blank app has and this project may not — and is not said here.
+    let snapshot = frontend.with_file_name("model").join("imported");
+    let installed = if snapshot.join("manifest.json").is_file() {
+        mxrs_project::installed_modules(&snapshot).unwrap_or_default()
+    } else {
+        Default::default()
+    };
     let mut dangling = Vec::new();
     for diagnostic in index.diagnostics() {
         if diagnostic.code != "unresolved_reference" {
@@ -176,13 +185,16 @@ fn unresolved_frontend_references(manifest: &Path, output: &Path) -> Result<Vec<
             let rest = diagnostic.message.strip_prefix(prefix)?;
             let (qualified, what) = rest.split_once(' ')?;
             let origin = declared.form_origins.get(&format!("{kind} {qualified}"))?;
-            Some(format!(
-                "{origin}: {}{qualified} {what}",
-                prefix.replace(':', " ")
+            let module = qualified.split('.').next().unwrap_or_default();
+            Some((
+                installed.contains(module),
+                format!("{origin}: {}{qualified} {what}", prefix.replace(':', " ")),
             ))
         });
-        if let Some(warning) = form {
-            eprintln!("[mxrs] warning: {warning}");
+        if let Some((of_installed, warning)) = form {
+            if !of_installed {
+                eprintln!("[mxrs] warning: {warning}");
+            }
             continue;
         }
         let Some(rest) = diagnostic.message.strip_prefix("nanoflow:") else {

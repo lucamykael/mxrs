@@ -180,8 +180,9 @@ fn copy_tree(
     Ok(())
 }
 
-/// The stylesheets a page loads, in order, when the build wrote them.
-const STYLESHEETS: [&str; 2] = ["theme.compiled.css", "collections.css"];
+/// The stylesheets a page loads, in order, when the build wrote them: the
+/// theme, the icon collections' rules, the widget packages' own.
+const STYLESHEETS: [&str; 3] = ["theme.compiled.css", "collections.css", "widgets.css"];
 
 /// Publishes the theme of the project at `root` into the web root `web`:
 /// the files a deployment keeps beside the shell, and the shell's page

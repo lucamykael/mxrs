@@ -19,27 +19,27 @@ use sha2::{Digest, Sha256};
 const INDEX: EmbeddedAsset = EmbeddedAsset::new(
     "index.html",
     include_bytes!("../assets/index.html"),
-    "9fcee8cddd8538151b038f7190411326aaf13d28f243749d2b02ba0814a773eb",
+    "b498cb544abbe51f072f9573b527b6715f722406ed335468109a2c321523161c",
 );
 const SCRIPT: EmbeddedAsset = EmbeddedAsset::new(
-    "app-BGNdNWGP.js",
-    include_bytes!("../assets/app-BGNdNWGP.js"),
-    "8cc39aad2f32f371ec4b3decd6056010a043e0898d586dbe2d3b7f87ea1d18e2",
+    "app-Di6tZwOZ.js",
+    include_bytes!("../assets/app-Di6tZwOZ.js"),
+    "465470d15294b224dd5e5edd7fb4098df02ba43943e8dab5d2fce537273942f3",
 );
 const STYLES: EmbeddedAsset = EmbeddedAsset::new(
-    "app-C3MoKBUP.css",
-    include_bytes!("../assets/app-C3MoKBUP.css"),
-    "43a6efdd6f848259d49fa86d17e26e22eae3bcd39b1a67ae025a6c4f3a11c07f",
+    "app-CDR_CK5o.css",
+    include_bytes!("../assets/app-CDR_CK5o.css"),
+    "329d387a25cb039a856bc994727057eaade4dab3134dc1dc0f76a4ce9ee29b27",
 );
 const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     ".vite/manifest.json",
     include_bytes!("../assets/.vite/manifest.json"),
-    "85138604e67097dd2ff030385889e5943df00af864c41d2503aea26118342178",
+    "e96f109550014a44b2356e8a4ecc8a33070e5d2f5fe664b433e6674adf8d79db",
 );
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "ad08c5410af2436428c2114c5a06907af00f5164f626419be0098316ea416c8c",
+    "4d901013502a62990a8236e982564112ce8c95784704aa46c2a8eebc5c8b9b76",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",
@@ -345,6 +345,43 @@ pub fn materialize_frontend_sources(output: impl AsRef<Path>) -> Result<Material
     Ok(report)
 }
 
+/// An enumeration as the model stores it: its name, and each value's key
+/// with its caption per language — what a selector offers for an attribute.
+fn enumeration_value(module_name: &str, document: &mxrs_bson::Document) -> Value {
+    let items = |document: &mxrs_bson::Document, key: &str| {
+        mxrs_bson::parse_array(document.get_array(key).ok().map(Vec::as_slice))
+            .items
+            .into_iter()
+            .filter_map(|item| item.as_document().cloned())
+            .collect::<Vec<_>>()
+    };
+    let values = items(document, "Values")
+        .iter()
+        .map(|value| {
+            let captions: serde_json::Map<String, Value> = value
+                .get_document("Caption")
+                .ok()
+                .map(|caption| {
+                    items(caption, "Items")
+                        .iter()
+                        .filter_map(|translation| {
+                            Some((
+                                translation.get_str("LanguageCode").ok()?.to_string(),
+                                Value::String(translation.get_str("Text").ok()?.to_string()),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({ "key": value.get_str("Name").unwrap_or_default(), "caption": captions })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "name": format!("{module_name}.{}", document.get_str("Name").unwrap_or_default()),
+        "values": values,
+    })
+}
+
 /// Builds the frontend's stable, runtime-neutral application contract.
 pub fn application_manifest(project: &Project) -> Result<Value> {
     let project_name = project.name()?.unwrap_or_else(|| "Application".into());
@@ -404,6 +441,12 @@ pub fn application_manifest(project: &Project) -> Result<Value> {
                     "to_entity": association.to_entity_id,
                     "type": format!("{:?}", association.association_type),
                 })).collect::<Vec<_>>(),
+                "enumerations": module
+                    .artifact_units
+                    .iter()
+                    .filter(|document| document.get_str("$Type").ok() == Some("Enumerations$Enumeration"))
+                    .map(|document| enumeration_value(module_name, document))
+                    .collect::<Vec<_>>(),
                 "microflows": module.microflows.iter().filter_map(|flow| flow.name.as_ref()).collect::<Vec<_>>(),
                 "nanoflows": module.nanoflows.iter().filter_map(|flow| flow.name.as_ref()).collect::<Vec<_>>(),
                 "pages": page_values,
@@ -588,6 +631,34 @@ pub fn embedded_frontend_source_hash() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_enumeration_reaches_the_manifest_with_its_values_captions() {
+        let value = |name: &str, caption: &str| {
+            mxrs_bson::doc! {
+                "$Type": "Enumerations$EnumerationValue",
+                "Name": name,
+                "Caption": mxrs_bson::doc! {
+                    "$Type": "Texts$Text",
+                    "Items": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$Type": "Texts$Translation", "LanguageCode": "en_US", "Text": caption,
+                    })], 3),
+                },
+            }
+        };
+        let document = mxrs_bson::doc! {
+            "$Type": "Enumerations$Enumeration",
+            "Name": "Status",
+            "Values": mxrs_bson::build_array(
+                vec![mxrs_bson::Bson::Document(value("Open", "Open")), mxrs_bson::Bson::Document(value("Paid", "Paid up"))],
+                2,
+            ),
+        };
+        let manifest = enumeration_value("Sales", &document);
+        assert_eq!(manifest["name"], "Sales.Status");
+        assert_eq!(manifest["values"][1]["key"], "Paid");
+        assert_eq!(manifest["values"][1]["caption"]["en_US"], "Paid up");
+    }
+
     use super::*;
 
     /// `mxrs new` writes the shell's sources as text.

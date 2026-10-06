@@ -167,6 +167,7 @@ fn run_build(mut args: Vec<String>) -> ExitCode {
             // and so are the icon fonts and images the model holds.
             mxrs_cli::theme::compile_and_report(&project);
             mxrs_cli::collections::write_and_report(&project, &path);
+            mxrs_cli::widget_styles::write_and_report(&project);
             // What a deployment serves beside the shell: the theme, published.
             let web = web.unwrap_or_else(|| {
                 path.parent()

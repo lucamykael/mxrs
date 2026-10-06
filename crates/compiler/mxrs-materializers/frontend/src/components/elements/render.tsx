@@ -15,7 +15,8 @@ import {
 } from 'react';
 
 import { invokeAction } from '@/api/actions';
-import { data, type DataObject } from '@/api/data';
+import { data, invoke, isObject, type DataObject } from '@/api/data';
+import type { Manifest } from '@/types/model';
 
 import {
   ColumnFilter,
@@ -46,6 +47,159 @@ import {
 } from './view';
 
 type Draw = (source: Source) => ReactElement | null;
+
+/** What an attribute's enumeration offers a selector: each value's key, and its caption in the user's language. */
+function optionsOf(
+  model: Manifest | null,
+  entity: string | undefined,
+  attribute: string,
+): { key: string; caption: string }[] {
+  if (!model || !entity || !attribute) return [];
+  const declared = model.modules
+    .flatMap((module) => module.entities ?? [])
+    .find((candidate) => candidate.name === entity)
+    ?.attributes.find((candidate) => candidate.name === attribute);
+  if (!declared?.enumeration) return [];
+  const enumeration = model.modules
+    .flatMap((module) => module.enumerations ?? [])
+    .find((candidate) => candidate.name === declared.enumeration);
+  return (enumeration?.values ?? []).map((value) => ({
+    key: value.key,
+    caption: textOf(value.caption) || value.key,
+  }));
+}
+
+// --- conditional visibility: the expression a widget is shown by ---
+
+type Token = { kind: 'word' | 'string' | 'number' | 'op'; text: string };
+
+/** The tokens of a Mendix expression: words and variables, strings, numbers, operators. */
+function tokens(expression: string): Token[] {
+  const found: Token[] = [];
+  const pattern =
+    /\s*(?:('(?:[^']|'')*')|(\$[\w/]+|[A-Za-z_][\w]*)|(-?\d+(?:\.\d+)?)|(<=|>=|!=|[=<>()]))/gy;
+  let match: RegExpExecArray | null;
+  pattern.lastIndex = 0;
+  while ((match = pattern.exec(expression)) !== null) {
+    if (match[0].trim() === '') break;
+    if (match[1] !== undefined)
+      found.push({ kind: 'string', text: match[1].slice(1, -1).replace(/''/g, "'") });
+    else if (match[2] !== undefined) found.push({ kind: 'word', text: match[2] });
+    else if (match[3] !== undefined) found.push({ kind: 'number', text: match[3] });
+    else found.push({ kind: 'op', text: match[4] });
+    if (pattern.lastIndex >= expression.length) break;
+  }
+  return found;
+}
+
+/**
+ * Evaluates the expression a widget is shown by against the object the
+ * widget is in and the value its own attribute holds: `$object/Attribute`,
+ * `$value`, `empty`, `true`/`false`, numbers, strings, `=`/`!=`/`<`/`>`,
+ * `and`/`or`/`not`, parentheses. What it cannot evaluate is `undefined`,
+ * and the widget is shown.
+ */
+function evaluate(expression: string, object: DataObject | null, own: unknown): unknown {
+  const list = tokens(expression);
+  let at = 0;
+  const peek = () => list[at];
+  const take = () => list[at++];
+  const value = (word: string): unknown => {
+    if (word === 'true') return true;
+    if (word === 'false') return false;
+    if (word === 'empty') return null;
+    if (word === '$value') return own ?? null;
+    if (word.startsWith('$')) {
+      const [, member] = word.split('/');
+      if (!member) return object ?? null;
+      return object ? (object.members[member] ?? null) : null;
+    }
+    return undefined;
+  };
+  const primary = (): unknown => {
+    const token = take();
+    if (!token) return undefined;
+    if (token.kind === 'op' && token.text === '(') {
+      const inner = or();
+      if (peek()?.text === ')') take();
+      return inner;
+    }
+    if (token.kind === 'string') return token.text;
+    if (token.kind === 'number') return Number(token.text);
+    if (token.kind === 'word' && token.text === 'not') {
+      const operand = primary();
+      return operand === undefined ? undefined : !truthy(operand);
+    }
+    return token.kind === 'word' ? value(token.text) : undefined;
+  };
+  const same = (left: unknown, right: unknown) =>
+    left === right ||
+    ((left === null || left === undefined) && (right === null || right === undefined)) ||
+    (left !== null && right !== null && String(left) === String(right));
+  const comparison = (): unknown => {
+    const left = primary();
+    const operator = peek();
+    if (!operator || operator.kind !== 'op' || operator.text === ')') return left;
+    take();
+    const right = primary();
+    if (left === undefined || right === undefined) return undefined;
+    switch (operator.text) {
+      case '=':
+        return same(left, right);
+      case '!=':
+        return !same(left, right);
+      case '<':
+        return Number(left) < Number(right);
+      case '>':
+        return Number(left) > Number(right);
+      case '<=':
+        return Number(left) <= Number(right);
+      case '>=':
+        return Number(left) >= Number(right);
+      default:
+        return undefined;
+    }
+  };
+  const and = (): unknown => {
+    let left = comparison();
+    while (peek()?.kind === 'word' && peek().text === 'and') {
+      take();
+      const right = comparison();
+      left = left === undefined || right === undefined ? undefined : truthy(left) && truthy(right);
+    }
+    return left;
+  };
+  const or = (): unknown => {
+    let left = and();
+    while (peek()?.kind === 'word' && peek().text === 'or') {
+      take();
+      const right = and();
+      left = left === undefined || right === undefined ? undefined : truthy(left) || truthy(right);
+    }
+    return left;
+  };
+  return or();
+}
+
+/** What a Mendix condition holds for true: a true boolean, or a value that is not empty. */
+const truthy = (value: unknown): boolean =>
+  value !== null && value !== undefined && value !== false && value !== '';
+
+/** Whether the widget is shown: its visibility settings, evaluated; shown when there are none, or they cannot be evaluated. */
+function useVisible(source: Source): boolean {
+  const row = useContext(Row);
+  const draft = useContext(Draft);
+  const settings = child(source, 'conditionalVisibilitySettings');
+  if (!settings) return true;
+  const expression = plain(settings, 'expression', '');
+  if (!expression) return true;
+  const object = draft?.object ?? row;
+  const attribute = child(source, 'attributeRef');
+  const own =
+    attribute && object ? object.members[lastName(plain(attribute, 'attribute', ''))] : undefined;
+  const result = evaluate(expression, object, own);
+  return result === undefined ? true : truthy(result);
+}
 
 /** The element a field states, drawn. */
 const held = (source: Source, field: string): ReactNode => {
@@ -455,6 +609,8 @@ type Bound = {
   placeholder: string;
   value: unknown;
   change: (value: unknown) => void;
+  /** What the attribute's enumeration offers, when it holds one. */
+  options: { key: string; caption: string }[];
 };
 
 /** A widget bound to an attribute: its label, and a control of its kind holding the form's value. */
@@ -462,6 +618,7 @@ const input =
   (control: (bound: Bound) => ReactElement): Draw =>
   (source) => {
     const draft = useContext(Draft);
+    const { model } = useContext(Shell);
     const attribute = child(source, 'attributeRef');
     const name = lastName(attribute ? plain(attribute, 'attribute', '') : '');
     const label = text(source, 'labelTemplate');
@@ -473,6 +630,7 @@ const input =
           placeholder: text(source, 'placeholderTemplate'),
           value: draft?.object?.members[name],
           change: (value) => draft?.set(name, value),
+          options: optionsOf(model, draft?.object?.entity, name),
         })}
       </div>
     );
@@ -515,7 +673,40 @@ const CheckBox = input(({ name, value, change }) => (
     onChange={(event) => change(event.target.checked)}
   />
 ));
-const Selector = input(({ name }) => <select className="form-control" name={name} />);
+/** A drop-down over an attribute: the enumeration's values, or nothing chosen. */
+const Selector = input(({ name, value, change, options }) => (
+  <select
+    className="form-control"
+    name={name}
+    value={written(value)}
+    onChange={(event) => change(event.target.value || null)}
+  >
+    <option value="" />
+    {options.map((option) => (
+      <option key={option.key} value={option.key}>
+        {option.caption}
+      </option>
+    ))}
+  </select>
+));
+
+/** A radio button per value of the attribute's enumeration. */
+const Radios = input(({ name, value, change, options }) => (
+  <div className="mx-radiogroup">
+    {options.map((option) => (
+      <label key={option.key} className="radio-inline">
+        <input
+          type="radio"
+          name={name}
+          value={option.key}
+          checked={written(value) === option.key}
+          onChange={() => change(option.key)}
+        />
+        {option.caption}
+      </label>
+    ))}
+  </div>
+));
 
 /**
  * A data view: the object its page was given, which its inputs fill and
@@ -530,6 +721,24 @@ const DataView: Draw = (source) => {
   const initial = parameter ? (given[parameter] ?? null) : null;
   const [object, setObject] = useState<DataObject | null>(initial);
   const [changed, setChanged] = useState<ReadonlySet<string>>(new Set());
+  // A view over a microflow shows the object the flow answers with; a flow
+  // the runtime cannot run is said in the view's place, not the page's.
+  const settings =
+    origin?.type === 'Forms$MicroflowSource' ? child(origin, 'microflowSettings') : null;
+  const microflow = settings ? plain(settings, 'microflow', '') : '';
+  const [unanswered, setUnanswered] = useState<string>();
+  useEffect(() => {
+    if (!microflow) return;
+    let current = true;
+    invoke<unknown>('microflow', microflow, {})
+      .then((answer) => current && isObject(answer) && setObject(answer))
+      .catch((error: unknown) => {
+        if (current) setUnanswered(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      current = false;
+    };
+  }, [microflow]);
   const set = (member: string, value: unknown) => {
     setObject((now) => (now ? { ...now, members: { ...now.members, [member]: value } } : now));
     setChanged((now) => new Set(now).add(member));
@@ -538,6 +747,13 @@ const DataView: Draw = (source) => {
     setObject(kept);
     setChanged(new Set());
   };
+  if (unanswered && !object) {
+    return (
+      <section className={className(source, 'mx-dataview')} title={unanswered}>
+        <div className="mx-dataview-empty">{text(source, 'noEntityMessage')}</div>
+      </section>
+    );
+  }
   // A page opened without the object it shows — from the address bar, or
   // reloaded — has nothing to show, and says so.
   if (parameter && !object) {
@@ -983,6 +1199,105 @@ const OfRow = ({ object, children }: { object: DataObject; children: ReactNode }
   </Row.Provider>
 );
 
+/** How a list's items are selected, as its widget says: not at all, one, or several. */
+const selectionOf = (source: Source): 'None' | 'Single' | 'Multi' => {
+  const stated = sourceOf(property(source, 'itemSelection'));
+  const mode = stated ? plain(stated, 'selection', 'None') : 'None';
+  return mode === 'Single' || mode === 'Multi' ? mode : 'None';
+};
+
+/** Which of a list's items are selected, and how a click changes that. */
+function useSelection(source: Source) {
+  const mode = selectionOf(source);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const toggle = (id: string) =>
+    setSelected((now) => {
+      const next = new Set(mode === 'Multi' ? now : []);
+      if (now.has(id) && (mode === 'Multi' || now.size === 1)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  return { mode, selected, toggle };
+}
+
+/**
+ * One item of a list, drawn as the widgets inside about its object: a
+ * click selects it, or does what the list's `onClick` says.
+ */
+const ListItem = ({
+  source,
+  object,
+  className: classes,
+  selected,
+  select,
+  children,
+}: {
+  source: Source;
+  object: DataObject;
+  className: string;
+  selected: boolean;
+  select?: () => void;
+  children: ReactNode;
+}) => (
+  <OfRow object={object}>
+    <ListItemBody source={source} className={classes} selected={selected} select={select}>
+      {children}
+    </ListItemBody>
+  </OfRow>
+);
+
+const ListItemBody = ({
+  source,
+  className: classes,
+  selected,
+  select,
+  children,
+}: {
+  source: Source;
+  className: string;
+  selected: boolean;
+  select?: () => void;
+  children: ReactNode;
+}) => {
+  const act = useAction({ ...source, props: { onClick: property(source, 'onClick') } }, 'onClick');
+  const double = property(source, 'onClickTrigger') === 'double';
+  const clickable = Boolean(act || select);
+  const handle = () => {
+    select?.();
+    act?.();
+  };
+  return (
+    <div
+      className={[classes, selected ? `${classes}-selected` : '', clickable ? 'clickable' : '']
+        .filter(Boolean)
+        .join(' ')}
+      role={clickable ? 'button' : undefined}
+      onClick={double ? undefined : clickable ? handle : undefined}
+      onDoubleClick={double && clickable ? handle : undefined}
+    >
+      {children}
+    </div>
+  );
+};
+
+/** The rows in the order a column's sort says: by the member's number, or its text. */
+function sorted(
+  rows: DataObject[],
+  columns: Stated[],
+  sort: { index: number; descending: boolean } | null,
+): DataObject[] {
+  if (!sort) return rows;
+  const column = columns[sort.index];
+  if (!column) return rows;
+  const direction = sort.descending ? -1 : 1;
+  return [...rows].sort((left, right) => {
+    const a = memberOf(left, column.attribute);
+    const b = memberOf(right, column.attribute);
+    if (typeof a === 'number' && typeof b === 'number') return (a - b) * direction;
+    return shown(a).localeCompare(shown(b)) * direction;
+  });
+}
+
 /** The widgets a pluggable widget's property holds, drawn. */
 const inside = (value: unknown): ReactNode => (isValidElement(value) ? value : each(value));
 
@@ -1010,6 +1325,23 @@ const Datagrid: Draw = (source) => {
       paging.reset();
     },
   });
+  const [sort, setSort] = useState<{ index: number; descending: boolean } | null>(null);
+  const sortable = (column: Stated) =>
+    property(source, 'columnsSortable') !== false &&
+    column.sortable !== false &&
+    typeof column.attribute === 'string' &&
+    column.attribute !== '';
+  const sortBy = (index: number) =>
+    setSort((now) =>
+      now?.index === index
+        ? now.descending
+          ? null
+          : { index, descending: true }
+        : { index, descending: false },
+    );
+  const { mode, selected, toggle } = useSelection(source);
+  const byClick = mode !== 'None' && property(source, 'itemSelectionMethod') !== 'checkbox';
+  const ordered = sorted(rows, columns, sort);
   const cell = (column: Stated, object: DataObject): ReactNode => {
     switch (column.showContentAs) {
       case 'customContent':
@@ -1028,7 +1360,13 @@ const Datagrid: Draw = (source) => {
         : 'minmax(100px, 1fr)';
   const filtersPlaceholder = property(source, 'filtersPlaceholder');
   return (
-    <div className={className(source, 'widget-datagrid')}>
+    <div
+      className={className(
+        source,
+        'widget-datagrid',
+        byClick ? 'widget-datagrid-selection-method-click' : '',
+      )}
+    >
       {filtersPlaceholder ? (
         <div className="widget-datagrid-header header-filters">
           <ColumnFilter.Provider value={filter(-1)}>
@@ -1047,9 +1385,24 @@ const Datagrid: Draw = (source) => {
           <div className="widget-datagrid-grid-head" role="rowgroup">
             <div className="tr" role="row" style={{ display: 'contents' }}>
               {columns.map((column, index) => (
-                <div className="th" role="columnheader" key={index}>
+                <div
+                  className={sortable(column) ? 'th clickable' : 'th'}
+                  role="columnheader"
+                  key={index}
+                  aria-sort={
+                    sort?.index === index
+                      ? sort.descending
+                        ? 'descending'
+                        : 'ascending'
+                      : undefined
+                  }
+                  onClick={sortable(column) ? () => sortBy(index) : undefined}
+                >
                   <div className="column-container">
-                    <div className="column-header">{textOf(column.header)}</div>
+                    <div className="column-header">
+                      {textOf(column.header)}
+                      {sort?.index === index ? (sort.descending ? ' ▾' : ' ▴') : null}
+                    </div>
                     {isValidElement(column.filter) ? (
                       <div className="filter">
                         <ColumnFilter.Provider value={filter(index)}>
@@ -1067,20 +1420,21 @@ const Datagrid: Draw = (source) => {
             role="rowgroup"
             aria-busy={entity !== '' && objects === undefined}
           >
-            {rows.slice(paging.first, paging.last).map((object) => (
-              <div className="tr" role="row" key={object.id} style={{ display: 'contents' }}>
-                <OfRow object={object}>
-                  {columns.map((column, index) => (
-                    <div
-                      className={column.wrapText ? 'td wrap-text' : 'td'}
-                      role="cell"
-                      key={index}
-                    >
-                      {cell(column, object)}
-                    </div>
-                  ))}
-                </OfRow>
-              </div>
+            {ordered.slice(paging.first, paging.last).map((object) => (
+              <ListItem
+                source={source}
+                object={object}
+                className="tr"
+                selected={selected.has(object.id)}
+                select={byClick ? () => toggle(object.id) : undefined}
+                key={object.id}
+              >
+                {columns.map((column, index) => (
+                  <div className={column.wrapText ? 'td wrap-text' : 'td'} role="cell" key={index}>
+                    {cell(column, object)}
+                  </div>
+                ))}
+              </ListItem>
             ))}
           </div>
         </div>
@@ -1114,6 +1468,7 @@ const Gallery: Draw = (source) => {
       !filter?.value || Object.values(object.members).some((value) => matches(value, filter)),
   );
   const paging = usePaging(items.length, source);
+  const { mode, selected, toggle } = useSelection(source);
   const across = (key: string, otherwise: number) =>
     Math.max(1, Number(property(source, key) ?? otherwise) || otherwise);
   const desktop = across('desktopItems', 4);
@@ -1145,9 +1500,16 @@ const Gallery: Draw = (source) => {
       ) : null}
       <div className="widget-gallery-items" aria-busy={entity !== '' && objects === undefined}>
         {items.slice(paging.first, paging.last).map((object) => (
-          <div className="widget-gallery-item" key={object.id}>
-            <OfRow object={object}>{inside(property(source, 'content'))}</OfRow>
-          </div>
+          <ListItem
+            source={source}
+            object={object}
+            className="widget-gallery-item"
+            selected={selected.has(object.id)}
+            select={mode !== 'None' ? () => toggle(object.id) : undefined}
+            key={object.id}
+          >
+            {inside(property(source, 'content'))}
+          </ListItem>
         ))}
       </div>
       {entity && objects?.length === 0 && property(source, 'showEmptyPlaceholder') === 'custom' ? (
@@ -1228,19 +1590,37 @@ const Combobox: Draw = (source) => {
     .find((value): value is string => typeof value === 'string' && value !== '');
   const name = attribute ? lastName(attribute) : '';
   const value = name ? draft?.object?.members[name] : undefined;
+  const { model } = useContext(Shell);
+  const options = optionsOf(model, draft?.object?.entity, name);
   // In the group a form's control is in, which is what a theme styles.
   return (
     <div className={className(source, 'form-group')}>
       <div className="widget-combobox">
         <div className="form-control widget-combobox-input-container">
-          <input
-            className="widget-combobox-input"
-            name={name || undefined}
-            placeholder={widgetText(source, 'emptyOptionText')}
-            value={written(value)}
-            readOnly={!name || !draft}
-            onChange={(event) => name && draft?.set(name, event.target.value)}
-          />
+          {options.length ? (
+            <select
+              className="widget-combobox-input"
+              name={name || undefined}
+              value={written(value)}
+              onChange={(event) => draft?.set(name, event.target.value || null)}
+            >
+              <option value="">{widgetText(source, 'emptyOptionText')}</option>
+              {options.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.caption}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className="widget-combobox-input"
+              name={name || undefined}
+              placeholder={widgetText(source, 'emptyOptionText')}
+              value={written(value)}
+              readOnly={!name || !draft}
+              onChange={(event) => name && draft?.set(name, event.target.value)}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -1329,6 +1709,397 @@ const ProgressCircle: Draw = (source) => {
   );
 };
 
+/** The day, month or year an object's date falls in, as a timeline groups events. */
+function period(value: unknown, by: unknown): string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(value)) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  switch (by) {
+    case 'year':
+      return date.toLocaleDateString(undefined, { year: 'numeric', timeZone: 'UTC' });
+    case 'month':
+      return date.toLocaleDateString(undefined, {
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+    default:
+      return date.toLocaleDateString(undefined, { timeZone: 'UTC' });
+  }
+}
+
+/**
+ * Mendix's Timeline: the objects of its source, an event each — its title,
+ * description and time said by the page — grouped by the date the page
+ * names, as its own stylesheet lays them out.
+ */
+const Timeline: Draw = (source) => {
+  const entity = sourceEntity(property(source, 'data'));
+  const objects = useObjects(entity);
+  const grouped = property(source, 'groupEvents') !== false;
+  // Drawn as the page says, widget by widget, or as the widget's own texts.
+  const custom = property(source, 'customVisualization') === true;
+  const groups = new Map<string, DataObject[]>();
+  for (const object of objects ?? []) {
+    const key = grouped
+      ? period(memberOf(object, property(source, 'groupAttribute')), property(source, 'groupByKey'))
+      : '';
+    groups.set(key, [...(groups.get(key) ?? []), object]);
+  }
+  return (
+    <div
+      className={className(source, 'widget-timeline-wrapper')}
+      aria-busy={entity !== '' && objects === undefined}
+    >
+      {[...groups].map(([header, events]) => (
+        <div key={header || 'all'}>
+          {header ? (
+            <div className="widget-timeline-date-header">
+              {custom && property(source, 'customGroupHeader') ? (
+                <OfRow object={events[0]}>{inside(property(source, 'customGroupHeader'))}</OfRow>
+              ) : (
+                header
+              )}
+            </div>
+          ) : null}
+          <div className="widget-timeline-events-wrapper">
+            <ul>
+              {events.map((object) => (
+                <ListItem
+                  source={source}
+                  object={object}
+                  className="widget-timeline-event"
+                  selected={false}
+                  key={object.id}
+                >
+                  <div className="widget-timeline-flex-container">
+                    <div className="widget-timeline-icon-wrapper">
+                      {custom && property(source, 'customIcon') ? (
+                        inside(property(source, 'customIcon'))
+                      ) : (
+                        <div className="widget-timeline-icon-circle" />
+                      )}
+                    </div>
+                    <div className="widget-timeline-content-wrapper">
+                      <div className="widget-timeline-info-wrapper">
+                        {custom ? (
+                          <>
+                            {inside(property(source, 'customTitle'))}
+                            {inside(property(source, 'customDescription'))}
+                          </>
+                        ) : (
+                          <>
+                            <p className="widget-timeline-title">
+                              {widgetText(source, 'title', object)}
+                            </p>
+                            <p className="widget-timeline-description">
+                              {widgetText(source, 'description', object)}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                      <div className="widget-timeline-date-time-wrapper">
+                        {custom ? (
+                          inside(property(source, 'customEventDateTime'))
+                        ) : (
+                          <span>{widgetText(source, 'timeIndication', object)}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </ListItem>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+/** A point of a chart's series: what the page's X attribute says, and the number its Y attribute holds. */
+type Point = { x: string; y: number };
+
+/** Reads one series' objects and hands its points up to the chart. */
+const SeriesPoints = ({
+  entity,
+  x,
+  y,
+  onPoints,
+}: {
+  entity: string;
+  x: unknown;
+  y: unknown;
+  onPoints: (points: Point[]) => void;
+}) => {
+  const objects = useObjects(entity);
+  useEffect(() => {
+    if (!objects) return;
+    onPoints(
+      objects.map((object) => ({
+        x: shown(memberOf(object, x)),
+        y: Number(memberOf(object, y)) || 0,
+      })),
+    );
+    // `onPoints` is the chart's own setter and does not change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [objects]);
+  return null;
+};
+
+/** The size a chart widget asks for, in the units the page states. */
+function chartSize(source: Source): { width: string; height: number } {
+  const width = Number(property(source, 'width') ?? 100) || 100;
+  const height = Number(property(source, 'height') ?? 75) || 75;
+  return {
+    width: property(source, 'widthUnit') === 'pixels' ? `${width}px` : `${width}%`,
+    height: property(source, 'heightUnit') === 'pixels' ? height : 300,
+  };
+}
+
+/** A series of a bar, column or line chart, as the page states it: its source, its two attributes, how its points add up. */
+function seriesOf(
+  source: Source,
+): { name: string; entity: string; x: unknown; y: unknown; aggregation: string }[] {
+  // A line chart calls its series lines.
+  return statedList(property(source, 'series') ?? property(source, 'lines')).map((series) => {
+    const dynamic = series.dataSet === 'dynamic';
+    return {
+      name: textOf(dynamic ? series.dynamicName : series.staticName),
+      entity: sourceEntity(dynamic ? series.dynamicDataSource : series.staticDataSource),
+      x: dynamic ? series.dynamicXAttribute : series.staticXAttribute,
+      y: dynamic ? series.dynamicYAttribute : series.staticYAttribute,
+      aggregation: typeof series.aggregationType === 'string' ? series.aggregationType : 'none',
+    };
+  });
+}
+
+/** The points of a series with one x each, their y's added up the way the series says. */
+function aggregated(points: Point[], how: string): Point[] {
+  if (how === 'none') return points;
+  const groups = new Map<string, number[]>();
+  for (const point of points) groups.set(point.x, [...(groups.get(point.x) ?? []), point.y]);
+  const of = (values: number[]): number => {
+    const sorted = [...values].sort((a, b) => a - b);
+    switch (how) {
+      case 'count':
+        return values.length;
+      case 'avg':
+        return values.reduce((sum, value) => sum + value, 0) / values.length;
+      case 'min':
+        return sorted[0];
+      case 'max':
+        return sorted[sorted.length - 1];
+      case 'median':
+        return sorted[Math.floor(sorted.length / 2)];
+      case 'first':
+        return values[0];
+      case 'last':
+        return values[values.length - 1];
+      case 'mode': {
+        const counts = new Map<number, number>();
+        for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+        return [...counts].sort((a, b) => b[1] - a[1])[0][0];
+      }
+      default:
+        return values.reduce((sum, value) => sum + value, 0);
+    }
+  };
+  return [...groups].map(([x, values]) => ({ x, y: of(values) }));
+}
+
+const PALETTE = ['#264ae5', '#3cb33d', '#eca51c', '#e33f4e', '#7b61ff', '#0ca5b0', '#8a8f9a'];
+
+/**
+ * Mendix's bar, column and line charts: each series' points from its own
+ * objects, drawn as the bars or the line they make, with the axes' labels
+ * and a legend. A chart with nothing to draw yet is its box.
+ */
+const chart =
+  (kind: 'bar' | 'column' | 'line'): Draw =>
+  (source) => {
+    const series = seriesOf(source);
+    const [points, setPoints] = useState<Record<number, Point[]>>({});
+    const { width, height } = chartSize(source);
+    const categories = [
+      ...new Set(series.flatMap((_, index) => (points[index] ?? []).map((point) => point.x))),
+    ];
+    const top = Math.max(
+      1,
+      ...series.flatMap((_, index) => (points[index] ?? []).map((point) => point.y)),
+    );
+    const padding = { left: 48, bottom: 28, top: 12, right: 12 };
+    const plotWidth = 600;
+    const plotHeight = height - padding.top - padding.bottom;
+    const slot = categories.length
+      ? (plotWidth - padding.left - padding.right) / categories.length
+      : 0;
+    const scale = (value: number) => (plotHeight * value) / top;
+    const x = (index: number) => padding.left + slot * index;
+    const y = (value: number) => padding.top + plotHeight - scale(value);
+    return (
+      <div
+        className={className(source, 'widget-charts', `widget-${kind}-chart`)}
+        style={{ width, height: `${height}px` }}
+      >
+        {series.map((one, index) => (
+          <SeriesPoints
+            key={index}
+            entity={one.entity}
+            x={one.x}
+            y={one.y}
+            onPoints={(found) =>
+              setPoints((now) => ({ ...now, [index]: aggregated(found, one.aggregation) }))
+            }
+          />
+        ))}
+        <svg viewBox={`0 0 ${plotWidth} ${height}`} width="100%" height={height} role="img">
+          <line
+            x1={padding.left}
+            y1={padding.top}
+            x2={padding.left}
+            y2={padding.top + plotHeight}
+            stroke="#8a8f9a"
+          />
+          <line
+            x1={padding.left}
+            y1={padding.top + plotHeight}
+            x2={plotWidth - padding.right}
+            y2={padding.top + plotHeight}
+            stroke="#8a8f9a"
+          />
+          <text x={padding.left - 6} y={padding.top + 10} textAnchor="end" fontSize="10">
+            {top}
+          </text>
+          <text x={padding.left - 6} y={padding.top + plotHeight} textAnchor="end" fontSize="10">
+            0
+          </text>
+          {categories.map((category, index) => (
+            <text
+              key={category}
+              x={x(index) + slot / 2}
+              y={height - 8}
+              textAnchor="middle"
+              fontSize="10"
+            >
+              {category}
+            </text>
+          ))}
+          {series.map((one, which) => {
+            const mine = points[which] ?? [];
+            const color = PALETTE[which % PALETTE.length];
+            if (kind === 'line') {
+              const path = categories
+                .map((category, index) => {
+                  const point = mine.find((candidate) => candidate.x === category);
+                  return point ? `${x(index) + slot / 2},${y(point.y)}` : null;
+                })
+                .filter(Boolean)
+                .join(' ');
+              return (
+                <polyline key={which} points={path} fill="none" stroke={color} strokeWidth="2" />
+              );
+            }
+            const barWidth = slot / (series.length + 1);
+            return categories.map((category, index) => {
+              const point = mine.find((candidate) => candidate.x === category);
+              if (!point) return null;
+              const barHeight = scale(point.y);
+              return kind === 'column' ? (
+                <rect
+                  key={`${which}-${category}`}
+                  x={x(index) + barWidth * (which + 0.5)}
+                  y={y(point.y)}
+                  width={barWidth}
+                  height={barHeight}
+                  fill={color}
+                />
+              ) : (
+                <rect
+                  key={`${which}-${category}`}
+                  x={padding.left}
+                  y={x(index) + barWidth * (which + 0.5) - padding.left + padding.top}
+                  width={(plotWidth - padding.left - padding.right) * (point.y / top)}
+                  height={barWidth}
+                  fill={color}
+                />
+              );
+            });
+          })}
+        </svg>
+        {property(source, 'showLegend') !== false && series.some((one) => one.name) ? (
+          <ul className="widget-charts-legend">
+            {series.map((one, index) => (
+              <li key={index}>
+                <span
+                  style={{ background: PALETTE[index % PALETTE.length] }}
+                  className="widget-charts-legend-swatch"
+                />
+                {one.name}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+    );
+  };
+
+/** Mendix's pie chart: a slice per object of its source, as big as the value attribute says. */
+const PieChart: Draw = (source) => {
+  const entity = sourceEntity(property(source, 'seriesDataSource'));
+  const objects = useObjects(entity);
+  const { width, height } = chartSize(source);
+  const slices = (objects ?? []).map((object) => ({
+    name:
+      widgetText(source, 'seriesName', object) ||
+      shown(memberOf(object, property(source, 'seriesName'))),
+    value: Math.max(0, Number(memberOf(object, property(source, 'seriesValueAttribute'))) || 0),
+  }));
+  const total = slices.reduce((sum, slice) => sum + slice.value, 0) || 1;
+  const hole = Number(property(source, 'holeRadius') ?? 0) || 0;
+  let angle = -Math.PI / 2;
+  const radius = 90;
+  const arcs = slices.map((slice, index) => {
+    const span = (slice.value / total) * 2 * Math.PI;
+    const start = angle;
+    angle += span;
+    const point = (at: number, r: number) => `${100 + r * Math.cos(at)},${100 + r * Math.sin(at)}`;
+    const large = span > Math.PI ? 1 : 0;
+    const inner = (radius * hole) / 100;
+    const d = inner
+      ? `M ${point(start, radius)} A ${radius} ${radius} 0 ${large} 1 ${point(angle, radius)} L ${point(angle, inner)} A ${inner} ${inner} 0 ${large} 0 ${point(start, inner)} Z`
+      : `M 100,100 L ${point(start, radius)} A ${radius} ${radius} 0 ${large} 1 ${point(angle, radius)} Z`;
+    return (
+      <path key={index} d={d} fill={PALETTE[index % PALETTE.length]}>
+        <title>{`${slice.name}: ${slice.value}`}</title>
+      </path>
+    );
+  });
+  return (
+    <div
+      className={className(source, 'widget-charts', 'widget-pie-chart')}
+      style={{ width, height: `${height}px` }}
+    >
+      <svg viewBox="0 0 200 200" width="100%" height={height} role="img">
+        {arcs}
+      </svg>
+      {property(source, 'showLegend') !== false ? (
+        <ul className="widget-charts-legend">
+          {slices.map((slice, index) => (
+            <li key={index}>
+              <span
+                style={{ background: PALETTE[index % PALETTE.length] }}
+                className="widget-charts-legend-swatch"
+              />
+              {slice.name}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+};
+
 /** A widget drawn as the box its own stylesheet styles: its classes, and what it holds. */
 const boxed =
   (...classes: string[]): Draw =>
@@ -1348,11 +2119,11 @@ const customWidgets: Record<string, Draw> = {
   'com.mendix.widget.custom.badge.Badge': Badge,
   'com.mendix.widget.custom.progressbar.ProgressBar': ProgressBar,
   'com.mendix.widget.custom.progresscircle.ProgressCircle': ProgressCircle,
-  'com.mendix.widget.web.timeline.Timeline': boxed('widget-timeline'),
-  'com.mendix.widget.web.barchart.BarChart': boxed('widget-charts', 'widget-bar-chart'),
-  'com.mendix.widget.web.columnchart.ColumnChart': boxed('widget-charts', 'widget-column-chart'),
-  'com.mendix.widget.web.linechart.LineChart': boxed('widget-charts', 'widget-line-chart'),
-  'com.mendix.widget.web.piechart.PieChart': boxed('widget-charts', 'widget-pie-chart'),
+  'com.mendix.widget.web.timeline.Timeline': Timeline,
+  'com.mendix.widget.web.barchart.BarChart': chart('bar'),
+  'com.mendix.widget.web.columnchart.ColumnChart': chart('column'),
+  'com.mendix.widget.web.linechart.LineChart': chart('line'),
+  'com.mendix.widget.web.piechart.PieChart': PieChart,
 };
 
 /** A pluggable widget: as itself when it is drawn; else its label, its name, and the widgets its properties hold. */
@@ -1398,7 +2169,7 @@ const drawn: Record<string, Draw> = {
   Forms$CheckBox: CheckBox,
   Forms$DropDown: Selector,
   Forms$ReferenceSelector: Selector,
-  Forms$RadioButtonGroup: Selector,
+  Forms$RadioButtonGroup: Radios,
   Forms$DataView: DataView,
   Forms$ListView: ListView,
   Forms$TemplateGrid: ListView,
@@ -1432,5 +2203,13 @@ const drawn: Record<string, Draw> = {
 /** Draws an element the way its stored type is drawn. */
 export function render(source: Source): ReactElement {
   const Drawn = drawn[source.type] ?? Box;
-  return <Drawn {...source} />;
+  return (
+    <Shown source={source}>
+      <Drawn {...source} />
+    </Shown>
+  );
 }
+
+/** What is drawn only while the condition the page states for it holds. */
+const Shown = ({ source, children }: { source: Source; children: ReactElement }) =>
+  useVisible(source) ? children : null;

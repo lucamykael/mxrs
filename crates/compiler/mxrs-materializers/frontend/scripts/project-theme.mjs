@@ -88,6 +88,7 @@ export function projectTheme() {
       const links = [
         ['theme.compiled.css', stylesheet],
         ['collections.css', join(assets, 'theme-cache', 'web', 'collections.css')],
+        ['widgets.css', join(assets, 'theme-cache', 'web', 'widgets.css')],
       ];
       return links
         .filter(([, file]) => existsSync(file))

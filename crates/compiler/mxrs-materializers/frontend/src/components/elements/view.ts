@@ -123,8 +123,7 @@ export function text(
     .map(sourceOf)
     .map((parameter) => {
       if (!parameter) return '…';
-      const attribute = child(parameter, 'attributeRef');
-      const name = lastName(attribute ? plain(attribute, 'attribute', '') : '');
+      const name = lastName(attributeOf(parameter));
       if (!name) return '…';
       // The value of the object being shown, or the attribute's name where
       // there is none to show.
@@ -153,6 +152,14 @@ export function shown(value: unknown): string {
       : instant.toLocaleDateString(undefined, { timeZone: 'UTC' });
   }
   return String(value);
+}
+
+/** The attribute an element names: whole, or as the one thing it says. */
+export function attributeOf(source: Source, field = 'attributeRef'): string {
+  const stated = source.props[field];
+  if (typeof stated === 'string') return stated;
+  const held = child(source, field);
+  return held ? plain(held, 'attribute', '') : '';
 }
 
 /** The entity a data source or an action is about. */

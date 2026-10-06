@@ -2,7 +2,7 @@ import { createContext, type ReactNode } from 'react';
 
 import type { DataObject } from '@/api/data';
 import type { Form } from '@/mxrs/forms';
-import type { Collections, NavigationItem } from '@/types/model';
+import type { Collections, Manifest, NavigationItem } from '@/types/model';
 
 /** The object the widgets being drawn are about: a row of a list, or a form's. */
 export const Row = createContext<DataObject | null>(null);
@@ -61,12 +61,15 @@ export const Shell = createContext<{
   form: (qualified: string) => Form | undefined;
   /** The icon collections' classes and the images' files, by qualified name. */
   collections: Collections;
+  /** The application model: its entities' attributes and enumerations, for what a selector offers. */
+  model: Manifest | null;
   /** Whether the user opened or closed the sidebar, which every page of the layout keeps. */
   sidebar?: boolean;
   setSidebar: (open: boolean) => void;
 }>({
   setSidebar: () => {},
   collections: { icons: {}, images: {} },
+  model: null,
   items: [],
   current: '',
   open: () => {},

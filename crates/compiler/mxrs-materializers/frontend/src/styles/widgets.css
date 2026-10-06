@@ -35,3 +35,23 @@
     display: block;
   }
 }
+
+/* A chart's legend: a swatch per series or slice, in a row under the drawing. */
+.widget-charts-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.widget-charts-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 2px;
+  vertical-align: middle;
+}

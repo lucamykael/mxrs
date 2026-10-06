@@ -319,6 +319,7 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     let target = resolve_target(&options.root)?;
     crate::theme::compile_and_report(&options.root);
     crate::collections::write_and_report(&options.root, &target.mpr);
+    crate::widget_styles::write_and_report(&options.root);
     crate::theme::publish_and_report(&options.root, &target.web_root);
     let address = bind_address(options)?;
     let profile = EnvironmentProfile::load(&options.root, options.environment.as_deref())?;

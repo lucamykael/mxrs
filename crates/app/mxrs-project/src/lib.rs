@@ -462,22 +462,26 @@ fn io_error(path: &Path, source: std::io::Error) -> ProjectError {
 /// Rust, and writes only what the frontend states of.
 pub fn installed_modules(snapshot: impl AsRef<Path>) -> Result<std::collections::BTreeSet<String>> {
     let snapshot = snapshot.as_ref();
-    let manifest = read_imported_manifest(snapshot)?;
+    // The manifest's units alone: a snapshot a test seeds may say no more.
+    let manifest_path = snapshot.join("manifest.json");
+    let text =
+        std::fs::read_to_string(&manifest_path).map_err(|error| io_error(&manifest_path, error))?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&text).map_err(ProjectError::Manifest)?;
     let mut installed = std::collections::BTreeSet::new();
-    for unit in &manifest.units {
-        if !matches!(
-            unit.native_type.as_str(),
-            "Projects$Module" | "Projects$ModuleImpl"
-        ) {
+    for unit in manifest["units"].as_array().into_iter().flatten() {
+        let native_type = unit["native_type"].as_str().unwrap_or_default();
+        if !matches!(native_type, "Projects$Module" | "Projects$ModuleImpl") {
             continue;
         }
-        let path = snapshot.join(&unit.file);
+        let (Some(file), Some(name)) = (unit["file"].as_str(), unit["name"].as_str()) else {
+            continue;
+        };
+        let path = snapshot.join(file);
         let bytes = std::fs::read(&path).map_err(|error| io_error(&path, error))?;
         let document = mxrs_bson::parse(&bytes)?;
-        if document.get_bool("FromAppStore").unwrap_or(false)
-            && let Some(name) = &unit.name
-        {
-            installed.insert(name.clone());
+        if document.get_bool("FromAppStore").unwrap_or(false) {
+            installed.insert(name.to_string());
         }
     }
     Ok(installed)

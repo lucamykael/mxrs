@@ -45,11 +45,38 @@ export type NavigationProfile = {
   items: NavigationItem[];
 };
 
+/** An attribute of an entity, as the manifest declares it. */
+export type AttributeDecl = {
+  name: string;
+  type: string;
+  required?: boolean;
+  /** The enumeration the attribute holds a value of, by qualified name. */
+  enumeration?: string | null;
+};
+
+/** An entity, by qualified name, with its attributes. */
+export type EntityDecl = {
+  name: string;
+  persistable?: boolean;
+  attributes: AttributeDecl[];
+};
+
+/** An enumeration, by qualified name: each value's key and caption per language. */
+export type EnumerationDecl = {
+  name: string;
+  values: Array<{ key: string; caption: Record<string, string> }>;
+};
+
 /** `model.json`: the application as the Rust runtime publishes it. */
 export type Manifest = {
   format: number;
   project: { name: string; mendix_version: string };
-  modules: Array<{ name: string; pages: Page[] }>;
+  modules: Array<{
+    name: string;
+    pages: Page[];
+    entities?: EntityDecl[];
+    enumerations?: EnumerationDecl[];
+  }>;
   navigation: { profiles: NavigationProfile[] };
 };
 

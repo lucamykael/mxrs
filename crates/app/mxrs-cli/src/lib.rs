@@ -77,4 +77,5 @@ pub mod theme;
 pub mod uml;
 pub mod update;
 pub mod validate;
+pub mod widget_styles;
 pub mod widgets;

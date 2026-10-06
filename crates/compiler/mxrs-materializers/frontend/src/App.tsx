@@ -78,6 +78,7 @@ export function App() {
           fail: (error) => setProblem(error instanceof Error ? error.message : String(error)),
           form: findForm,
           collections,
+          model: manifest,
           sidebar,
           setSidebar,
         }}
