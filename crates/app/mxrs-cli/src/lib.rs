@@ -53,6 +53,7 @@ pub mod atlas;
 pub mod browse;
 pub mod cargo_project;
 pub mod changelog;
+pub mod collections;
 pub mod compare;
 pub mod database;
 pub mod db_reports;

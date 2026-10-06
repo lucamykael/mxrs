@@ -19,12 +19,12 @@ use sha2::{Digest, Sha256};
 const INDEX: EmbeddedAsset = EmbeddedAsset::new(
     "index.html",
     include_bytes!("../assets/index.html"),
-    "bb9f8e2b4a214a88def8617c16da63c78ee04664824e1d7334266fded133f20c",
+    "b3d23ca016b6feefa2ee756a0cd06d16cb1ccd98e4af14a0a69dda6f01e75e75",
 );
 const SCRIPT: EmbeddedAsset = EmbeddedAsset::new(
-    "app-B10ucf_4.js",
-    include_bytes!("../assets/app-B10ucf_4.js"),
-    "84e98c0e85b67cbc43f19e0fbc3881bb7ebd037f7db451be74f3efeb1b35c4e4",
+    "app-_hWdsKjJ.js",
+    include_bytes!("../assets/app-_hWdsKjJ.js"),
+    "6f2f718fd15196bf821979154c96f6140a54a605fdc04bf8cb04bcbf6a998c71",
 );
 const STYLES: EmbeddedAsset = EmbeddedAsset::new(
     "app-C3MoKBUP.css",
@@ -34,12 +34,12 @@ const STYLES: EmbeddedAsset = EmbeddedAsset::new(
 const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     ".vite/manifest.json",
     include_bytes!("../assets/.vite/manifest.json"),
-    "1855db9b9d29508bce428cda69cecab0cdcbda6cfca36238e872c79dfd1138b0",
+    "55b810bc5e8cd84b27ebadef0974d4f479d36a0878aa29f342e01693b6b7df01",
 );
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "6b7e5a10e3e3641c9074f17b347a374812d579e7f3dd6c0e327df69a82a5d352",
+    "451a6f52517bd643dee263e2976e710d4ca52b9b524c57340f43f3968e31cc64",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",

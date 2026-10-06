@@ -27,7 +27,11 @@ export function sourceOf(value: unknown): Source | null {
 function number(value: unknown): unknown {
   if (typeof value !== 'object' || value === null) return value;
   const sized = value as { long?: unknown; int?: unknown };
-  return typeof sized.long === 'number' ? sized.long : typeof sized.int === 'number' ? sized.int : value;
+  return typeof sized.long === 'number'
+    ? sized.long
+    : typeof sized.int === 'number'
+      ? sized.int
+      : value;
 }
 
 /** A field that holds a text, a number or a boolean. */
@@ -87,10 +91,7 @@ const language = () =>
   typeof document === 'undefined' ? '' : document.documentElement.lang.replace('-', '_');
 
 const inLanguage = (texts: Record<string, string>) =>
-  texts[language()] ??
-  texts.en_US ??
-  Object.values(texts)[0] ??
-  '';
+  texts[language()] ?? texts.en_US ?? Object.values(texts)[0] ?? '';
 
 /** The text a field says in the user's language: a text, or a template with its parameters named. */
 export function text(
@@ -134,6 +135,12 @@ export function text(
   });
 }
 
+/** The text a value is, when a page wrote one: itself, or a text per language. */
+export function textOf(value: unknown): string {
+  if (typeof value === 'string') return value;
+  return isTexts(value) ? inLanguage(value) : '';
+}
+
 /** A member's value as a page shows it. */
 export function shown(value: unknown): string {
   if (value === null || value === undefined) return '';
@@ -157,7 +164,7 @@ export function entityOf(source: Source, field = 'entityRef'): string {
 }
 
 /** The pluggable widget an element is, by the id its definition states. */
-function widgetId(source: Source): string | undefined {
+export function widgetId(source: Source): string | undefined {
   const definition = sourceOf(source.defaults.definition);
   return definition ? plain(definition, 'widgetId', '') || undefined : undefined;
 }

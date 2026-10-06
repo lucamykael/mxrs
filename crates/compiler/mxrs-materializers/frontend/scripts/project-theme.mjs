@@ -3,14 +3,7 @@
 // what the theme and every module publish beside it (`assets/theme/web/`,
 // `assets/themesource/<module>/public/`), all at the root of the site —
 // where the stylesheet's own `url(...)`s expect its fonts and images.
-import {
-  cpSync,
-  createReadStream,
-  existsSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-} from 'node:fs';
+import { cpSync, createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -55,7 +48,8 @@ function designProperties() {
   const modules = join(assets, 'themesource');
   if (!existsSync(modules)) return merged;
   const names = readdirSync(modules).sort(
-    (left, right) => (right === 'atlas_core') - (left === 'atlas_core') || left.localeCompare(right),
+    (left, right) =>
+      (right === 'atlas_core') - (left === 'atlas_core') || left.localeCompare(right),
   );
   for (const module of names) {
     const file = join(modules, module, 'web', 'design-properties.json');
@@ -89,10 +83,19 @@ export function projectTheme() {
       output = resolve(config.root, config.build.outDir);
     },
     transformIndexHtml() {
-      if (!existsSync(stylesheet)) return [];
-      return [
-        { tag: 'link', attrs: { rel: 'stylesheet', href: './theme.compiled.css' }, injectTo: 'head' },
+      // The theme, and after it the fonts and rules of the model's icon
+      // collections, when the build wrote them.
+      const links = [
+        ['theme.compiled.css', stylesheet],
+        ['collections.css', join(assets, 'theme-cache', 'web', 'collections.css')],
       ];
+      return links
+        .filter(([, file]) => existsSync(file))
+        .map(([name]) => ({
+          tag: 'link',
+          attrs: { rel: 'stylesheet', href: `./${name}` },
+          injectTo: 'head',
+        }));
     },
     configureServer(server) {
       server.middlewares.use((request, response, next) => {

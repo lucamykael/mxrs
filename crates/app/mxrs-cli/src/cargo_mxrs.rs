@@ -162,8 +162,10 @@ fn run_build(mut args: Vec<String>) -> ExitCode {
     match result {
         Ok(path) => {
             println!("[mxrs] built and validated {}", path.display());
-            // The stylesheet its pages load is part of what a build makes.
+            // The stylesheet its pages load is part of what a build makes,
+            // and so are the icon fonts and images the model holds.
             mxrs_cli::theme::compile_and_report(&project);
+            mxrs_cli::collections::write_and_report(&project, &path);
             ExitCode::SUCCESS
         }
         Err(error) => {

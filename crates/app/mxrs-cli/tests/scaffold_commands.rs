@@ -676,6 +676,7 @@ fn a_new_project_brings_atlas_from_the_cache() {
         "assets/theme/web/main.scss",
         "assets/theme/web/settings.json",
         "assets/themesource/atlas_core/web/main.scss",
+        "assets/themesource/datawidgets/web/main.scss",
     ] {
         assert!(root.join(path).is_file(), "{path}");
     }

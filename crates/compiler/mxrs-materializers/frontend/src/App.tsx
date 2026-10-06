@@ -5,7 +5,7 @@ import { Shell } from '@/components/elements/context';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Navigation } from '@/components/layout/Navigation';
 import { useHashRoute } from '@/hooks/useHashRoute';
-import { useManifest } from '@/hooks/useManifest';
+import { useCollections, useManifest } from '@/hooks/useManifest';
 import { ModelPage } from '@/pages/ModelPage';
 import { PageNotFound } from '@/pages/PageNotFound';
 import { findForm } from '@/utils/forms';
@@ -17,6 +17,7 @@ import { findForm } from '@/utils/forms';
  */
 export function App() {
   const { manifest, failure } = useManifest();
+  const collections = useCollections();
   const [route, openRoute] = useHashRoute();
   const [sidebar, setSidebar] = useState<boolean>();
   // What each page was given when it was opened, by the page's name.
@@ -76,6 +77,7 @@ export function App() {
           },
           fail: (error) => setProblem(error instanceof Error ? error.message : String(error)),
           form: findForm,
+          collections,
           sidebar,
           setSidebar,
         }}

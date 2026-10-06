@@ -55,3 +55,13 @@ export type Manifest = {
 
 /** The object a widget is rendered against, when it has one. */
 export type WidgetContext = Record<string, RuntimeValue> | null;
+
+/**
+ * What the model's collections give the browser: each icon collection's
+ * classes by its qualified name, and each image's file by its own — what
+ * the build wrote beside the theme as `collections.json`.
+ */
+export type Collections = {
+  icons: Record<string, { class: string; prefix: string }>;
+  images: Record<string, string>;
+};

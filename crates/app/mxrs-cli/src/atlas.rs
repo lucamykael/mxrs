@@ -21,8 +21,10 @@ pub struct AtlasPackage {
     pub file: &'static str,
 }
 
-/// Atlas Core first: the others build on its theme.
-pub const PACKAGES: [AtlasPackage; 2] = [
+/// Atlas Core first: the others build on its theme. Data Widgets is what
+/// Atlas Web Content's templates are made of — the data grid, the gallery
+/// and their filters — and what styles them.
+pub const PACKAGES: [AtlasPackage; 3] = [
     AtlasPackage {
         name: "Atlas Core",
         content_id: "117187",
@@ -32,6 +34,11 @@ pub const PACKAGES: [AtlasPackage; 2] = [
         name: "Atlas Web Content",
         content_id: "117183",
         file: "Atlas_Web_Content.mpk",
+    },
+    AtlasPackage {
+        name: "Data Widgets",
+        content_id: "116540",
+        file: "Data_Widgets.mpk",
     },
 ];
 

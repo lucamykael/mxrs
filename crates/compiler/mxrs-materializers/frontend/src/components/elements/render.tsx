@@ -29,6 +29,8 @@ import {
   sourceOf,
   styleOf,
   text,
+  textOf,
+  widgetId,
   type Source,
 } from './view';
 
@@ -150,6 +152,42 @@ function useAction(source: Source, field: string): (() => void) | undefined {
       return undefined;
   }
 }
+
+/**
+ * An icon a field holds: one of a collection — the classes the Mendix
+ * client gives it, which the collection's stylesheet draws — a glyph, or
+ * an image of a collection.
+ */
+const Icon = ({ source, field }: { source: Source; field: string }): ReactElement | null => {
+  const { collections } = useContext(Shell);
+  const held = child(source, field);
+  if (!held) return null;
+  switch (held.type) {
+    case 'Forms$IconCollectionIcon': {
+      const image = plain(held, 'image', '');
+      const dot = image.lastIndexOf('.');
+      const name = image.slice(dot + 1);
+      if (!name) return null;
+      const collection = collections.icons[image.slice(0, dot)];
+      const classes = collection ? `${collection.class} ${collection.prefix}-${name}` : 'mx-icon';
+      return <span className={classes} data-icon={image} aria-hidden="true" />;
+    }
+    case 'Forms$GlyphIcon': {
+      const code = plain(held, 'code', 0);
+      return code ? (
+        <span className="glyphicon" aria-hidden="true">
+          {String.fromCharCode(code)}
+        </span>
+      ) : null;
+    }
+    case 'Forms$ImageIcon': {
+      const file = collections.images[plain(held, 'image', '')];
+      return file ? <img className="mx-icon-image" src={`./${file}`} alt="" /> : null;
+    }
+    default:
+      return null;
+  }
+};
 
 const Box: Draw = (source) => (
   <div data-element={source.type} className={className(source)}>
@@ -383,6 +421,7 @@ const ActionButton: Draw = (source) => {
       title={text(source, 'tooltip') || undefined}
       onClick={act}
     >
+      <Icon source={source} field="icon" />
       {text(source, 'captionTemplate')}
     </button>
   );
@@ -627,7 +666,8 @@ const SidebarToggle: Draw = (source) => {
       aria-expanded={open}
       onClick={toggle}
     >
-      {text(source, 'captionTemplate') || '☰'}
+      <Icon source={source} field="icon" />
+      {text(source, 'captionTemplate')}
     </button>
   );
 };
@@ -665,13 +705,18 @@ const GridButton: Draw = (source) => (
   </button>
 );
 
-const Image: Draw = (source) => (
-  <span
-    role="img"
-    className={className(source, 'mx-image')}
-    aria-label={lastName(plain(source, 'image', ''))}
-  />
-);
+/** A static image: the image of a collection it names, when the build wrote it. */
+const Image: Draw = (source) => {
+  const { collections } = useContext(Shell);
+  const image = plain(source, 'image', '');
+  const file = collections.images[image];
+  if (file) {
+    return (
+      <img className={className(source, 'mx-image')} src={`./${file}`} alt={lastName(image)} />
+    );
+  }
+  return <span role="img" className={className(source, 'mx-image')} aria-label={lastName(image)} />;
+};
 
 /** A table: every cell where its row and column say, as wide and tall as it spans. */
 const Table: Draw = (source) => (
@@ -744,8 +789,52 @@ function nested(value: unknown): ReactNode[] {
   return [];
 }
 
-/** A pluggable widget: its label, its name, and the widgets its properties hold. */
+/** What a page states of a pluggable widget's property, by its key. */
+const property = (source: Source, key: string): unknown =>
+  (source.props.properties as Record<string, unknown> | undefined)?.[key];
+
+/**
+ * Mendix's Image widget: an image of a collection, an image at a URL, or
+ * an icon — in the markup its own stylesheet styles.
+ */
+const ImageWidget: Draw = (source) => {
+  const { collections } = useContext(Shell);
+  const kind = property(source, 'datasource');
+  const responsive = property(source, 'responsive') !== false;
+  const classes = className(
+    source,
+    'mx-image-viewer',
+    responsive ? 'mx-image-viewer-responsive' : '',
+  );
+  const object = property(source, 'imageObject');
+  const file = typeof object === 'string' ? collections.images[object] : undefined;
+  if (kind === 'icon') {
+    const icon = sourceOf(property(source, 'imageIcon'));
+    return (
+      <div className={classes}>
+        {icon ? (
+          <Icon
+            source={{ ...source, props: { icon: property(source, 'imageIcon') } }}
+            field="icon"
+          />
+        ) : null}
+      </div>
+    );
+  }
+  const src = kind === 'imageUrl' ? textOf(property(source, 'imageUrl')) : file ? `./${file}` : '';
+  return <div className={classes}>{src ? <img src={src} alt="" /> : null}</div>;
+};
+
+/** The pluggable widgets drawn as themselves, by the id their definition states. */
+const customWidgets: Record<string, Draw> = {
+  'com.mendix.widget.web.image.Image': ImageWidget,
+};
+
+/** A pluggable widget: as itself when it is drawn; else its label, its name, and the widgets its properties hold. */
 const CustomWidget: Draw = (source) => {
+  const id = widgetId(source);
+  const Drawn = id ? customWidgets[id] : undefined;
+  if (Drawn) return <Drawn {...source} />;
   const definition = sourceOf(source.defaults.definition);
   const widget = definition ? plain(definition, 'widgetName', '') : '';
   return (

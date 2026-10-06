@@ -2,7 +2,7 @@ import { createContext, type ReactNode } from 'react';
 
 import type { DataObject } from '@/api/data';
 import type { Form } from '@/mxrs/forms';
-import type { NavigationItem } from '@/types/model';
+import type { Collections, NavigationItem } from '@/types/model';
 
 /** The object the widgets being drawn are about: a row of a list, or a form's. */
 export const Row = createContext<DataObject | null>(null);
@@ -50,11 +50,14 @@ export const Shell = createContext<{
   /** Says what went wrong to the user. */
   fail: (error: unknown) => void;
   form: (qualified: string) => Form | undefined;
+  /** The icon collections' classes and the images' files, by qualified name. */
+  collections: Collections;
   /** Whether the user opened or closed the sidebar, which every page of the layout keeps. */
   sidebar?: boolean;
   setSidebar: (open: boolean) => void;
 }>({
   setSidebar: () => {},
+  collections: { icons: {}, images: {} },
   items: [],
   current: '',
   open: () => {},
