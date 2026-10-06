@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 mod analysis;
 pub mod cache;
 pub mod documents;
+mod pages;
 pub use analysis::{Analysis, CallCycle, ModuleDependency};
 
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +117,15 @@ pub struct SearchHit {
     pub artifact: Artifact,
     pub score: u32,
 }
+
+/// The codes of what a page or snippet names that it, or the page it
+/// opens, does not declare: warnings, as a model may be imported so.
+pub const PAGE_REFERENCE_CODES: &[&str] = &[
+    "unknown_page_parameter",
+    "unknown_page_variable",
+    "unknown_widget",
+    "attribute_outside_context",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -844,6 +854,9 @@ fn add_named_documents(
         .iter()
         .filter_map(|module| Some((module.id.as_str(), module.name.as_deref()?)))
         .collect();
+    // The pages and snippets, by qualified name, for what they name of
+    // themselves and of each other once all are known.
+    let mut forms: Vec<(String, &'static str, Document)> = Vec::new();
     for unit in &units {
         let document = project
             .mpr()
@@ -853,6 +866,11 @@ fn add_named_documents(
             let keys: Vec<_> = keys.iter().cloned().collect();
             for key in keys {
                 builder.document_references(&key, &document, "references");
+                if document.get_str("$Type").ok() == Some("Forms$Page")
+                    && let Some(qualified) = key.strip_prefix("page:")
+                {
+                    forms.push((qualified.to_string(), "page", document.clone()));
+                }
             }
             continue;
         }
@@ -906,6 +924,37 @@ fn add_named_documents(
             builder.reference_keys(&format!("module:{module}"), &key, "contains");
         }
         builder.document_references(&key, &document, "references");
+        if kind == ArtifactKind::Snippet
+            && let Some(qualified) = key.strip_prefix("snippet:")
+        {
+            forms.push((qualified.to_string(), "snippet", document));
+        }
+    }
+    let shapes: BTreeMap<String, pages::FormShape> = forms
+        .iter()
+        .map(|(qualified, kind, document)| {
+            (qualified.clone(), pages::FormShape::of(kind, document))
+        })
+        .collect();
+    let generalizations: BTreeMap<String, String> = modules
+        .iter()
+        .flat_map(|module| {
+            let module_name = module.name.clone().unwrap_or_default();
+            module.entities().iter().filter_map(move |entity| {
+                let qualified = entity.qualified_name.clone().unwrap_or_else(|| {
+                    format!(
+                        "{module_name}.{}",
+                        entity.name.as_deref().unwrap_or_default()
+                    )
+                });
+                Some((qualified, entity.generalization.as_ref()?.target.clone()?))
+            })
+        })
+        .collect();
+    for (qualified, _, document) in &forms {
+        builder
+            .diagnostics
+            .extend(pages::check(qualified, document, &shapes, &generalizations));
     }
     Ok(())
 }

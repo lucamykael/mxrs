@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::{Result, SemanticError, SemanticIndex};
 
 // 2: SemanticIndex gained `unresolved_targets`.
-const CACHE_FORMAT: u32 = 2;
+const CACHE_FORMAT: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CacheInfo {

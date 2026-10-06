@@ -327,7 +327,15 @@ from, as a window of the size the page states — behind an underlay when it
 is modal — and the address stays the page's; its close button, Escape, a
 Cancel or a save that closes the page closes it. A page reached without the
 object it shows (from the address bar, or reloaded) says it has nothing to
-show. This is the
+show. A build checks what each page and snippet names, inside itself and
+of the page a button opens: the parameter a mapping gives a value to, the
+parameter, variable or widget a page variable names, and the attribute an
+input of a data view shows — of the entity the view shows, along an
+association path when its source has one, or of one it specializes. What
+is not there is a warning with the file that names it (`mxrs lint` lists
+them as `unknown_page_parameter`, `unknown_page_variable`, `unknown_widget`
+and `attribute_outside_context`); a model may be imported so, and the
+build is still the model it was. This is the
 project's own frontend: the bundle mxrs embeds draws from the manifest and
 knows none of it. A data view
 over a flow, a grid and a pluggable widget show the widgets they hold, not

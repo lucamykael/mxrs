@@ -169,7 +169,10 @@ fn unresolved_frontend_references(manifest: &Path, output: &Path) -> Result<Vec<
     };
     let mut dangling = Vec::new();
     for diagnostic in index.diagnostics() {
-        if diagnostic.code != "unresolved_reference" {
+        // What a form names inside itself and of the pages it opens — a
+        // parameter, a variable, a widget, an attribute — is said too.
+        let unresolved = diagnostic.code == "unresolved_reference";
+        if !unresolved && !mxrs_semantic::PAGE_REFERENCE_CODES.contains(&diagnostic.code.as_str()) {
             continue;
         }
         // What a page, layout or snippet of the frontend names and the
@@ -197,7 +200,11 @@ fn unresolved_frontend_references(manifest: &Path, output: &Path) -> Result<Vec<
             }
             continue;
         }
-        let Some(rest) = diagnostic.message.strip_prefix("nanoflow:") else {
+        let Some(rest) = diagnostic
+            .message
+            .strip_prefix("nanoflow:")
+            .filter(|_| unresolved)
+        else {
             continue;
         };
         let Some((qualified, what)) = rest.split_once(' ') else {
