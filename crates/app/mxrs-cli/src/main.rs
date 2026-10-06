@@ -246,7 +246,7 @@ commands! {
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
     "portability", "<file.mpr> [--json] [--verify-round-trip] [--require-typed]", "Audit typed authoring versus lossless model preservation", run_portability;
     "portable", "<file.mpr> [--output runtime.zip] [--deployment DIR] [--mendix-home DIR] [--force]", "Build an executable portable Runtime ZIP", run_portable;
-    "page", "new <Module.Page> [--template NAME] [--chain CHAIN] [--role Module.Role] [--target DIR] [--dry-run] [--json] | templates [--json]", "Scaffold a page declaration, a page-led vertical slice, or list page templates", run_page;
+    "page", "new <Module.Page> [--template NAME] [--chain CHAIN] [--role Module.Role] [--target DIR] [--dry-run] [--json] | templates [--target DIR] [--json]", "Scaffold a page declaration, a page-led vertical slice, or list page templates", run_page;
     "preflight", "<file.mpr> [--json]", "Audit native compiler and runtime compatibility", run_preflight;
     "protocols", "<file.mpr> [--json]", "Audit imported Marketplace protocol connectors", run_protocols;
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;

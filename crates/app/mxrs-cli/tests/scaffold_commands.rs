@@ -691,4 +691,44 @@ fn a_new_project_brings_atlas_from_the_cache() {
         navigation.contains("homePage: \"Main.Home\""),
         "{navigation}"
     );
+
+    // Atlas's page templates are in the catalog of this project, and one
+    // named makes a page of its content, in Atlas's layout.
+    let target = root.to_str().unwrap();
+    let listed = text(&cli(&["page", "templates", "--target", target]));
+    assert!(
+        listed.starts_with("Page templates\n")
+            && listed.contains("Page templates of Atlas_Web_Content\n")
+            && listed.contains("── Grid\n"),
+        "{listed}"
+    );
+    let catalog: Value = serde_json::from_str(&text(&cli(&[
+        "page",
+        "templates",
+        "--target",
+        target,
+        "--json",
+    ])))
+    .unwrap();
+    assert!(catalog.as_array().unwrap().iter().any(|group| {
+        group["module"] == "Atlas_Web_Content"
+            && group["category"] == "Grids"
+            && group["templates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "Grid")
+    }));
+    let page = scaffold(&root, &["page", "new", "Main.Orders", "--template", "Grid"]);
+    assert!(
+        page.status.success(),
+        "{}",
+        String::from_utf8_lossy(&page.stderr)
+    );
+    let orders = std::fs::read_to_string(root.join("frontend/src/pages/main/Orders.tsx")).unwrap();
+    assert!(
+        orders.contains("<LayoutCall form=\"Atlas_Core.Atlas_Default\">")
+            && orders.contains("Datagrid"),
+        "{orders}"
+    );
 }

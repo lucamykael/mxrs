@@ -1243,3 +1243,148 @@ fn a_page_lands_in_atlas_default_layout_when_the_project_has_atlas() {
     );
     assert!(!root.join("frontend/src/components/layout/stock").exists());
 }
+
+/// A page template the way a project installed from the Marketplace holds
+/// one: under the imported model, with the widgets of `seed`.
+fn install_template(root: &Path, name: &str, seed: &mxrs_ir::page::PageDecl) {
+    use mxrs_bson::{Bson, Document, build_array, parse_array};
+    let catalog = std::rc::Rc::new(mxrs_forms::Catalog::for_version("11.12.1").unwrap());
+    let page = mxrs_writer::page_compiler::compile_page(&catalog, seed, None).unwrap();
+    let call = page.get_document("FormCall").unwrap();
+    let arguments = parse_array(call.get_array("Arguments").ok().map(Vec::as_slice)).items;
+    let widgets = arguments[0]
+        .as_document()
+        .unwrap()
+        .get("Widgets")
+        .cloned()
+        .unwrap();
+    let mut argument = Document::new();
+    argument.insert("$Type", "Forms$FormCallArgument");
+    argument.insert("Parameter", "Atlas_Core.Atlas_TopBar.Main");
+    argument.insert("Widgets", widgets);
+    let mut layout_call = Document::new();
+    layout_call.insert("$Type", "Forms$LayoutCall");
+    layout_call.insert("Arguments", build_array(vec![Bson::Document(argument)], 2));
+    let mut template = Document::new();
+    template.insert("$Type", "Forms$PageTemplate");
+    template.insert("Name", name);
+    template.insert("DisplayName", "");
+    template.insert("TemplateCategory", "Seeds");
+    template.insert("LayoutCall", layout_call);
+    let units = root.join("model/imported/units");
+    std::fs::create_dir_all(&units).unwrap();
+    std::fs::write(
+        units.join("t1.mxdoc"),
+        mxrs_bson::serialize(&template).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("model/imported/manifest.json"),
+        serde_json::json!({"snapshot_version": 2, "units": [
+            {"unit_id": "m1", "container_id": "root", "containment_name": "Modules", "native_type": "Projects$ModuleImpl", "name": "Atlas_Web_Content", "file": "units/m1.mxdoc"},
+            {"unit_id": "t1", "container_id": "m1", "containment_name": "Documents", "native_type": "Forms$PageTemplate", "name": name, "file": "units/t1.mxdoc"},
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// `--template` names an installed template as it names mxrs's own; the
+/// page holds the template's widgets, in the layout the module's pages are
+/// shown in, and joins the navigation. Without `--template`, nothing of
+/// the installed templates reaches a page.
+#[test]
+fn a_page_from_an_installed_template_holds_what_the_template_holds() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    scaffold(&root, ArtifactKind::Page, "Sales.Plain");
+    let plain_text =
+        std::fs::read_to_string(root.join("frontend/src/pages/sales/Plain.tsx")).unwrap();
+
+    let mut seed = mxrs_ir::page::PageDecl::new("Seed");
+    seed.layout = Some(mxrs_ir::page::LayoutRef::new(
+        "Atlas_Core.Atlas_TopBar",
+        "Main",
+    ));
+    seed.widgets.push(mxrs_ir::page::WidgetDecl::Text {
+        name: None,
+        caption: "Seeded by the template".to_string(),
+        class: None,
+    });
+    install_template(&root, "Seed", &seed);
+    assert_eq!(
+        mxrs_scaffold::installed_templates::installed(&root)
+            .unwrap()
+            .iter()
+            .map(|template| template.qualified_name())
+            .collect::<Vec<_>>(),
+        vec!["Atlas_Web_Content.Seed".to_string()]
+    );
+
+    // Named: the template's content, in the module's layout.
+    let options = ArtifactScaffold::new(ArtifactKind::Page, "Sales.Orders", &root)
+        .page_template(Some("Seed".into()));
+    let outcome = scaffold_artifact(&options).unwrap();
+    let orders = root.join("frontend/src/pages/sales/Orders.tsx");
+    assert!(outcome.files.contains(&orders), "{:?}", outcome.files);
+    let source = std::fs::read_to_string(&orders).unwrap();
+    assert!(
+        source.contains("Seeded by the template")
+            && source.contains("<LayoutCall form=\"Sales.ApplicationLayout\">")
+            && source.contains("<FormCallArgument parameter=\"Sales.ApplicationLayout.Main\">"),
+        "{source}"
+    );
+    let navigation =
+        std::fs::read_to_string(root.join("frontend/src/navigation/index.ts")).unwrap();
+    assert!(navigation.contains("Sales.Orders"), "{navigation}");
+    // Once: the page is declared, and not again.
+    assert!(matches!(
+        scaffold_artifact(&options).unwrap_err(),
+        ScaffoldError::FileExists(_)
+    ));
+    // A chain is a slice mxrs builds around its own templates.
+    let chained = ArtifactScaffold::new(ArtifactKind::Page, "Sales.Chained", &root)
+        .page_template(Some("Seed".into()))
+        .page_chain(Some(PageChain::Microflow));
+    assert!(
+        scaffold_artifact(&chained)
+            .unwrap_err()
+            .to_string()
+            .contains("takes no --chain")
+    );
+    assert!(!root.join("frontend/src/pages/sales/Chained.tsx").exists());
+    // A name no template has is still unknown.
+    assert!(matches!(
+        scaffold_artifact(
+            &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Unknown", &root)
+                .page_template(Some("Nope".into()))
+        )
+        .unwrap_err(),
+        ScaffoldError::UnknownPageTemplate(name) if name == "Nope"
+    ));
+
+    // Not named: the page is the one it was before the template existed.
+    scaffold(&root, ArtifactKind::Page, "Sales.Plain2");
+    assert_eq!(
+        std::fs::read_to_string(root.join("frontend/src/pages/sales/Plain2.tsx")).unwrap(),
+        plain_text.replace("Plain", "Plain2")
+    );
+
+    // The project still builds its model with the page.
+    let output = cargo(
+        &root,
+        &["run", "--offline", "--quiet", "--", "build/Seeded.mpr"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let project = mxrs_model::Project::open(root.join("build/Seeded.mpr"), true).unwrap();
+    assert!(project.all_units().unwrap().iter().any(|unit| {
+        let doc = project.mpr().parse_contents(unit).unwrap();
+        doc.get_str("Name").ok() == Some("Orders")
+            && doc.get_str("$Type").ok() == Some("Forms$Page")
+    }));
+}

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub mod artifact;
 mod forms;
+pub mod installed_templates;
 pub mod lifecycle;
 mod nanoflow;
 pub mod page_templates;
@@ -19,6 +20,7 @@ pub use artifact::{
     ArtifactKind, ArtifactScaffold, PageChain, ProjectInspection, SCAFFOLD_COMMANDS,
     ScaffoldCommand, ScaffoldOutcome, inspect_project, scaffold_artifact,
 };
+pub use installed_templates::InstalledTemplate;
 pub use page_templates::PageTemplate;
 pub use registry::RegisteredScaffold;
 

@@ -36,7 +36,7 @@ pub fn usage(kind: ArtifactKind) -> String {
     let (page_options, page_forms) = if kind == ArtifactKind::Page {
         (
             " [--template NAME] [--chain CHAIN] [--role Module.Role]",
-            " | templates [--json]",
+            " | templates [--target DIR] [--json]",
         )
     } else if kind == ArtifactKind::DemoUser {
         (" [--entity Module.Entity] [--role ROLE]", "")
@@ -101,8 +101,7 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
         && chain.is_none()
         && entity.is_none()
     {
-        print_page_templates(json);
-        return Ok(());
+        return print_page_templates(json, &target);
     }
     // `design init` names no artifact: the whole theme kit is the target.
     if kind == ArtifactKind::Design {
@@ -149,9 +148,13 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
     Ok(())
 }
 
-fn print_page_templates(json: bool) {
+/// The catalog: mxrs's own templates, then the ones the project at
+/// `target` installed, by module and category.
+fn print_page_templates(json: bool, target: &str) -> Result<(), String> {
+    let installed = mxrs_scaffold::installed_templates::installed(std::path::Path::new(target))
+        .map_err(|error| error.to_string())?;
     if json {
-        let payload: Vec<_> = page_templates::grouped()
+        let mut payload: Vec<_> = page_templates::grouped()
             .into_iter()
             .map(|(category, entries)| {
                 serde_json::json!({
@@ -167,13 +170,32 @@ fn print_page_templates(json: bool) {
                 })
             })
             .collect();
+        for (module, category, names) in mxrs_scaffold::installed_templates::grouped(&installed) {
+            payload.push(serde_json::json!({
+                "category": category,
+                "module": module,
+                "templates": names
+                    .iter()
+                    .map(|name| serde_json::json!({
+                        "name": name,
+                        "description": format!("{module}'s {name}, as Studio Pro offers it"),
+                        "data_backed": false,
+                    }))
+                    .collect::<Vec<_>>(),
+            }));
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&payload).expect("the template catalog is serializable")
         );
     } else {
         println!("{}", page_templates::tree());
+        if !installed.is_empty() {
+            println!();
+            print!("{}", mxrs_scaffold::installed_templates::tree(&installed));
+        }
     }
+    Ok(())
 }
 
 fn render(outcome: &ScaffoldOutcome, json: bool) {
@@ -324,7 +346,7 @@ mod tests {
                 .map_or(usage.as_str(), |(generator, _)| generator);
             assert!(generator_form.ends_with("[--target DIR] [--dry-run] [--json]"));
             assert_eq!(
-                usage.contains(" | templates [--json]"),
+                usage.contains(" | templates [--target DIR] [--json]"),
                 command.kind == ArtifactKind::Page
             );
             assert_eq!(

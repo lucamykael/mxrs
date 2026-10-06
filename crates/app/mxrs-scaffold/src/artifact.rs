@@ -26,7 +26,9 @@ use std::path::{Path, PathBuf};
 
 use crate::templates::snake_case;
 use crate::transaction::Transaction;
-use crate::{Result, ScaffoldError, io_error, page_templates, registry, templates};
+use crate::{
+    Result, ScaffoldError, installed_templates, io_error, page_templates, registry, templates,
+};
 
 /// Placeholder name on the scaffolded `ApplicationLayout` that scaffolded
 /// pages attach their widgets to. Matches the `mxrs new` project scaffold.
@@ -966,7 +968,25 @@ fn create_page_slice(
         .page_template
         .clone()
         .unwrap_or_else(|| page_templates::DEFAULT_CHAIN_TEMPLATE.to_string());
-    let template = page_templates::fetch(&template_name)?;
+    let template = match page_templates::fetch(&template_name) {
+        Ok(template) => template,
+        // Not one of mxrs's own: one the project installed, as Studio Pro
+        // offers them — named, so never applied without asking.
+        Err(ScaffoldError::UnknownPageTemplate(_)) => {
+            return match installed_templates::find(root, &template_name)? {
+                Some(installed) => create_installed_template_page(
+                    transaction,
+                    root,
+                    options,
+                    module_name,
+                    artifact_name,
+                    &installed,
+                ),
+                None => Err(ScaffoldError::UnknownPageTemplate(template_name)),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     if template.name == page_templates::CRUD {
         return create_crud(transaction, root, options, module_name, artifact_name);
     }
@@ -1039,8 +1059,17 @@ fn create_page_slice(
         &options.page_roles,
     );
     add_page(transaction, root, module_name, &page)?;
-    // The page joins the navigation the frontend declares, when it
-    // declares one the way an import or `mxrs new` writes it.
+    join_navigation(transaction, root, module_name, artifact_name)
+}
+
+/// The page `module_name.artifact_name` joins the navigation the frontend
+/// declares, when it declares one the way an import or `mxrs new` writes it.
+fn join_navigation(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    artifact_name: &str,
+) -> Result<()> {
     let navigation = root.join("frontend/src/navigation/index.ts");
     let qualified = format!("{module_name}.{artifact_name}");
     match transaction.content(&navigation)? {
@@ -1063,6 +1092,43 @@ fn create_page_slice(
         )),
     }
     Ok(())
+}
+
+/// A page from a template the project installed: the template's widgets in
+/// the placeholder of the layout the page is shown in, stated as TSX like
+/// any scaffolded page, and in the navigation.
+fn create_installed_template_page(
+    transaction: &mut Transaction,
+    root: &Path,
+    options: &ArtifactScaffold,
+    module_name: &str,
+    artifact_name: &str,
+    template: &installed_templates::InstalledTemplate,
+) -> Result<()> {
+    if options.page_chain.is_some() {
+        return Err(ScaffoldError::InvalidProjectSource {
+            path: template.qualified_name(),
+            reason: "an installed page template takes no --chain: the page holds what the template holds"
+                .to_string(),
+        });
+    }
+    refuse_declared_page(transaction, root, module_name, artifact_name)?;
+    let shown_in = page_layout(transaction, root, module_name)?;
+    let layout =
+        mxrs_ir::page::LayoutRef::new(shown_in.layout.clone(), shown_in.parameter.as_str());
+    let version = forms_version(transaction, root)?;
+    let (document, notes) = installed_templates::page_document(
+        template,
+        &version,
+        &layout,
+        artifact_name,
+        &options.page_roles,
+    )?;
+    for note in notes {
+        transaction.note(note);
+    }
+    crate::forms::add_forms(transaction, root, &[(module_name, document)])?;
+    join_navigation(transaction, root, module_name, artifact_name)
 }
 
 /// The overview and edit pages of an entity the project declares, written
@@ -1306,17 +1372,17 @@ fn forms_version(transaction: &mut Transaction, root: &Path) -> Result<String> {
 }
 
 /// Declares `page` in the frontend: `frontend/src/pages/<module>/`.
-fn add_page(
+/// A page the project already declares — in Rust, or in the frontend
+/// under a name a file system may not tell from this one — is not
+/// declared again.
+fn refuse_declared_page(
     transaction: &mut Transaction,
     root: &Path,
     module_name: &str,
-    page: &mxrs_ir::page::PageDecl,
+    name: &str,
 ) -> Result<()> {
-    // A page the project already declares — in Rust, or in the frontend
-    // under a name a file system may not tell from this one — is not
-    // declared again.
     let stem = snake_case(module_name);
-    let rust = root.join(format!("src/ui/pages/{stem}/{}.rs", snake_case(&page.name)));
+    let rust = root.join(format!("src/ui/pages/{stem}/{}.rs", snake_case(name)));
     if transaction.content(&rust)?.is_some() {
         return Err(ScaffoldError::FileExists(rust.display().to_string()));
     }
@@ -1326,12 +1392,22 @@ fn add_page(
             let existing = entry.path();
             let same = existing
                 .file_stem()
-                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(&page.name));
+                .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case(name));
             if same {
                 return Err(ScaffoldError::FileExists(existing.display().to_string()));
             }
         }
     }
+    Ok(())
+}
+
+fn add_page(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    page: &mxrs_ir::page::PageDecl,
+) -> Result<()> {
+    refuse_declared_page(transaction, root, module_name, &page.name)?;
     let version = forms_version(transaction, root)?;
     let document = crate::forms::page_document(&version, page)?;
     crate::forms::add_forms(transaction, root, &[(module_name, document)])
