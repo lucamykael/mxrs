@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { DataObject } from '@/api/data';
 import { Shell } from '@/components/elements/context';
@@ -8,7 +8,7 @@ import { useHashRoute } from '@/hooks/useHashRoute';
 import { useCollections, useManifest } from '@/hooks/useManifest';
 import { ModelPage } from '@/pages/ModelPage';
 import { PageNotFound } from '@/pages/PageNotFound';
-import { findForm } from '@/utils/forms';
+import { findForm, openingOf } from '@/utils/forms';
 
 /**
  * The application: the page the route names. A page the frontend declares
@@ -31,22 +31,45 @@ export function App() {
   useEffect(() => {
     setMenuDrawn(document.querySelector('.mx-navigationtree') !== null);
   }, [route, manifest]);
+  // The popups open over the page, the last one on top, each with what
+  // it was given. They are not routes: the address stays the page's.
+  const [popups, setPopups] = useState<{ page: string; given: Record<string, DataObject> }[]>([]);
   // The page a button is opening: a page reached any other way — the
   // address bar, the browser's history — was given nothing.
   const opening = useRef<string>(undefined);
   const open = useCallback(
     (page: string, objects: Record<string, DataObject> = {}) => {
+      if (openingOf(page).popup) {
+        setPopups((all) => [...all, { page, given: objects }]);
+        return;
+      }
+      setPopups([]);
       opening.current = page;
       setGiven((all) => ({ ...all, [page]: objects }));
       openRoute(page);
     },
     [openRoute],
   );
+  // Leaving the page: back to the one before it, or home when there is none.
+  const leave = useCallback(() => {
+    if (history.length > 1) history.back();
+    else openRoute('');
+  }, [openRoute]);
   useEffect(() => {
     setProblem(undefined);
+    setPopups([]);
     if (opening.current !== route) setGiven((all) => ({ ...all, [route]: {} }));
     opening.current = undefined;
   }, [route]);
+  // Escape closes the popup on top, as the Mendix client's does.
+  useEffect(() => {
+    if (!popups.length) return;
+    const pressed = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPopups((all) => all.slice(0, -1));
+    };
+    addEventListener('keydown', pressed);
+    return () => removeEventListener('keydown', pressed);
+  }, [popups.length]);
   const pages = useMemo(
     () => (manifest ? manifest.modules.flatMap((module) => module.pages) : []),
     [manifest],
@@ -63,29 +86,32 @@ export function App() {
 
   const qualified = page?.qualified_name ?? requested;
   const declared = findForm(qualified);
+  // What every page is given by the application, the page itself and how
+  // it is closed being its own.
+  const shell = (current: string, objects: Record<string, DataObject>, close: () => void) => ({
+    items: profile?.items || [],
+    current,
+    open,
+    close,
+    given: objects,
+    changes,
+    changed: () => {
+      setProblem(undefined);
+      setChanges((count) => count + 1);
+    },
+    fail: (error: unknown) => setProblem(error instanceof Error ? error.message : String(error)),
+    notify: (message: string, level: string) => setNotice({ message, level }),
+    form: findForm,
+    collections,
+    model: manifest,
+    sidebar,
+    setSidebar,
+  });
+
   // A page is what a route opens; a layout or a snippet is drawn inside one.
   if (declared?.kind === 'page') {
     return (
-      <Shell.Provider
-        value={{
-          items: profile?.items || [],
-          current: qualified,
-          open,
-          given: given[qualified] || {},
-          changes,
-          changed: () => {
-            setProblem(undefined);
-            setChanges((count) => count + 1);
-          },
-          fail: (error) => setProblem(error instanceof Error ? error.message : String(error)),
-          notify: (message, level) => setNotice({ message, level }),
-          form: findForm,
-          collections,
-          model: manifest,
-          sidebar,
-          setSidebar,
-        }}
-      >
+      <Shell.Provider value={shell(qualified, given[qualified] || {}, leave)}>
         {problem ? (
           <div role="alert" className="mxrs-failure" onClick={() => setProblem(undefined)}>
             {problem}
@@ -109,6 +135,51 @@ export function App() {
         <div className="mxrs-app" data-page={qualified} key={qualified}>
           {declared.document}
         </div>
+        {popups.map((popup, index) => {
+          const form = findForm(popup.page);
+          const shape = openingOf(popup.page);
+          if (!form || !shape.popup) return null;
+          // Closing a popup closes the ones opened from it too.
+          const close = () => setPopups((all) => all.slice(0, index));
+          return (
+            <Fragment key={`${index}:${popup.page}`}>
+              {shape.modal ? (
+                <div className="mx-underlay" style={{ zIndex: 1000 + index * 2 }} />
+              ) : null}
+              <div
+                role="dialog"
+                aria-modal={shape.modal}
+                aria-label={shape.title || undefined}
+                className="modal-dialog mx-window mx-window-active mxrs-popup"
+                data-page={popup.page}
+                style={{
+                  zIndex: 1001 + index * 2,
+                  width: shape.width ? `${shape.width}px` : undefined,
+                  height: shape.height ? `${shape.height}px` : undefined,
+                }}
+              >
+                <div className="modal-content mx-window-content">
+                  <div className="modal-header mx-window-header">
+                    <button
+                      type="button"
+                      className="close mx-window-close"
+                      aria-label="Close"
+                      onClick={close}
+                    >
+                      ×
+                    </button>
+                    <h4>{shape.title}</h4>
+                  </div>
+                  <div className="modal-body mx-window-body">
+                    <Shell.Provider value={shell(popup.page, popup.given, close)}>
+                      {form.document}
+                    </Shell.Provider>
+                  </div>
+                </div>
+              </div>
+            </Fragment>
+          );
+        })}
       </Shell.Provider>
     );
   }

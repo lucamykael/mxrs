@@ -218,17 +218,11 @@ const held = (source: Source, field: string): ReactNode => {
 
 /**
  * What happens when the user acts on a widget: the action its field holds.
- * A flow runs once the user agrees to what it asks first, and without
- * arguments — a page holds no data to give it yet.
+ * A flow runs once the user agrees to what it asks first, given the object
+ * the widget is in, and what it asks of the page is done.
  */
-/** Leaves the page: back to the one before it, or home when there is none. */
-const leave = (open: (page: string) => void) => {
-  if (history.length > 1) history.back();
-  else open('');
-};
-
 function useAction(source: Source, field: string): (() => void) | undefined {
-  const { open, changed, fail, notify } = useContext(Shell);
+  const { open, close, changed, fail, notify } = useContext(Shell);
   const row = useContext(Row);
   const draft = useContext(Draft);
   // One request at a time: a second click while the first is on its way
@@ -287,7 +281,7 @@ function useAction(source: Source, field: string): (() => void) | undefined {
           }
           break;
         case 'close_page':
-          leave(open);
+          close();
           break;
         case 'show_home_page':
           open('');
@@ -352,7 +346,7 @@ function useAction(source: Source, field: string): (() => void) | undefined {
             draft.saved(saved);
             changed();
             if (effects?.length) apply(effects);
-            if (plain(action, 'closePage', true)) leave(open);
+            if (plain(action, 'closePage', true)) close();
           })
           .catch((error: unknown) => {
             // What the runtime refused is shown where it belongs, under
@@ -368,7 +362,7 @@ function useAction(source: Source, field: string): (() => void) | undefined {
       const confirm = once(() =>
         data('delete', { entity, id }).then(() => {
           changed();
-          if (draft?.object && plain(action, 'closePage', true)) leave(open);
+          if (draft?.object && plain(action, 'closePage', true)) close();
         }),
       );
       // Deleting asks first, as the Mendix client does.
@@ -388,7 +382,7 @@ function useAction(source: Source, field: string): (() => void) | undefined {
     }
     case 'Forms$ClosePageClientAction':
     case 'Forms$CancelChangesClientAction':
-      return () => leave(open);
+      return close;
     default:
       return undefined;
   }

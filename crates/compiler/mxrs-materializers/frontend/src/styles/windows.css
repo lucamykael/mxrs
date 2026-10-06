@@ -1,0 +1,26 @@
+/*
+ * What the Mendix client does to a page it opens in a window, which no theme
+ * states: it places the window and sizes it to what it holds. Unlayered, as
+ * the client's own inline sizing is, so the theme's `.mx-window` rule — which
+ * leaves the placing to the client — does not undo it.
+ */
+.modal-dialog.mx-window.mxrs-popup {
+  top: 8vh;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 32px);
+  max-height: 84vh;
+}
+
+.mxrs-popup .mx-window-body {
+  max-height: calc(84vh - 60px);
+}
+
+/* A layout drawn in a window is as tall as what it holds, not the screen. */
+.mxrs-popup .mx-layout {
+  min-height: 0;
+}
+
+.mxrs-popup .mx-scrollcontainer {
+  flex-basis: auto;
+}

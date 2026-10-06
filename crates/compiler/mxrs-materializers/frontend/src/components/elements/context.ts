@@ -55,6 +55,8 @@ export const Shell = createContext<{
   current: string;
   /** Opens a page, giving it the objects its parameters take. */
   open: (page: string, given?: Record<string, DataObject>) => void;
+  /** Closes the page being shown: a popup, or back to the page before it (home when there is none). */
+  close: () => void;
   /** What the page being shown was given. */
   given: Record<string, DataObject>;
   /** Counts what changed in the data, so what shows it reads it again. */
@@ -79,6 +81,7 @@ export const Shell = createContext<{
   items: [],
   current: '',
   open: () => {},
+  close: () => {},
   given: {},
   changes: 0,
   changed: () => {},

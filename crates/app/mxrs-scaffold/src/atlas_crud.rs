@@ -296,6 +296,9 @@ pub(crate) struct Crud<'a> {
     /// The Mendix version the pages are written for.
     pub(crate) version: &'a str,
     pub(crate) shown_in: &'a PageLayout,
+    /// The layout the edit page is shown in: Atlas's popup, when the
+    /// project has it, as Studio Pro's edit pages are.
+    pub(crate) edit_shown_in: &'a PageLayout,
     /// `Module.Entity`.
     pub(crate) entity: &'a str,
     pub(crate) attributes: &'a [CrudAttribute],
@@ -314,6 +317,7 @@ pub(crate) fn pages(crud: &Crud<'_>) -> Result<(Document, Document, Vec<String>)
         edit,
         version,
         shown_in,
+        edit_shown_in,
         entity,
         attributes,
         roles,
@@ -395,8 +399,12 @@ pub(crate) fn pages(crud: &Crud<'_>) -> Result<(Document, Document, Vec<String>)
     });
 
     // The edit page: the form is about the page's object, with its inputs.
+    let edit_layout = LayoutRef::new(
+        edit_shown_in.layout.clone(),
+        edit_shown_in.parameter.as_str(),
+    );
     let (mut form, more) =
-        installed_templates::page_document(edit, version, &layout, &edit_name, roles)?;
+        installed_templates::page_document(edit, version, &edit_layout, &edit_name, roles)?;
     notes.extend(more);
     let what = format!("Atlas template {EDIT_TEMPLATE}");
     if let Some(parameters) = own_edit.get("Parameters") {

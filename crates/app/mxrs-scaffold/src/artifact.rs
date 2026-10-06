@@ -1249,11 +1249,13 @@ fn create_crud(
         let version = forms_version(transaction, root)?;
         let own_edit = crate::forms::page_document(&version, &pages[0])?;
         let own_overview = crate::forms::page_document(&version, &pages[1])?;
+        let edit_shown_in = popup_layout(transaction, root)?.unwrap_or_else(|| shown_in.clone());
         let (list, edit, notes) = atlas_crud::pages(&atlas_crud::Crud {
             overview: &grid,
             edit: &form,
             version: &version,
             shown_in: &shown_in,
+            edit_shown_in: &edit_shown_in,
             entity: &format!("{module_name}.{entity}"),
             attributes: &attributes,
             roles: &options.page_roles,
@@ -1676,6 +1678,22 @@ fn page_layout(
         module_name,
         LAYOUT_PARAMETER,
     ))
+}
+
+/// Atlas's popup layout, when the project has it: where Studio Pro shows
+/// an entity's edit page, over the list it was opened from.
+fn popup_layout(
+    transaction: &mut Transaction,
+    root: &Path,
+) -> Result<Option<crate::forms::PageLayout>> {
+    let popup = root.join("frontend/src/components/layout/atlas_core/PopupLayout.tsx");
+    Ok(transaction
+        .content(&popup)?
+        .is_some()
+        .then(|| crate::forms::PageLayout {
+            layout: "Atlas_Core.PopupLayout".to_string(),
+            parameter: LAYOUT_PARAMETER.to_string(),
+        }))
 }
 
 /// mxrb's `ensure_presentation` creates the module's `ApplicationLayout`
@@ -2108,6 +2126,22 @@ mod tests {
 mod crud_tests {
     use super::*;
     use crate::forms::CrudKind;
+
+    /// An edit page is shown in Atlas's popup layout when the project has
+    /// it, and nowhere new when it does not.
+    #[test]
+    fn the_edit_page_opens_in_atlas_s_popup_when_the_project_has_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut transaction = Transaction::default();
+        assert!(popup_layout(&mut transaction, root).unwrap().is_none());
+        let layouts = root.join("frontend/src/components/layout/atlas_core");
+        std::fs::create_dir_all(&layouts).unwrap();
+        std::fs::write(layouts.join("PopupLayout.tsx"), "export default {};\n").unwrap();
+        let popup = popup_layout(&mut transaction, root).unwrap().unwrap();
+        assert_eq!(popup.layout, "Atlas_Core.PopupLayout");
+        assert_eq!(popup.parameter, "Main");
+    }
 
     /// An entity is read as Rust reads it, however its struct is laid out.
     #[test]

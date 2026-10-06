@@ -321,8 +321,13 @@ under the inputs; what passes is committed through the entity's event
 handlers the way a flow's commit is, and the effects those handlers ask for
 (a message, feedback) come back with the saved object. A list is retrieved
 within its XPath constraint (the subset the runtime evaluates), in its sort
-order, a page at a time. A page reached without the object it shows (from
-the address bar, or reloaded) says it has nothing to show. This is the
+order, a page at a time. A page whose layout is a popup (`Popup`,
+`ModalPopup`, as Atlas's `PopupLayout`) opens over the page it was opened
+from, as a window of the size the page states — behind an underlay when it
+is modal — and the address stays the page's; its close button, Escape, a
+Cancel or a save that closes the page closes it. A page reached without the
+object it shows (from the address bar, or reloaded) says it has nothing to
+show. This is the
 project's own frontend: the bundle mxrs embeds draws from the manifest and
 knows none of it. A data view
 over a flow, a grid and a pluggable widget show the widgets they hold, not
@@ -346,7 +351,9 @@ theme that does not compile is a warning.
 entity the project declares — `<Entity>_Overview` (a list, with New, Edit
 and Delete) and `<Entity>_Edit` (an input per attribute, Save and Cancel) —
 from the attributes its struct has, and adds the overview to the
-navigation. A
+navigation. With `--atlas` the pages are Atlas's `Grid` and
+`Form_Vertical_Edit` templates bound to the entity, and the edit page is in
+Atlas's `PopupLayout`, as Studio Pro's is, so it opens over the list. A
 declaration file exports data the frontend's own types check:
 
 ```ts

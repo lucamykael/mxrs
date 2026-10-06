@@ -3,3 +3,5 @@
 @import './layout.css' layer(mxrs);
 @import './widgets.css' layer(mxrs);
 @import './elements.css' layer(mxrs);
+/* What the client does to a window, which the theme must not undo: in no layer. */
+@import './windows.css';
