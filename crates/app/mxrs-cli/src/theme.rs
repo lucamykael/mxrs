@@ -73,31 +73,37 @@ pub fn compile(root: &Path) -> Result<Theme, String> {
     }
     let folder = assets.join("theme-cache/web");
     let stylesheet = folder.join("theme.compiled.css");
+    // What the stylesheet is compiled from, kept beside it: a module added
+    // or removed changes it without touching any Sass file's time.
+    let sources = folder.join("theme.compiled.css.sources");
+    let source: String = entries
+        .iter()
+        .map(|entry| format!("@import \"{entry}\";\n"))
+        .collect();
     let mut latest = None;
     newest(&assets.join("themesource"), &mut latest);
     newest(&assets.join("theme"), &mut latest);
     let compiled = std::fs::metadata(&stylesheet)
         .and_then(|metadata| metadata.modified())
         .ok();
+    let same_sources = std::fs::read_to_string(&sources).is_ok_and(|known| known == source);
     if let (Some(compiled), Some(latest)) = (compiled, latest)
         && compiled >= latest
+        && same_sources
     {
         return Ok(Theme::Current(stylesheet));
     }
-    let source: String = entries
-        .iter()
-        .map(|entry| format!("@import \"{entry}\";\n"))
-        .collect();
     std::fs::create_dir_all(&folder).map_err(|error| format!("{}: {error}", folder.display()))?;
     // Read from the stylesheet's own folder, so a `url(...)` and an
     // `@import` mean what they mean to Studio Pro.
     let options = grass::Options::default()
         .style(grass::OutputStyle::Expanded)
         .load_path(&folder);
-    let css = grass::from_string(source, &options)
+    let css = grass::from_string(source.clone(), &options)
         .map_err(|error| format!("the theme does not compile: {error}"))?;
     std::fs::write(&stylesheet, &css)
         .map_err(|error| format!("{}: {error}", stylesheet.display()))?;
+    std::fs::write(&sources, &source).map_err(|error| format!("{}: {error}", sources.display()))?;
     Ok(Theme::Compiled {
         stylesheet,
         bytes: css.len(),
@@ -137,9 +143,9 @@ fn roots(assets: &Path) -> Vec<PathBuf> {
 
 /// What a theme is written in, not what a browser asks for.
 fn source(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension == "scss" || extension == "map")
-        || path.file_name().is_some_and(|name| name == "settings.json")
+    path.extension().is_some_and(|extension| {
+        extension == "scss" || extension == "map" || extension == "sources"
+    }) || path.file_name().is_some_and(|name| name == "settings.json")
 }
 
 fn copy_tree(

@@ -279,10 +279,21 @@ pub(crate) fn page_document(
             .to_string()
     };
     let wanted = local(&layout.parameter);
-    let chosen = arguments
+    let matched = arguments
         .iter()
-        .position(|(parameter, _)| local(parameter) == wanted)
-        .or_else(|| (!arguments.is_empty()).then_some(0));
+        .position(|(parameter, _)| local(parameter) == wanted);
+    let chosen = matched.or_else(|| (!arguments.is_empty()).then_some(0));
+    if matched.is_none()
+        && let Some(index) = chosen
+    {
+        notes.push(format!(
+            "{}: the widgets for {} are placed in {}: {} has no placeholder of that name",
+            template.qualified_name(),
+            arguments[index].0,
+            layout.parameter,
+            layout.qualified_name
+        ));
+    }
     for (index, (parameter, widgets)) in arguments.iter().enumerate() {
         if Some(index) == chosen {
             continue;

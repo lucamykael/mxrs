@@ -198,6 +198,11 @@ pub fn create(
         );
         std::fs::write(&navigation, named)
             .map_err(|error| format!("{}: {error}", navigation.display()))?;
+    } else if !source.contains("homePage:") {
+        eprintln!(
+            "[mxrs] warning: {} is not laid out the way mxrs writes it: set `homePage: \"Main.Home\"` on its Responsive profile yourself",
+            navigation.display()
+        );
     }
     Ok(())
 }

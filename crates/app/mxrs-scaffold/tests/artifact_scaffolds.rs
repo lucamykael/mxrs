@@ -1384,7 +1384,9 @@ fn a_page_from_an_installed_template_holds_what_the_template_holds() {
         plain_text.replace("Plain", "Plain2")
     );
 
-    // The project still builds its model with the page.
+    // The project still builds its model with the page. The template has
+    // served: the seed is not a model a build restores, so it goes.
+    std::fs::remove_dir_all(root.join("model")).unwrap();
     let output = cargo(
         &root,
         &["run", "--offline", "--quiet", "--", "build/Seeded.mpr"],
@@ -1400,4 +1402,136 @@ fn a_page_from_an_installed_template_holds_what_the_template_holds() {
         doc.get_str("Name").ok() == Some("Orders")
             && doc.get_str("$Type").ok() == Some("Forms$Page")
     }));
+}
+
+/// Atlas Web Content's `Grid` and `Form_Vertical_Edit`, as the model stores
+/// them, installed into a project's imported model.
+fn install_atlas_fixtures(root: &Path) {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/atlas");
+    let units = root.join("model/imported/units");
+    std::fs::create_dir_all(&units).unwrap();
+    let mut listed = vec![serde_json::json!({
+        "unit_id": "m1", "container_id": "root", "containment_name": "Modules",
+        "native_type": "Projects$ModuleImpl", "name": "Atlas_Web_Content", "file": "units/m1.mxdoc",
+    })];
+    for (index, name) in ["Grid", "Form_Vertical_Edit"].iter().enumerate() {
+        let id = format!("t{index}");
+        std::fs::copy(
+            fixtures.join(format!("{name}.mxdoc")),
+            units.join(format!("{id}.mxdoc")),
+        )
+        .unwrap();
+        listed.push(serde_json::json!({
+            "unit_id": id, "container_id": "m1", "containment_name": "Documents",
+            "native_type": "Forms$PageTemplate", "name": name, "file": format!("units/{id}.mxdoc"),
+        }));
+    }
+    std::fs::write(
+        root.join("model/imported/manifest.json"),
+        serde_json::json!({"snapshot_version": 2, "units": listed}).to_string(),
+    )
+    .unwrap();
+}
+
+/// Atlas's own templates: a page from `Grid` holds its data grid; an
+/// entity's CRUD from them lists the entity in that grid, a column per
+/// attribute, its row buttons give the edit page the row, its titles are
+/// the entity's, and the form holds an input per attribute.
+#[test]
+fn atlas_templates_make_a_page_and_an_entitys_crud_bound_to_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    install_atlas_fixtures(&root);
+    assert_eq!(
+        mxrs_scaffold::installed_templates::installed(&root)
+            .unwrap()
+            .iter()
+            .map(|template| template.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["Form_Vertical_Edit".to_string(), "Grid".to_string()]
+    );
+    scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Catalog", &root)
+            .page_template(Some("Grid".into())),
+    )
+    .unwrap();
+    let catalog =
+        std::fs::read_to_string(root.join("frontend/src/pages/sales/Catalog.tsx")).unwrap();
+    assert!(
+        catalog.contains("<Datagrid")
+            && catalog.contains("<LayoutCall form=\"Sales.ApplicationLayout\">"),
+        "{catalog}"
+    );
+    // --atlas goes with the crud template, and with an entity.
+    let misplaced = scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Loose", &root)
+            .page_template(Some("Grid".into()))
+            .atlas(true),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(misplaced.contains("--template crud"), "{misplaced}");
+    scaffold(&root, ArtifactKind::Entity, "Sales.Animal");
+    let entity = root.join("src/domain/entities/sales/animal.rs");
+    let source = std::fs::read_to_string(&entity).unwrap();
+    std::fs::write(
+        &entity,
+        source.replace(
+            "pub struct Animal {}",
+            "pub struct Animal {\n    pub name: MxString,\n    pub birth_date: MxDateTime,\n    pub active: MxBool,\n}",
+        ),
+    )
+    .unwrap();
+    scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Animal", &root)
+            .page_template(Some("crud".into()))
+            .atlas(true),
+    )
+    .unwrap();
+    let pages = root.join("frontend/src/pages/sales");
+    let overview = std::fs::read_to_string(pages.join("Animal_Overview.tsx")).unwrap();
+    for expected in [
+        "title={{ en_US: \"Animals\" }}",
+        "datasource: <CustomWidgetXPathSource",
+        "entityRef=\"Sales.Animal\"",
+        "attribute: \"Sales.Animal.Name\"",
+        "attribute: \"Sales.Animal.BirthDate\"",
+        "attribute: \"Sales.Animal.Active\"",
+        "header: { en_US: \"Birth Date\" }",
+        "entityRef=\"Sales.Animal\"",
+        "form=\"Sales.Animal_Edit\"",
+        "parameter=\"Sales.Animal_Edit.Animal\"",
+        "widget=\"dataGrid2_1\"",
+        "content={{ en_US: \"Animals\" }}",
+    ] {
+        assert!(overview.contains(expected), "{expected}\n{overview}");
+    }
+    assert!(!overview.contains("widget=\"list\""), "{overview}");
+    let edit = std::fs::read_to_string(pages.join("Animal_Edit.tsx")).unwrap();
+    for expected in [
+        "title={{ en_US: \"Animal\" }}",
+        "<PageParameter",
+        "<DataViewSource sourceVariable=\"Animal\" />",
+        "attributeRef=\"Sales.Animal.Name\"",
+        "attributeRef=\"Sales.Animal.BirthDate\"",
+        "SaveChangesClientAction",
+    ] {
+        assert!(edit.contains(expected), "{expected}\n{edit}");
+    }
+    let navigation =
+        std::fs::read_to_string(root.join("frontend/src/navigation/index.ts")).unwrap();
+    assert!(navigation.contains("Sales.Animal_Overview"), "{navigation}");
+    // The project still builds its model with both pages. The templates
+    // have served: the fixture is not a model a build restores, so it goes.
+    std::fs::remove_dir_all(root.join("model")).unwrap();
+    let output = cargo(
+        &root,
+        &["run", "--offline", "--quiet", "--", "build/Atlas.mpr"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

@@ -173,6 +173,7 @@ pub fn apply_with_frontend(
     crate_name: &str,
     project: &mut ProjectDecl,
     frontend: mxrs_frontend::FrontendDecl,
+    installed: &std::collections::BTreeSet<String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     // A nanoflow Rust names as the frontend's is one the frontend declares:
     // a page would otherwise call a nanoflow that was renamed or removed.
@@ -225,7 +226,7 @@ pub fn apply_with_frontend(
         if declaration.stage > Stage::Nanoflow
             && let Some(declared) = nanoflows.take()
         {
-            add_nanoflows(project, declared, &origins)?;
+            add_nanoflows(project, declared, &origins, installed)?;
         }
         if declaration.stage > Stage::Navigation
             && let Some(declared) = navigation.take()
@@ -235,21 +236,25 @@ pub fn apply_with_frontend(
         declaration.apply(project);
     }
     if let Some(declared) = nanoflows {
-        add_nanoflows(project, declared, &origins)?;
+        add_nanoflows(project, declared, &origins, installed)?;
     }
     if let Some(declared) = navigation {
         project.navigation = Some(declared);
     }
-    add_forms(project, forms, &form_origins)
+    add_forms(project, forms, &form_origins, installed)
 }
 
-/// The module the frontend declares something of. One no Rust declaration
-/// made is a module the project installed: what the frontend states of it
-/// is written, and the rest of it is left as the model holds it.
-fn module_of<'a>(project: &'a mut ProjectDecl, name: &str) -> &'a mut mxrs_ir::ModuleDecl {
-    let declared = project.modules.iter().any(|module| module.name == name);
+/// The module the frontend declares something of. One the project
+/// installed — the imported model says which — is written as installed:
+/// what the frontend states of it, and the rest as the model holds it.
+/// Any other is the project's own, whether or not Rust declared it yet.
+fn module_of<'a>(
+    project: &'a mut ProjectDecl,
+    name: &str,
+    installed: &std::collections::BTreeSet<String>,
+) -> &'a mut mxrs_ir::ModuleDecl {
     let module = project.module_mut(name);
-    if !declared {
+    if installed.contains(name) {
         module.installed = true;
     }
     module
@@ -261,9 +266,10 @@ fn add_forms(
     project: &mut ProjectDecl,
     forms: Vec<(String, mxrs_ir::FormDecl)>,
     origins: &std::collections::HashMap<String, String>,
+    installed: &std::collections::BTreeSet<String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     for (module, form) in forms {
-        let declared = module_of(project, &module);
+        let declared = module_of(project, &module, installed);
         let twice = match form.kind() {
             "Forms$Page" => declared.pages.iter().any(|page| page.name == form.name()),
             "Forms$Layout" => declared
@@ -292,14 +298,31 @@ fn add_forms(
 }
 
 /// Adds the nanoflows the frontend declares to their modules; one Rust
-/// declares too is declared twice.
+/// declares too is declared twice, and one for a module the project
+/// installed has no module of the project's to be written into.
 fn add_nanoflows(
     project: &mut ProjectDecl,
     nanoflows: Vec<(String, mxrs_ir::flow::MicroflowDecl)>,
     origins: &std::collections::HashMap<String, String>,
+    installed: &std::collections::BTreeSet<String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     for (module, nanoflow) in nanoflows {
-        let declared = module_of(project, &module);
+        let declared = module_of(project, &module, installed);
+        if declared.installed {
+            let qualified = format!("{module}.{}", nanoflow.name);
+            let (path, line) = origins
+                .get(&qualified)
+                .and_then(|origin| origin.rsplit_once(':'))
+                .and_then(|(path, line)| Some((path.to_string(), line.parse().ok()?)))
+                .unwrap_or_else(|| ("frontend/src/services".to_string(), 1));
+            return Err(mxrs_frontend::FrontendError::Shape {
+                path,
+                line,
+                detail: format!(
+                    "nanoflow {qualified} is declared for a module the project installed, which is written as installed; declare it in a module of the project's own"
+                ),
+            });
+        }
         if declared
             .nanoflows
             .iter()
@@ -342,5 +365,71 @@ mod tests {
         assert!(Stage::Entity < Stage::Security);
         assert!(Stage::Security < Stage::Microflow);
         assert!(Stage::Microflow < Stage::Page);
+    }
+}
+
+#[cfg(test)]
+mod installed_tests {
+    use super::*;
+
+    fn installed(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_module_is_installed_only_when_the_imported_model_says_so() {
+        let mut project = ProjectDecl {
+            mendix_version: "11.12.1".into(),
+            modules: vec![],
+            security: None,
+            navigation: None,
+            demo_users: vec![],
+        };
+        let atlas = installed(&["Atlas_Core"]);
+        // The frontend's only module: the project's own, not installed.
+        assert!(!module_of(&mut project, "Portal", &atlas).installed);
+        assert!(module_of(&mut project, "Atlas_Core", &atlas).installed);
+        // Asked again, the same modules.
+        assert_eq!(project.modules.len(), 2);
+        assert!(!module_of(&mut project, "Portal", &atlas).installed);
+    }
+
+    #[test]
+    fn a_nanoflow_for_an_installed_module_is_refused_where_it_is_declared() {
+        let mut project = ProjectDecl {
+            mendix_version: "11.12.1".into(),
+            modules: vec![],
+            security: None,
+            navigation: None,
+            demo_users: vec![],
+        };
+        let mut origins = std::collections::HashMap::new();
+        origins.insert(
+            "Atlas_Core.NAN_X".to_string(),
+            "frontend/src/services/atlas_core/atlasService.ts:12".to_string(),
+        );
+        let nanoflow = mxrs_ir::flow::MicroflowDecl::new("NAN_X");
+        let error = add_nanoflows(
+            &mut project,
+            vec![("Atlas_Core".to_string(), nanoflow.clone())],
+            &origins,
+            &installed(&["Atlas_Core"]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("Atlas_Core.NAN_X") && error.contains("installed"),
+            "{error}"
+        );
+        assert!(error.contains("atlasService.ts"), "{error}");
+        // For the project's own module, it is declared.
+        add_nanoflows(
+            &mut project,
+            vec![("Portal".to_string(), nanoflow)],
+            &origins,
+            &installed(&["Atlas_Core"]),
+        )
+        .unwrap();
+        assert_eq!(project.module_mut("Portal").nanoflows.len(), 1);
     }
 }

@@ -80,13 +80,28 @@ pub fn expand(args: &ApplicationArgs, item: &ItemStruct) -> Result<TokenStream> 
                 frontend: impl ::core::convert::AsRef<::std::path::Path>,
             ) -> ::core::result::Result<::mxrs::ProjectDecl, ::mxrs::FrontendError> {
                 use ::mxrs::ApplicationDefinition as _;
+                let frontend = frontend.as_ref();
                 let declared = ::mxrs::read_frontend(frontend)?;
+                // The modules the project installed: the imported model
+                // beside the frontend says which.
+                let installed = frontend
+                    .parent()
+                    .map(|root| root.join("model/imported"))
+                    .filter(|snapshot| snapshot.join("manifest.json").is_file())
+                    .map(::mxrs::installed_modules)
+                    .transpose()
+                    .map_err(|error| ::mxrs::FrontendError::Syntax {
+                        path: "model/imported".to_string(),
+                        detail: error.to_string(),
+                    })?
+                    .unwrap_or_default();
                 let mut declaration = #base;
                 declaration.mendix_version = Self::MENDIX_VERSION.to_string();
                 ::mxrs::registry::apply_with_frontend(
                     ::mxrs::registry::crate_of(::core::module_path!()),
                     &mut declaration,
                     declared,
+                    &installed,
                 )?;
                 ::core::result::Result::Ok(declaration)
             }

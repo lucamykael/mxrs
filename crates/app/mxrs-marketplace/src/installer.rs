@@ -332,15 +332,16 @@ fn shared_widget(relative: &str) -> bool {
 }
 
 /// Whether the widget a package brings takes the place of the one the
-/// project has: when there is none, or when it is a newer version. The same
-/// file, an older one, or one whose version cannot be read leaves the
-/// project's alone.
+/// project has: when there is none, when it is a newer version, or when the
+/// project's states no version to compare. The same file, an older one, or
+/// one whose own version cannot be read leaves the project's alone.
 fn replaces_widget(incoming: &Path, existing: &Path) -> bool {
     if !existing.is_file() {
         return true;
     }
     match (widget_version(incoming), widget_version(existing)) {
         (Some(incoming), Some(existing)) => incoming > existing,
+        (Some(_), None) => true,
         _ => false,
     }
 }

@@ -2,6 +2,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum WriterError {
+    #[error(
+        "module {module} is one the project installed, and the project declares {what} of it; an installed module is written as installed — declare them in a module of the project's own"
+    )]
+    InstalledModuleDeclared { module: String, what: String },
+
     #[error("flow {flow:?} has invalid variable {variable:?}: {reason}")]
     InvalidFlowVariable {
         flow: String,

@@ -26,6 +26,7 @@ import {
   Row,
   Shell,
   Sidebar,
+  type FilterKind,
 } from './context';
 import {
   child,
@@ -377,7 +378,11 @@ const LayoutGrid: Draw = (source) => {
     plain(source, 'width', 'FullWidth') === 'FullWidth'
       ? ['mx-layoutgrid-fluid', 'container-fluid']
       : ['mx-layoutgrid-fixed', 'container'];
-  return <div className={className(source, 'mx-layoutgrid', ...width)}>{content(source)}</div>;
+  return (
+    <div className={className(source, 'mx-layoutgrid', ...width)} style={styleOf(source)}>
+      {content(source)}
+    </div>
+  );
 };
 
 const LayoutGridRow: Draw = (source) => (
@@ -410,11 +415,17 @@ const DynamicText: Draw = (source) => {
     'h1' | 'p' | 'span';
   const row = useContext(Row);
   const object = useContext(Draft)?.object ?? row;
-  return <Tag className={className(source, 'mx-text')}>{text(source, 'content', object)}</Tag>;
+  return (
+    <Tag className={className(source, 'mx-text')} style={styleOf(source)}>
+      {text(source, 'content', object)}
+    </Tag>
+  );
 };
 
 const StaticText: Draw = (source) => (
-  <span className={className(source, 'mx-text')}>{text(source, 'caption')}</span>
+  <span className={className(source, 'mx-text')} style={styleOf(source)}>
+    {text(source, 'caption')}
+  </span>
 );
 
 const Label: Draw = (source) => (
@@ -428,6 +439,7 @@ const ActionButton: Draw = (source) => {
     <button
       type="button"
       className={className(source, 'btn', 'mx-button', `btn-${style}`)}
+      style={styleOf(source)}
       title={text(source, 'tooltip') || undefined}
       onClick={act}
     >
@@ -887,12 +899,35 @@ const memberOf = (object: DataObject | null, attribute: unknown): unknown =>
     ? object.members[lastName(attribute)]
     : undefined;
 
-/** Whether a row passes what the user typed into a column's filter. */
-function passes(column: Stated, object: DataObject, filter: string | undefined): boolean {
-  if (!filter) return true;
+/** What a filter holds: what the user chose, and how it narrows. */
+type Filter = { value: string; kind: FilterKind };
+
+/** Whether a value passes a filter: contains the text, equals the option, or falls on the day. */
+function matches(value: unknown, filter: Filter): boolean {
+  switch (filter.kind) {
+    case 'option':
+      return String(value) === filter.value || shown(value) === filter.value;
+    case 'date':
+      return typeof value === 'string' && value.startsWith(filter.value);
+    default:
+      return shown(value).toLowerCase().includes(filter.value.toLowerCase());
+  }
+}
+
+/** Whether a row passes what the user chose in a column's filter. */
+function passes(column: Stated, object: DataObject, filter: Filter | undefined): boolean {
+  if (!filter?.value) return true;
   const value = memberOf(object, column.attribute);
-  if (value === undefined) return true;
-  return shown(value).toLowerCase().includes(filter.toLowerCase());
+  return value === undefined || matches(value, filter);
+}
+
+/** Whether a row passes the grid's own filter: any attribute column of it does. */
+function passesAny(columns: Stated[], object: DataObject, filter: Filter | undefined): boolean {
+  if (!filter?.value) return true;
+  const values = columns
+    .map((column) => memberOf(object, column.attribute))
+    .filter((value) => value !== undefined);
+  return values.length === 0 || values.some((value) => matches(value, filter));
 }
 
 /** The pages of a list, as the widget's pagination says: all of it, or so many at a time. */
@@ -960,15 +995,18 @@ const Datagrid: Draw = (source) => {
   const entity = sourceEntity(property(source, 'datasource'));
   const objects = useObjects(entity);
   const columns = statedList(property(source, 'columns'));
-  const [filters, setFilters] = useState<Record<number, string>>({});
-  const rows = (objects ?? []).filter((object) =>
-    columns.every((column, index) => passes(column, object, filters[index])),
+  // Each column's filter by its index; the grid's own, above the columns, by -1.
+  const [filters, setFilters] = useState<Record<number, Filter>>({});
+  const rows = (objects ?? []).filter(
+    (object) =>
+      passesAny(columns, object, filters[-1]) &&
+      columns.every((column, index) => passes(column, object, filters[index])),
   );
   const paging = usePaging(rows.length, source);
   const filter = (index: number) => ({
-    value: filters[index] ?? '',
-    set: (value: string) => {
-      setFilters((now) => ({ ...now, [index]: value }));
+    value: filters[index]?.value ?? '',
+    set: (value: string, kind: FilterKind) => {
+      setFilters((now) => ({ ...now, [index]: { value, kind } }));
       paging.reset();
     },
   });
@@ -992,7 +1030,11 @@ const Datagrid: Draw = (source) => {
   return (
     <div className={className(source, 'widget-datagrid')}>
       {filtersPlaceholder ? (
-        <div className="widget-datagrid-header header-filters">{inside(filtersPlaceholder)}</div>
+        <div className="widget-datagrid-header header-filters">
+          <ColumnFilter.Provider value={filter(-1)}>
+            {inside(filtersPlaceholder)}
+          </ColumnFilter.Provider>
+        </div>
       ) : null}
       <div className="widget-datagrid-content">
         <div
@@ -1066,7 +1108,12 @@ const Datagrid: Draw = (source) => {
 const Gallery: Draw = (source) => {
   const entity = sourceEntity(property(source, 'datasource'));
   const objects = useObjects(entity);
-  const paging = usePaging(objects?.length ?? 0, source);
+  const [filter, setFilter] = useState<Filter>();
+  const items = (objects ?? []).filter(
+    (object) =>
+      !filter?.value || Object.values(object.members).some((value) => matches(value, filter)),
+  );
+  const paging = usePaging(items.length, source);
   const across = (key: string, otherwise: number) =>
     Math.max(1, Number(property(source, key) ?? otherwise) || otherwise);
   const desktop = across('desktopItems', 4);
@@ -1082,10 +1129,22 @@ const Gallery: Draw = (source) => {
       )}
     >
       {filtersPlaceholder ? (
-        <div className="widget-gallery-filter">{inside(filtersPlaceholder)}</div>
+        <div className="widget-gallery-filter">
+          <ColumnFilter.Provider
+            value={{
+              value: filter?.value ?? '',
+              set: (value, kind) => {
+                setFilter({ value, kind });
+                paging.reset();
+              },
+            }}
+          >
+            {inside(filtersPlaceholder)}
+          </ColumnFilter.Provider>
+        </div>
       ) : null}
       <div className="widget-gallery-items" aria-busy={entity !== '' && objects === undefined}>
-        {(objects ?? []).slice(paging.first, paging.last).map((object) => (
+        {items.slice(paging.first, paging.last).map((object) => (
           <div className="widget-gallery-item" key={object.id}>
             <OfRow object={object}>{inside(property(source, 'content'))}</OfRow>
           </div>
@@ -1113,7 +1172,7 @@ const TextFilter: Draw = (source) => {
         type="text"
         placeholder={widgetText(source, 'placeholder')}
         value={filter?.value ?? ''}
-        onChange={(event) => filter?.set(event.target.value)}
+        onChange={(event) => filter?.set(event.target.value, 'text')}
       />
     </div>
   );
@@ -1128,7 +1187,7 @@ const DropdownFilter: Draw = (source) => {
       <select
         className="form-control filter-input"
         value={filter?.value ?? ''}
-        onChange={(event) => filter?.set(event.target.value)}
+        onChange={(event) => filter?.set(event.target.value, 'option')}
       >
         <option value="">{widgetText(source, 'emptyOptionCaption')}</option>
         {options.map((option, index) => (
@@ -1150,7 +1209,7 @@ const DateFilter: Draw = (source) => {
         className="form-control filter-input"
         type="date"
         value={filter?.value ?? ''}
-        onChange={(event) => filter?.set(event.target.value)}
+        onChange={(event) => filter?.set(event.target.value, 'date')}
       />
     </div>
   );

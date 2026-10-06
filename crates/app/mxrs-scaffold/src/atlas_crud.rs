@@ -255,6 +255,20 @@ fn bind_datagrid(widget: &mut Document, entity: &str, attributes: &[CrudAttribut
     Ok(())
 }
 
+/// Makes every page variable of `page` the one of the widget `widget`: the
+/// grid a row's button gives the page the row of.
+fn name_page_variables(page: &mut Document, widget: &str) {
+    if widget.is_empty() {
+        return;
+    }
+    walk_document(page, &mut |inner| {
+        if ty(inner) == "Forms$PageVariable" && inner.contains_key("Widget") {
+            inner.insert("Widget", widget);
+        }
+        false
+    });
+}
+
 /// Replaces, in `page`, the action of the first button whose action is of
 /// `action_type` with `action`.
 fn rebind_button(page: &mut Document, action_type: &str, action: Document) -> bool {
@@ -319,11 +333,13 @@ pub(crate) fn pages(crud: &Crud<'_>) -> Result<(Document, Document, Vec<String>)
     let what = format!("Atlas template {OVERVIEW_TEMPLATE}");
     let mut bound = false;
     let mut failure = None;
+    let mut grid_name = String::new();
     walk_document(&mut list, &mut |inner| {
         if ty(inner) == "CustomWidgets$CustomWidget" && widget_id(inner) == DATAGRID {
             if let Err(error) = bind_datagrid(inner, entity, attributes) {
                 failure = Some(error);
             }
+            grid_name = inner.get_str("Name").unwrap_or_default().to_string();
             bound = true;
             true
         } else {
@@ -352,6 +368,13 @@ pub(crate) fn pages(crud: &Crud<'_>) -> Result<(Document, Document, Vec<String>)
             ));
         }
     }
+    // A row's button gives the page the row: the variable names the grid
+    // the row is of, which is the template's, not mxrs's own list.
+    name_page_variables(&mut list, &grid_name);
+    // The pages are titled as mxrs's own: the entity's name, its plural.
+    if let Some(title) = own_overview.get("Title") {
+        list.insert("Title", title.clone());
+    }
     let title = humanize(&plural(entity_name));
     walk_document(&mut list, &mut |inner| {
         if ty(inner) == "Forms$DynamicText"
@@ -378,6 +401,9 @@ pub(crate) fn pages(crud: &Crud<'_>) -> Result<(Document, Document, Vec<String>)
     let what = format!("Atlas template {EDIT_TEMPLATE}");
     if let Some(parameters) = own_edit.get("Parameters") {
         form.insert("Parameters", parameters.clone());
+    }
+    if let Some(title) = own_edit.get("Title") {
+        form.insert("Title", title.clone());
     }
     let own_view = find(own_edit, &|inner| ty(inner) == "Forms$DataView")
         .ok_or_else(|| invalid(&edit_name, "mxrs's own edit page has no data view"))?;
@@ -536,6 +562,41 @@ mod tests {
         ));
         assert!(find(&page, &|inner| ty(inner) == "Forms$DeleteClientAction").is_some());
         assert!(find(&page, &|inner| ty(inner) == "Forms$Nothing").is_none());
+    }
+
+    #[test]
+    fn a_pages_variables_name_the_grid_a_row_is_of() {
+        let mut variable = Document::new();
+        variable.insert("$ID", id());
+        variable.insert("$Type", "Forms$PageVariable");
+        variable.insert("Widget", "list");
+        let mut other = Document::new();
+        other.insert("$ID", id());
+        other.insert("$Type", "Forms$PageVariable");
+        other.insert("UseAllPages", true);
+        let mut page = Document::new();
+        page.insert("$Type", "Forms$Page");
+        page.insert(
+            "Widgets",
+            build_array(vec![Bson::Document(variable), Bson::Document(other)], 2),
+        );
+        name_page_variables(&mut page, "dataGrid2_1");
+        let variables: Vec<Document> = items(&page, "Widgets")
+            .into_iter()
+            .map(|item| item.as_document().unwrap().clone())
+            .collect();
+        assert_eq!(variables[0].get_str("Widget").unwrap(), "dataGrid2_1");
+        assert!(variables[1].get("Widget").is_none());
+        // Nothing to name: nothing changes.
+        name_page_variables(&mut page, "");
+        assert_eq!(
+            items(&page, "Widgets")[0]
+                .as_document()
+                .unwrap()
+                .get_str("Widget")
+                .unwrap(),
+            "dataGrid2_1"
+        );
     }
 
     #[test]

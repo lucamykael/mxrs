@@ -58,24 +58,35 @@ impl Image {
     }
 }
 
-/// What a model holds of both.
+/// What a model holds of both, and what of it is not written: a
+/// collection or an image whose name is not one a file may be named with,
+/// or an image in a format a browser does not show.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Collections {
     pub icons: Vec<IconCollection>,
     pub images: Vec<Image>,
+    pub skipped: Vec<String>,
+}
+
+/// Whether a name of the model's may name a file: a Mendix identifier.
+fn file_safe(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 const ICON_COLLECTION: &str = "CustomIcons$CustomIconCollection";
 const IMAGE_COLLECTION: &str = "Images$ImageCollection";
 
-fn extension(format: &str) -> &'static str {
+fn extension(format: &str) -> Option<&'static str> {
     match format {
-        "Svg" => "svg",
-        "Png" => "png",
-        "Jpeg" => "jpg",
-        "Gif" => "gif",
-        "Bmp" => "bmp",
-        _ => "bin",
+        "Svg" => Some("svg"),
+        "Png" => Some("png"),
+        "Jpeg" => Some("jpg"),
+        "Gif" => Some("gif"),
+        "Bmp" => Some("bmp"),
+        _ => None,
     }
 }
 
@@ -100,9 +111,22 @@ pub fn of_documents<'a>(
     documents: impl IntoIterator<Item = &'a Document>,
 ) -> Collections {
     let mut collections = Collections::default();
+    if !file_safe(module) {
+        collections.skipped.push(format!(
+            "module {module:?}: not a name a file may be named with"
+        ));
+        return collections;
+    }
     for document in documents {
         let name = document.get_str("Name").unwrap_or_default().to_string();
-        match document.get_str("$Type").unwrap_or_default() {
+        let ty = document.get_str("$Type").unwrap_or_default();
+        if matches!(ty, ICON_COLLECTION | IMAGE_COLLECTION) && !file_safe(&name) {
+            collections.skipped.push(format!(
+                "{module}.{name:?}: not a name a file may be named with"
+            ));
+            continue;
+        }
+        match ty {
             ICON_COLLECTION => collections.icons.push(IconCollection {
                 module: module.to_string(),
                 name,
@@ -129,12 +153,24 @@ pub fn of_documents<'a>(
                     let Ok(image_name) = image.get_str("Name") else {
                         continue;
                     };
+                    if !file_safe(image_name) {
+                        collections.skipped.push(format!(
+                            "{module}.{name}.{image_name:?}: not a name a file may be named with"
+                        ));
+                        continue;
+                    }
+                    let format = image.get_str("ImageFormat").unwrap_or_default();
+                    let Some(extension) = extension(format) else {
+                        collections.skipped.push(format!(
+                            "{module}.{name}.{image_name}: {format:?} is not a format a browser shows"
+                        ));
+                        continue;
+                    };
                     collections.images.push(Image {
                         module: module.to_string(),
                         collection: name.clone(),
                         name: image_name.to_string(),
-                        extension: extension(image.get_str("ImageFormat").unwrap_or_default())
-                            .to_string(),
+                        extension: extension.to_string(),
                         bytes: binary(&image, "Image"),
                     });
                 }
@@ -161,6 +197,7 @@ pub fn of_model(mpr: &Path) -> Result<Collections, String> {
         let found = of_documents(name, &module.artifact_units);
         collections.icons.extend(found.icons);
         collections.images.extend(found.images);
+        collections.skipped.extend(found.skipped);
     }
     collections
         .icons
@@ -230,6 +267,10 @@ pub struct Written {
     pub images: usize,
     /// The files written anew or changed.
     pub changed: Vec<PathBuf>,
+    /// The files of collections the model no longer has, removed.
+    pub removed: Vec<PathBuf>,
+    /// What the model holds that was not written, and why.
+    pub skipped: Vec<String>,
 }
 
 fn keep(path: &Path, bytes: &[u8], written: &mut Written) -> Result<(), String> {
@@ -245,38 +286,71 @@ fn keep(path: &Path, bytes: &[u8], written: &mut Written) -> Result<(), String> 
     Ok(())
 }
 
+/// Removes, under `folder`, every file not in `kept`: what a collection the
+/// model no longer has left behind.
+fn prune(
+    folder: &Path,
+    kept: &std::collections::BTreeSet<PathBuf>,
+    written: &mut Written,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_file() && !kept.contains(&path) {
+            std::fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            written.removed.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Writes the collections of the model at `mpr` beside the compiled theme
 /// of the project at `root`, each file only when it is not already what it
-/// would be.
+/// would be, and removes what earlier collections left that the model no
+/// longer has.
 pub fn write(root: &Path, mpr: &Path) -> Result<Written, String> {
     let collections = of_model(mpr)?;
     let folder = root.join("assets/theme-cache/web");
-    let mut written = Written::default();
+    let mut written = Written {
+        skipped: collections.skipped.clone(),
+        ..Written::default()
+    };
+    let mut kept = std::collections::BTreeSet::new();
     for collection in &collections.icons {
-        keep(
-            &folder.join(format!("fonts/{}.ttf", collection.font_name())),
-            &collection.font,
-            &mut written,
-        )?;
+        let font = folder.join(format!("fonts/{}.ttf", collection.font_name()));
+        keep(&font, &collection.font, &mut written)?;
+        kept.insert(font);
         written.fonts += 1;
         written.icons += collection.icons.len();
     }
     for image in &collections.images {
-        keep(&folder.join(image.file()), &image.bytes, &mut written)?;
+        let file = folder.join(image.file());
+        keep(&file, &image.bytes, &mut written)?;
+        kept.insert(file);
         written.images += 1;
     }
+    prune(&folder.join("fonts"), &kept, &mut written)?;
+    prune(&folder.join("img"), &kept, &mut written)?;
+    let stylesheet_file = folder.join("collections.css");
+    let manifest_file = folder.join("collections.json");
     if collections.icons.is_empty() && collections.images.is_empty() {
+        for stale in [stylesheet_file, manifest_file] {
+            if stale.is_file() {
+                std::fs::remove_file(&stale)
+                    .map_err(|error| format!("{}: {error}", stale.display()))?;
+                written.removed.push(stale);
+            }
+        }
         return Ok(written);
     }
     keep(
-        &folder.join("collections.css"),
+        &stylesheet_file,
         stylesheet(&collections).as_bytes(),
         &mut written,
     )?;
     let manifest = serde_json::to_string_pretty(&manifest(&collections))
         .expect("the collections manifest is serializable");
     keep(
-        &folder.join("collections.json"),
+        &manifest_file,
         format!("{manifest}\n").as_bytes(),
         &mut written,
     )?;
@@ -287,11 +361,24 @@ pub fn write(root: &Path, mpr: &Path) -> Result<Written, String> {
 /// whose collections cannot be read is a warning — the build stands.
 pub fn write_and_report(root: &Path, mpr: &Path) {
     match write(root, mpr) {
-        Ok(written) if written.changed.is_empty() => {}
-        Ok(written) => println!(
-            "[mxrs] wrote {} icon font(s) ({} icons) and {} image(s) to assets/theme-cache/web",
-            written.fonts, written.icons, written.images
-        ),
+        Ok(written) => {
+            for skipped in &written.skipped {
+                eprintln!("[mxrs] warning: not written to assets/theme-cache/web: {skipped}");
+            }
+            if !written.changed.is_empty() || !written.removed.is_empty() {
+                println!(
+                    "[mxrs] wrote {} icon font(s) ({} icons) and {} image(s) to assets/theme-cache/web{}",
+                    written.fonts,
+                    written.icons,
+                    written.images,
+                    if written.removed.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", removed {} file(s)", written.removed.len())
+                    }
+                );
+            }
+        }
         Err(error) => eprintln!("[mxrs] warning: {error}"),
     }
 }
@@ -374,7 +461,23 @@ mod tests {
             manifest["images"]["Atlas_Core.Layout.logo"],
             "img/Atlas_Core$Layout$logo.svg"
         );
-        assert_eq!(extension("Jpeg"), "jpg");
+        assert_eq!(extension("Jpeg"), Some("jpg"));
+        assert_eq!(extension("Tiff"), None);
+        // A name no file may be named with, or a format no browser shows, is said, not written.
+        let mut odd = image_collection();
+        odd.insert("Name", "../Layout");
+        let mut odd_format = image_collection();
+        odd_format.insert("Images", build_array(vec![
+            Bson::Document(doc! { "$Type": "Images$Image", "Name": "photo", "ImageFormat": "Tiff", "Image": Bson::Binary(mxrs_bson::Binary { subtype: mxrs_bson::BinarySubtype::Generic, bytes: b"x".to_vec() }) }),
+        ], 2));
+        let skipped = of_documents("Atlas_Core", &[odd, odd_format]);
+        assert!(skipped.images.is_empty());
+        assert_eq!(skipped.skipped.len(), 2, "{:?}", skipped.skipped);
+        assert!(
+            of_documents("../core", &[image_collection()])
+                .images
+                .is_empty()
+        );
     }
 
     #[test]
@@ -403,5 +506,14 @@ mod tests {
             std::fs::read_to_string(folder.join("collections.css")).unwrap(),
             stylesheet(&collections)
         );
+        // What an earlier model left under the folders is removed.
+        std::fs::create_dir_all(folder.join("fonts")).unwrap();
+        std::fs::write(folder.join("fonts/Gone$Icons.ttf"), b"old").unwrap();
+        let kept = std::collections::BTreeSet::from([folder.join("fonts/Kept$Icons.ttf")]);
+        std::fs::write(folder.join("fonts/Kept$Icons.ttf"), b"kept").unwrap();
+        let mut pruned = Written::default();
+        prune(&folder.join("fonts"), &kept, &mut pruned).unwrap();
+        assert_eq!(pruned.removed, vec![folder.join("fonts/Gone$Icons.ttf")]);
+        assert!(folder.join("fonts/Kept$Icons.ttf").is_file());
     }
 }

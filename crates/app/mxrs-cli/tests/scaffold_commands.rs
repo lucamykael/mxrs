@@ -777,6 +777,8 @@ fn a_new_project_brings_atlas_from_the_cache() {
         "header: { en_US: \"Email\" }",
         "form=\"Main.Customer_Edit\"",
         "parameter=\"Main.Customer_Edit.Customer\"",
+        "widget=\"dataGrid2_1\"",
+        "title={{ en_US: \"Customers\" }}",
         "content={{ en_US: \"Customers\" }}",
         "<LayoutCall form=\"Atlas_Core.Atlas_Default\">",
     ] {
@@ -785,6 +787,7 @@ fn a_new_project_brings_atlas_from_the_cache() {
     let edit =
         std::fs::read_to_string(root.join("frontend/src/pages/main/Customer_Edit.tsx")).unwrap();
     for expected in [
+        "title={{ en_US: \"Customer\" }}",
         "<PageParameter",
         "<DataViewSource sourceVariable=\"Customer\" />",
         "attributeRef=\"Main.Customer.Name\"",

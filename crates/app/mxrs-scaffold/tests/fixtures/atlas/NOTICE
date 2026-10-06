@@ -1,0 +1,4 @@
+Grid.mxdoc and Form_Vertical_Edit.mxdoc are two page templates of Atlas Web
+Content 4.4.0 (Mendix Marketplace content 117183, Apache License 2.0), as the
+model stores them (BSON): what `mxrs page new --template Grid` and
+`--template crud --atlas` are tested against without the Marketplace.

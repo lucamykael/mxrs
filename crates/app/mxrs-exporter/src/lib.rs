@@ -817,7 +817,7 @@ fn import_cargo_project_inner(
     )?;
     write_text(
         &destination.join(".gitignore"),
-        "/build\n/target\n/frontend/node_modules\n/frontend/dist\n",
+        "/build\n/target\n/frontend/node_modules\n/frontend/dist\n/assets/theme-cache\n",
     )?;
     write_text(
         &destination.join("Dockerfile"),

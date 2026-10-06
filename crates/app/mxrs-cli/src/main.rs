@@ -786,6 +786,9 @@ fn run_new(mut args: Vec<String>) -> ExitCode {
                         ExitCode::SUCCESS
                     }
                     Err(error) => {
+                        // Half a project is no project: what was written
+                        // before the failure is removed.
+                        let _ = std::fs::remove_dir_all(&destination);
                         eprintln!("[mxrs] error: {error}");
                         ExitCode::FAILURE
                     }

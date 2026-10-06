@@ -633,6 +633,31 @@ fn an_installed_modules_entities_stay_known_when_only_its_forms_are_declared() {
         "thing"
     );
 
+    let entities = |path: &Path| {
+        let project = mxrs_model::Project::open(path, true).unwrap();
+        let modules = project.modules().unwrap();
+        let installed = modules
+            .iter()
+            .find(|module| module.name.as_deref() == Some("Installed"))
+            .unwrap();
+        installed
+            .entities()
+            .iter()
+            .filter_map(|entity| entity.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(entities(&path), vec!["Thing".to_string()]);
+    // An installed module with a nanoflow of the project's: refused.
+    project.modules[0]
+        .nanoflows
+        .push(MicroflowDecl::new("NAN_Thing"));
+    let error = mxrs_writer::synchronize_project(&path, &project).unwrap_err();
+    assert!(
+        error.to_string().contains("Installed") && error.to_string().contains("nanoflows"),
+        "{error}"
+    );
+    project.modules[0].nanoflows.clear();
+
     // Declared by the project without them: superseded.
     project.modules[0].installed = false;
     let error = mxrs_writer::synchronize_project(&path, &project).unwrap_err();

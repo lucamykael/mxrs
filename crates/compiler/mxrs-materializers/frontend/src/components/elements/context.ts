@@ -17,10 +17,14 @@ export const Draft = createContext<{
   saved: (object: DataObject) => void;
 } | null>(null);
 
-/** The filter of the grid column being drawn: what the user typed, and how to change it. */
-export const ColumnFilter = createContext<{ value: string; set: (value: string) => void } | null>(
-  null,
-);
+/** How a filter narrows: by a text it contains, an option it equals, or a day it falls on. */
+export type FilterKind = 'text' | 'option' | 'date';
+
+/** The filter being drawn, of a grid's column or of the grid: what the user chose, and how to change it. */
+export const ColumnFilter = createContext<{
+  value: string;
+  set: (value: string, kind: FilterKind) => void;
+} | null>(null);
 
 /** The title of the page being drawn. */
 export const PageTitle = createContext('');

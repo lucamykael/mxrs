@@ -1484,6 +1484,16 @@ fn create_artifact(
         ));
     }
     if options.kind == ArtifactKind::Page
+        && options.atlas
+        && options.page_template.as_deref() != Some(page_templates::CRUD)
+    {
+        return Err(ScaffoldError::InvalidProjectSource {
+            path: format!("{module_name}.{artifact_name}"),
+            reason: "--atlas makes the crud template's pages from Atlas's templates: it goes with `--template crud`"
+                .to_string(),
+        });
+    }
+    if options.kind == ArtifactKind::Page
         && (options.page_template.is_some() || options.page_chain.is_some())
     {
         return create_page_slice(transaction, root, options, module_name, artifact_name);
@@ -1646,9 +1656,6 @@ fn connect_plain_family(
     Ok(())
 }
 
-/// mxrb's `ensure_presentation` creates the module's `ApplicationLayout`
-/// before a page that references it. Ported for pages only: the mxrs family
-/// directories are flat, so a nanoflow has no layout dependency to satisfy.
 /// The layout a page scaffolded into `module_name` is shown in: Atlas's
 /// default when the project has Atlas, the module's own otherwise — which
 /// is declared for it when it has none yet.
@@ -1671,6 +1678,9 @@ fn page_layout(
     ))
 }
 
+/// mxrb's `ensure_presentation` creates the module's `ApplicationLayout`
+/// before a page that references it. Ported for pages only: the mxrs family
+/// directories are flat, so a nanoflow has no layout dependency to satisfy.
 fn ensure_module_layout(
     transaction: &mut Transaction,
     root: &Path,

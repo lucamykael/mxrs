@@ -163,8 +163,26 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             }
         };
         // Of a module the project installed, only the forms the frontend
-        // states are written: the rest is the model's, as it was installed.
+        // states are written: the rest is the model's, as it was installed —
+        // and nothing else of it may be declared.
         if decl.installed {
+            let declared: Vec<&str> = [
+                (!decl.entities.is_empty(), "entities"),
+                (!decl.microflows.is_empty(), "microflows"),
+                (!decl.nanoflows.is_empty(), "nanoflows"),
+                (!decl.pages.is_empty(), "pages"),
+                (!decl.layouts.is_empty(), "layouts"),
+                (!decl.enumerations.is_empty(), "enumerations"),
+            ]
+            .into_iter()
+            .filter_map(|(declares, what)| declares.then_some(what))
+            .collect();
+            if !declared.is_empty() {
+                return Err(WriterError::InstalledModuleDeclared {
+                    module: decl.name.clone(),
+                    what: declared.join(", "),
+                });
+            }
             crate::native::synchronize_forms_with_identity(
                 &mut mpr,
                 &module_id,

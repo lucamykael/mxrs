@@ -457,6 +457,32 @@ fn io_error(path: &Path, source: std::io::Error) -> ProjectError {
     }
 }
 
+/// The modules the imported model holds as installed from the Marketplace
+/// (`FromAppStore`), by name: what the project declares nothing of in
+/// Rust, and writes only what the frontend states of.
+pub fn installed_modules(snapshot: impl AsRef<Path>) -> Result<std::collections::BTreeSet<String>> {
+    let snapshot = snapshot.as_ref();
+    let manifest = read_imported_manifest(snapshot)?;
+    let mut installed = std::collections::BTreeSet::new();
+    for unit in &manifest.units {
+        if !matches!(
+            unit.native_type.as_str(),
+            "Projects$Module" | "Projects$ModuleImpl"
+        ) {
+            continue;
+        }
+        let path = snapshot.join(&unit.file);
+        let bytes = std::fs::read(&path).map_err(|error| io_error(&path, error))?;
+        let document = mxrs_bson::parse(&bytes)?;
+        if document.get_bool("FromAppStore").unwrap_or(false)
+            && let Some(name) = &unit.name
+        {
+            installed.insert(name.clone());
+        }
+    }
+    Ok(installed)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
