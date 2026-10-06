@@ -17,7 +17,16 @@ import {
 import { invokeAction } from '@/api/actions';
 import { data, type DataObject } from '@/api/data';
 
-import { Draft, OfPage, PageTitle, Placeholders, Row, Shell, Sidebar } from './context';
+import {
+  ColumnFilter,
+  Draft,
+  OfPage,
+  PageTitle,
+  Placeholders,
+  Row,
+  Shell,
+  Sidebar,
+} from './context';
 import {
   child,
   className,
@@ -26,6 +35,7 @@ import {
   lastName,
   list,
   plain,
+  shown,
   sourceOf,
   styleOf,
   text,
@@ -542,22 +552,9 @@ const DataView: Draw = (source) => {
 
 /** A list: every object of its entity, each drawn as the widgets inside. */
 const ListView: Draw = (source) => {
-  const { changes, fail } = useContext(Shell);
   const origin = child(source, 'dataSource');
   const entity = origin ? entityOf(origin) : '';
-  const [objects, setObjects] = useState<DataObject[]>();
-  useEffect(() => {
-    if (!entity) return;
-    let current = true;
-    data<{ objects: DataObject[] }>('retrieve', { entity })
-      .then((answer) => current && setObjects(answer.objects))
-      .catch((error) => current && (setObjects([]), fail(error)));
-    return () => {
-      current = false;
-    };
-    // `fail` is the application's own and does not change what is listed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entity, changes]);
+  const objects = useObjects(entity);
   // A list about no entity this page can read shows its widgets once.
   if (!entity) {
     return <section className={className(source, 'mx-listview')}>{content(source)}</section>;
@@ -825,9 +822,478 @@ const ImageWidget: Draw = (source) => {
   return <div className={classes}>{src ? <img src={src} alt="" /> : null}</div>;
 };
 
+// --- data widgets: what a page lists, drawn as Mendix's own widgets draw it ---
+
+/** A column of a grid, or an option of a filter: what the page states of it. */
+type Stated = Record<string, unknown>;
+
+const statedList = (value: unknown): Stated[] =>
+  Array.isArray(value)
+    ? value.filter(
+        (item): item is Stated =>
+          typeof item === 'object' && item !== null && !isValidElement(item),
+      )
+    : [];
+
+/** The entity a pluggable widget's data source lists, when it lists one the runtime can read. */
+function sourceEntity(value: unknown): string {
+  const stated = sourceOf(value);
+  if (!stated) return '';
+  switch (stated.type) {
+    case 'CustomWidgets$CustomWidgetXPathSource':
+    case 'CustomWidgets$CustomWidgetDatabaseSource':
+      return entityOf(stated);
+    default:
+      // A microflow, an association, a listened widget: nothing a page can
+      // ask the runtime for yet.
+      return '';
+  }
+}
+
+/**
+ * The objects of an entity, read again whenever the data changes;
+ * `undefined` while they are on their way, and none for no entity.
+ */
+function useObjects(entity: string): DataObject[] | undefined {
+  const { changes, fail } = useContext(Shell);
+  const [objects, setObjects] = useState<DataObject[]>();
+  useEffect(() => {
+    if (!entity) return;
+    let current = true;
+    data<{ objects: DataObject[] }>('retrieve', { entity })
+      .then((answer) => current && setObjects(answer.objects))
+      .catch((error) => current && (setObjects([]), fail(error)));
+    return () => {
+      current = false;
+    };
+    // `fail` is the application's own and does not change what is listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entity, changes]);
+  return entity ? objects : undefined;
+}
+
+/** The text a pluggable widget's property says: a text, a template, or a widget value holding one. */
+function widgetText(source: Source, key: string, object?: DataObject | null): string {
+  const value = property(source, key);
+  const stated = sourceOf(value);
+  if (!stated) return textOf(value);
+  if (stated.type === 'CustomWidgets$WidgetValue') return text(stated, 'textTemplate', object);
+  return text({ ...source, props: { held: value } }, 'held', object);
+}
+
+/** The value of an object's attribute a pluggable widget's property names. */
+const memberOf = (object: DataObject | null, attribute: unknown): unknown =>
+  object && typeof attribute === 'string' && attribute
+    ? object.members[lastName(attribute)]
+    : undefined;
+
+/** Whether a row passes what the user typed into a column's filter. */
+function passes(column: Stated, object: DataObject, filter: string | undefined): boolean {
+  if (!filter) return true;
+  const value = memberOf(object, column.attribute);
+  if (value === undefined) return true;
+  return shown(value).toLowerCase().includes(filter.toLowerCase());
+}
+
+/** The pages of a list, as the widget's pagination says: all of it, or so many at a time. */
+function usePaging(count: number, source: Source) {
+  const [page, setPage] = useState(0);
+  const size = Math.max(1, Number(property(source, 'pageSize') ?? 10) || 10);
+  const paged = property(source, 'pagination') !== 'virtualScrolling';
+  const pages = Math.max(1, Math.ceil(count / size));
+  const current = paged ? Math.min(page, pages - 1) : 0;
+  const first = current * size;
+  return {
+    paged,
+    first,
+    last: paged ? Math.min(first + size, count) : count,
+    count,
+    back: () => setPage(Math.max(0, current - 1)),
+    forward: () => setPage(Math.min(pages - 1, current + 1)),
+    reset: () => setPage(0),
+  };
+}
+
+/** The bar of a paged list: where it is, and the way back and forward. */
+const PagingBar = ({ paging }: { paging: ReturnType<typeof usePaging> }) => (
+  <div className="pagination-bar">
+    <button
+      type="button"
+      className="btn pagination-button"
+      disabled={paging.first === 0}
+      onClick={paging.back}
+      aria-label="Previous page"
+    >
+      ‹
+    </button>
+    <span className="paging-status">
+      {paging.count ? `${paging.first + 1} to ${paging.last} of ${paging.count}` : '0 to 0 of 0'}
+    </span>
+    <button
+      type="button"
+      className="btn pagination-button"
+      disabled={paging.last >= paging.count}
+      onClick={paging.forward}
+      aria-label="Next page"
+    >
+      ›
+    </button>
+  </div>
+);
+
+/** What a list's rows are drawn about: each its own object, and no form's. */
+const OfRow = ({ object, children }: { object: DataObject; children: ReactNode }) => (
+  <Row.Provider value={object}>
+    <Draft.Provider value={null}>{children}</Draft.Provider>
+  </Row.Provider>
+);
+
+/** The widgets a pluggable widget's property holds, drawn. */
+const inside = (value: unknown): ReactNode => (isValidElement(value) ? value : each(value));
+
+/**
+ * Mendix's Data grid 2: the objects of its entity, a row each, in the
+ * columns the page states — an attribute's value, a text, or widgets of
+ * the page's own — with each column's filter and the grid's pages.
+ */
+const Datagrid: Draw = (source) => {
+  const entity = sourceEntity(property(source, 'datasource'));
+  const objects = useObjects(entity);
+  const columns = statedList(property(source, 'columns'));
+  const [filters, setFilters] = useState<Record<number, string>>({});
+  const rows = (objects ?? []).filter((object) =>
+    columns.every((column, index) => passes(column, object, filters[index])),
+  );
+  const paging = usePaging(rows.length, source);
+  const filter = (index: number) => ({
+    value: filters[index] ?? '',
+    set: (value: string) => {
+      setFilters((now) => ({ ...now, [index]: value }));
+      paging.reset();
+    },
+  });
+  const cell = (column: Stated, object: DataObject): ReactNode => {
+    switch (column.showContentAs) {
+      case 'customContent':
+        return inside(column.content);
+      case 'dynamicText':
+        return text({ ...source, props: { held: column.dynamicText } }, 'held', object);
+      default:
+        return shown(memberOf(object, column.attribute));
+    }
+  };
+  const width = (column: Stated) =>
+    column.width === 'autoFit'
+      ? 'fit-content(100%)'
+      : column.width === 'manual' && typeof column.size === 'number'
+        ? `${column.size}px`
+        : 'minmax(100px, 1fr)';
+  const filtersPlaceholder = property(source, 'filtersPlaceholder');
+  return (
+    <div className={className(source, 'widget-datagrid')}>
+      {filtersPlaceholder ? (
+        <div className="widget-datagrid-header header-filters">{inside(filtersPlaceholder)}</div>
+      ) : null}
+      <div className="widget-datagrid-content">
+        <div
+          className="widget-datagrid-grid table"
+          role="table"
+          style={
+            { '--widgets-grid-template-columns': columns.map(width).join(' ') } as CSSProperties
+          }
+        >
+          <div className="widget-datagrid-grid-head" role="rowgroup">
+            <div className="tr" role="row" style={{ display: 'contents' }}>
+              {columns.map((column, index) => (
+                <div className="th" role="columnheader" key={index}>
+                  <div className="column-container">
+                    <div className="column-header">{textOf(column.header)}</div>
+                    {isValidElement(column.filter) ? (
+                      <div className="filter">
+                        <ColumnFilter.Provider value={filter(index)}>
+                          {column.filter}
+                        </ColumnFilter.Provider>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div
+            className="widget-datagrid-grid-body"
+            role="rowgroup"
+            aria-busy={entity !== '' && objects === undefined}
+          >
+            {rows.slice(paging.first, paging.last).map((object) => (
+              <div className="tr" role="row" key={object.id} style={{ display: 'contents' }}>
+                <OfRow object={object}>
+                  {columns.map((column, index) => (
+                    <div
+                      className={column.wrapText ? 'td wrap-text' : 'td'}
+                      role="cell"
+                      key={index}
+                    >
+                      {cell(column, object)}
+                    </div>
+                  ))}
+                </OfRow>
+              </div>
+            ))}
+          </div>
+        </div>
+        {entity &&
+        objects?.length === 0 &&
+        property(source, 'showEmptyPlaceholder') === 'custom' ? (
+          <div className="widget-datagrid-empty">
+            {inside(property(source, 'emptyPlaceholder'))}
+          </div>
+        ) : null}
+      </div>
+      {paging.paged && entity ? (
+        <div className="widget-datagrid-footer">
+          <PagingBar paging={paging} />
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+/**
+ * Mendix's Gallery: the objects of its entity, each drawn as the widgets
+ * inside, so many to a row as the page says for a desktop.
+ */
+const Gallery: Draw = (source) => {
+  const entity = sourceEntity(property(source, 'datasource'));
+  const objects = useObjects(entity);
+  const paging = usePaging(objects?.length ?? 0, source);
+  const across = (key: string, otherwise: number) =>
+    Math.max(1, Number(property(source, key) ?? otherwise) || otherwise);
+  const desktop = across('desktopItems', 4);
+  const filtersPlaceholder = property(source, 'filtersPlaceholder');
+  return (
+    <div
+      className={className(
+        source,
+        'widget-gallery',
+        `widget-gallery-lg-${desktop}`,
+        `widget-gallery-md-${across('tabletItems', 3)}`,
+        `widget-gallery-sm-${across('phoneItems', 1)}`,
+      )}
+    >
+      {filtersPlaceholder ? (
+        <div className="widget-gallery-filter">{inside(filtersPlaceholder)}</div>
+      ) : null}
+      <div className="widget-gallery-items" aria-busy={entity !== '' && objects === undefined}>
+        {(objects ?? []).slice(paging.first, paging.last).map((object) => (
+          <div className="widget-gallery-item" key={object.id}>
+            <OfRow object={object}>{inside(property(source, 'content'))}</OfRow>
+          </div>
+        ))}
+      </div>
+      {entity && objects?.length === 0 && property(source, 'showEmptyPlaceholder') === 'custom' ? (
+        <div className="widget-gallery-empty">{inside(property(source, 'emptyPlaceholder'))}</div>
+      ) : null}
+      {paging.paged && entity ? (
+        <div className="widget-gallery-footer">
+          <PagingBar paging={paging} />
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+/** A grid column's text filter: what the user types narrows the rows. */
+const TextFilter: Draw = (source) => {
+  const filter = useContext(ColumnFilter);
+  return (
+    <div className={className(source, 'filter-container')}>
+      <input
+        className="form-control filter-input"
+        type="text"
+        placeholder={widgetText(source, 'placeholder')}
+        value={filter?.value ?? ''}
+        onChange={(event) => filter?.set(event.target.value)}
+      />
+    </div>
+  );
+};
+
+/** A grid column's drop-down filter: one of the options the page states, or any. */
+const DropdownFilter: Draw = (source) => {
+  const filter = useContext(ColumnFilter);
+  const options = statedList(property(source, 'filterOptions'));
+  return (
+    <div className={className(source, 'filter-container')}>
+      <select
+        className="form-control filter-input"
+        value={filter?.value ?? ''}
+        onChange={(event) => filter?.set(event.target.value)}
+      >
+        <option value="">{widgetText(source, 'emptyOptionCaption')}</option>
+        {options.map((option, index) => (
+          <option key={index} value={textOf(option.value)}>
+            {textOf(option.caption)}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+};
+
+/** A grid column's date filter: the day typed narrows the rows to it. */
+const DateFilter: Draw = (source) => {
+  const filter = useContext(ColumnFilter);
+  return (
+    <div className={className(source, 'filter-container')}>
+      <input
+        className="form-control filter-input"
+        type="date"
+        value={filter?.value ?? ''}
+        onChange={(event) => filter?.set(event.target.value)}
+      />
+    </div>
+  );
+};
+
+/** Mendix's Combo box: the attribute of the form's object it is about, typed into. */
+const Combobox: Draw = (source) => {
+  const draft = useContext(Draft);
+  const attribute = [
+    'attributeEnumeration',
+    'attributeBoolean',
+    'attributeAssociation',
+    'databaseAttributeString',
+  ]
+    .map((key) => property(source, key))
+    .find((value): value is string => typeof value === 'string' && value !== '');
+  const name = attribute ? lastName(attribute) : '';
+  const value = name ? draft?.object?.members[name] : undefined;
+  // In the group a form's control is in, which is what a theme styles.
+  return (
+    <div className={className(source, 'form-group')}>
+      <div className="widget-combobox">
+        <div className="form-control widget-combobox-input-container">
+          <input
+            className="widget-combobox-input"
+            name={name || undefined}
+            placeholder={widgetText(source, 'emptyOptionText')}
+            value={written(value)}
+            readOnly={!name || !draft}
+            onChange={(event) => name && draft?.set(name, event.target.value)}
+          />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/** Mendix's Badge: its value, as a badge or a label of its style. */
+const Badge: Draw = (source) => {
+  const row = useContext(Row);
+  const object = useContext(Draft)?.object ?? row;
+  const label = property(source, 'type') === 'label';
+  const style =
+    typeof property(source, 'bootstrapStyle') === 'string'
+      ? (property(source, 'bootstrapStyle') as string)
+      : 'default';
+  return (
+    <span
+      className={className(
+        source,
+        'widget-badge',
+        label ? 'label' : 'badge',
+        `${label ? 'label' : 'badge'}-${style}`,
+      )}
+    >
+      {widgetText(source, 'value', object)}
+    </span>
+  );
+};
+
+/** What a progress widget's property says its value is: a number, or the object's attribute. */
+function progressValue(
+  source: Source,
+  name: string,
+  object: DataObject | null,
+  otherwise: number,
+): number {
+  const kind = property(source, 'type');
+  const value =
+    kind === 'dynamic'
+      ? memberOf(object, property(source, `dynamic${name}`))
+      : kind === 'expression'
+        ? undefined
+        : property(source, `static${name}`);
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) ? number : otherwise;
+}
+
+/** The share a progress widget shows, from its value between its minimum and maximum. */
+function usePercentage(source: Source): number {
+  const row = useContext(Row);
+  const object = useContext(Draft)?.object ?? row;
+  const value = progressValue(source, 'CurrentValue', object, 0);
+  const minimum = progressValue(source, 'MinValue', object, 0);
+  const maximum = progressValue(source, 'MaxValue', object, 100);
+  const share = maximum > minimum ? ((value - minimum) / (maximum - minimum)) * 100 : 0;
+  return Math.round(Math.max(0, Math.min(100, share)));
+}
+
+/** Mendix's Progress bar: how far along its value is. */
+const ProgressBar: Draw = (source) => {
+  const percentage = usePercentage(source);
+  return (
+    <div className={className(source, 'widget-progress-bar')}>
+      <div className="progress">
+        <div className="progress-bar" role="progressbar" style={{ width: `${percentage}%` }}>
+          {property(source, 'showLabel') === false ? null : `${percentage}%`}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/** Mendix's Progress circle: the same, as a ring. */
+const ProgressCircle: Draw = (source) => {
+  const percentage = usePercentage(source);
+  return (
+    <div className={className(source, 'widget-progress-circle')}>
+      <div
+        className="progress-circle"
+        role="progressbar"
+        style={{ background: `conic-gradient(currentColor ${percentage}%, transparent 0)` }}
+      >
+        <span className="progress-circle-label">{`${percentage}%`}</span>
+      </div>
+    </div>
+  );
+};
+
+/** A widget drawn as the box its own stylesheet styles: its classes, and what it holds. */
+const boxed =
+  (...classes: string[]): Draw =>
+  (source) => (
+    <div className={className(source, ...classes)}>{each(nested(source.props.properties))}</div>
+  );
+
 /** The pluggable widgets drawn as themselves, by the id their definition states. */
 const customWidgets: Record<string, Draw> = {
   'com.mendix.widget.web.image.Image': ImageWidget,
+  'com.mendix.widget.web.datagrid.Datagrid': Datagrid,
+  'com.mendix.widget.web.gallery.Gallery': Gallery,
+  'com.mendix.widget.web.datagridtextfilter.DatagridTextFilter': TextFilter,
+  'com.mendix.widget.web.datagriddropdownfilter.DatagridDropdownFilter': DropdownFilter,
+  'com.mendix.widget.web.datagriddatefilter.DatagridDateFilter': DateFilter,
+  'com.mendix.widget.web.combobox.Combobox': Combobox,
+  'com.mendix.widget.custom.badge.Badge': Badge,
+  'com.mendix.widget.custom.progressbar.ProgressBar': ProgressBar,
+  'com.mendix.widget.custom.progresscircle.ProgressCircle': ProgressCircle,
+  'com.mendix.widget.web.timeline.Timeline': boxed('widget-timeline'),
+  'com.mendix.widget.web.barchart.BarChart': boxed('widget-charts', 'widget-bar-chart'),
+  'com.mendix.widget.web.columnchart.ColumnChart': boxed('widget-charts', 'widget-column-chart'),
+  'com.mendix.widget.web.linechart.LineChart': boxed('widget-charts', 'widget-line-chart'),
+  'com.mendix.widget.web.piechart.PieChart': boxed('widget-charts', 'widget-pie-chart'),
 };
 
 /** A pluggable widget: as itself when it is drawn; else its label, its name, and the widgets its properties hold. */

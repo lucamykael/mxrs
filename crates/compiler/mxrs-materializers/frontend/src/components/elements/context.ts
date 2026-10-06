@@ -17,6 +17,11 @@ export const Draft = createContext<{
   saved: (object: DataObject) => void;
 } | null>(null);
 
+/** The filter of the grid column being drawn: what the user typed, and how to change it. */
+export const ColumnFilter = createContext<{ value: string; set: (value: string) => void } | null>(
+  null,
+);
+
 /** The title of the page being drawn. */
 export const PageTitle = createContext('');
 
