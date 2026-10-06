@@ -187,6 +187,8 @@ fn content_type(path: &str) -> &'static str {
         "ico" => "image/x-icon",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
         "wasm" => "application/wasm",
         _ => "application/octet-stream",
     }
@@ -395,6 +397,7 @@ mod tests {
             ("js", "text/javascript; charset=utf-8"),
             ("mjs", "text/javascript; charset=utf-8"),
             ("css", "text/css; charset=utf-8"),
+            ("ttf", "font/ttf"),
             ("json", "application/json"),
             ("map", "application/json"),
             ("svg", "image/svg+xml"),

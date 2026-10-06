@@ -153,6 +153,7 @@ fn run_build(mut args: Vec<String>) -> ExitCode {
             || std::path::PathBuf::from("."),
             std::path::Path::to_path_buf,
         );
+    let web = web_output.as_ref().map(std::path::PathBuf::from);
     let result = match web_output {
         Some(web) => {
             mxrs_cli::cargo_project::build_with_web_output(manifest, output, web, release, offline)
@@ -166,6 +167,13 @@ fn run_build(mut args: Vec<String>) -> ExitCode {
             // and so are the icon fonts and images the model holds.
             mxrs_cli::theme::compile_and_report(&project);
             mxrs_cli::collections::write_and_report(&project, &path);
+            // What a deployment serves beside the shell: the theme, published.
+            let web = web.unwrap_or_else(|| {
+                path.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join("web")
+            });
+            mxrs_cli::theme::publish_and_report(&project, &web);
             ExitCode::SUCCESS
         }
         Err(error) => {

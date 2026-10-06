@@ -119,6 +119,23 @@ pub fn build_with_web_output(
         return Err(CargoProjectError::UnresolvedReferences(dangling));
     }
     mxrs_materializers::materialize_mpr(&output, web_output)?;
+    // The shell the project's frontend is drawn with is the one this
+    // build knows: a project made before the shell changed is brought up
+    // to it, its own files untouched.
+    let frontend = manifest
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("frontend");
+    if frontend.join("package.json").is_file() {
+        let report = mxrs_materializers::materialize_frontend_sources(&frontend)?;
+        if report.changed_files > 0 {
+            eprintln!(
+                "[mxrs] frontend shell brought up to this build: {} file(s) in {}",
+                report.changed_files,
+                frontend.display()
+            );
+        }
+    }
     Ok(output)
 }
 

@@ -68,6 +68,23 @@ fn fresh_projects_with_the_same_logical_name_reuse_all_unit_identities() {
         ids
     };
     assert_eq!(unit_ids(&first), unit_ids(&second));
+    // The table an entity's data lives in is named by the same identity:
+    // a runtime keeping data by it finds the table after every build.
+    let storage = |path: &std::path::Path| {
+        let project = Project::open(path, true).unwrap();
+        let modules = project.modules().unwrap();
+        let sales = modules
+            .iter()
+            .find(|module| module.name.as_deref() == Some("Sales"))
+            .unwrap();
+        let order = &sales.entities()[0];
+        (
+            order.data_storage_guid.clone().unwrap(),
+            order.attributes[0].data_storage_guid.clone().unwrap(),
+        )
+    };
+    assert_eq!(storage(&first), storage(&second));
+    assert_ne!(storage(&first).0, storage(&first).1);
 }
 
 #[test]

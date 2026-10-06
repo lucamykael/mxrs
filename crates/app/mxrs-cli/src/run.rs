@@ -98,7 +98,17 @@ pub fn resolve_target(root: &Path) -> Result<RunTarget, RunError> {
             )));
         }
     };
-    let web_root = build.join("web");
+    // The project's own frontend, built (`npm run build --prefix frontend`),
+    // is what a deployment serves: its pages, its theme. Without one, the
+    // embedded shell and the model's manifest stand in.
+    let own = root.join("frontend/dist");
+    let web_root = if own.join("index.html").is_file() {
+        // The model the shell loads is the runtime's to give it.
+        mxrs_materializers::materialize_model(&mpr, &own)?;
+        own
+    } else {
+        build.join("web")
+    };
     if !web_root.is_dir() {
         // `mxrs run` owns the native runtime lifecycle.  Materializing here
         // keeps it usable for an MPR produced by `rust-to-mendix` even when
@@ -280,10 +290,36 @@ enum Stop {
     Frontend(Option<ExitStatus>),
 }
 
+/// The signal that stops the server the way an interrupt does — so that
+/// what it holds is persisted on its way out: Ctrl-C, or a termination
+/// request (what `kill`, a supervisor or a container sends).
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(terminate) => terminate,
+                Err(_) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                    return;
+                }
+            };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 pub fn start(options: &RunOptions) -> Result<(), RunError> {
     let target = resolve_target(&options.root)?;
     crate::theme::compile_and_report(&options.root);
     crate::collections::write_and_report(&options.root, &target.mpr);
+    crate::theme::publish_and_report(&options.root, &target.web_root);
     let address = bind_address(options)?;
     let profile = EnvironmentProfile::load(&options.root, options.environment.as_deref())?;
     let boot = mxrs_runtime_boot::boot(&target.mpr)?;
@@ -479,11 +515,11 @@ fn serve(
     let shutdown = async move {
         let stop = match frontend_exit {
             Some(receiver) => tokio::select! {
-                _ = tokio::signal::ctrl_c() => Stop::Interrupt,
+                () = stop_signal() => Stop::Interrupt,
                 status = receiver => Stop::Frontend(status.ok().flatten()),
             },
             None => {
-                let _ = tokio::signal::ctrl_c().await;
+                stop_signal().await;
                 Stop::Interrupt
             }
         };
@@ -580,6 +616,15 @@ mod tests {
             target.state_path,
             root.join(".mxrs").join("runtime").join("state.sqlite3")
         );
+        // The project's own frontend, built, is what is served when it is there.
+        std::fs::create_dir_all(root.join("frontend/dist")).unwrap();
+        std::fs::write(root.join("frontend/dist/index.html"), "<html></html>").unwrap();
+        assert_eq!(
+            resolve_target(root).unwrap().web_root,
+            root.join("frontend/dist")
+        );
+        assert!(root.join("frontend/dist/model.json").is_file());
+        std::fs::remove_dir_all(root.join("frontend")).unwrap();
 
         mxrs_writer::write_project(
             root.join("build/other.mpr"),

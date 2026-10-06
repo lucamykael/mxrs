@@ -260,6 +260,31 @@ pub fn materialize_mpr(
     materialize_manifest(&manifest, output)
 }
 
+/// Writes the model's `model.json` beside a shell the project built itself
+/// (`frontend/dist`): the one file of the runtime's that shell needs.
+pub fn materialize_model(
+    mpr: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+) -> Result<MaterializeReport> {
+    let mpr = mpr.as_ref();
+    let output = output.as_ref();
+    let project = Project::open(mpr, true)?;
+    let mut manifest = application_manifest(&project)?;
+    if project.name()?.as_deref().is_none_or(str::is_empty)
+        && let Some(stem) = mpr.file_stem().and_then(|stem| stem.to_str())
+    {
+        manifest["project"]["name"] = Value::String(stem.to_string());
+    }
+    let mut report = MaterializeReport {
+        output: output.to_path_buf(),
+        ..Default::default()
+    };
+    let mut model = serde_json::to_vec_pretty(&manifest)?;
+    model.push(b'\n');
+    write_if_changed(output.join("model.json"), &model, &mut report)?;
+    Ok(report)
+}
+
 /// Materializes the embedded production bundle and one stable `model.json`.
 pub fn materialize_manifest(
     manifest: &Value,

@@ -491,7 +491,9 @@ fn fresh_entity(
         documentation: decl.documentation.clone(),
         persistable: decl.persistable,
         location: Location { x: 0, y: 0 },
-        data_storage_guid: None,
+        // The table's identity, as stable as the entity's own: a runtime
+        // that keeps data by it finds the same table after every build.
+        data_storage_guid: Some(identity.artifact_id(ArtifactKind::DataStorage, &entity_name)),
         image: Some(match decl.image.as_ref() {
             Some(EntityImageDecl::Reference(reference)) => reference.clone(),
             Some(EntityImageDecl::None) | None => String::new(),
