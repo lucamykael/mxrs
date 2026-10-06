@@ -1,4 +1,5 @@
 import type { EventDecl, WidgetContext } from '@/types/model';
+import { ValidationError, type Violation } from './data';
 
 /**
  * Runs the microflow or nanoflow an event names on the Rust runtime.
@@ -22,9 +23,13 @@ export async function invokeAction(
   const answer = (await response.json().catch(() => null)) as {
     result?: unknown;
     message?: string;
+    violations?: Violation[];
   } | null;
-  if (!response.ok)
-    throw new Error(answer?.message || `Action ${event.handler} failed (${response.status})`);
+  if (!response.ok) {
+    const message = answer?.message || `Action ${event.handler} failed (${response.status})`;
+    if (answer?.violations?.length) throw new ValidationError(message, answer.violations);
+    throw new Error(message);
+  }
   return asAnswer(answer?.result);
 }
 

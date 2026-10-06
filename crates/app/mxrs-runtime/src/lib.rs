@@ -70,10 +70,53 @@ pub enum RuleKind {
     Unique,
     MaxLength(usize),
     Range {
-        minimum: Option<f64>,
-        maximum: Option<f64>,
+        minimum: Option<Bound>,
+        maximum: Option<Bound>,
     },
+    /// A regular expression, as the model's `RegularExpressions` document
+    /// states it.
     Pattern(String),
+    /// Equal to a value, or to another member of the object.
+    EqualsTo(Bound),
+}
+
+/// What a rule compares a member with: a value the model states, or
+/// another member of the same object.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Bound {
+    Value(String),
+    Member(String),
+}
+
+impl Bound {
+    fn of(&self, record: &BTreeMap<String, Value>) -> Option<Value> {
+        match self {
+            Bound::Value(value) => Some(Value::String(value.clone())),
+            Bound::Member(member) => record.get(member).cloned(),
+        }
+    }
+}
+
+fn number_of(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text
+            .strip_prefix(DATETIME_MEMBER_PREFIX)
+            .unwrap_or(text)
+            .trim()
+            .parse()
+            .ok(),
+        _ => None,
+    }
+}
+
+impl std::fmt::Display for Bound {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Bound::Value(value) => formatter.write_str(value),
+            Bound::Member(member) => formatter.write_str(member),
+        }
+    }
 }
 
 impl ValidationRule {
@@ -94,12 +137,14 @@ impl ValidationRule {
                 (None, None) => format!("{member} is out of range"),
             },
             RuleKind::Pattern(_) => format!("{member} is not in the required format"),
+            RuleKind::EqualsTo(bound) => format!("{member} must be equal to {bound}"),
         }
     }
 
-    /// Whether the value breaks the rule; `others` are the values the other
-    /// objects of the entity hold in the member, for uniqueness.
-    fn broken(&self, value: Option<&Value>, others: &[&Value]) -> bool {
+    /// Whether the object breaks the rule; `others` are the values the
+    /// other objects of the entity hold in the member, for uniqueness.
+    fn broken(&self, record: &BTreeMap<String, Value>, others: &[&Value]) -> bool {
+        let value = record.get(&self.member);
         let empty = value.is_none_or(|value| match value {
             Value::Null => true,
             Value::String(text) => text.is_empty(),
@@ -112,10 +157,33 @@ impl ValidationRule {
                 .and_then(Value::as_str)
                 .is_some_and(|text| text.chars().count() > *length),
             RuleKind::Range { minimum, maximum } => {
-                let Some(number) = value.and_then(Value::as_f64) else {
+                let Some(number) = value.and_then(number_of) else {
                     return false;
                 };
-                minimum.is_some_and(|low| number < low) || maximum.is_some_and(|high| number > high)
+                let bound = |bound: &Option<Bound>| {
+                    bound
+                        .as_ref()
+                        .and_then(|bound| bound.of(record))
+                        .and_then(|value| number_of(&value))
+                };
+                bound(minimum).is_some_and(|low| number < low)
+                    || bound(maximum).is_some_and(|high| number > high)
+            }
+            RuleKind::EqualsTo(bound) => {
+                let Some(expected) = bound.of(record) else {
+                    return !empty;
+                };
+                match (value.and_then(number_of), number_of(&expected)) {
+                    (Some(left), Some(right)) => left != right,
+                    _ => {
+                        let text = |value: &Value| match value {
+                            Value::String(text) => text.clone(),
+                            Value::Null => String::new(),
+                            other => other.to_string(),
+                        };
+                        value.map(text).unwrap_or_default() != text(&expected)
+                    }
+                }
             }
             RuleKind::Pattern(pattern) => value.and_then(Value::as_str).is_some_and(|text| {
                 !text.is_empty()
@@ -190,6 +258,20 @@ struct EntitySchema {
     kinds: BTreeMap<String, MemberKind>,
     /// What the model asks of an object before it is committed.
     rules: Vec<ValidationRule>,
+}
+
+/// Whether the runtime reads a regular expression: the model's are Java's,
+/// and what this one does not have (look-around, back-references) is said.
+pub fn pattern_reads(expression: &str) -> std::result::Result<(), String> {
+    regex::Regex::new(expression).map(|_| ()).map_err(|error| {
+        error
+            .to_string()
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    })
 }
 
 /// What an attribute holds, as far as a value written from outside a flow
@@ -835,8 +917,22 @@ impl Runtime {
             .actions
             .get(name)
             .ok_or_else(|| RuntimeError::UnknownAction(name.to_string()))?;
-        self.store
-            .transaction(|store| action.execute(store, arguments))
+        // An object a page gives a flow is one its user may read, with the
+        // changes its form holds and its user may make.
+        let given = given_objects(&self.store, &self.security, arguments, context)?;
+        let answer = self.store.transaction(|store| {
+            for object in &given {
+                if object.create {
+                    store.create_as(&object.entity, &object.id)?;
+                }
+                for (member, value) in &object.values {
+                    store.set_member(&object.entity, &object.id, member, value.clone())?;
+                }
+            }
+            action.execute(store, arguments)
+        })?;
+        // What comes back to the page is what its user may read.
+        Ok(readable(&self.store, &self.security, answer, context))
     }
 
     /// What a page does with the objects it shows, by the operation's name:
@@ -902,13 +998,31 @@ impl Runtime {
                     .map(str::trim)
                     .filter(|constraint| !constraint.is_empty());
                 if let Some(constraint) = constraint
-                    && !crate::xpath::is_supported(constraint)
+                    && !crate::xpath::is_list_supported(constraint)
                 {
                     return Err(RuntimeError::Transaction(format!(
-                        "unsupported XPath constraint {constraint:?}: the runtime reads comparisons of a member with a literal, joined by and/or/not"
+                        "unsupported XPath constraint {constraint:?}: the runtime reads comparisons of the entity's own members with a literal or the current user, joined by and/or/not — not an association path, a page's variable or a token such as [%CurrentDateTime%]"
                     )));
                 }
-                let mut objects: Vec<ObjectValue> = self
+                // The constraint and the order see what the caller may read
+                // of each object, so neither tells of a member it may not.
+                let visible = |object: &ObjectValue| -> BTreeMap<String, Value> {
+                    object
+                        .members
+                        .iter()
+                        .filter(|(member, _)| {
+                            security.entity_allowed(
+                                entity,
+                                EntityAction::Read,
+                                Some(member),
+                                Some(&object.members),
+                                context,
+                            )
+                        })
+                        .map(|(member, value)| (member.clone(), value.clone()))
+                        .collect()
+                };
+                let mut objects: Vec<(ObjectValue, BTreeMap<String, Value>)> = self
                     .store
                     .retrieve(entity)?
                     .into_iter()
@@ -921,10 +1035,13 @@ impl Runtime {
                             context,
                         )
                     })
-                    .filter(|object| {
+                    .map(|object| {
+                        let seen = visible(&object);
+                        (object, seen)
+                    })
+                    .filter(|(_, seen)| {
                         constraint.is_none_or(|constraint| {
-                            crate::xpath::evaluate(constraint, &object.members, context)
-                                == Some(true)
+                            crate::xpath::evaluate(constraint, seen, context) == Some(true)
                         })
                     })
                     .collect();
@@ -942,13 +1059,16 @@ impl Runtime {
                         ))
                     })
                     .collect();
+                if let Some((path, _)) = sort.iter().find(|(attribute, _)| attribute.contains('/'))
+                {
+                    return Err(RuntimeError::Transaction(format!(
+                        "unsupported sort by {path:?}: the runtime sorts by the entity's own members, not along an association"
+                    )));
+                }
                 if !sort.is_empty() {
-                    objects.sort_by(|left, right| {
+                    objects.sort_by(|(_, left), (_, right)| {
                         for (attribute, descending) in &sort {
-                            let order = compare_members(
-                                left.members.get(attribute),
-                                right.members.get(attribute),
-                            );
+                            let order = compare_members(left.get(attribute), right.get(attribute));
                             if order != std::cmp::Ordering::Equal {
                                 return if *descending { order.reverse() } else { order };
                             }
@@ -969,7 +1089,7 @@ impl Runtime {
                     .iter()
                     .skip(offset)
                     .take(limit.unwrap_or(usize::MAX))
-                    .map(&seen)
+                    .map(|(object, _)| seen(object))
                     .collect();
                 Ok(serde_json::json!({ "objects": objects, "total": total }))
             }
@@ -1018,36 +1138,7 @@ impl Runtime {
                         });
                     }
                 };
-                let mut values = Vec::with_capacity(members.len());
-                for (member, value) in members {
-                    if !schema.kinds.contains_key(member)
-                        && !schema.defaults.contains_key(member)
-                        && !record.contains_key(member)
-                    {
-                        return Err(RuntimeError::Transaction(format!(
-                            "{entity} has no member {member}"
-                        )));
-                    }
-                    if !security.entity_allowed(
-                        entity,
-                        EntityAction::Write,
-                        Some(member),
-                        Some(&record),
-                        context,
-                    ) {
-                        return Err(refused("write", Some(member)));
-                    }
-                    let value = stored(value, schema.kinds.get(member), record.get(member))
-                        .map_err(|reason| {
-                            RuntimeError::Transaction(format!("{entity}.{member}: {reason}"))
-                        })?;
-                    values.push((member, value));
-                }
-                let mut whole = record.clone();
-                for (member, value) in &values {
-                    whole.insert((*member).clone(), value.clone());
-                }
-                self.validate(entity, id, &whole)?;
+                let values = written(security, &schema, entity, &record, members, context)?;
                 let lifecycle = self.lifecycle.as_deref();
                 let (saved, effects) = self.store.transaction(|store| {
                     let id = match existing {
@@ -1055,11 +1146,14 @@ impl Runtime {
                         None => store.create_as(entity, id)?.id,
                     };
                     for (member, value) in values {
-                        store.set_member(entity, &id, member, value)?;
+                        store.set_member(entity, &id, &member, value)?;
                     }
+                    // The lifecycle validates between the entity's
+                    // before-handlers and the commit, as a flow's commit does.
                     let effects = match lifecycle {
                         Some(lifecycle) => lifecycle.commit(store, entity, &id, context)?,
                         None => {
+                            validate_object(store, entity, &id)?;
                             store.commit(entity, &id)?;
                             Vec::new()
                         }
@@ -1099,44 +1193,6 @@ impl Runtime {
         }
     }
 
-    /// The object as it would be saved, against the entity's validation
-    /// rules: every rule broken is answered at once, as the Mendix client
-    /// shows them all under their inputs.
-    fn validate(&self, entity: &str, id: &str, members: &BTreeMap<String, Value>) -> Result<()> {
-        let rules = self.store.schema().rules_of(entity);
-        if rules.is_empty() {
-            return Ok(());
-        }
-        let others: Vec<ObjectValue> = if rules.iter().any(|rule| rule.kind == RuleKind::Unique) {
-            self.store
-                .retrieve(entity)?
-                .into_iter()
-                .filter(|object| object.id != id)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let violations: Vec<Violation> = rules
-            .iter()
-            .filter(|rule| {
-                let held: Vec<&Value> = others
-                    .iter()
-                    .filter_map(|object| object.members.get(&rule.member))
-                    .collect();
-                rule.broken(members.get(&rule.member), &held)
-            })
-            .map(|rule| Violation {
-                member: rule.member.clone(),
-                message: rule.message(),
-            })
-            .collect();
-        if violations.is_empty() {
-            Ok(())
-        } else {
-            Err(RuntimeError::Validation(violations))
-        }
-    }
-
     pub fn store(&self) -> &Store {
         &self.store
     }
@@ -1146,27 +1202,273 @@ impl Runtime {
     }
 }
 
+/// The object as it stands in the store, against its entity's validation
+/// rules: every rule broken is answered at once, as the Mendix client
+/// shows them all under their inputs. A page's save and a flow's commit
+/// both ask this before the object is committed.
+pub fn validate_object(store: &Store, entity: &str, id: &str) -> Result<()> {
+    let rules = store.schema().rules_of(entity);
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let Some(object) = store.find(entity, id)? else {
+        return Ok(());
+    };
+    let others: Vec<ObjectValue> = if rules.iter().any(|rule| rule.kind == RuleKind::Unique) {
+        store
+            .retrieve(entity)?
+            .into_iter()
+            .filter(|other| other.id != id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let violations: Vec<Violation> = rules
+        .iter()
+        .filter(|rule| {
+            let held: Vec<&Value> = others
+                .iter()
+                .filter_map(|other| other.members.get(&rule.member))
+                .collect();
+            rule.broken(&object.members, &held)
+        })
+        .map(|rule| Violation {
+            member: rule.member.clone(),
+            message: rule.message(),
+        })
+        .collect();
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(RuntimeError::Validation(violations))
+    }
+}
+
+/// What a page writes of an object, member by member: each one the entity
+/// has, the caller may write, and holds a value of its attribute's kind —
+/// one that does not is refused as that member's violation.
+fn written(
+    security: &SecurityPolicy,
+    schema: &EntitySchema,
+    entity: &str,
+    record: &BTreeMap<String, Value>,
+    members: &serde_json::Map<String, Value>,
+    context: &SecurityContext,
+) -> Result<Vec<(String, Value)>> {
+    let mut values = Vec::with_capacity(members.len());
+    let mut violations = Vec::new();
+    for (member, value) in members {
+        if !schema.kinds.contains_key(member)
+            && !schema.defaults.contains_key(member)
+            && !record.contains_key(member)
+        {
+            return Err(RuntimeError::Transaction(format!(
+                "{entity} has no member {member}"
+            )));
+        }
+        if !security.entity_allowed(
+            entity,
+            EntityAction::Write,
+            Some(member),
+            Some(record),
+            context,
+        ) {
+            return Err(RuntimeError::NotAuthorized {
+                action: "write".to_string(),
+                resource: format!("{entity}.{member}"),
+            });
+        }
+        match stored(value, schema.kinds.get(member), record.get(member)) {
+            Ok(value) => values.push((member.clone(), value)),
+            Err(reason) => violations.push(Violation {
+                member: member.clone(),
+                message: format!("{member}: {reason}"),
+            }),
+        }
+    }
+    if violations.is_empty() {
+        Ok(values)
+    } else {
+        Err(RuntimeError::Validation(violations))
+    }
+}
+
+/// An object a page gives a flow, as the flow is to find it.
+struct Given {
+    entity: String,
+    id: String,
+    /// A form's new object: it exists once the flow's unit of work does.
+    create: bool,
+    values: Vec<(String, Value)>,
+}
+
+/// The objects a page gives a flow (`{entity, id}`, with the members its
+/// form changed and whether it is new): each must be one the caller may
+/// read — or, new, may create — and what it changed, what it may write.
+fn given_objects(
+    store: &Store,
+    security: &SecurityPolicy,
+    arguments: &Value,
+    context: &SecurityContext,
+) -> Result<Vec<Given>> {
+    let Some(arguments) = arguments.as_object() else {
+        return Ok(Vec::new());
+    };
+    let mut given = Vec::new();
+    for value in arguments.values() {
+        let (Some(entity), Some(id)) = (
+            value.get("entity").and_then(Value::as_str),
+            value.get("id").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let schema = store
+            .schema()
+            .entities
+            .get(entity)
+            .cloned()
+            .ok_or_else(|| RuntimeError::UnknownEntity(entity.to_string()))?;
+        let new = value.get("new").and_then(Value::as_bool) == Some(true);
+        let existing = store.find(entity, id)?;
+        let record = match (&existing, new) {
+            (Some(object), _) => {
+                if !security.entity_allowed(
+                    entity,
+                    EntityAction::Read,
+                    None,
+                    Some(&object.members),
+                    context,
+                ) {
+                    return Err(RuntimeError::NotAuthorized {
+                        action: "read".to_string(),
+                        resource: entity.to_string(),
+                    });
+                }
+                object.members.clone()
+            }
+            (None, true) => {
+                if !security.entity_allowed(entity, EntityAction::Create, None, None, context) {
+                    return Err(RuntimeError::NotAuthorized {
+                        action: "create".to_string(),
+                        resource: entity.to_string(),
+                    });
+                }
+                schema.defaults.clone()
+            }
+            (None, false) => {
+                return Err(RuntimeError::UnknownObject {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                });
+            }
+        };
+        let values = match value.get("members").and_then(Value::as_object) {
+            Some(members) => written(security, &schema, entity, &record, members, context)?,
+            None => Vec::new(),
+        };
+        given.push(Given {
+            entity: entity.to_string(),
+            id: id.to_string(),
+            create: existing.is_none(),
+            values,
+        });
+    }
+    Ok(given)
+}
+
+/// What a flow answers, as its caller may read it: every object in it
+/// (`{entity, id, members}`) keeps only the members the caller may read.
+fn readable(
+    store: &Store,
+    security: &SecurityPolicy,
+    value: Value,
+    context: &SecurityContext,
+) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| readable(store, security, value, context))
+                .collect(),
+        ),
+        Value::Object(mut map) => {
+            let shown = match (
+                map.get("entity").and_then(Value::as_str),
+                map.get("id").and_then(Value::as_str),
+                map.get("members"),
+            ) {
+                (Some(entity), Some(id), Some(Value::Object(members))) => {
+                    let record = store
+                        .find(entity, id)
+                        .ok()
+                        .flatten()
+                        .map(|object| object.members)
+                        .unwrap_or_else(|| {
+                            members
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        });
+                    Some(
+                        members
+                            .iter()
+                            .filter(|(member, _)| {
+                                security.entity_allowed(
+                                    entity,
+                                    EntityAction::Read,
+                                    Some(member),
+                                    Some(&record),
+                                    context,
+                                )
+                            })
+                            .map(|(member, value)| (member.clone(), value.clone()))
+                            .collect::<serde_json::Map<_, _>>(),
+                    )
+                }
+                _ => None,
+            };
+            if let Some(shown) = shown {
+                map.insert("members".to_string(), Value::Object(shown));
+                Value::Object(map)
+            } else {
+                Value::Object(
+                    map.into_iter()
+                        .map(|(key, value)| (key, readable(store, security, value, context)))
+                        .collect(),
+                )
+            }
+        }
+        other => other,
+    }
+}
+
 /// The order of two members as a list sorts them: numbers by size, dates by
 /// instant, texts by their characters; what is absent comes first.
 fn compare_members(left: Option<&Value>, right: Option<&Value>) -> std::cmp::Ordering {
-    let instant = |value: &Value| {
-        value
-            .as_str()
-            .and_then(|text| text.strip_prefix(DATETIME_MEMBER_PREFIX))
-            .and_then(|seconds| seconds.parse::<f64>().ok())
-    };
-    match (left, right) {
-        (None, None) | (Some(Value::Null), Some(Value::Null)) => std::cmp::Ordering::Equal,
-        (None, _) | (Some(Value::Null), _) => std::cmp::Ordering::Less,
-        (_, None) | (_, Some(Value::Null)) => std::cmp::Ordering::Greater,
-        (Some(a), Some(b)) => match (a.as_f64(), b.as_f64()) {
-            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
-            _ => match (instant(a), instant(b)) {
-                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
-                _ => a.to_string().cmp(&b.to_string()),
+    // A total order: what is absent, then booleans, numbers, dates, texts
+    // (as a person reads them, then by case), then anything else.
+    let key = |value: Option<&Value>| -> (u8, f64, String) {
+        match value {
+            None | Some(Value::Null) => (0, 0.0, String::new()),
+            Some(Value::Bool(flag)) => (1, f64::from(u8::from(*flag)), String::new()),
+            Some(Value::Number(number)) => (2, number.as_f64().unwrap_or(0.0), String::new()),
+            Some(Value::String(text)) => match text
+                .strip_prefix(DATETIME_MEMBER_PREFIX)
+                .and_then(|seconds| seconds.parse::<f64>().ok())
+            {
+                Some(seconds) => (3, seconds, String::new()),
+                None => (4, 0.0, text.clone()),
             },
-        },
-    }
+            Some(other) => (5, 0.0, other.to_string()),
+        }
+    };
+    let (left_rank, left_number, left_text) = key(left);
+    let (right_rank, right_number, right_text) = key(right);
+    left_rank
+        .cmp(&right_rank)
+        .then_with(|| left_number.total_cmp(&right_number))
+        .then_with(|| left_text.to_lowercase().cmp(&right_text.to_lowercase()))
+        .then_with(|| left_text.cmp(&right_text))
 }
 
 /// An object as a page shows it: a date and time is text a browser reads
@@ -1591,13 +1893,18 @@ mod tests {
             serde_json::json!({ "BirthDate": "2023-02-31" }),
             serde_json::json!({ "BirthDate": "2023-01-01T25:00:00Z" }),
             serde_json::json!({ "BirthDate": "99999999999-01-01" }),
-            serde_json::json!({ "Nope": 1 }),
         ] {
+            // A value its attribute cannot hold is said under its input.
             assert!(
-                matches!(save(refused.clone()), Err(RuntimeError::Transaction(_))),
+                matches!(save(refused.clone()), Err(RuntimeError::Validation(violations)) if violations.len() == 1),
                 "{refused}"
             );
         }
+        // A member the entity does not have is not the user's to put right.
+        assert!(matches!(
+            save(serde_json::json!({ "Nope": 1 })),
+            Err(RuntimeError::Transaction(_))
+        ));
         assert_eq!(instant_seconds("1970-01-01"), Some(0));
         assert_eq!(instant_seconds("1969-12-31T23:59:59Z"), Some(-1));
         assert_eq!(instant_seconds("2100-02-29"), None);
@@ -1638,8 +1945,8 @@ mod tests {
                             rule(
                                 "Age",
                                 RuleKind::Range {
-                                    minimum: Some(0.0),
-                                    maximum: Some(150.0),
+                                    minimum: Some(Bound::Value("0".into())),
+                                    maximum: Some(Bound::Value("150".into())),
                                 },
                                 "",
                             ),
@@ -1860,6 +2167,238 @@ mod tests {
             runtime.data("retrieve", &entity, &SecurityContext::default()),
             Err(RuntimeError::NotAuthorized { .. })
         ));
+    }
+
+    /// A role that may read some of a record, and a flow that echoes what it
+    /// was given and what the store holds of it.
+    fn guarded() -> (Runtime, SecurityContext, String) {
+        let defaults = BTreeMap::from([
+            ("Name".to_string(), Value::String(String::new())),
+            ("Salary".to_string(), Value::from(0)),
+        ]);
+        let rule = EntityRule {
+            module_roles: BTreeSet::from(["Main.User".to_string()]),
+            create: true,
+            delete: false,
+            default_member_right: None,
+            member_rights: BTreeMap::from([
+                ("Name".to_string(), MemberRight::Write),
+                ("Salary".to_string(), MemberRight::None),
+            ]),
+            xpath: "[Name != 'Boss']".to_string(),
+        };
+        let security = SecurityPolicy {
+            enabled: true,
+            entities: BTreeMap::from([("Main.Person".to_string(), vec![rule])]),
+            documents: BTreeMap::from([(
+                "Main.ACT_Echo".to_string(),
+                BTreeSet::from(["Main.User".to_string()]),
+            )]),
+            ..Default::default()
+        };
+        let mut store = Store::new(
+            StoreSchema::default()
+                .entity("Main.Person", defaults, false)
+                .members(
+                    "Main.Person",
+                    BTreeMap::from([
+                        ("Name".to_string(), MemberKind::Text { length: None }),
+                        ("Salary".to_string(), MemberKind::Integer),
+                    ]),
+                ),
+        );
+        let mut ids = Vec::new();
+        for (name, salary) in [("Ann", 10), ("Boss", 900), ("Cid", 500)] {
+            let object = store.create("Main.Person").unwrap();
+            store
+                .set_member("Main.Person", &object.id, "Name", Value::from(name))
+                .unwrap();
+            store
+                .set_member("Main.Person", &object.id, "Salary", Value::from(salary))
+                .unwrap();
+            store.commit("Main.Person", &object.id).unwrap();
+            ids.push(object.id);
+        }
+        let mut runtime = Runtime::new(store, security);
+        runtime.register_action("Main.ACT_Echo", |store: &mut Store, arguments: &Value| {
+            let person = &arguments["Person"];
+            let object = store
+                .find("Main.Person", person["id"].as_str().unwrap())?
+                .unwrap();
+            Ok(serde_json::json!({ "result": shown(&object) }))
+        });
+        let user = SecurityContext {
+            module_roles: BTreeSet::from(["Main.User".to_string()]),
+            ..Default::default()
+        };
+        (runtime, user, ids[1].clone())
+    }
+
+    /// A flow is given only objects its caller may read, with the changes
+    /// the caller's form holds and may make; what comes back is what the
+    /// caller may read of it.
+    #[test]
+    fn a_flow_is_given_what_its_caller_may_read_and_answers_what_it_may_see() {
+        let (mut runtime, user, boss) = guarded();
+        let people = runtime
+            .data(
+                "retrieve",
+                &serde_json::json!({ "entity": "Main.Person" }),
+                &user,
+            )
+            .unwrap();
+        let ann = people["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|person| person["members"]["Name"] == "Ann")
+            .and_then(|person| person["id"].as_str())
+            .unwrap()
+            .to_string();
+        let echo = |runtime: &mut Runtime, person: Value| {
+            runtime.invoke(
+                "Main.ACT_Echo",
+                &serde_json::json!({ "Person": person }),
+                &user,
+            )
+        };
+        // Someone else's record, by its id: refused, not run.
+        assert!(matches!(
+            echo(
+                &mut runtime,
+                serde_json::json!({ "entity": "Main.Person", "id": boss })
+            ),
+            Err(RuntimeError::NotAuthorized { action, resource })
+                if action == "read" && resource == "Main.Person"
+        ));
+        assert!(matches!(
+            echo(
+                &mut runtime,
+                serde_json::json!({ "entity": "Main.Person", "id": "3f0b1a52-8b3e-4d6a-9f3c-2d7c1e5a9b77" })
+            ),
+            Err(RuntimeError::UnknownObject { .. })
+        ));
+        // The form's change reaches the flow; what it may not read does not
+        // come back.
+        let answer = echo(
+            &mut runtime,
+            serde_json::json!({ "entity": "Main.Person", "id": ann, "members": { "Name": "Annie" } }),
+        )
+        .unwrap();
+        assert_eq!(
+            answer["result"]["members"],
+            serde_json::json!({ "Name": "Annie" })
+        );
+        // Not committed by the flow, the change is not kept.
+        assert_eq!(
+            runtime
+                .store()
+                .find("Main.Person", &ann)
+                .unwrap()
+                .unwrap()
+                .members["Name"],
+            "Ann"
+        );
+        // Nor may the form write what its role may not.
+        assert!(matches!(
+            echo(
+                &mut runtime,
+                serde_json::json!({ "entity": "Main.Person", "id": ann, "members": { "Salary": 1 } })
+            ),
+            Err(RuntimeError::NotAuthorized { .. })
+        ));
+        // A new object the form holds is the flow's to find.
+        let fresh = uuid::Uuid::new_v4().to_string();
+        let answer = echo(
+            &mut runtime,
+            serde_json::json!({ "entity": "Main.Person", "id": fresh, "new": true, "members": { "Name": "Dee" } }),
+        )
+        .unwrap();
+        assert_eq!(answer["result"]["members"]["Name"], "Dee");
+    }
+
+    /// A list's constraint and order see what the caller may read, so they
+    /// tell nothing of a member it may not.
+    #[test]
+    fn a_list_tells_nothing_of_what_its_caller_may_not_read() {
+        let (mut runtime, user, _) = guarded();
+        let retrieve = |runtime: &mut Runtime, query: Value| {
+            let mut query = query;
+            query["entity"] = Value::from("Main.Person");
+            runtime.data("retrieve", &query, &user)
+        };
+        let probed = retrieve(
+            &mut runtime,
+            serde_json::json!({ "constraint": "[Salary > 100]" }),
+        )
+        .unwrap();
+        assert_eq!(probed["total"], 0);
+        let sorted = retrieve(
+            &mut runtime,
+            serde_json::json!({ "sort": [{ "attribute": "Salary", "descending": true }] }),
+        )
+        .unwrap();
+        let names: Vec<&str> = sorted["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|object| object["members"]["Name"].as_str().unwrap())
+            .collect();
+        // Every salary reads as absent: the order is the store's, untold.
+        assert_eq!(names.len(), 2);
+        for unsupported in [
+            "[Main.Person_Company/Main.Company/Name = 'X']",
+            "[Name = $currentObject/Name]",
+            "[Name = '[%CurrentObject%]']",
+            "[Born < '[%CurrentDateTime%]']",
+        ] {
+            assert!(
+                matches!(
+                    retrieve(
+                        &mut runtime,
+                        serde_json::json!({ "constraint": unsupported })
+                    ),
+                    Err(RuntimeError::Transaction(_))
+                ),
+                "{unsupported}"
+            );
+        }
+        assert!(matches!(
+            retrieve(
+                &mut runtime,
+                serde_json::json!({ "sort": [{ "attribute": "Main.Person_Company/Main.Company/Name", "descending": false }] })
+            ),
+            Err(RuntimeError::Transaction(_))
+        ));
+        assert!(crate::xpath::is_list_supported(
+            "[Name = '[%CurrentUser%]' or Owner = $currentUser]"
+        ));
+    }
+
+    /// A list sorts by a total order: absent and empty alike first, then
+    /// booleans, numbers, dates and texts as a person reads them.
+    #[test]
+    fn members_sort_in_a_total_order() {
+        use std::cmp::Ordering::*;
+        let null = Value::Null;
+        assert_eq!(compare_members(None, Some(&null)), Equal);
+        assert_eq!(compare_members(Some(&null), None), Equal);
+        let values = [
+            Value::Bool(true),
+            Value::from(2),
+            Value::from(10),
+            Value::from("apple"),
+            Value::from("Banana"),
+        ];
+        for (index, left) in values.iter().enumerate() {
+            for (other, right) in values.iter().enumerate() {
+                assert_eq!(
+                    compare_members(Some(left), Some(right)),
+                    index.cmp(&other),
+                    "{left} {right}"
+                );
+            }
+        }
     }
     use serde_json::json;
 

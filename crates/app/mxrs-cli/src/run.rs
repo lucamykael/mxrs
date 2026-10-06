@@ -278,12 +278,16 @@ impl mxrs_runtime::Action for FlowAction {
         if let serde_json::Value::Object(map) = arguments {
             for (name, value) in map {
                 // A page passes an object it holds as the object: by its
-                // entity and id, which is what the flow's parameter is.
+                // entity and id, which is what the flow's parameter is —
+                // and only an object of the entity the parameter takes.
                 let value = match (
                     value.get("entity").and_then(serde_json::Value::as_str),
                     value.get("id").and_then(serde_json::Value::as_str),
                 ) {
                     (Some(entity), Some(id)) => {
+                        self.engine
+                            .takes(&self.name, name, entity)
+                            .map_err(mxrs_runtime::RuntimeError::Transaction)?;
                         mxrs_runtime_flows::FlowValue::Object(mxrs_runtime_flows::ObjectRef {
                             entity: entity.to_string(),
                             id: id.to_string(),
@@ -299,11 +303,22 @@ impl mxrs_runtime::Action for FlowAction {
             .engine
             .call_in_unit(store, &mut execution, &self.name, variables)
         {
-            Ok(value) => Ok(serde_json::json!({
-                "result": answered(store, &value),
-                "effects": execution.effects,
-                "log": execution.log,
-            })),
+            Ok(value) => {
+                // What the flow logged is the server's to keep, as Mendix
+                // keeps it: on the console, not in the page's answer.
+                for line in &execution.log {
+                    eprintln!("[mxrs] {}: {line}", self.name);
+                }
+                let effects: Vec<serde_json::Value> = execution
+                    .effects
+                    .into_iter()
+                    .map(|effect| with_members(store, effect))
+                    .collect();
+                Ok(serde_json::json!({
+                    "result": answered(store, &value),
+                    "effects": effects,
+                }))
+            }
             Err(mxrs_runtime_flows::FlowError::Runtime(error)) => Err(error),
             Err(mxrs_runtime_flows::FlowError::Native(message)) => {
                 Err(mxrs_runtime::RuntimeError::Transaction(message))
@@ -339,10 +354,13 @@ impl mxrs_runtime::Lifecycle for FlowLifecycle {
         {
             Ok(()) => Ok(execution.effects),
             Err(error) => {
+                // The feedback about the object being saved is its
+                // violations; about another object, it is not this save's.
                 let violations: Vec<mxrs_runtime::Violation> = execution
                     .effects
                     .iter()
                     .filter(|effect| effect["type"] == "validation_feedback")
+                    .filter(|effect| effect["object_id"] == id)
                     .map(|effect| mxrs_runtime::Violation {
                         member: effect["member"].as_str().unwrap_or_default().to_string(),
                         message: effect["message"].as_str().unwrap_or_default().to_string(),
@@ -359,6 +377,35 @@ impl mxrs_runtime::Lifecycle for FlowLifecycle {
                 })
             }
         }
+    }
+}
+
+/// An effect as a page reads it: the objects a page is opened with
+/// (`{entity, id}`) carry their members, as the page is to show them.
+fn with_members(store: &Store, effect: serde_json::Value) -> serde_json::Value {
+    match effect {
+        serde_json::Value::Object(map) => {
+            if let (Some(entity), Some(id), None) = (
+                map.get("entity").and_then(serde_json::Value::as_str),
+                map.get("id").and_then(serde_json::Value::as_str),
+                map.get("members"),
+            ) && let Ok(Some(object)) = store.find(entity, id)
+            {
+                return mxrs_runtime::shown(&object);
+            }
+            serde_json::Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, with_members(store, value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| with_members(store, value))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -485,6 +532,9 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
         target.mpr.display(),
         restored,
     );
+    for skipped in &boot.skipped_validation_rules {
+        println!("[mxrs] warning: validation rule {skipped}; a flow must check it");
+    }
     if !boot.skipped_xpath_rules.is_empty() {
         println!(
             "[mxrs] warning: {} access rule(s) carry an XPath constraint outside the evaluated subset and are enforced as deny",

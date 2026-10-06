@@ -24,6 +24,8 @@ pub struct Flow {
     pub name: String,
     pub apply_entity_access: bool,
     pub parameter_names: Vec<String>,
+    /// The entity each object or list parameter takes, by its name.
+    pub parameter_entities: BTreeMap<String, String>,
     pub objects: Vec<Document>,
     pub edges: Vec<Document>,
 }
@@ -125,6 +127,8 @@ pub struct FlowEngine {
     flows: BTreeMap<String, Flow>,
     associations: BTreeMap<String, AssociationInfo>,
     lifecycle: BTreeMap<String, Vec<LifecycleHook>>,
+    /// The entity each entity specializes, by qualified name.
+    generalizations: BTreeMap<String, String>,
     policy: Option<SecurityPolicy>,
     adapters: BTreeMap<AdapterKind, Box<dyn Adapter>>,
     java_actions: BTreeMap<String, Box<dyn JavaAction>>,
@@ -167,6 +171,20 @@ impl FlowEngine {
                                 parameter.get_str("Name").ok().map(str::to_string)
                             })
                             .collect(),
+                        parameter_entities: flow
+                            .parameters
+                            .iter()
+                            .filter_map(|parameter| {
+                                let name = parameter.get_str("Name").ok()?;
+                                let entity = ["VariableType", "ParameterType", "Type"]
+                                    .iter()
+                                    .find_map(|key| parameter.get_document(key).ok())?
+                                    .get_str("Entity")
+                                    .ok()
+                                    .filter(|entity| !entity.is_empty())?;
+                                Some((name.to_string(), entity.to_string()))
+                            })
+                            .collect(),
                         objects: flow.objects.clone(),
                         edges: flow.flows.clone(),
                     },
@@ -195,6 +213,15 @@ impl FlowEngine {
                 );
             }
             for entity in module.entities() {
+                if let Some(parent) = entity
+                    .generalization
+                    .as_ref()
+                    .and_then(|generalization| generalization.target.clone())
+                {
+                    engine
+                        .generalizations
+                        .insert(qualified_entity(module_name, entity), parent);
+                }
                 if entity.lifecycle.is_empty() {
                     continue;
                 }
@@ -958,8 +985,8 @@ impl FlowEngine {
         let events = action.get_bool("WithEvents").unwrap_or(true);
         for reference in object_list(&value)? {
             self.authorize_record(execution, &reference, EntityAction::Delete)?;
-            if events {
-                self.run_hooks(store, execution, &reference, "before_delete")?;
+            if events && !self.run_hooks(store, execution, &reference, "before_delete")? {
+                continue;
             }
             store
                 .delete(&reference.entity, &reference.id)
@@ -969,6 +996,33 @@ impl FlowEngine {
             }
         }
         Ok(())
+    }
+
+    /// Whether an object of `entity` may be given to `flow` for
+    /// `parameter`: the parameter's own entity, or one that specializes
+    /// it. A flow or parameter the engine does not know, or one that takes
+    /// no object, says nothing against it.
+    pub fn takes(&self, flow: &str, parameter: &str, entity: &str) -> Result<(), String> {
+        let Some(expected) = self
+            .flows
+            .get(flow)
+            .and_then(|flow| flow.parameter_entities.get(parameter))
+        else {
+            return Ok(());
+        };
+        let mut current = entity;
+        for _ in 0..32 {
+            if current == expected {
+                return Ok(());
+            }
+            match self.generalizations.get(current) {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        Err(format!(
+            "{flow} takes {expected} for {parameter}, not {entity}"
+        ))
     }
 
     /// Commits an object the way a flow's commit with events does: the
@@ -992,8 +1046,10 @@ impl FlowEngine {
         events: bool,
     ) -> Result<(), FlowError> {
         let creating = !store.is_committed(&reference.entity, &reference.id);
-        if events {
-            self.run_hooks(
+        // A before-handler that answers false, without raising an error,
+        // cancels the commit as Mendix does: silently.
+        if events
+            && !(self.run_hooks(
                 store,
                 execution,
                 reference,
@@ -1002,9 +1058,14 @@ impl FlowEngine {
                 } else {
                     "before_update"
                 },
-            )?;
-            self.run_hooks(store, execution, reference, "before_commit")?;
+            )? && self.run_hooks(store, execution, reference, "before_commit")?)
+        {
+            return Ok(());
         }
+        // The entity's validation rules hold after its before-handlers
+        // have had their say, and before the commit.
+        mxrs_runtime::validate_object(store, &reference.entity, &reference.id)
+            .map_err(FlowError::Runtime)?;
         store
             .commit(&reference.entity, &reference.id)
             .map_err(FlowError::Runtime)?;
@@ -1024,16 +1085,19 @@ impl FlowEngine {
         Ok(())
     }
 
+    /// Runs the entity's handlers of `event`; false when a before-handler
+    /// answered false without raising an error, which cancels the event.
     fn run_hooks(
         &self,
         store: &mut Store,
         execution: &mut Execution,
         reference: &ObjectRef,
         event: &str,
-    ) -> Result<(), FlowError> {
+    ) -> Result<bool, FlowError> {
         let Some(hooks) = self.lifecycle.get(&reference.entity) else {
-            return Ok(());
+            return Ok(true);
         };
+        let mut proceed = true;
         for hook in hooks.iter().filter(|hook| hook.event == event) {
             let mut arguments = Variables::new();
             if hook.pass_event_object
@@ -1043,14 +1107,17 @@ impl FlowEngine {
                 arguments.insert(parameter.clone(), FlowValue::Object(reference.clone()));
             }
             let result = self.call_flow(store, execution, &hook.handler, arguments)?;
-            if hook.raise_error_on_false && result == FlowValue::Bool(false) {
-                return Err(FlowError::native(format!(
-                    "entity lifecycle {} rejected {}",
-                    hook.handler, reference.entity
-                )));
+            if result == FlowValue::Bool(false) {
+                if hook.raise_error_on_false {
+                    return Err(FlowError::native(format!(
+                        "entity lifecycle {} rejected {}",
+                        hook.handler, reference.entity
+                    )));
+                }
+                proceed &= !event.starts_with("before_");
             }
         }
-        Ok(())
+        Ok(proceed)
     }
 
     fn action_retrieve(
@@ -1814,7 +1881,14 @@ impl FlowEngine {
             };
             let parameter = mapping.get_str("Parameter").unwrap_or_default().to_string();
             let value = self.eval(store, mapping.get("Argument"), variables, None)?;
-            arguments.insert(parameter, value.to_json_shallow());
+            // An object goes to the page as the object it is.
+            let value = match &value {
+                FlowValue::Object(reference) => {
+                    json!({ "entity": reference.entity, "id": reference.id })
+                }
+                other => other.to_json_shallow(),
+            };
+            arguments.insert(parameter, value);
         }
         execution.effects.push(json!({
             "type": "open_page",

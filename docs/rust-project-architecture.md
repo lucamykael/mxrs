@@ -318,10 +318,22 @@ the entity's validation rules (required, unique, maximum length, range,
 regular expression — with the model's message) and refused as
 `validation_failed` with its `violations` by member, which the page shows
 under the inputs; what passes is committed through the entity's event
-handlers the way a flow's commit is, and the effects those handlers ask for
-(a message, feedback) come back with the saved object. A list is retrieved
-within its XPath constraint (the subset the runtime evaluates), in its sort
-order, a page at a time. A page whose layout is a popup (`Popup`,
+handlers the way a flow's commit is — a before-handler that answers false
+cancels it, the validation rules hold after the handlers, also for a flow's
+own commit — and the effects those handlers ask for (a message, feedback, a
+page) come back with the saved object. A rule the runtime does not check (a
+kind it does not know, a regular expression Rust's engine cannot read) is a
+warning when `mxrs run` boots. A list is retrieved within its XPath
+constraint — over the entity's own members, refused when it names an
+association path, a page's variable or a token other than the current user
+— in its sort order; constraint and order see only what the caller may
+read. The runtime answers a page of a list (`offset`, `limit`) with the
+total; the shell asks for the whole list and its grids filter and page it.
+A flow a button runs is given the objects its parameter mappings name (a
+widget's, a page parameter's, the one the button is in) — each one the
+caller may read and of the entity the parameter takes, a form's with the
+changes the user made — and what it answers is what the caller may read;
+its log stays on the server's console. A page whose layout is a popup (`Popup`,
 `ModalPopup`, as Atlas's `PopupLayout`) opens over the page it was opened
 from, as a window of the size the page states — behind an underlay when it
 is modal — and the address stays the page's; its close button, Escape, a

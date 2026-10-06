@@ -21,7 +21,8 @@ use std::path::Path;
 use mxrs_bson::{Bson, Document, parse_array};
 use mxrs_model::{Attribute, AttributeType, Module, Project};
 use mxrs_runtime::{
-    EntityRule, MemberRight, RuleKind, SecurityContext, SecurityPolicy, StoreSchema, ValidationRule,
+    Bound, EntityRule, MemberRight, RuleKind, SecurityContext, SecurityPolicy, StoreSchema,
+    ValidationRule,
 };
 use serde_json::Value;
 
@@ -149,6 +150,10 @@ pub struct Boot {
     /// but their constraint can never hold, so they deny every record. A
     /// constraint the evaluator *can* read is not listed here.
     pub skipped_xpath_rules: Vec<String>,
+    /// `Entity.member: why` for each validation rule this runtime does not
+    /// check — a kind it does not know, a regular expression it cannot read
+    /// or the model does not hold. A flow must check those.
+    pub skipped_validation_rules: Vec<String>,
 }
 
 pub fn boot(path: impl AsRef<Path>) -> Result<Boot, BootError> {
@@ -158,7 +163,8 @@ pub fn boot(path: impl AsRef<Path>) -> Result<Boot, BootError> {
         .modules()
         .map_err(|error| BootError::Model(error.to_string()))?;
     let security = project_security(&project)?;
-    build(modules, security.as_ref())
+    let patterns = regular_expressions(&project)?;
+    build_with(modules, security.as_ref(), &patterns)
 }
 
 /// The first `Security$ProjectSecurity` unit, parsed. mxrb locates it the
@@ -238,56 +244,155 @@ fn http_message_schema(schema: StoreSchema) -> StoreSchema {
 
 /// A validation rule as the model states it (`DomainModels$ValidationRule`):
 /// the attribute, the kind of rule in `RuleInfo`, and the message of the
-/// `Message`/`ErrorMessage` text. A kind this runtime cannot check is left
-/// to a flow, as before.
-fn validation_rule(document: &Document) -> Option<ValidationRule> {
+/// `Message`/`ErrorMessage` text. A regular expression is named by its
+/// document (`Module.EmailFormat`), which `patterns` gives the expression
+/// of. A rule this runtime cannot check is answered with why, and the boot
+/// says so rather than dropping it.
+fn validation_rule(
+    document: &Document,
+    patterns: &BTreeMap<String, String>,
+) -> Result<ValidationRule, String> {
     let member = document
         .get_str("Attribute")
-        .ok()?
-        .rsplit('.')
-        .next()?
+        .ok()
+        .and_then(|attribute| attribute.rsplit('.').next())
+        .filter(|member| !member.is_empty())
+        .ok_or("a rule without its attribute")?
         .to_string();
-    let info = document.get_document("RuleInfo").ok()?;
+    let info = document
+        .get_document("RuleInfo")
+        .map_err(|_| format!("{member}: a rule without its kind"))?;
     let rule_type = info.get_str("$Type").unwrap_or_default();
-    let number = |key: &str| match info.get(key) {
-        Some(Bson::String(text)) => text.trim().parse::<f64>().ok(),
-        Some(Bson::Int32(value)) => Some(f64::from(*value)),
-        Some(Bson::Int64(value)) => Some(*value as f64),
-        Some(Bson::Double(value)) => Some(*value),
+    let text = |key: &str| match info.get(key) {
+        Some(Bson::String(text)) => Some(text.trim().to_string()),
+        Some(Bson::Int32(value)) => Some(value.to_string()),
+        Some(Bson::Int64(value)) => Some(value.to_string()),
+        Some(Bson::Double(value)) => Some(value.to_string()),
         _ => None,
+    };
+    let flag = |key: &str| info.get_bool(key).ok();
+    // A bound is a value, or — when the rule says not to use one — another
+    // attribute of the same object.
+    let bound = |value: &str, use_value: &str, attribute: &str| -> Option<Bound> {
+        if flag(use_value) == Some(false) {
+            let other = text(attribute).filter(|other| !other.is_empty())?;
+            return Some(Bound::Member(
+                other.rsplit('.').next().unwrap_or(&other).to_string(),
+            ));
+        }
+        text(value)
+            .filter(|value| !value.is_empty())
+            .map(Bound::Value)
     };
     let kind = if rule_type.ends_with("RequiredRuleInfo") {
         RuleKind::Required
     } else if rule_type.ends_with("UniqueRuleInfo") {
         RuleKind::Unique
     } else if rule_type.ends_with("MaxLengthRuleInfo") {
-        RuleKind::MaxLength(usize::try_from(number("MaxLength")? as i64).ok()?)
+        let length = text("MaxLength")
+            .and_then(|length| length.parse::<usize>().ok())
+            .ok_or_else(|| format!("{member}: a maximum length without its length"))?;
+        RuleKind::MaxLength(length)
     } else if rule_type.ends_with("RangeRuleInfo") {
-        // Studio Pro states the range's type and keeps both bounds; only the
-        // ones the type uses count.
+        // Studio Pro states the range's type and keeps both bounds; only
+        // the ones the type uses count.
         let range_type = info.get_str("TypeOfRange").unwrap_or("Between");
         let minimum = (range_type != "SmallerThanOrEqualTo")
-            .then(|| number("MinimumValue").or_else(|| number("MinValue")))
+            .then(|| {
+                bound("MinValue", "UseMinValue", "MinAttribute")
+                    .or_else(|| bound("MinimumValue", "UseMinValue", "MinAttribute"))
+            })
             .flatten();
         let maximum = (range_type != "GreaterThanOrEqualTo")
-            .then(|| number("MaximumValue").or_else(|| number("MaxValue")))
+            .then(|| {
+                bound("MaxValue", "UseMaxValue", "MaxAttribute")
+                    .or_else(|| bound("MaximumValue", "UseMaxValue", "MaxAttribute"))
+            })
             .flatten();
+        if minimum.is_none() && maximum.is_none() {
+            return Err(format!("{member}: a range without its bounds"));
+        }
         RuleKind::Range { minimum, maximum }
+    } else if rule_type.ends_with("EqualsToRuleInfo") {
+        let expected = bound("EqualsToValue", "UseValue", "EqualsToAttribute")
+            .ok_or_else(|| format!("{member}: an equals-to rule without what it equals"))?;
+        RuleKind::EqualsTo(expected)
     } else if rule_type.ends_with("RegExRuleInfo") {
-        RuleKind::Pattern(info.get_str("RegularExpression").ok()?.to_string())
+        let name = text("RegularExpression")
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("{member}: a regular expression rule without its expression"))?;
+        let expression = patterns.get(&name).ok_or_else(|| {
+            format!("{member}: the regular expression {name} is not in the model")
+        })?;
+        if let Err(error) = mxrs_runtime::pattern_reads(expression) {
+            return Err(format!(
+                "{member}: the regular expression {name} uses what this runtime does not read ({error})"
+            ));
+        }
+        RuleKind::Pattern(expression.clone())
     } else {
-        return None;
+        return Err(format!(
+            "{member}: a {rule_type} is not checked by this runtime"
+        ));
     };
     let message = ["Message", "ErrorMessage"]
         .iter()
         .filter_map(|key| document.get_document(key).ok())
         .find_map(translated_text)
         .unwrap_or_default();
-    Some(ValidationRule {
+    Ok(ValidationRule {
         member,
         kind,
         message,
     })
+}
+
+/// The regular expressions the model declares
+/// (`RegularExpressions$RegularExpression`), by qualified name.
+fn regular_expressions(project: &Project) -> Result<BTreeMap<String, String>, BootError> {
+    let model = |error: mxrs_model::ModelError| BootError::Model(error.to_string());
+    let units = project.all_units().map_err(model)?;
+    let modules: BTreeMap<String, String> = project
+        .modules()
+        .map_err(model)?
+        .into_iter()
+        .filter_map(|module| Some((module.id.clone(), module.name?)))
+        .collect();
+    let containers: BTreeMap<&str, &str> = units
+        .iter()
+        .map(|unit| (unit.unit_id.as_str(), unit.container_id.as_str()))
+        .collect();
+    let mut expressions = BTreeMap::new();
+    for unit in &units {
+        let document = project
+            .mpr()
+            .parse_contents(unit)
+            .map_err(|error| BootError::Model(error.to_string()))?;
+        if document.get_str("$Type").ok() != Some("RegularExpressions$RegularExpression") {
+            continue;
+        }
+        let (Ok(name), Ok(expression)) = (document.get_str("Name"), document.get_str("Expression"))
+        else {
+            continue;
+        };
+        // The module is the first container up the folders that is one.
+        let mut container = unit.container_id.as_str();
+        let mut module = None;
+        for _ in 0..64 {
+            if let Some(found) = modules.get(container) {
+                module = Some(found.clone());
+                break;
+            }
+            match containers.get(container) {
+                Some(parent) => container = parent,
+                None => break,
+            }
+        }
+        if let Some(module) = module {
+            expressions.insert(format!("{module}.{name}"), expression.to_string());
+        }
+    }
+    Ok(expressions)
 }
 
 /// The text of a `Texts$Text`: its English translation, or the first one
@@ -321,11 +426,22 @@ fn translated_text(text: &Document) -> Option<String> {
 }
 
 pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, BootError> {
+    build_with(modules, security, &BTreeMap::new())
+}
+
+/// [`build`], with the model's regular expressions by qualified name, which
+/// its validation rules name.
+pub fn build_with(
+    modules: Vec<Module>,
+    security: Option<&Document>,
+    patterns: &BTreeMap<String, String>,
+) -> Result<Boot, BootError> {
     let mut schema = http_message_schema(StoreSchema::default());
     let mut entities = 0;
     let mut documents = BTreeMap::new();
     let mut entity_rules: BTreeMap<String, Vec<EntityRule>> = BTreeMap::new();
     let mut skipped_xpath_rules = Vec::new();
+    let mut skipped_validation_rules = Vec::new();
     for module in &modules {
         let Some(module_name) = module.name.as_deref() else {
             continue;
@@ -381,11 +497,13 @@ pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, 
                     Some((attribute.name.clone()?, kind))
                 })
                 .collect();
-            let rules = entity
-                .validation_rules
-                .iter()
-                .filter_map(validation_rule)
-                .collect();
+            let mut rules = Vec::new();
+            for rule in &entity.validation_rules {
+                match validation_rule(rule, patterns) {
+                    Ok(rule) => rules.push(rule),
+                    Err(reason) => skipped_validation_rules.push(format!("{qualified}.{reason}")),
+                }
+            }
             schema = schema
                 .entity(qualified.clone(), defaults, transient)
                 .members(&qualified, kinds)
@@ -454,6 +572,7 @@ pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, 
         entities,
         documents: document_count,
         skipped_xpath_rules,
+        skipped_validation_rules,
     })
 }
 
@@ -1082,22 +1201,30 @@ mod tests {
             ),
             rule(
                 "Main.Customer.Age",
-                doc! { "$Type": "DomainModels$RangeRuleInfo", "TypeOfRange": "GreaterThanOrEqualTo", "MinimumValue": "0", "MaximumValue": "9" },
+                doc! { "$Type": "DomainModels$RangeRuleInfo", "TypeOfRange": "GreaterThanOrEqualTo", "UseMinValue": true, "MinValue": "0", "MaxValue": "9" },
+                None,
+            ),
+            rule(
+                "Main.Customer.Age",
+                doc! { "$Type": "DomainModels$RangeRuleInfo", "TypeOfRange": "Between", "UseMinValue": false, "MinAttribute": "Main.Customer.Floor", "UseMaxValue": true, "MaxValue": "150" },
                 None,
             ),
             rule(
                 "Main.Customer.Email",
-                doc! { "$Type": "DomainModels$RegExRuleInfo", "RegularExpression": "^.+@.+$" },
+                doc! { "$Type": "DomainModels$RegExRuleInfo", "RegularExpression": "Main.EmailFormat" },
                 None,
             ),
             rule(
-                "Main.Customer.Name",
-                doc! { "$Type": "DomainModels$SomeOtherRuleInfo" },
+                "Main.Customer.Confirm",
+                doc! { "$Type": "DomainModels$EqualsToRuleInfo", "UseValue": false, "EqualsToAttribute": "Main.Customer.Email" },
                 None,
             ),
         ];
-        let parsed: Vec<ValidationRule> = rules.iter().filter_map(validation_rule).collect();
-        assert_eq!(parsed.len(), 5);
+        let patterns = BTreeMap::from([("Main.EmailFormat".to_string(), "^.+@.+$".to_string())]);
+        let parsed: Vec<ValidationRule> = rules
+            .iter()
+            .map(|rule| validation_rule(rule, &patterns).unwrap())
+            .collect();
         assert_eq!(parsed[0].member, "Name");
         assert_eq!(parsed[0].kind, RuleKind::Required);
         assert_eq!(parsed[0].message, "Name the customer");
@@ -1107,10 +1234,48 @@ mod tests {
         assert_eq!(
             parsed[3].kind,
             RuleKind::Range {
-                minimum: Some(0.0),
+                minimum: Some(Bound::Value("0".into())),
                 maximum: None
             }
         );
-        assert_eq!(parsed[4].kind, RuleKind::Pattern("^.+@.+$".into()));
+        assert_eq!(
+            parsed[4].kind,
+            RuleKind::Range {
+                minimum: Some(Bound::Member("Floor".into())),
+                maximum: Some(Bound::Value("150".into()))
+            }
+        );
+        // The rule names the model's expression; the expression is checked.
+        assert_eq!(parsed[5].kind, RuleKind::Pattern("^.+@.+$".into()));
+        assert_eq!(
+            parsed[6].kind,
+            RuleKind::EqualsTo(Bound::Member("Email".into()))
+        );
+        // What this runtime cannot check is said, with why.
+        let unchecked = |info: Document| {
+            validation_rule(&rule("Main.Customer.Email", info, None), &patterns).unwrap_err()
+        };
+        assert!(
+            unchecked(doc! { "$Type": "DomainModels$SomeOtherRuleInfo" }).contains("not checked")
+        );
+        assert!(
+            unchecked(
+                doc! { "$Type": "DomainModels$RegExRuleInfo", "RegularExpression": "Main.Missing" }
+            )
+            .contains("not in the model")
+        );
+        let lookaround = BTreeMap::from([("Main.Ahead".to_string(), "^(?=a)a$".to_string())]);
+        assert!(
+            validation_rule(
+                &rule(
+                    "Main.Customer.Email",
+                    doc! { "$Type": "DomainModels$RegExRuleInfo", "RegularExpression": "Main.Ahead" },
+                    None
+                ),
+                &lookaround
+            )
+            .unwrap_err()
+            .contains("does not read")
+        );
     }
 }

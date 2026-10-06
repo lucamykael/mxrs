@@ -198,7 +198,9 @@ impl Check<'_> {
         }
         let parameter = field(source, "SourceVariable")
             .and_then(as_document)
-            .and_then(|variable| text(variable, "PageParameter"))?;
+            .and_then(|variable| {
+                text(variable, "PageParameter").or_else(|| text(variable, "SnippetParameter"))
+            })?;
         let name = parameter_of(self.qualified, parameter)?;
         self.own.parameters.get(name).cloned().flatten()
     }
@@ -477,12 +479,50 @@ mod tests {
                 ]),
             }])}])},
         };
+        // A snippet: its data view over its own parameter, and a page
+        // calling it with a parameter it does not have.
+        let card = doc! {
+            "$Type": "Forms$Snippet",
+            "Name": "Pet_Card",
+            "Parameters": list(vec![doc! {
+                "$Type": "Forms$SnippetParameter",
+                "Name": "Pet",
+                "ParameterType": { "$Type": "DataTypes$ObjectType", "Entity": "Main.Pet" },
+            }]),
+            "Widgets": list(vec![doc! {
+                "$Type": "Forms$DataView",
+                "Name": "card",
+                "DataSource": {
+                    "$Type": "Forms$DataViewSource",
+                    "SourceVariable": variable("SnippetParameter", "Main.Pet_Card.Pet"),
+                },
+                "Widgets": list(vec![input("owner", "Main.Customer.Name")]),
+            }]),
+        };
+        let caller = doc! {
+            "$Type": "Forms$Page",
+            "Name": "Pet_Show",
+            "Widgets": list(vec![doc! {
+                "$Type": "Forms$SnippetCallWidget",
+                "Name": "call",
+                "FormCall": {
+                    "$Type": "Forms$SnippetCall",
+                    "Form": "Main.Pet_Card",
+                    "ParameterMappings": list(vec![doc! {
+                        "$Type": "Forms$SnippetParameterMapping",
+                        "Parameter": "Main.Pet_Card.Animal",
+                    }]),
+                },
+            }]),
+        };
         let forms = BTreeMap::from([
             ("Main.Pet_Edit".to_string(), FormShape::of("page", &edit)),
             (
                 "Main.Pet_Overview".to_string(),
                 FormShape::of("page", &overview),
             ),
+            ("Main.Pet_Card".to_string(), FormShape::of("snippet", &card)),
+            ("Main.Pet_Show".to_string(), FormShape::of("page", &caller)),
         ]);
         let generalizations = BTreeMap::from([("Main.Pet".to_string(), "Main.Animal".to_string())]);
         let messages = |qualified: &str, document: &Document| {
@@ -498,6 +538,18 @@ mod tests {
                 "attribute_outside_context page:Main.Pet_Edit shows \"Main.Customer.Email\" in \"stranger\", inside a data view of Main.Pet, which has no such attribute",
                 "unknown_page_variable page:Main.Pet_Edit names the parameter \"Main.Pet_Edit.Animal\", which this page does not have",
                 "unknown_page_variable page:Main.Pet_Edit names the variable \"Nope\", which this page does not declare",
+            ]
+        );
+        assert_eq!(
+            messages("Main.Pet_Card", &card),
+            vec![
+                "attribute_outside_context snippet:Main.Pet_Card shows \"Main.Customer.Name\" in \"owner\", inside a data view of Main.Pet, which has no such attribute",
+            ]
+        );
+        assert_eq!(
+            messages("Main.Pet_Show", &caller),
+            vec![
+                "unknown_page_parameter page:Main.Pet_Show opens Main.Pet_Card with \"Animal\", which is not a parameter of it",
             ]
         );
         assert_eq!(

@@ -7,6 +7,12 @@ import type { Collections, Manifest, NavigationItem } from '@/types/model';
 /** The object the widgets being drawn are about: a row of a list, or a form's. */
 export const Row = createContext<DataObject | null>(null);
 
+/**
+ * The objects of the widgets the one being drawn is inside — a data view's,
+ * a list's row — by the widget's name, which a page variable names.
+ */
+export const Scope = createContext<ReadonlyMap<string, DataObject>>(new Map());
+
 /** The form the inputs being drawn fill: what it holds now, and how to change it. */
 export const Draft = createContext<{
   object: DataObject | null;
@@ -19,6 +25,8 @@ export const Draft = createContext<{
   violations: ReadonlyMap<string, string>;
   /** Takes what a save was refused for, or what a flow's feedback said of a member. */
   rejected: (violations: Violation[]) => void;
+  /** The members the form has an input for, which a violation is shown under. */
+  inputs: Set<string>;
 } | null>(null);
 
 /** How a filter narrows: by a text it contains, an option it equals, or a day it falls on. */

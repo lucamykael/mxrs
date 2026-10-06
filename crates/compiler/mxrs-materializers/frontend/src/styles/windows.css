@@ -24,3 +24,10 @@
 .mxrs-popup .mx-scrollcontainer {
   flex-basis: auto;
 }
+
+/* What the application says stays readable over a window and its underlay. */
+.mxrs-failure,
+.mxrs-notice {
+  position: relative;
+  z-index: 3000;
+}

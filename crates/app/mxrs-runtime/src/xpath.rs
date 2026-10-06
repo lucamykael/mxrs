@@ -46,6 +46,48 @@ pub fn is_supported(expression: &str) -> bool {
     run(expression, Mode::Shape).is_some()
 }
 
+/// Whether a list's constraint is one the runtime answers as Mendix would:
+/// what [`is_supported`] reads, over the entity's own members — not an
+/// association path (`Order_Customer/Customer/Name`), a page's variable
+/// (`$currentObject`), or a token it does not resolve (`[%CurrentDateTime%]`,
+/// `'[%CurrentObject%]'`). The current user, as a token or `$currentUser`,
+/// is resolved.
+pub fn is_list_supported(expression: &str) -> bool {
+    if !is_supported(expression) {
+        return false;
+    }
+    let characters: Vec<char> = expression.chars().collect();
+    let mut quoted = false;
+    for (index, character) in characters.iter().enumerate() {
+        if *character == '\'' {
+            quoted = !quoted;
+            continue;
+        }
+        if *character == '[' && characters.get(index + 1) == Some(&'%') {
+            let token: String = characters[index..].iter().take(15).collect();
+            if !token.eq_ignore_ascii_case("[%CurrentUser%]") {
+                return false;
+            }
+        }
+        if quoted {
+            continue;
+        }
+        if *character == '/' {
+            return false;
+        }
+        if *character == '$' {
+            let name: String = characters[index + 1..]
+                .iter()
+                .take_while(|character| character.is_alphanumeric() || **character == '_')
+                .collect();
+            if !name.eq_ignore_ascii_case("currentUser") {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Clone, Copy)]
 enum Mode<'a> {
     Evaluate {

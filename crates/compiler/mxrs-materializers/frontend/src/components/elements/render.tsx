@@ -33,6 +33,7 @@ import {
   PageTitle,
   Placeholders,
   Row,
+  Scope,
   Shell,
   Sidebar,
   type FilterKind,
@@ -222,9 +223,10 @@ const held = (source: Source, field: string): ReactNode => {
  * the widget is in, and what it asks of the page is done.
  */
 function useAction(source: Source, field: string): (() => void) | undefined {
-  const { open, close, changed, fail, notify } = useContext(Shell);
+  const { open, close, changed, fail, notify, given: pageGiven } = useContext(Shell);
   const row = useContext(Row);
   const draft = useContext(Draft);
+  const scope = useContext(Scope);
   // One request at a time: a second click while the first is on its way
   // does nothing.
   const busy = useRef(false);
@@ -245,25 +247,57 @@ function useAction(source: Source, field: string): (() => void) | undefined {
   };
   // The object the widget is in: the one a form is filling, or a list's row.
   const here = draft?.object ?? row;
-  // What the page gives a flow: the object it is in, for each parameter the
-  // settings map to a variable of the page.
+  // The object a parameter mapping names: a widget's (a data view's, a
+  // list's row), a parameter of the page, or the one the widget is in.
+  const objectOf = (mapping: Source): DataObject | null => {
+    const variable = child(mapping, 'variable');
+    const widget = variable ? plain(variable, 'widget', '') : '';
+    if (widget) return scope.get(widget) ?? null;
+    const parameter = variable ? plain(variable, 'pageParameter', '') : '';
+    if (parameter) return pageGiven[lastName(parameter)] ?? null;
+    const expression = plain(mapping, 'expression', '') || plain(mapping, 'argument', '');
+    if (!expression || expression === '$currentObject') return here;
+    const name = /^\$(\w+)$/.exec(expression)?.[1];
+    return name ? (scope.get(name) ?? pageGiven[name] ?? null) : null;
+  };
+  // An object as a flow is given it: the form's, with what the user
+  // changed and whether it is new; any other, as it is stored.
+  const passed = (object: DataObject): RuntimeValue => {
+    const form = draft?.object;
+    if (form && object.id === form.id) {
+      const members = Object.fromEntries(
+        Object.entries(form.members).filter(([member]) => draft.changed.has(member)),
+      );
+      return {
+        entity: form.entity,
+        id: form.id,
+        new: form.new === true,
+        members,
+      } as unknown as RuntimeValue;
+    }
+    return { entity: object.entity, id: object.id } as unknown as RuntimeValue;
+  };
+  // What the page gives a flow: for each parameter, the object its mapping names.
   const given = (settings: Source | null): Record<string, RuntimeValue> => {
     const arguments_: Record<string, RuntimeValue> = {};
     for (const mapping of settings ? list(settings, 'parameterMappings').map(sourceOf) : []) {
-      if (!mapping || !here) continue;
+      if (!mapping) continue;
       const parameter = lastName(plain(mapping, 'parameter', ''));
-      const expression = plain(mapping, 'expression', '');
-      if (
-        parameter &&
-        (child(mapping, 'variable') || expression === '$currentObject' || !expression)
-      ) {
-        arguments_[parameter] = here as unknown as RuntimeValue;
-      }
+      const object = objectOf(mapping);
+      if (parameter && object) arguments_[parameter] = passed(object);
     }
     return arguments_;
   };
-  // What a flow asks the page to do once it has run.
-  const apply = (effects: Array<Record<string, unknown> & { type: string }>) => {
+  // What the runtime refused: under the inputs it is about, and the rest said.
+  const refused = (error: unknown) => {
+    if (!(error instanceof ValidationError) || !draft) throw error;
+    draft.rejected(error.violations);
+    const unshown = error.violations.filter(({ member }) => !draft.inputs.has(member));
+    if (unshown.length) notify(unshown.map(({ message }) => message).join(' '), 'warning');
+  };
+  // What a flow asks the page to do once it has run; whether that left the page.
+  const apply = (effects: Array<Record<string, unknown> & { type: string }>): boolean => {
+    let left = false;
     for (const effect of effects) {
       switch (effect.type) {
         case 'show_message':
@@ -282,19 +316,44 @@ function useAction(source: Source, field: string): (() => void) | undefined {
           break;
         case 'close_page':
           close();
+          left = true;
           break;
         case 'show_home_page':
           open('');
+          left = true;
           break;
-        case 'show_page':
-          if (typeof effect.name === 'string' && effect.name)
-            open(effect.name, here ? { [lastName(here.entity)]: here } : {});
+        case 'open_page': {
+          // The page a flow opens, given the objects the flow named for it.
+          const page = String(effect.page ?? '');
+          const objects: Record<string, DataObject> = {};
+          for (const [parameter, value] of Object.entries(
+            (effect.arguments ?? {}) as Record<string, unknown>,
+          )) {
+            if (isObject(value)) objects[lastName(parameter)] = value;
+          }
+          if (page) {
+            open(page, objects);
+            left = true;
+          }
+          break;
+        }
+        case 'download_file':
+          notify(
+            'The flow offers a file to download, which this runtime does not serve yet.',
+            'warning',
+          );
           break;
         default:
+          // What the shell does not do is said, not dropped.
+          notify(
+            `The flow asked the page for ${effect.type}${effect.name ? ` (${String(effect.name)})` : ''}, which this shell does not do yet.`,
+            'warning',
+          );
           break;
       }
     }
     changed();
+    return left;
   };
   const run = (kind: string, handler: string, asking: Source | null) => () => {
     const confirmation = asking ? child(asking, 'confirmationInfo') : null;
@@ -302,18 +361,25 @@ function useAction(source: Source, field: string): (() => void) | undefined {
     if (question && !window.confirm(question)) return;
     invokeAction({ kind, handler, arguments: given(asking) }, null)
       .then((answer) => answer && apply(answer.effects))
-      .catch(fail);
+      .catch((error: unknown) => {
+        try {
+          refused(error);
+        } catch (other) {
+          fail(other);
+        }
+      });
   };
   switch (action.type) {
     case 'Forms$FormAction': {
       const page = settings('formSettings', 'form');
       if (!page) return undefined;
-      // Each parameter the page is given takes the object the button is in.
+      // Each parameter the page is given takes the object its mapping names.
       const pageSettings = child(action, 'formSettings');
       const given: Record<string, DataObject> = {};
       for (const mapping of pageSettings ? list(pageSettings, 'parameterMappings') : []) {
         const stated = sourceOf(mapping);
-        if (stated && here) given[lastName(plain(stated, 'parameter', ''))] = here;
+        const object = stated ? objectOf(stated) : null;
+        if (stated && object) given[lastName(plain(stated, 'parameter', ''))] = object;
       }
       return () => open(page, given);
     }
@@ -345,15 +411,13 @@ function useAction(source: Source, field: string): (() => void) | undefined {
           .then(({ effects, ...saved }) => {
             draft.saved(saved);
             changed();
-            if (effects?.length) apply(effects);
-            if (plain(action, 'closePage', true)) close();
+            // A handler that closed or opened a page has left this one.
+            const left = effects?.length ? apply(effects) : false;
+            if (!left && plain(action, 'closePage', true)) close();
           })
-          .catch((error: unknown) => {
-            // What the runtime refused is shown where it belongs, under
-            // the inputs; the page stays for the user to put it right.
-            if (!(error instanceof ValidationError)) throw error;
-            draft.rejected(error.violations);
-          }),
+          // What the runtime refused is shown where it belongs, under the
+          // inputs; the page stays for the user to put it right.
+          .catch(refused),
       );
     }
     case 'Forms$DeleteClientAction': {
@@ -694,6 +758,7 @@ const input =
     const label = text(source, 'labelTemplate');
     // What the runtime refused of the member is said under its input, as
     // the Mendix client does, until the user changes it.
+    draft?.inputs.add(name);
     const refused = draft?.violations.get(name);
     // Laid out as the Mendix client lays out a horizontal form: the label
     // in a column of its own and the control, with what was refused of it,
@@ -810,6 +875,8 @@ const DataView: Draw = (source) => {
   const [object, setObject] = useState<DataObject | null>(initial);
   const [changed, setChanged] = useState<ReadonlySet<string>>(new Set());
   const [violations, setViolations] = useState<ReadonlyMap<string, string>>(new Map());
+  const inputs = useRef(new Set<string>()).current;
+  const scope = useContext(Scope);
   // A view over a microflow shows the object the flow answers with; a flow
   // the runtime cannot run is said in the view's place, not the page's.
   const settings =
@@ -873,13 +940,15 @@ const DataView: Draw = (source) => {
     );
   }
   return (
-    <Draft.Provider value={{ object, changed, set, saved, violations, rejected }}>
-      <section className={className(source, 'mx-dataview')}>
-        <div className="mx-dataview-content">{each(list(source, 'widgets'))}</div>
-        {list(source, 'footerWidgets').length ? (
-          <footer className="mx-dataview-controls">{each(list(source, 'footerWidgets'))}</footer>
-        ) : null}
-      </section>
+    <Draft.Provider value={{ object, changed, set, saved, violations, rejected, inputs }}>
+      <Scope.Provider value={within(scope, plain(source, 'name', ''), object)}>
+        <section className={className(source, 'mx-dataview')}>
+          <div className="mx-dataview-content">{each(list(source, 'widgets'))}</div>
+          {list(source, 'footerWidgets').length ? (
+            <footer className="mx-dataview-controls">{each(list(source, 'footerWidgets'))}</footer>
+          ) : null}
+        </section>
+      </Scope.Provider>
     </Draft.Provider>
   );
 };
@@ -903,9 +972,9 @@ const ListView: Draw = (source) => {
         {all.slice(0, shownCount).map((object) => (
           <li key={object.id} className="mx-listview-item">
             {/* A row is about its own object, whatever form the list is in. */}
-            <Row.Provider value={object}>
-              <Draft.Provider value={null}>{content(source)}</Draft.Provider>
-            </Row.Provider>
+            <OfRow object={object} of={plain(source, 'name', '')}>
+              {content(source)}
+            </OfRow>
           </li>
         ))}
       </ul>
@@ -1207,7 +1276,8 @@ function queryOf(value: unknown): Query {
     .map(sourceOf)
     .filter((item): item is Source => item !== null)
     .map((item) => ({
-      attribute: lastName(attributeOf(item)),
+      // Along an association, the path as it is: the runtime says it does not sort so.
+      attribute: attributeOf(item).includes('/') ? attributeOf(item) : lastName(attributeOf(item)),
       descending: plain(item, 'sortOrder', 'Ascending') === 'Descending',
     }))
     .filter((item) => item.attribute);
@@ -1330,12 +1400,40 @@ const PagingBar = ({ paging }: { paging: ReturnType<typeof usePaging> }) => (
   </div>
 );
 
-/** What a list's rows are drawn about: each its own object, and no form's. */
-const OfRow = ({ object, children }: { object: DataObject; children: ReactNode }) => (
-  <Row.Provider value={object}>
-    <Draft.Provider value={null}>{children}</Draft.Provider>
-  </Row.Provider>
-);
+/** The objects of the widgets around, with one more: what a widget of that name holds. */
+function within(
+  scope: ReadonlyMap<string, DataObject>,
+  name: string,
+  object: DataObject | null,
+): ReadonlyMap<string, DataObject> {
+  if (!name || !object) return scope;
+  const next = new Map(scope);
+  next.set(name, object);
+  return next;
+}
+
+/**
+ * What a list's rows are drawn about: each its own object, and no form's —
+ * which a page variable naming the list (`of`) is about too.
+ */
+const OfRow = ({
+  object,
+  of = '',
+  children,
+}: {
+  object: DataObject;
+  of?: string;
+  children: ReactNode;
+}) => {
+  const scope = useContext(Scope);
+  return (
+    <Row.Provider value={object}>
+      <Scope.Provider value={within(scope, of, object)}>
+        <Draft.Provider value={null}>{children}</Draft.Provider>
+      </Scope.Provider>
+    </Row.Provider>
+  );
+};
 
 /** How a list's items are selected, as its widget says: not at all, one, or several. */
 const selectionOf = (source: Source): 'None' | 'Single' | 'Multi' => {
@@ -1377,7 +1475,7 @@ const ListItem = ({
   select?: () => void;
   children: ReactNode;
 }) => (
-  <OfRow object={object}>
+  <OfRow object={object} of={plain(source, 'name', '')}>
     <ListItemBody source={source} className={classes} selected={selected} select={select}>
       {children}
     </ListItemBody>

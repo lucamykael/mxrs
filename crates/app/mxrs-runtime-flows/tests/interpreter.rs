@@ -1066,6 +1066,127 @@ fn lifecycle_hooks_fire_in_the_oracle_order_and_can_reject_commits() {
     );
 }
 
+/// A before-commit handler that answers false without raising an error
+/// cancels the commit, silently, as Mendix does; what passes is held to the
+/// entity's validation rules after the handlers ran; a flow takes an object
+/// only of its parameter's entity, or one that specializes it.
+#[test]
+fn a_commit_is_cancelled_by_its_handler_and_held_to_the_rules() {
+    let mut order = mxrs_model::entity::Entity::from_bson(&doc! {
+        "$Type": "DomainModels$Entity",
+        "Name": "Order",
+    });
+    order.qualified_name = Some("App.Order".to_string());
+    order.lifecycle = vec![mxrs_model::entity::LifecycleCallback {
+        id: None,
+        event: "before_commit".to_string(),
+        handler: "Veto".to_string(),
+        pass_event_object: true,
+        raise_error_on_false: false,
+        raw: doc! {},
+    }];
+    let mut rush = mxrs_model::entity::Entity::from_bson(&doc! {
+        "$Type": "DomainModels$Entity",
+        "Name": "RushOrder",
+    });
+    rush.qualified_name = Some("App.RushOrder".to_string());
+    rush.generalization = Some(mxrs_model::entity::Generalization {
+        id: None,
+        native_type: "DomainModels$Generalization".to_string(),
+        target: Some("App.Order".to_string()),
+        persistable: None,
+        system_members: Default::default(),
+        raw: doc! {},
+    });
+    let veto = flow(
+        "Veto",
+        vec![
+            start("s"),
+            parameter("p", "order"),
+            end("e", "$order/Name != 'skip'"),
+        ],
+        vec![edge("f1", "s", "e")],
+    );
+    let make = flow(
+        "Make",
+        vec![
+            start("s"),
+            parameter("p", "Name"),
+            activity(
+                "c",
+                doc! {
+                    "$Type": "Microflows$CreateObjectAction",
+                    "Entity": "App.Order",
+                    "VariableName": "order",
+                    "Commit": "Yes",
+                    "Items": build_array(vec![
+                        Bson::Document(doc! { "Attribute": "Name", "Value": doc! { "Value": "$Name" } }),
+                    ], 2),
+                },
+            ),
+            end("e", "true"),
+        ],
+        vec![edge("f1", "s", "c"), edge("f2", "c", "e")],
+    );
+    let mut ship = Microflow::from_bson(&doc! {
+        "$Type": "Microflows$Microflow",
+        "Name": "Ship",
+        "ObjectCollection": doc! {
+            "$Type": "Microflows$MicroflowObjectCollection",
+            "Objects": build_array(vec![start("s"), end("e", "true")], 2),
+        },
+        "Flows": build_array(vec![edge("f1", "s", "e")], 2),
+    });
+    ship.parameters = vec![doc! {
+        "$Type": "Microflows$MicroflowParameterObject",
+        "Name": "Order",
+        "VariableType": { "$Type": "DataTypes$ObjectType", "Entity": "App.Order" },
+    }];
+    let mut module = module_with(vec![veto, make, ship]);
+    module.domain_model = Some(mxrs_model::DomainModel {
+        id: None,
+        native_type: None,
+        documentation: String::new(),
+        entities: vec![order, rush],
+        associations: Vec::new(),
+        cross_associations: Vec::new(),
+    });
+    let engine = FlowEngine::from_modules(std::slice::from_ref(&module));
+    let mut store = Store::new(
+        StoreSchema::default()
+            .entity("App.Order", BTreeMap::new(), false)
+            .rules(
+                "App.Order",
+                vec![mxrs_runtime::ValidationRule {
+                    member: "Name".to_string(),
+                    kind: mxrs_runtime::RuleKind::MaxLength(5),
+                    message: String::new(),
+                }],
+            ),
+    );
+    let make = |store: &mut Store, name: &str| {
+        let mut arguments = Variables::new();
+        arguments.insert("Name".into(), FlowValue::String(name.into()));
+        engine.call(store, "App.Make", arguments, None)
+    };
+    make(&mut store, "skip").unwrap();
+    assert!(store.retrieve("App.Order").unwrap().is_empty());
+    assert!(matches!(
+        make(&mut store, "far too long"),
+        Err(FlowError::Runtime(RuntimeError::Validation(_)))
+    ));
+    make(&mut store, "fine").unwrap();
+    assert_eq!(store.retrieve("App.Order").unwrap().len(), 1);
+    assert!(engine.takes("App.Ship", "Order", "App.Order").is_ok());
+    assert!(engine.takes("App.Ship", "Order", "App.RushOrder").is_ok());
+    assert_eq!(
+        engine
+            .takes("App.Ship", "Order", "App.Customer")
+            .unwrap_err(),
+        "App.Ship takes App.Order for Order, not App.Customer"
+    );
+}
+
 #[test]
 fn list_operations_and_aggregates_follow_the_oracle_table() {
     let flows = vec![flow(

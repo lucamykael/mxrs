@@ -10,6 +10,9 @@ import { ModelPage } from '@/pages/ModelPage';
 import { PageNotFound } from '@/pages/PageNotFound';
 import { findForm, openingOf } from '@/utils/forms';
 
+/** What `opening` holds while the application itself goes back a page. */
+const BACK = '\u0000back';
+
 /**
  * The application: the page the route names. A page the frontend declares
  * is drawn from its TSX, inside the layout it calls; one only the model
@@ -50,14 +53,23 @@ export function App() {
     },
     [openRoute],
   );
-  // Leaving the page: back to the one before it, or home when there is none.
+  // How many pages this application opened that going back returns from:
+  // leaving a page goes back to the one before it only when it opened one,
+  // and home otherwise — never out of the application.
+  const depth = useRef(0);
   const leave = useCallback(() => {
-    if (history.length > 1) history.back();
-    else openRoute('');
+    if (depth.current > 0) {
+      depth.current -= 1;
+      opening.current = BACK;
+      history.back();
+    } else openRoute('');
   }, [openRoute]);
   useEffect(() => {
     setProblem(undefined);
     setPopups([]);
+    if (opening.current === route) depth.current += 1;
+    // Reached another way — the browser's own back — it is one less deep.
+    else if (opening.current !== BACK) depth.current = Math.max(0, depth.current - 1);
     if (opening.current !== route) setGiven((all) => ({ ...all, [route]: {} }));
     opening.current = undefined;
   }, [route]);
@@ -108,6 +120,51 @@ export function App() {
     setSidebar,
   });
 
+  // The popups open over the page, each its own page in the shell.
+  const windows = popups.map((popup, index) => {
+    const form = findForm(popup.page);
+    const shape = openingOf(popup.page);
+    if (!form || !shape.popup) return null;
+    // Closing a popup closes the ones opened from it too.
+    const close = () => setPopups((all) => all.slice(0, index));
+    return (
+      <Fragment key={`${index}:${popup.page}`}>
+        {shape.modal ? <div className="mx-underlay" style={{ zIndex: 1000 + index * 2 }} /> : null}
+        <div
+          role="dialog"
+          aria-modal={shape.modal}
+          aria-label={shape.title || undefined}
+          className="modal-dialog mx-window mx-window-active mxrs-popup"
+          data-page={popup.page}
+          style={{
+            zIndex: 1001 + index * 2,
+            width: shape.width ? `${shape.width}px` : undefined,
+            height: shape.height ? `${shape.height}px` : undefined,
+          }}
+        >
+          <div className="modal-content mx-window-content">
+            <div className="modal-header mx-window-header">
+              <button
+                type="button"
+                className="close mx-window-close"
+                aria-label="Close"
+                onClick={close}
+              >
+                ×
+              </button>
+              <h4>{shape.title}</h4>
+            </div>
+            <div className="modal-body mx-window-body">
+              <Shell.Provider value={shell(popup.page, popup.given, close)}>
+                {form.document}
+              </Shell.Provider>
+            </div>
+          </div>
+        </div>
+      </Fragment>
+    );
+  });
+
   // A page is what a route opens; a layout or a snippet is drawn inside one.
   if (declared?.kind === 'page') {
     return (
@@ -135,57 +192,14 @@ export function App() {
         <div className="mxrs-app" data-page={qualified} key={qualified}>
           {declared.document}
         </div>
-        {popups.map((popup, index) => {
-          const form = findForm(popup.page);
-          const shape = openingOf(popup.page);
-          if (!form || !shape.popup) return null;
-          // Closing a popup closes the ones opened from it too.
-          const close = () => setPopups((all) => all.slice(0, index));
-          return (
-            <Fragment key={`${index}:${popup.page}`}>
-              {shape.modal ? (
-                <div className="mx-underlay" style={{ zIndex: 1000 + index * 2 }} />
-              ) : null}
-              <div
-                role="dialog"
-                aria-modal={shape.modal}
-                aria-label={shape.title || undefined}
-                className="modal-dialog mx-window mx-window-active mxrs-popup"
-                data-page={popup.page}
-                style={{
-                  zIndex: 1001 + index * 2,
-                  width: shape.width ? `${shape.width}px` : undefined,
-                  height: shape.height ? `${shape.height}px` : undefined,
-                }}
-              >
-                <div className="modal-content mx-window-content">
-                  <div className="modal-header mx-window-header">
-                    <button
-                      type="button"
-                      className="close mx-window-close"
-                      aria-label="Close"
-                      onClick={close}
-                    >
-                      ×
-                    </button>
-                    <h4>{shape.title}</h4>
-                  </div>
-                  <div className="modal-body mx-window-body">
-                    <Shell.Provider value={shell(popup.page, popup.given, close)}>
-                      {form.document}
-                    </Shell.Provider>
-                  </div>
-                </div>
-              </div>
-            </Fragment>
-          );
-        })}
+        {windows}
       </Shell.Provider>
     );
   }
 
   return (
     <div className="mxrs-app">
+      {windows}
       <AppHeader project={manifest.project} />
       <div className="mxrs-shell">
         <Navigation items={profile?.items || []} onOpen={open} />
