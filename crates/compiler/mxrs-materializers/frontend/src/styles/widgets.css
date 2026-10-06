@@ -55,3 +55,23 @@
   border-radius: 2px;
   vertical-align: middle;
 }
+
+/* What a flow told the user: a line under the page's top, in the flow's own level. */
+.mxrs-notice {
+  padding: 8px 16px;
+  color: #17324d;
+  background: #e8f1ff;
+  border-bottom: 1px solid #c3d6f3;
+  cursor: pointer;
+}
+
+.mxrs-notice-warning {
+  background: #fff3cd;
+  border-color: #ffeeba;
+}
+
+.mxrs-notice-error {
+  color: #fff;
+  background: #c4252e;
+  border-color: #a51f27;
+}

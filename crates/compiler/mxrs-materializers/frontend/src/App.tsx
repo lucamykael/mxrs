@@ -24,6 +24,8 @@ export function App() {
   const [given, setGiven] = useState<Record<string, Record<string, DataObject>>>({});
   const [changes, setChanges] = useState(0);
   const [problem, setProblem] = useState<string>();
+  // What a flow told the user, until it is dismissed.
+  const [notice, setNotice] = useState<{ message: string; level: string }>();
   // A layout that draws no menu of its own leaves the application's to the shell.
   const [menuDrawn, setMenuDrawn] = useState(true);
   useEffect(() => {
@@ -76,6 +78,7 @@ export function App() {
             setChanges((count) => count + 1);
           },
           fail: (error) => setProblem(error instanceof Error ? error.message : String(error)),
+          notify: (message, level) => setNotice({ message, level }),
           form: findForm,
           collections,
           model: manifest,
@@ -86,6 +89,15 @@ export function App() {
         {problem ? (
           <div role="alert" className="mxrs-failure" onClick={() => setProblem(undefined)}>
             {problem}
+          </div>
+        ) : null}
+        {notice ? (
+          <div
+            role="status"
+            className={`mxrs-notice mxrs-notice-${notice.level}`}
+            onClick={() => setNotice(undefined)}
+          >
+            {notice.message}
           </div>
         ) : null}
         {menuDrawn ? null : (

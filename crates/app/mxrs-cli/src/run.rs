@@ -122,10 +122,24 @@ pub fn resolve_target(root: &Path) -> Result<RunTarget, RunError> {
     })
 }
 
+/// A host as a URL writes it: an IPv6 address goes in brackets.
+pub fn url_host(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
 /// The frontend dev server's extra environment: the profile's `VITE_`
 /// passthrough plus the same markers mxrb sets (`MXRB_ENV`/`MXRB_API_PORT`
-/// there, `MXRS_`-prefixed here).
-pub fn frontend_environment(profile: &EnvironmentProfile, api_port: u16) -> Vec<(String, String)> {
+/// there, `MXRS_`-prefixed here), and the runtime's origin so the dev
+/// server proxies to the host the runtime actually listens on.
+pub fn frontend_environment(
+    profile: &EnvironmentProfile,
+    host: &str,
+    api_port: u16,
+) -> Vec<(String, String)> {
     let mut variables: Vec<(String, String)> = profile
         .variables()
         .filter(|(key, _)| key.starts_with("VITE_"))
@@ -133,6 +147,10 @@ pub fn frontend_environment(profile: &EnvironmentProfile, api_port: u16) -> Vec<
         .collect();
     variables.push(("MXRS_ENV".to_string(), profile.environment.clone()));
     variables.push(("MXRS_API_PORT".to_string(), api_port.to_string()));
+    variables.push((
+        "MXRS_API_ORIGIN".to_string(),
+        format!("http://{}:{api_port}", url_host(host)),
+    ));
     variables
 }
 
@@ -259,10 +277,21 @@ impl mxrs_runtime::Action for FlowAction {
         let mut variables = mxrs_runtime_flows::Variables::new();
         if let serde_json::Value::Object(map) = arguments {
             for (name, value) in map {
-                variables.insert(
-                    name.clone(),
-                    mxrs_runtime_flows::FlowValue::from_member(value),
-                );
+                // A page passes an object it holds as the object: by its
+                // entity and id, which is what the flow's parameter is.
+                let value = match (
+                    value.get("entity").and_then(serde_json::Value::as_str),
+                    value.get("id").and_then(serde_json::Value::as_str),
+                ) {
+                    (Some(entity), Some(id)) => {
+                        mxrs_runtime_flows::FlowValue::Object(mxrs_runtime_flows::ObjectRef {
+                            entity: entity.to_string(),
+                            id: id.to_string(),
+                        })
+                    }
+                    _ => mxrs_runtime_flows::FlowValue::from_member(value),
+                };
+                variables.insert(name.clone(), value);
             }
         }
         let mut execution = self.engine.new_execution(Some(self.context.clone()));
@@ -271,7 +300,7 @@ impl mxrs_runtime::Action for FlowAction {
             .call_in_unit(store, &mut execution, &self.name, variables)
         {
             Ok(value) => Ok(serde_json::json!({
-                "result": value.to_json_shallow(),
+                "result": answered(store, &value),
                 "effects": execution.effects,
                 "log": execution.log,
             })),
@@ -280,6 +309,25 @@ impl mxrs_runtime::Action for FlowAction {
                 Err(mxrs_runtime::RuntimeError::Transaction(message))
             }
         }
+    }
+}
+
+/// What a flow answered, as a page reads it: an object with its members, a
+/// list of them, or the value itself.
+fn answered(store: &Store, value: &mxrs_runtime_flows::FlowValue) -> serde_json::Value {
+    match value {
+        mxrs_runtime_flows::FlowValue::Object(reference) => store
+            .find(&reference.entity, &reference.id)
+            .ok()
+            .flatten()
+            .map_or_else(
+                || value.to_json_shallow(),
+                |object| mxrs_runtime::shown(&object),
+            ),
+        mxrs_runtime_flows::FlowValue::List(values) => {
+            serde_json::Value::Array(values.iter().map(|value| answered(store, value)).collect())
+        }
+        other => other.to_json_shallow(),
     }
 }
 
@@ -400,20 +448,22 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
             task.scheduler.jobs().len()
         );
     }
+    let host = url_host(&options.host);
     println!(
-        "[mxrs] Runtime server: http://{}:{}",
-        options.host, options.server_port
+        "[mxrs] Runtime server: http://{host}:{}",
+        options.server_port
     );
     if options.frontend {
-        println!(
-            "[mxrs] React client: http://{}:{}",
-            options.host, options.client_port
-        );
+        println!("[mxrs] React client: http://{host}:{}", options.client_port);
     }
 
     let frontend = if options.frontend {
         let mut command = frontend_command(&options.root, options)?;
-        command.envs(frontend_environment(&profile, options.server_port));
+        command.envs(frontend_environment(
+            &profile,
+            &options.host,
+            options.server_port,
+        ));
         let child = command.spawn().map_err(|source| {
             RunError::Frontend(format!("cannot start the frontend dev server: {source}"))
         })?;
@@ -687,7 +737,7 @@ mod tests {
         )
         .unwrap();
         let profile = EnvironmentProfile::load(directory.path(), Some("development")).unwrap();
-        let variables = frontend_environment(&profile, 9292);
+        let variables = frontend_environment(&profile, "::1", 9292);
         assert!(
             variables
                 .iter()
@@ -698,6 +748,11 @@ mod tests {
             variables
                 .iter()
                 .any(|(key, value)| key == "MXRS_API_PORT" && value == "9292")
+        );
+        assert!(
+            variables
+                .iter()
+                .any(|(key, value)| key == "MXRS_API_ORIGIN" && value == "http://[::1]:9292")
         );
         assert!(!variables.iter().any(|(key, _)| key == "SECRET_TOKEN"));
     }

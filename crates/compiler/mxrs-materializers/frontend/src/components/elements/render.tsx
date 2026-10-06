@@ -15,8 +15,8 @@ import {
 } from 'react';
 
 import { invokeAction } from '@/api/actions';
-import { data, invoke, isObject, type DataObject } from '@/api/data';
-import type { Manifest } from '@/types/model';
+import { data, invoke, isObject, retrieve, type DataObject, type Query } from '@/api/data';
+import type { Manifest, RuntimeValue } from '@/types/model';
 
 import {
   ColumnFilter,
@@ -36,6 +36,7 @@ import {
   entityOf,
   lastName,
   list,
+  attributeOf,
   plain,
   shown,
   sourceOf,
@@ -212,8 +213,14 @@ const held = (source: Source, field: string): ReactNode => {
  * A flow runs once the user agrees to what it asks first, and without
  * arguments — a page holds no data to give it yet.
  */
+/** Leaves the page: back to the one before it, or home when there is none. */
+const leave = (open: (page: string) => void) => {
+  if (history.length > 1) history.back();
+  else open('');
+};
+
 function useAction(source: Source, field: string): (() => void) | undefined {
-  const { open, changed, fail } = useContext(Shell);
+  const { open, changed, fail, notify } = useContext(Shell);
   const row = useContext(Row);
   const draft = useContext(Draft);
   // One request at a time: a second click while the first is on its way
@@ -234,14 +241,59 @@ function useAction(source: Source, field: string): (() => void) | undefined {
     const held = child(action, name);
     return held ? plain(held, target, '') : '';
   };
+  // The object the widget is in: the one a form is filling, or a list's row.
+  const here = draft?.object ?? row;
+  // What the page gives a flow: the object it is in, for each parameter the
+  // settings map to a variable of the page.
+  const given = (settings: Source | null): Record<string, RuntimeValue> => {
+    const arguments_: Record<string, RuntimeValue> = {};
+    for (const mapping of settings ? list(settings, 'parameterMappings').map(sourceOf) : []) {
+      if (!mapping || !here) continue;
+      const parameter = lastName(plain(mapping, 'parameter', ''));
+      const expression = plain(mapping, 'expression', '');
+      if (
+        parameter &&
+        (child(mapping, 'variable') || expression === '$currentObject' || !expression)
+      ) {
+        arguments_[parameter] = here as unknown as RuntimeValue;
+      }
+    }
+    return arguments_;
+  };
+  // What a flow asks the page to do once it has run.
+  const apply = (effects: Array<Record<string, unknown> & { type: string }>) => {
+    for (const effect of effects) {
+      switch (effect.type) {
+        case 'show_message':
+          notify(String(effect.message ?? ''), String(effect.level ?? 'info'));
+          break;
+        case 'validation_feedback':
+          notify(String(effect.message ?? ''), 'warning');
+          break;
+        case 'close_page':
+          leave(open);
+          break;
+        case 'show_home_page':
+          open('');
+          break;
+        case 'show_page':
+          if (typeof effect.name === 'string' && effect.name)
+            open(effect.name, here ? { [lastName(here.entity)]: here } : {});
+          break;
+        default:
+          break;
+      }
+    }
+    changed();
+  };
   const run = (kind: string, handler: string, asking: Source | null) => () => {
     const confirmation = asking ? child(asking, 'confirmationInfo') : null;
     const question = confirmation ? text(confirmation, 'question') : '';
     if (question && !window.confirm(question)) return;
-    invokeAction({ kind, handler }, null).catch(fail);
+    invokeAction({ kind, handler, arguments: given(asking) }, null)
+      .then((answer) => answer && apply(answer.effects))
+      .catch(fail);
   };
-  // The object the widget is in: the one a form is filling, or a list's row.
-  const here = draft?.object ?? row;
   switch (action.type) {
     case 'Forms$FormAction': {
       const page = settings('formSettings', 'form');
@@ -282,7 +334,7 @@ function useAction(source: Source, field: string): (() => void) | undefined {
         }).then((saved) => {
           draft.saved(saved);
           changed();
-          if (plain(action, 'closePage', true)) history.back();
+          if (plain(action, 'closePage', true)) leave(open);
         }),
       );
     }
@@ -292,7 +344,7 @@ function useAction(source: Source, field: string): (() => void) | undefined {
       const confirm = once(() =>
         data('delete', { entity, id }).then(() => {
           changed();
-          if (draft?.object && plain(action, 'closePage', true)) history.back();
+          if (draft?.object && plain(action, 'closePage', true)) leave(open);
         }),
       );
       // Deleting asks first, as the Mendix client does.
@@ -312,7 +364,7 @@ function useAction(source: Source, field: string): (() => void) | undefined {
     }
     case 'Forms$ClosePageClientAction':
     case 'Forms$CancelChangesClientAction':
-      return () => history.back();
+      return () => leave(open);
     default:
       return undefined;
   }
@@ -731,7 +783,10 @@ const DataView: Draw = (source) => {
     if (!microflow) return;
     let current = true;
     invoke<unknown>('microflow', microflow, {})
-      .then((answer) => current && isObject(answer) && setObject(answer))
+      .then((answer) => {
+        const held = (answer as { result?: unknown } | null)?.result ?? answer;
+        if (current && isObject(held)) setObject(held);
+      })
       .catch((error: unknown) => {
         if (current) setUnanswered(error instanceof Error ? error.message : String(error));
       });
@@ -782,15 +837,19 @@ const DataView: Draw = (source) => {
 const ListView: Draw = (source) => {
   const origin = child(source, 'dataSource');
   const entity = origin ? entityOf(origin) : '';
-  const objects = useObjects(entity);
+  const objects = useObjects(entity, queryOf(source.props.dataSource));
+  // So many at a time, as the list says, with the way to the rest.
+  const size = Math.max(1, plain(source, 'pageSize', 10));
+  const [shownCount, setShownCount] = useState(size);
   // A list about no entity this page can read shows its widgets once.
   if (!entity) {
     return <section className={className(source, 'mx-listview')}>{content(source)}</section>;
   }
+  const all = objects ?? [];
   return (
     <section className={className(source, 'mx-listview')} aria-busy={objects === undefined}>
       <ul>
-        {(objects ?? []).map((object) => (
+        {all.slice(0, shownCount).map((object) => (
           <li key={object.id} className="mx-listview-item">
             {/* A row is about its own object, whatever form the list is in. */}
             <Row.Provider value={object}>
@@ -799,6 +858,15 @@ const ListView: Draw = (source) => {
           </li>
         ))}
       </ul>
+      {all.length > shownCount ? (
+        <button
+          type="button"
+          className="btn mx-button btn-default mx-listview-loadMore"
+          onClick={() => setShownCount((now) => now + size)}
+        >
+          Load more
+        </button>
+      ) : null}
       {objects?.length === 0 ? <div className="mx-listview-empty">No items</div> : null}
     </section>
   );
@@ -1078,17 +1146,36 @@ function sourceEntity(value: unknown): string {
   }
 }
 
+/** How a data source asks for its objects: its XPath constraint and its sort bar. */
+function queryOf(value: unknown): Query {
+  const stated = sourceOf(value);
+  if (!stated) return {};
+  const constraint = plain(stated, 'xPathConstraint', '');
+  const bar = child(stated, 'sortBar');
+  const sort = (bar ? list(bar, 'sortItems') : [])
+    .map(sourceOf)
+    .filter((item): item is Source => item !== null)
+    .map((item) => ({
+      attribute: lastName(attributeOf(item)),
+      descending: plain(item, 'sortOrder', 'Ascending') === 'Descending',
+    }))
+    .filter((item) => item.attribute);
+  return { ...(constraint ? { constraint } : {}), ...(sort.length ? { sort } : {}) };
+}
+
 /**
- * The objects of an entity, read again whenever the data changes;
- * `undefined` while they are on their way, and none for no entity.
+ * The objects of an entity, as its source asks for them, read again
+ * whenever the data changes; `undefined` while they are on their way, and
+ * none for no entity.
  */
-function useObjects(entity: string): DataObject[] | undefined {
+function useObjects(entity: string, query: Query = {}): DataObject[] | undefined {
   const { changes, fail } = useContext(Shell);
   const [objects, setObjects] = useState<DataObject[]>();
+  const asked = JSON.stringify(query);
   useEffect(() => {
     if (!entity) return;
     let current = true;
-    data<{ objects: DataObject[] }>('retrieve', { entity })
+    retrieve(entity, JSON.parse(asked) as Query)
       .then((answer) => current && setObjects(answer.objects))
       .catch((error) => current && (setObjects([]), fail(error)));
     return () => {
@@ -1096,7 +1183,7 @@ function useObjects(entity: string): DataObject[] | undefined {
     };
     // `fail` is the application's own and does not change what is listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entity, changes]);
+  }, [entity, asked, changes]);
   return entity ? objects : undefined;
 }
 
@@ -1308,7 +1395,7 @@ const inside = (value: unknown): ReactNode => (isValidElement(value) ? value : e
  */
 const Datagrid: Draw = (source) => {
   const entity = sourceEntity(property(source, 'datasource'));
-  const objects = useObjects(entity);
+  const objects = useObjects(entity, queryOf(property(source, 'datasource')));
   const columns = statedList(property(source, 'columns'));
   // Each column's filter by its index; the grid's own, above the columns, by -1.
   const [filters, setFilters] = useState<Record<number, Filter>>({});
@@ -1461,7 +1548,7 @@ const Datagrid: Draw = (source) => {
  */
 const Gallery: Draw = (source) => {
   const entity = sourceEntity(property(source, 'datasource'));
-  const objects = useObjects(entity);
+  const objects = useObjects(entity, queryOf(property(source, 'datasource')));
   const [filter, setFilter] = useState<Filter>();
   const items = (objects ?? []).filter(
     (object) =>
@@ -1735,7 +1822,7 @@ function period(value: unknown, by: unknown): string {
  */
 const Timeline: Draw = (source) => {
   const entity = sourceEntity(property(source, 'data'));
-  const objects = useObjects(entity);
+  const objects = useObjects(entity, queryOf(property(source, 'data')));
   const grouped = property(source, 'groupEvents') !== false;
   // Drawn as the page says, widget by widget, or as the widget's own texts.
   const custom = property(source, 'customVisualization') === true;

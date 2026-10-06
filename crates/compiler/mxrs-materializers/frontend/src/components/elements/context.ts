@@ -58,6 +58,8 @@ export const Shell = createContext<{
   changed: () => void;
   /** Says what went wrong to the user. */
   fail: (error: unknown) => void;
+  /** Says what a flow told the user, at the level the flow gave it. */
+  notify: (message: string, level: string) => void;
   form: (qualified: string) => Form | undefined;
   /** The icon collections' classes and the images' files, by qualified name. */
   collections: Collections;
@@ -77,5 +79,6 @@ export const Shell = createContext<{
   changes: 0,
   changed: () => {},
   fail: () => {},
+  notify: () => {},
   form: () => undefined,
 });

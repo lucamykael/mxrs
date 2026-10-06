@@ -36,6 +36,26 @@ export async function invoke<T>(
   return answer.result as T;
 }
 
+/** How a list asks for its objects: within an XPath constraint, in a sort order, a page of them. */
+export type Query = {
+  constraint?: string;
+  sort?: { attribute: string; descending: boolean }[];
+  offset?: number;
+  limit?: number;
+};
+
+/** The objects of an entity the runtime holds, as the query says, and how many there are in all. */
+export async function retrieve(
+  entity: string,
+  query: Query = {},
+): Promise<{ objects: DataObject[]; total: number }> {
+  const answer = await data<{ objects: DataObject[]; total?: number }>('retrieve', {
+    entity,
+    ...query,
+  });
+  return { objects: answer.objects, total: answer.total ?? answer.objects.length };
+}
+
 /** Whether what the runtime answered is an object of the model. */
 export const isObject = (value: unknown): value is DataObject =>
   typeof value === 'object' &&

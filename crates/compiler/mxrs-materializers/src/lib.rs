@@ -19,27 +19,27 @@ use sha2::{Digest, Sha256};
 const INDEX: EmbeddedAsset = EmbeddedAsset::new(
     "index.html",
     include_bytes!("../assets/index.html"),
-    "b498cb544abbe51f072f9573b527b6715f722406ed335468109a2c321523161c",
+    "158ec29e5c0f9b9b94d0ee6975ba95a9c1871d02a37c5e12963742b2417cd561",
 );
 const SCRIPT: EmbeddedAsset = EmbeddedAsset::new(
-    "app-Di6tZwOZ.js",
-    include_bytes!("../assets/app-Di6tZwOZ.js"),
-    "465470d15294b224dd5e5edd7fb4098df02ba43943e8dab5d2fce537273942f3",
+    "app-CbC_V4kl.js",
+    include_bytes!("../assets/app-CbC_V4kl.js"),
+    "2648bfc2b43187ece8f5d20ab9d1b0146910753fdba6c4dd34c28600b5c4dbd9",
 );
 const STYLES: EmbeddedAsset = EmbeddedAsset::new(
-    "app-CDR_CK5o.css",
-    include_bytes!("../assets/app-CDR_CK5o.css"),
-    "329d387a25cb039a856bc994727057eaade4dab3134dc1dc0f76a4ce9ee29b27",
+    "app-Cr5KgRlS.css",
+    include_bytes!("../assets/app-Cr5KgRlS.css"),
+    "ad64e055e63f9f84345479e5e350464cb0f8c4fa69e8ef1b5a9e850c2d2a4ec4",
 );
 const VITE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     ".vite/manifest.json",
     include_bytes!("../assets/.vite/manifest.json"),
-    "e96f109550014a44b2356e8a4ecc8a33070e5d2f5fe664b433e6674adf8d79db",
+    "7efe6b7a4dfaec6f8c1d8624788cbce88fb0ae10f65ac3cc5bcb1c01504ee03c",
 );
 const BUNDLE_MANIFEST: EmbeddedAsset = EmbeddedAsset::new(
     "bundle-manifest.json",
     include_bytes!("../assets/bundle-manifest.json"),
-    "4d901013502a62990a8236e982564112ce8c95784704aa46c2a8eebc5c8b9b76",
+    "032fd66b4539540c2fc479c394afdb6720a09aa61f84f9827a7410310c1b5065",
 );
 const LICENSES: EmbeddedAsset = EmbeddedAsset::new(
     "THIRD_PARTY_LICENSES.md",

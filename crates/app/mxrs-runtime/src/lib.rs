@@ -760,7 +760,21 @@ impl Runtime {
                 if !security.entity_allowed(entity, EntityAction::Read, None, None, context) {
                     return Err(refused("read", None));
                 }
-                let objects: Vec<Value> = self
+                // As the page's source says: within its XPath constraint,
+                // in its sort order, and so many from where it is.
+                let constraint = arguments
+                    .get("constraint")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|constraint| !constraint.is_empty());
+                if let Some(constraint) = constraint
+                    && !crate::xpath::is_supported(constraint)
+                {
+                    return Err(RuntimeError::Transaction(format!(
+                        "unsupported XPath constraint {constraint:?}: the runtime reads comparisons of a member with a literal, joined by and/or/not"
+                    )));
+                }
+                let mut objects: Vec<ObjectValue> = self
                     .store
                     .retrieve(entity)?
                     .into_iter()
@@ -773,9 +787,57 @@ impl Runtime {
                             context,
                         )
                     })
-                    .map(|object| seen(&object))
+                    .filter(|object| {
+                        constraint.is_none_or(|constraint| {
+                            crate::xpath::evaluate(constraint, &object.members, context)
+                                == Some(true)
+                        })
+                    })
                     .collect();
-                Ok(serde_json::json!({ "objects": objects }))
+                let sort: Vec<(String, bool)> = arguments
+                    .get("sort")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| {
+                        Some((
+                            item.get("attribute")?.as_str()?.to_string(),
+                            item.get("descending")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        ))
+                    })
+                    .collect();
+                if !sort.is_empty() {
+                    objects.sort_by(|left, right| {
+                        for (attribute, descending) in &sort {
+                            let order = compare_members(
+                                left.members.get(attribute),
+                                right.members.get(attribute),
+                            );
+                            if order != std::cmp::Ordering::Equal {
+                                return if *descending { order.reverse() } else { order };
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                }
+                let total = objects.len();
+                let offset = arguments
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .map_or(0, |offset| offset as usize);
+                let limit = arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map(|limit| limit as usize);
+                let objects: Vec<Value> = objects
+                    .iter()
+                    .skip(offset)
+                    .take(limit.unwrap_or(usize::MAX))
+                    .map(&seen)
+                    .collect();
+                Ok(serde_json::json!({ "objects": objects, "total": total }))
             }
             "create" => {
                 if !security.entity_allowed(entity, EntityAction::Create, None, None, context) {
@@ -888,9 +950,32 @@ impl Runtime {
     }
 }
 
+/// The order of two members as a list sorts them: numbers by size, dates by
+/// instant, texts by their characters; what is absent comes first.
+fn compare_members(left: Option<&Value>, right: Option<&Value>) -> std::cmp::Ordering {
+    let instant = |value: &Value| {
+        value
+            .as_str()
+            .and_then(|text| text.strip_prefix(DATETIME_MEMBER_PREFIX))
+            .and_then(|seconds| seconds.parse::<f64>().ok())
+    };
+    match (left, right) {
+        (None, None) | (Some(Value::Null), Some(Value::Null)) => std::cmp::Ordering::Equal,
+        (None, _) | (Some(Value::Null), _) => std::cmp::Ordering::Less,
+        (_, None) | (_, Some(Value::Null)) => std::cmp::Ordering::Greater,
+        (Some(a), Some(b)) => match (a.as_f64(), b.as_f64()) {
+            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+            _ => match (instant(a), instant(b)) {
+                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                _ => a.to_string().cmp(&b.to_string()),
+            },
+        },
+    }
+}
+
 /// An object as a page shows it: a date and time is text a browser reads
 /// (`2026-10-06T12:00:00Z`), not the tag the store keeps it under.
-fn shown(object: &ObjectValue) -> Value {
+pub fn shown(object: &ObjectValue) -> Value {
     let members: serde_json::Map<String, Value> = object
         .members
         .iter()
@@ -1080,6 +1165,90 @@ fn instant_seconds(text: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A list is retrieved as its source asks: within its XPath constraint,
+    /// in its sort order, so many from where it is — and told how many
+    /// there are in all. A constraint outside what the runtime reads is
+    /// refused, not answered with nothing.
+    #[test]
+    fn a_list_is_retrieved_as_its_source_asks() {
+        let defaults = BTreeMap::from([
+            ("Name".to_string(), Value::String(String::new())),
+            ("Amount".to_string(), Value::from(0)),
+            ("Active".to_string(), Value::Bool(true)),
+        ]);
+        let mut runtime = Runtime::new(
+            Store::new(StoreSchema::default().entity("Main.Sale", defaults, false)),
+            SecurityPolicy::default(),
+        );
+        let context = SecurityContext::default();
+        for (name, amount, active) in [("Food", 30, true), ("Vet", 200, true), ("Toys", 45, false)]
+        {
+            let blank = runtime
+                .data(
+                    "create",
+                    &serde_json::json!({ "entity": "Main.Sale" }),
+                    &context,
+                )
+                .unwrap();
+            runtime
+                .data(
+                    "save",
+                    &serde_json::json!({
+                        "entity": "Main.Sale", "id": blank["id"], "new": true,
+                        "members": { "Name": name, "Amount": amount, "Active": active },
+                    }),
+                    &context,
+                )
+                .unwrap();
+        }
+        let names = |answer: &Value| {
+            answer["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|object| object["members"]["Name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let listed = runtime
+            .data(
+                "retrieve",
+                &serde_json::json!({
+                    "entity": "Main.Sale",
+                    "constraint": "[Active = true()]",
+                    "sort": [{ "attribute": "Amount", "descending": true }],
+                }),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(names(&listed), vec!["Vet", "Food"]);
+        assert_eq!(listed["total"], 2);
+        let paged = runtime
+            .data(
+                "retrieve",
+                &serde_json::json!({
+                    "entity": "Main.Sale",
+                    "sort": [{ "attribute": "Name", "descending": false }],
+                    "offset": 1, "limit": 1,
+                }),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(names(&paged), vec!["Toys"]);
+        assert_eq!(paged["total"], 3);
+        let refused = runtime
+            .data(
+                "retrieve",
+                &serde_json::json!({ "entity": "Main.Sale", "constraint": "[contains(Name, 'o')]" }),
+                &context,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("unsupported XPath constraint"),
+            "{refused}"
+        );
+    }
 
     /// A page's own operations: what it creates is kept once saved, a date
     /// stays a date, and what it deletes is gone.

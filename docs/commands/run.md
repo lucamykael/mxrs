@@ -24,7 +24,8 @@ the `build/web` shell by `cargo mxrs build`):
 The frontend (unless `--no-frontend`) starts mxrb's way: `npm run dev --
 --host H --port P --strictPort` inside `DIR/frontend`, after checking the
 package and its `node_modules` exist, with the profile's `VITE_*` variables
-plus `MXRS_ENV`/`MXRS_API_PORT`. Interrupting terminates it (TERM, then
+plus `MXRS_ENV`/`MXRS_API_PORT`/`MXRS_API_ORIGIN` (the runtime URL the dev
+server proxies `/api` and `/model.json` to). Interrupting terminates it (TERM, then
 reap); the frontend exiting non-zero on its own stops the run with
 `frontend process exited with status N`.
 
