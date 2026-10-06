@@ -123,8 +123,11 @@ read-only behavioral oracle; never edit it.
   object it is in, creates, saves or deletes one through the runtime's
   `/api/data/<operation>` — each member read or written within the rights
   of the caller's role, each value checked against what its attribute
-  holds; the entity's event handlers and validation rules are a flow's to
-  run and are not run there — or runs its flow, without arguments yet. The bundle mxrs embeds holds no project's
+  holds, a save held to the entity's validation rules (what is refused is
+  shown under its input) and committed through its event handlers as a
+  flow's commit is; a list asks for its XPath constraint, sort order and
+  page — or runs its flow with the object it is in, applying what the flow
+  asks of the page. The bundle mxrs embeds holds no project's
   pages and draws what the manifest describes. The importer,
   `mxrs new` and the scaffolds write these files: a scaffolded page or
   layout is built as what it is, made the document the model would store,

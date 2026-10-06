@@ -15,7 +15,15 @@ import {
 } from 'react';
 
 import { invokeAction } from '@/api/actions';
-import { data, invoke, isObject, retrieve, type DataObject, type Query } from '@/api/data';
+import {
+  data,
+  invoke,
+  isObject,
+  retrieve,
+  ValidationError,
+  type DataObject,
+  type Query,
+} from '@/api/data';
 import type { Manifest, RuntimeValue } from '@/types/model';
 
 import {
@@ -268,7 +276,15 @@ function useAction(source: Source, field: string): (() => void) | undefined {
           notify(String(effect.message ?? ''), String(effect.level ?? 'info'));
           break;
         case 'validation_feedback':
-          notify(String(effect.message ?? ''), 'warning');
+          // Feedback about the object the form holds goes under its input;
+          // about anything else, it is said as a message.
+          if (draft?.object && effect.object_id === draft.object.id && effect.member) {
+            draft.rejected([
+              { member: String(effect.member), message: String(effect.message ?? '') },
+            ]);
+          } else {
+            notify(String(effect.message ?? ''), 'warning');
+          }
           break;
         case 'close_page':
           leave(open);
@@ -326,16 +342,24 @@ function useAction(source: Source, field: string): (() => void) | undefined {
         Object.entries(members).filter(([member]) => draft.changed.has(member)),
       );
       return once(() =>
-        data<DataObject>('save', {
+        data<DataObject & { effects?: Array<Record<string, unknown> & { type: string }> }>('save', {
           entity,
           id,
           new: draft.object?.new === true,
           members: sent,
-        }).then((saved) => {
-          draft.saved(saved);
-          changed();
-          if (plain(action, 'closePage', true)) leave(open);
-        }),
+        })
+          .then(({ effects, ...saved }) => {
+            draft.saved(saved);
+            changed();
+            if (effects?.length) apply(effects);
+            if (plain(action, 'closePage', true)) leave(open);
+          })
+          .catch((error: unknown) => {
+            // What the runtime refused is shown where it belongs, under
+            // the inputs; the page stays for the user to put it right.
+            if (!(error instanceof ValidationError)) throw error;
+            draft.rejected(error.violations);
+          }),
       );
     }
     case 'Forms$DeleteClientAction': {
@@ -674,16 +698,34 @@ const input =
     const attribute = child(source, 'attributeRef');
     const name = lastName(attribute ? plain(attribute, 'attribute', '') : '');
     const label = text(source, 'labelTemplate');
+    // What the runtime refused of the member is said under its input, as
+    // the Mendix client does, until the user changes it.
+    const refused = draft?.violations.get(name);
+    // Laid out as the Mendix client lays out a horizontal form: the label
+    // in a column of its own and the control, with what was refused of it,
+    // in the rest; without a label, the control takes the whole row.
     return (
-      <div className={className(source, 'form-group')}>
-        {label ? <label className="control-label">{label}</label> : null}
-        {control({
-          name,
-          placeholder: text(source, 'placeholderTemplate'),
-          value: draft?.object?.members[name],
-          change: (value) => draft?.set(name, value),
-          options: optionsOf(model, draft?.object?.entity, name),
-        })}
+      <div
+        className={className(
+          source,
+          'form-group',
+          label ? '' : 'no-columns',
+          refused ? 'has-error' : '',
+        )}
+      >
+        {label ? <label className="control-label col-sm-3">{label}</label> : null}
+        <div className={label ? 'col-sm-9' : 'col-sm-12'}>
+          {control({
+            name,
+            placeholder: text(source, 'placeholderTemplate'),
+            value: draft?.object?.members[name],
+            change: (value) => draft?.set(name, value),
+            options: optionsOf(model, draft?.object?.entity, name),
+          })}
+          {refused ? (
+            <div className="alert alert-danger mx-validation-message">{refused}</div>
+          ) : null}
+        </div>
       </div>
     );
   };
@@ -773,6 +815,7 @@ const DataView: Draw = (source) => {
   const initial = parameter ? (given[parameter] ?? null) : null;
   const [object, setObject] = useState<DataObject | null>(initial);
   const [changed, setChanged] = useState<ReadonlySet<string>>(new Set());
+  const [violations, setViolations] = useState<ReadonlyMap<string, string>>(new Map());
   // A view over a microflow shows the object the flow answers with; a flow
   // the runtime cannot run is said in the view's place, not the page's.
   const settings =
@@ -797,11 +840,25 @@ const DataView: Draw = (source) => {
   const set = (member: string, value: unknown) => {
     setObject((now) => (now ? { ...now, members: { ...now.members, [member]: value } } : now));
     setChanged((now) => new Set(now).add(member));
+    // Changed, a member is no longer what the runtime refused.
+    setViolations((now) => {
+      if (!now.has(member)) return now;
+      const next = new Map(now);
+      next.delete(member);
+      return next;
+    });
   };
   const saved = (kept: DataObject) => {
     setObject(kept);
     setChanged(new Set());
+    setViolations(new Map());
   };
+  const rejected = (refused: { member: string; message: string }[]) =>
+    setViolations((now) => {
+      const next = new Map(now);
+      for (const { member, message } of refused) next.set(member, message);
+      return next;
+    });
   if (unanswered && !object) {
     return (
       <section className={className(source, 'mx-dataview')} title={unanswered}>
@@ -822,7 +879,7 @@ const DataView: Draw = (source) => {
     );
   }
   return (
-    <Draft.Provider value={{ object, changed, set, saved }}>
+    <Draft.Provider value={{ object, changed, set, saved, violations, rejected }}>
       <section className={className(source, 'mx-dataview')}>
         <div className="mx-dataview-content">{each(list(source, 'widgets'))}</div>
         {list(source, 'footerWidgets').length ? (

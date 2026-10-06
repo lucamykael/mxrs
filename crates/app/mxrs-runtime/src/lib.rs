@@ -32,6 +32,97 @@ pub enum RuntimeError {
     Transaction(String),
     #[error("invalid persistent runtime state: {0}")]
     InvalidPersistence(String),
+    /// What a save was refused for: the entity's validation rules the
+    /// object broke, or the feedback a before-commit flow gave as it
+    /// rejected it.
+    #[error("validation failed: {}", violations_text(.0))]
+    Validation(Vec<Violation>),
+}
+
+/// One thing wrong with an object a page saves: the member and the message
+/// the model states for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Violation {
+    pub member: String,
+    pub message: String,
+}
+
+fn violations_text(violations: &[Violation]) -> String {
+    violations
+        .iter()
+        .map(|violation| violation.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A validation rule of an entity, as the model states it on an attribute.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidationRule {
+    pub member: String,
+    pub kind: RuleKind,
+    /// The model's message, or empty for the rule's own words.
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuleKind {
+    Required,
+    Unique,
+    MaxLength(usize),
+    Range {
+        minimum: Option<f64>,
+        maximum: Option<f64>,
+    },
+    Pattern(String),
+}
+
+impl ValidationRule {
+    /// What the rule says when it is broken: the model's message, or its own.
+    fn message(&self) -> String {
+        if !self.message.trim().is_empty() {
+            return self.message.clone();
+        }
+        let member = &self.member;
+        match &self.kind {
+            RuleKind::Required => format!("{member} is required"),
+            RuleKind::Unique => format!("{member} must be unique"),
+            RuleKind::MaxLength(length) => format!("{member} may hold at most {length} characters"),
+            RuleKind::Range { minimum, maximum } => match (minimum, maximum) {
+                (Some(low), Some(high)) => format!("{member} must be between {low} and {high}"),
+                (Some(low), None) => format!("{member} must be at least {low}"),
+                (None, Some(high)) => format!("{member} must be at most {high}"),
+                (None, None) => format!("{member} is out of range"),
+            },
+            RuleKind::Pattern(_) => format!("{member} is not in the required format"),
+        }
+    }
+
+    /// Whether the value breaks the rule; `others` are the values the other
+    /// objects of the entity hold in the member, for uniqueness.
+    fn broken(&self, value: Option<&Value>, others: &[&Value]) -> bool {
+        let empty = value.is_none_or(|value| match value {
+            Value::Null => true,
+            Value::String(text) => text.is_empty(),
+            _ => false,
+        });
+        match &self.kind {
+            RuleKind::Required => empty,
+            RuleKind::Unique => !empty && others.contains(&value.unwrap_or(&Value::Null)),
+            RuleKind::MaxLength(length) => value
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.chars().count() > *length),
+            RuleKind::Range { minimum, maximum } => {
+                let Some(number) = value.and_then(Value::as_f64) else {
+                    return false;
+                };
+                minimum.is_some_and(|low| number < low) || maximum.is_some_and(|high| number > high)
+            }
+            RuleKind::Pattern(pattern) => value.and_then(Value::as_str).is_some_and(|text| {
+                !text.is_empty()
+                    && regex::Regex::new(pattern).is_ok_and(|pattern| !pattern.is_match(text))
+            }),
+        }
+    }
 }
 
 pub mod xpath;
@@ -97,6 +188,8 @@ struct EntitySchema {
     transient: bool,
     /// What each attribute holds, where the model says.
     kinds: BTreeMap<String, MemberKind>,
+    /// What the model asks of an object before it is committed.
+    rules: Vec<ValidationRule>,
 }
 
 /// What an attribute holds, as far as a value written from outside a flow
@@ -128,9 +221,24 @@ impl StoreSchema {
                 defaults,
                 transient,
                 kinds: BTreeMap::new(),
+                rules: Vec::new(),
             },
         );
         self
+    }
+
+    /// The validation rules of an entity, checked at a page's save.
+    pub fn rules(mut self, entity: &str, rules: Vec<ValidationRule>) -> Self {
+        if let Some(schema) = Arc::make_mut(&mut self.entities).get_mut(entity) {
+            schema.rules = rules;
+        }
+        self
+    }
+
+    pub fn rules_of(&self, entity: &str) -> &[ValidationRule] {
+        self.entities
+            .get(entity)
+            .map_or(&[], |schema| schema.rules.as_slice())
     }
 
     /// States what the attributes of an entity already declared hold.
@@ -385,6 +493,10 @@ impl Store {
     /// Whether an object has ever been committed. Lifecycle semantics need
     /// this distinction: committing a fresh object fires create events,
     /// committing an already-committed one fires update events.
+    pub fn schema(&self) -> &StoreSchema {
+        &self.schema
+    }
+
     pub fn is_committed(&self, entity: &str, id: &str) -> bool {
         self.committed
             .get(entity)
@@ -672,10 +784,25 @@ where
     }
 }
 
+/// How an object a page saves is committed when the entity's event
+/// handlers are to run: a flow engine commits it between its before- and
+/// after-handlers and answers the effects those flows asked for. Without
+/// one, the store commits the object as it is.
+pub trait Lifecycle: Send + Sync {
+    fn commit(
+        &self,
+        store: &mut Store,
+        entity: &str,
+        id: &str,
+        context: &SecurityContext,
+    ) -> Result<Vec<Value>>;
+}
+
 pub struct Runtime {
     store: Store,
     security: SecurityPolicy,
     actions: BTreeMap<String, Box<dyn Action>>,
+    lifecycle: Option<Box<dyn Lifecycle>>,
 }
 
 impl Runtime {
@@ -684,7 +811,13 @@ impl Runtime {
             store,
             security,
             actions: BTreeMap::new(),
+            lifecycle: None,
         }
+    }
+
+    /// Commits what a page saves through the entity's event handlers.
+    pub fn set_lifecycle(&mut self, lifecycle: impl Lifecycle + 'static) {
+        self.lifecycle = Some(Box::new(lifecycle));
     }
 
     pub fn register_action(&mut self, name: impl Into<String>, action: impl Action + 'static) {
@@ -711,8 +844,9 @@ impl Runtime {
     /// blank one for a form, `save` the members a form changed and commit
     /// them, or `delete` one. Each is checked against the entity's access
     /// rules member by member, and a value against what its attribute
-    /// holds. Event handlers of the entity are a flow's to run and are not
-    /// run here.
+    /// holds. A save is checked against the entity's validation rules, and
+    /// committed through its event handlers when the runtime has a
+    /// lifecycle to run them.
     pub fn data(
         &mut self,
         operation: &str,
@@ -909,7 +1043,13 @@ impl Runtime {
                         })?;
                     values.push((member, value));
                 }
-                let saved = self.store.transaction(|store| {
+                let mut whole = record.clone();
+                for (member, value) in &values {
+                    whole.insert((*member).clone(), value.clone());
+                }
+                self.validate(entity, id, &whole)?;
+                let lifecycle = self.lifecycle.as_deref();
+                let (saved, effects) = self.store.transaction(|store| {
                     let id = match existing {
                         Some(object) => object.id,
                         None => store.create_as(entity, id)?.id,
@@ -917,9 +1057,27 @@ impl Runtime {
                     for (member, value) in values {
                         store.set_member(entity, &id, member, value)?;
                     }
-                    store.commit(entity, &id)
+                    let effects = match lifecycle {
+                        Some(lifecycle) => lifecycle.commit(store, entity, &id, context)?,
+                        None => {
+                            store.commit(entity, &id)?;
+                            Vec::new()
+                        }
+                    };
+                    let saved =
+                        store
+                            .find(entity, &id)?
+                            .ok_or_else(|| RuntimeError::UnknownObject {
+                                entity: entity.to_string(),
+                                id: id.clone(),
+                            })?;
+                    Ok((saved, effects))
                 })?;
-                Ok(seen(&saved))
+                let mut answer = seen(&saved);
+                if !effects.is_empty() {
+                    answer["effects"] = Value::Array(effects);
+                }
+                Ok(answer)
             }
             "delete" => {
                 let id = text("id")?;
@@ -938,6 +1096,44 @@ impl Runtime {
                     .map(|object| serde_json::json!({ "entity": object.entity, "id": object.id }))
             }
             other => Err(RuntimeError::UnknownAction(format!("data/{other}"))),
+        }
+    }
+
+    /// The object as it would be saved, against the entity's validation
+    /// rules: every rule broken is answered at once, as the Mendix client
+    /// shows them all under their inputs.
+    fn validate(&self, entity: &str, id: &str, members: &BTreeMap<String, Value>) -> Result<()> {
+        let rules = self.store.schema().rules_of(entity);
+        if rules.is_empty() {
+            return Ok(());
+        }
+        let others: Vec<ObjectValue> = if rules.iter().any(|rule| rule.kind == RuleKind::Unique) {
+            self.store
+                .retrieve(entity)?
+                .into_iter()
+                .filter(|object| object.id != id)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let violations: Vec<Violation> = rules
+            .iter()
+            .filter(|rule| {
+                let held: Vec<&Value> = others
+                    .iter()
+                    .filter_map(|object| object.members.get(&rule.member))
+                    .collect();
+                rule.broken(members.get(&rule.member), &held)
+            })
+            .map(|rule| Violation {
+                member: rule.member.clone(),
+                message: rule.message(),
+            })
+            .collect();
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::Validation(violations))
         }
     }
 
@@ -1408,6 +1604,198 @@ mod tests {
         assert_eq!(
             iso_instant(instant_seconds("2000-02-29T23:59:59.999Z").unwrap()),
             "2000-02-29T23:59:59Z"
+        );
+    }
+
+    /// What a page saves is held to the entity's validation rules, every
+    /// broken one answered at once with the model's message.
+    #[test]
+    fn a_save_is_checked_against_the_entitys_validation_rules() {
+        let rule = |member: &str, kind: RuleKind, message: &str| ValidationRule {
+            member: member.to_string(),
+            kind,
+            message: message.to_string(),
+        };
+        let mut runtime = Runtime::new(
+            Store::new(
+                StoreSchema::default()
+                    .entity("Main.Customer", BTreeMap::new(), false)
+                    .members(
+                        "Main.Customer",
+                        BTreeMap::from([
+                            ("Name".to_string(), MemberKind::Text { length: None }),
+                            ("Email".to_string(), MemberKind::Text { length: None }),
+                            ("Age".to_string(), MemberKind::Integer),
+                        ]),
+                    )
+                    .rules(
+                        "Main.Customer",
+                        vec![
+                            rule("Name", RuleKind::Required, "Please name the customer"),
+                            rule("Email", RuleKind::Unique, ""),
+                            rule("Email", RuleKind::MaxLength(12), ""),
+                            rule("Email", RuleKind::Pattern("^[^@]+@[^@]+$".into()), ""),
+                            rule(
+                                "Age",
+                                RuleKind::Range {
+                                    minimum: Some(0.0),
+                                    maximum: Some(150.0),
+                                },
+                                "",
+                            ),
+                        ],
+                    ),
+            ),
+            SecurityPolicy::default(),
+        );
+        let context = SecurityContext::default();
+        let save = |runtime: &mut Runtime, id: &str, members: Value| {
+            runtime.data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Customer", "id": id, "new": true, "members": members }),
+                &context,
+            )
+        };
+        let first = uuid::Uuid::new_v4().to_string();
+        save(
+            &mut runtime,
+            &first,
+            serde_json::json!({ "Name": "Ana", "Email": "ana@pets.io", "Age": 30 }),
+        )
+        .unwrap();
+        let second = uuid::Uuid::new_v4().to_string();
+        let refused = save(
+            &mut runtime,
+            &second,
+            serde_json::json!({ "Name": "", "Email": "ana@pets.io", "Age": 200 }),
+        );
+        let Err(RuntimeError::Validation(violations)) = refused else {
+            panic!("{refused:?}");
+        };
+        assert_eq!(
+            violations,
+            vec![
+                Violation {
+                    member: "Name".into(),
+                    message: "Please name the customer".into()
+                },
+                Violation {
+                    member: "Email".into(),
+                    message: "Email must be unique".into()
+                },
+                Violation {
+                    member: "Age".into(),
+                    message: "Age must be between 0 and 150".into()
+                },
+            ]
+        );
+        for (members, member) in [
+            (
+                serde_json::json!({ "Name": "Bo", "Email": "a-very-long@x.io" }),
+                "Email",
+            ),
+            (
+                serde_json::json!({ "Name": "Bo", "Email": "not-mail" }),
+                "Email",
+            ),
+        ] {
+            let Err(RuntimeError::Validation(violations)) = save(&mut runtime, &second, members)
+            else {
+                panic!("accepted");
+            };
+            assert_eq!(violations.len(), 1);
+            assert_eq!(violations[0].member, member);
+        }
+        // Nothing is kept of a refused save.
+        assert!(
+            runtime
+                .store()
+                .find("Main.Customer", &second)
+                .unwrap()
+                .is_none()
+        );
+        // An object may keep its own value: uniqueness is against the others.
+        save(
+            &mut runtime,
+            &first,
+            serde_json::json!({ "Name": "Ana", "Email": "ana@pets.io" }),
+        )
+        .unwrap();
+    }
+
+    /// A save is committed through the lifecycle the runtime was given: the
+    /// effects its flows ask for come back with the object, and what it
+    /// refuses is not kept.
+    #[test]
+    fn a_save_is_committed_through_the_entitys_lifecycle() {
+        struct Recording;
+        impl Lifecycle for Recording {
+            fn commit(
+                &self,
+                store: &mut Store,
+                entity: &str,
+                id: &str,
+                _context: &SecurityContext,
+            ) -> Result<Vec<Value>> {
+                let name = store
+                    .find(entity, id)?
+                    .and_then(|object| object.members.get("Name").cloned())
+                    .unwrap_or_default();
+                if name == "Nope" {
+                    return Err(RuntimeError::Validation(vec![Violation {
+                        member: "Name".into(),
+                        message: "Not that one".into(),
+                    }]));
+                }
+                store.set_member(
+                    entity,
+                    id,
+                    "Name",
+                    Value::String(format!("{} ✓", name.as_str().unwrap_or(""))),
+                )?;
+                store.commit(entity, id)?;
+                Ok(vec![
+                    serde_json::json!({ "type": "show_message", "message": "Saved" }),
+                ])
+            }
+        }
+        let mut runtime = Runtime::new(
+            Store::new(
+                StoreSchema::default()
+                    .entity("Main.Customer", BTreeMap::new(), false)
+                    .members(
+                        "Main.Customer",
+                        BTreeMap::from([("Name".to_string(), MemberKind::Text { length: None })]),
+                    ),
+            ),
+            SecurityPolicy::default(),
+        );
+        runtime.set_lifecycle(Recording);
+        let context = SecurityContext::default();
+        let id = uuid::Uuid::new_v4().to_string();
+        let save = |runtime: &mut Runtime, name: &str| {
+            runtime.data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Customer", "id": id, "new": true, "members": { "Name": name } }),
+                &context,
+            )
+        };
+        let saved = save(&mut runtime, "Ana").unwrap();
+        assert_eq!(saved["members"]["Name"], "Ana ✓");
+        assert_eq!(saved["effects"][0]["type"], "show_message");
+        let refused = save(&mut runtime, "Nope");
+        assert!(
+            matches!(refused, Err(RuntimeError::Validation(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            runtime
+                .store()
+                .find("Main.Customer", &id)
+                .unwrap()
+                .unwrap()
+                .members["Name"],
+            "Ana ✓"
         );
     }
 

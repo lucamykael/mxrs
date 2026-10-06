@@ -260,6 +260,10 @@ async fn invoke(
 struct ErrorBody<'a> {
     error: &'a str,
     message: &'a str,
+    /// What a save was refused for, member by member, for the page to show
+    /// under its inputs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    violations: Vec<mxrs_runtime::Violation>,
 }
 
 fn runtime_error_response(error: RuntimeError) -> Response {
@@ -268,7 +272,9 @@ fn runtime_error_response(error: RuntimeError) -> Response {
         RuntimeError::UnknownAction(_)
         | RuntimeError::UnknownEntity(_)
         | RuntimeError::UnknownObject { .. } => StatusCode::NOT_FOUND,
-        RuntimeError::Transaction(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        RuntimeError::Transaction(_) | RuntimeError::Validation(_) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         RuntimeError::InvalidPersistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     let code = match error {
@@ -277,9 +283,22 @@ fn runtime_error_response(error: RuntimeError) -> Response {
         RuntimeError::UnknownEntity(_) => "unknown_entity",
         RuntimeError::UnknownObject { .. } => "unknown_object",
         RuntimeError::Transaction(_) => "transaction_failed",
+        RuntimeError::Validation(_) => "validation_failed",
         RuntimeError::InvalidPersistence(_) => "invalid_persistence",
     };
-    error_response(status, code, &error.to_string())
+    let violations = match &error {
+        RuntimeError::Validation(violations) => violations.clone(),
+        _ => Vec::new(),
+    };
+    (
+        status,
+        Json(ErrorBody {
+            error: code,
+            message: &error.to_string(),
+            violations,
+        }),
+    )
+        .into_response()
 }
 
 fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
@@ -288,6 +307,7 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
         Json(ErrorBody {
             error: code,
             message,
+            violations: Vec::new(),
         }),
     )
         .into_response()
@@ -307,6 +327,28 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("index.html"), "<h1>MXRS</h1>").unwrap();
         directory
+    }
+
+    /// A save the runtime refuses for the model's rules answers each
+    /// violation by member, for the page to show where it belongs.
+    #[tokio::test]
+    async fn a_refused_save_answers_its_violations() {
+        let response =
+            runtime_error_response(RuntimeError::Validation(vec![mxrs_runtime::Violation {
+                member: "Name".into(),
+                message: "Name is required".into(),
+            }]));
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"], "validation_failed");
+        assert_eq!(body["violations"][0]["member"], "Name");
+        assert_eq!(body["violations"][0]["message"], "Name is required");
+        let plain = error_response(StatusCode::NOT_FOUND, "unknown_action", "x");
+        let body: Value =
+            serde_json::from_slice(&plain.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert!(body.get("violations").is_none());
     }
 
     #[tokio::test]

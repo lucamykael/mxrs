@@ -313,10 +313,15 @@ button opens a page with the object it is in, creates, saves or deletes one
 or runs its flow, without arguments yet, once the user agrees to what it
 asks first. The data operations read and write member by member within the
 rights of the caller's role and check a value against what its attribute
-holds (a text's length, a number, a real date); they do not run the
-entity's event handlers or validation rules, which only a flow does, and a
-list shows every object its role may read — its constraint, sorting and
-paging are not applied. A page reached without the object it shows (from
+holds (a text's length, a number, a real date). A save is checked against
+the entity's validation rules (required, unique, maximum length, range,
+regular expression — with the model's message) and refused as
+`validation_failed` with its `violations` by member, which the page shows
+under the inputs; what passes is committed through the entity's event
+handlers the way a flow's commit is, and the effects those handlers ask for
+(a message, feedback) come back with the saved object. A list is retrieved
+within its XPath constraint (the subset the runtime evaluates), in its sort
+order, a page at a time. A page reached without the object it shows (from
 the address bar, or reloaded) says it has nothing to show. This is the
 project's own frontend: the bundle mxrs embeds draws from the manifest and
 knows none of it. A data view

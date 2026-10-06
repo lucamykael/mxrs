@@ -971,6 +971,19 @@ impl FlowEngine {
         Ok(())
     }
 
+    /// Commits an object the way a flow's commit with events does: the
+    /// entity's before-handlers, the store's commit, then its
+    /// after-handlers; what the handlers asked of the page is in the
+    /// execution's effects.
+    pub fn commit_with_events(
+        &self,
+        store: &mut Store,
+        execution: &mut Execution,
+        reference: &ObjectRef,
+    ) -> Result<(), FlowError> {
+        self.commit_object(store, execution, reference, true)
+    }
+
     fn commit_object(
         &self,
         store: &mut Store,

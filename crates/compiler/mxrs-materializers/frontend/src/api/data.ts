@@ -15,6 +15,19 @@ export async function data<T>(operation: string, body: Record<string, unknown>):
   return invoke<T>('data', operation, body);
 }
 
+/** One thing wrong with what a form saved: the member and what the model says of it. */
+export type Violation = { member: string; message: string };
+
+/** A save the runtime refused for the model's rules: what to show under which inputs. */
+export class ValidationError extends Error {
+  constructor(
+    message: string,
+    readonly violations: Violation[],
+  ) {
+    super(message);
+  }
+}
+
 /** Asks the runtime for something by kind and name: a data operation, a microflow, a nanoflow. */
 export async function invoke<T>(
   kind: string,
@@ -29,9 +42,12 @@ export async function invoke<T>(
   const answer = (await response.json().catch(() => null)) as {
     result?: T;
     message?: string;
+    violations?: Violation[];
   } | null;
   if (!response.ok || !answer) {
-    throw new Error(answer?.message || `${handler} failed (${response.status})`);
+    const message = answer?.message || `${handler} failed (${response.status})`;
+    if (answer?.violations?.length) throw new ValidationError(message, answer.violations);
+    throw new Error(message);
   }
   return answer.result as T;
 }

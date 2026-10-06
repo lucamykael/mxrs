@@ -312,6 +312,56 @@ impl mxrs_runtime::Action for FlowAction {
     }
 }
 
+/// Commits what a page saves through the entity's event handlers, as a
+/// flow's commit does, and answers what those handlers asked of the page.
+/// A handler that rejects the object after giving validation feedback is
+/// answered as that feedback, member by member.
+struct FlowLifecycle {
+    engine: Arc<mxrs_runtime_flows::FlowEngine>,
+}
+
+impl mxrs_runtime::Lifecycle for FlowLifecycle {
+    fn commit(
+        &self,
+        store: &mut Store,
+        entity: &str,
+        id: &str,
+        context: &mxrs_runtime::SecurityContext,
+    ) -> mxrs_runtime::Result<Vec<serde_json::Value>> {
+        let mut execution = self.engine.new_execution(Some(context.clone()));
+        let reference = mxrs_runtime_flows::ObjectRef {
+            entity: entity.to_string(),
+            id: id.to_string(),
+        };
+        match self
+            .engine
+            .commit_with_events(store, &mut execution, &reference)
+        {
+            Ok(()) => Ok(execution.effects),
+            Err(error) => {
+                let violations: Vec<mxrs_runtime::Violation> = execution
+                    .effects
+                    .iter()
+                    .filter(|effect| effect["type"] == "validation_feedback")
+                    .map(|effect| mxrs_runtime::Violation {
+                        member: effect["member"].as_str().unwrap_or_default().to_string(),
+                        message: effect["message"].as_str().unwrap_or_default().to_string(),
+                    })
+                    .collect();
+                if !violations.is_empty() {
+                    return Err(mxrs_runtime::RuntimeError::Validation(violations));
+                }
+                Err(match error {
+                    mxrs_runtime_flows::FlowError::Runtime(error) => error,
+                    mxrs_runtime_flows::FlowError::Native(message) => {
+                        mxrs_runtime::RuntimeError::Transaction(message)
+                    }
+                })
+            }
+        }
+    }
+}
+
 /// What a flow answered, as a page reads it: an object with its members, a
 /// list of them, or the value itself.
 fn answered(store: &Store, value: &mxrs_runtime_flows::FlowValue) -> serde_json::Value {
@@ -414,6 +464,9 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
             },
         );
     }
+    runtime.set_lifecycle(FlowLifecycle {
+        engine: engine.clone(),
+    });
     let http = RuntimeHttp::new(runtime, &target.web_root);
     let runtime_handle = http.runtime_handle();
     let jobs = mxrs_runtime_scheduler::jobs_from_modules(&boot.modules)
@@ -726,6 +779,128 @@ mod tests {
             command.get_current_dir(),
             Some(root.join("frontend").as_path())
         );
+    }
+
+    /// What a page saves is committed through the entity's event handlers:
+    /// a before-commit flow that gives feedback and rejects the object is
+    /// answered as that feedback, member by member; one that accepts it
+    /// still hands the page what it asked for.
+    #[test]
+    fn a_pages_save_is_committed_through_the_entitys_event_handlers() {
+        use mxrs_bson::{Bson, build_array, doc};
+        let node = Bson::Document;
+        let mut customer = mxrs_model::entity::Entity::from_bson(&doc! {
+            "$Type": "DomainModels$Entity",
+            "Name": "Customer",
+        });
+        customer.qualified_name = Some("Main.Customer".to_string());
+        customer.lifecycle = vec![mxrs_model::entity::LifecycleCallback {
+            id: None,
+            event: "before_commit".to_string(),
+            handler: "Main.VAL_Customer".to_string(),
+            pass_event_object: true,
+            raise_error_on_false: true,
+            raw: doc! {},
+        }];
+        let sequence = |id: &str, origin: &str, destination: &str| {
+            node(doc! {
+                "$Type": "Microflows$SequenceFlow",
+                "$ID": id,
+                "OriginPointer": origin,
+                "DestinationPointer": destination,
+                "IsErrorHandler": false,
+            })
+        };
+        let gate = mxrs_model::Microflow::from_bson(&doc! {
+            "$Type": "Microflows$Microflow",
+            "Name": "VAL_Customer",
+            "ApplyEntityAccess": false,
+            "ObjectCollection": doc! {
+                "$Type": "Microflows$MicroflowObjectCollection",
+                "Objects": build_array(vec![
+                    node(doc! { "$Type": "Microflows$StartEvent", "$ID": "s" }),
+                    node(doc! { "$Type": "Microflows$MicroflowParameter", "$ID": "p", "Name": "customer" }),
+                    node(doc! {
+                        "$Type": "Microflows$ActionActivity",
+                        "$ID": "v",
+                        "Action": doc! {
+                            "$Type": "Microflows$ValidationFeedbackAction",
+                            "ValidationVariableName": "customer",
+                            "Attribute": "Main.Customer.Name",
+                            "FeedbackTemplate": doc! {
+                                "Text": doc! {
+                                    "Items": build_array(vec![node(doc! { "LanguageCode": "en_US", "Text": "Not that name" })], 3),
+                                },
+                            },
+                        },
+                    }),
+                    node(doc! { "$Type": "Microflows$EndEvent", "$ID": "e", "ReturnValue": "$customer/Name != 'Nope'" }),
+                ], 2),
+            },
+            "Flows": build_array(vec![sequence("f1", "s", "v"), sequence("f2", "v", "e")], 2),
+        });
+        let module = mxrs_model::Module {
+            id: String::new(),
+            name: Some("Main".to_string()),
+            sort_index: None,
+            from_app_store: false,
+            app_store_guid: None,
+            app_store_version: None,
+            export_level: String::new(),
+            domain_model: Some(mxrs_model::DomainModel {
+                id: None,
+                native_type: None,
+                documentation: String::new(),
+                entities: vec![customer],
+                associations: Vec::new(),
+                cross_associations: Vec::new(),
+            }),
+            pages: Vec::new(),
+            microflows: vec![gate],
+            nanoflows: Vec::new(),
+            rules: Vec::new(),
+            menus: Vec::new(),
+            module_roles: Vec::new(),
+            artifact_units: Vec::new(),
+        };
+        let engine = Arc::new(mxrs_runtime_flows::FlowEngine::from_modules(
+            std::slice::from_ref(&module),
+        ));
+        let mut runtime = mxrs_runtime::Runtime::new(
+            Store::new(
+                mxrs_runtime::StoreSchema::default()
+                    .entity("Main.Customer", std::collections::BTreeMap::new(), false)
+                    .members(
+                        "Main.Customer",
+                        std::collections::BTreeMap::from([(
+                            "Name".to_string(),
+                            mxrs_runtime::MemberKind::Text { length: None },
+                        )]),
+                    ),
+            ),
+            mxrs_runtime::SecurityPolicy::default(),
+        );
+        runtime.set_lifecycle(FlowLifecycle { engine });
+        let context = mxrs_runtime::SecurityContext::default();
+        let mut save = |name: &str| {
+            runtime.data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Customer", "id": "3f0b1a52-8b3e-4d6a-9f3c-2d7c1e5a9b01", "new": true, "members": { "Name": name } }),
+                &context,
+            )
+        };
+        assert_eq!(
+            save("Nope"),
+            Err(mxrs_runtime::RuntimeError::Validation(vec![
+                mxrs_runtime::Violation {
+                    member: "Name".into(),
+                    message: "Not that name".into(),
+                }
+            ]))
+        );
+        let saved = save("Ana").unwrap();
+        assert_eq!(saved["members"]["Name"], "Ana");
+        assert_eq!(saved["effects"][0]["type"], "validation_feedback");
     }
 
     #[test]

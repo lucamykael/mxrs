@@ -1,6 +1,6 @@
 import { createContext, type ReactNode } from 'react';
 
-import type { DataObject } from '@/api/data';
+import type { DataObject, Violation } from '@/api/data';
 import type { Form } from '@/mxrs/forms';
 import type { Collections, Manifest, NavigationItem } from '@/types/model';
 
@@ -15,6 +15,10 @@ export const Draft = createContext<{
   set: (member: string, value: unknown) => void;
   /** Takes the object as the runtime saved it. */
   saved: (object: DataObject) => void;
+  /** What the runtime refused of the last save, by member, until the member changes. */
+  violations: ReadonlyMap<string, string>;
+  /** Takes what a save was refused for, or what a flow's feedback said of a member. */
+  rejected: (violations: Violation[]) => void;
 } | null>(null);
 
 /** How a filter narrows: by a text it contains, an option it equals, or a day it falls on. */

@@ -20,7 +20,9 @@ use std::path::Path;
 
 use mxrs_bson::{Bson, Document, parse_array};
 use mxrs_model::{Attribute, AttributeType, Module, Project};
-use mxrs_runtime::{EntityRule, MemberRight, SecurityContext, SecurityPolicy, StoreSchema};
+use mxrs_runtime::{
+    EntityRule, MemberRight, RuleKind, SecurityContext, SecurityPolicy, StoreSchema, ValidationRule,
+};
 use serde_json::Value;
 
 /// One account `Security$ProjectSecurity` declares, with the password the
@@ -234,6 +236,90 @@ fn http_message_schema(schema: StoreSchema) -> StoreSchema {
         )
 }
 
+/// A validation rule as the model states it (`DomainModels$ValidationRule`):
+/// the attribute, the kind of rule in `RuleInfo`, and the message of the
+/// `Message`/`ErrorMessage` text. A kind this runtime cannot check is left
+/// to a flow, as before.
+fn validation_rule(document: &Document) -> Option<ValidationRule> {
+    let member = document
+        .get_str("Attribute")
+        .ok()?
+        .rsplit('.')
+        .next()?
+        .to_string();
+    let info = document.get_document("RuleInfo").ok()?;
+    let rule_type = info.get_str("$Type").unwrap_or_default();
+    let number = |key: &str| match info.get(key) {
+        Some(Bson::String(text)) => text.trim().parse::<f64>().ok(),
+        Some(Bson::Int32(value)) => Some(f64::from(*value)),
+        Some(Bson::Int64(value)) => Some(*value as f64),
+        Some(Bson::Double(value)) => Some(*value),
+        _ => None,
+    };
+    let kind = if rule_type.ends_with("RequiredRuleInfo") {
+        RuleKind::Required
+    } else if rule_type.ends_with("UniqueRuleInfo") {
+        RuleKind::Unique
+    } else if rule_type.ends_with("MaxLengthRuleInfo") {
+        RuleKind::MaxLength(usize::try_from(number("MaxLength")? as i64).ok()?)
+    } else if rule_type.ends_with("RangeRuleInfo") {
+        // Studio Pro states the range's type and keeps both bounds; only the
+        // ones the type uses count.
+        let range_type = info.get_str("TypeOfRange").unwrap_or("Between");
+        let minimum = (range_type != "SmallerThanOrEqualTo")
+            .then(|| number("MinimumValue").or_else(|| number("MinValue")))
+            .flatten();
+        let maximum = (range_type != "GreaterThanOrEqualTo")
+            .then(|| number("MaximumValue").or_else(|| number("MaxValue")))
+            .flatten();
+        RuleKind::Range { minimum, maximum }
+    } else if rule_type.ends_with("RegExRuleInfo") {
+        RuleKind::Pattern(info.get_str("RegularExpression").ok()?.to_string())
+    } else {
+        return None;
+    };
+    let message = ["Message", "ErrorMessage"]
+        .iter()
+        .filter_map(|key| document.get_document(key).ok())
+        .find_map(translated_text)
+        .unwrap_or_default();
+    Some(ValidationRule {
+        member,
+        kind,
+        message,
+    })
+}
+
+/// The text of a `Texts$Text`: its English translation, or the first one
+/// that says anything.
+fn translated_text(text: &Document) -> Option<String> {
+    let items = ["Items", "Translations"]
+        .iter()
+        .find_map(|key| match text.get(key) {
+            Some(Bson::Array(items)) => Some(parse_array(Some(items)).items),
+            _ => None,
+        })?;
+    let translations: Vec<&Document> = items
+        .iter()
+        .filter_map(|item| match item {
+            Bson::Document(document) => Some(document),
+            _ => None,
+        })
+        .collect();
+    let spoken = |translation: &&Document| {
+        translation
+            .get_str("Text")
+            .ok()
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string)
+    };
+    translations
+        .iter()
+        .filter(|translation| translation.get_str("LanguageCode").ok() == Some("en_US"))
+        .find_map(spoken)
+        .or_else(|| translations.iter().find_map(spoken))
+}
+
 pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, BootError> {
     let mut schema = http_message_schema(StoreSchema::default());
     let mut entities = 0;
@@ -295,9 +381,15 @@ pub fn build(modules: Vec<Module>, security: Option<&Document>) -> Result<Boot, 
                     Some((attribute.name.clone()?, kind))
                 })
                 .collect();
+            let rules = entity
+                .validation_rules
+                .iter()
+                .filter_map(validation_rule)
+                .collect();
             schema = schema
                 .entity(qualified.clone(), defaults, transient)
-                .members(&qualified, kinds);
+                .members(&qualified, kinds)
+                .rules(&qualified, rules);
             entities += 1;
             let mut rules = Vec::new();
             for rule in &entity.access_rules {
@@ -946,5 +1038,79 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"secreT"));
         assert!(!constant_time_eq(b"secret", b"secre"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    /// The model's validation rules reach the schema with their messages;
+    /// a kind this runtime cannot check is left out.
+    #[test]
+    fn validation_rules_reach_the_schema_with_their_messages() {
+        let rule = |attribute: &str, info: Document, message: Option<&str>| {
+            let mut rule = doc! {
+                "$Type": "DomainModels$ValidationRule",
+                "Attribute": attribute,
+                "RuleInfo": info,
+            };
+            if let Some(message) = message {
+                rule.insert(
+                    "Message",
+                    doc! {
+                        "$Type": "Texts$Text",
+                        "Items": mxrs_bson::build_array(vec![
+                            Bson::Document(doc! { "LanguageCode": "pt_BR", "Text": "obrigatório" }),
+                            Bson::Document(doc! { "LanguageCode": "en_US", "Text": message }),
+                        ], 3),
+                    },
+                );
+            }
+            rule
+        };
+        let rules = [
+            rule(
+                "Main.Customer.Name",
+                doc! { "$Type": "DomainModels$RequiredRuleInfo" },
+                Some("Name the customer"),
+            ),
+            rule(
+                "Main.Customer.Email",
+                doc! { "$Type": "DomainModels$UniqueRuleInfo" },
+                None,
+            ),
+            rule(
+                "Main.Customer.Email",
+                doc! { "$Type": "DomainModels$MaxLengthRuleInfo", "MaxLength": 40 },
+                None,
+            ),
+            rule(
+                "Main.Customer.Age",
+                doc! { "$Type": "DomainModels$RangeRuleInfo", "TypeOfRange": "GreaterThanOrEqualTo", "MinimumValue": "0", "MaximumValue": "9" },
+                None,
+            ),
+            rule(
+                "Main.Customer.Email",
+                doc! { "$Type": "DomainModels$RegExRuleInfo", "RegularExpression": "^.+@.+$" },
+                None,
+            ),
+            rule(
+                "Main.Customer.Name",
+                doc! { "$Type": "DomainModels$SomeOtherRuleInfo" },
+                None,
+            ),
+        ];
+        let parsed: Vec<ValidationRule> = rules.iter().filter_map(validation_rule).collect();
+        assert_eq!(parsed.len(), 5);
+        assert_eq!(parsed[0].member, "Name");
+        assert_eq!(parsed[0].kind, RuleKind::Required);
+        assert_eq!(parsed[0].message, "Name the customer");
+        assert_eq!(parsed[1].kind, RuleKind::Unique);
+        assert_eq!(parsed[1].message, "");
+        assert_eq!(parsed[2].kind, RuleKind::MaxLength(40));
+        assert_eq!(
+            parsed[3].kind,
+            RuleKind::Range {
+                minimum: Some(0.0),
+                maximum: None
+            }
+        );
+        assert_eq!(parsed[4].kind, RuleKind::Pattern("^.+@.+$".into()));
     }
 }
