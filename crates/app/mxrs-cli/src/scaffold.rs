@@ -35,7 +35,7 @@ pub fn usage(kind: ArtifactKind) -> String {
     // template catalog, the way mxrb's own help states them on one line.
     let (page_options, page_forms) = if kind == ArtifactKind::Page {
         (
-            " [--template NAME] [--chain CHAIN] [--role Module.Role]",
+            " [--template NAME] [--chain CHAIN] [--atlas] [--role Module.Role]",
             " | templates [--target DIR] [--json]",
         )
     } else if kind == ArtifactKind::DemoUser {
@@ -80,6 +80,7 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
     let roles = take_values(&mut arguments, "--role");
     let template = take_value(&mut arguments, "--template");
     let chain = take_value(&mut arguments, "--chain");
+    let atlas = take_flag(&mut arguments, "--atlas");
     let entity = take_value(&mut arguments, "--entity");
     let expected = command(kind).action;
     // MXRB's `new` is optional for demo-user (`mxrb demo-user manager` works).
@@ -99,6 +100,7 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
         && roles.is_empty()
         && template.is_none()
         && chain.is_none()
+        && !atlas
         && entity.is_none()
     {
         return print_page_templates(json, &target);
@@ -119,7 +121,7 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
         render(&outcome, json);
         return Ok(());
     }
-    let page_only = template.is_some() || chain.is_some();
+    let page_only = template.is_some() || chain.is_some() || atlas;
     let roles_allowed = matches!(kind, ArtifactKind::Page | ArtifactKind::DemoUser);
     let [action, name] = arguments.as_slice() else {
         return Err(format!("usage: mxrs {}", usage(kind)));
@@ -141,6 +143,7 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
             .page_roles(roles)
             .page_template(template)
             .page_chain(chain)
+            .atlas(atlas)
             .demo_entity(entity),
     )
     .map_err(|error| error.to_string())?;

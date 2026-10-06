@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 use crate::templates::snake_case;
 use crate::transaction::Transaction;
 use crate::{
-    Result, ScaffoldError, installed_templates, io_error, page_templates, registry, templates,
+    Result, ScaffoldError, atlas_crud, installed_templates, io_error, page_templates, registry,
+    templates,
 };
 
 /// Placeholder name on the scaffolded `ApplicationLayout` that scaffolded
@@ -333,6 +334,9 @@ pub struct ArtifactScaffold {
     pub page_template: Option<String>,
     /// Page-led vertical slice to generate (`--chain`).
     pub page_chain: Option<PageChain>,
+    /// The `crud` template from Atlas's templates (`--atlas`): the
+    /// overview from `Grid`, the edit page from `Form_Vertical_Edit`.
+    pub atlas: bool,
     /// Demo-user backing entity (`--entity`, `System.User` by default). The
     /// repeatable `--role` values arrive through [`Self::page_roles`], which
     /// doubles as the generic role list for kinds that grant roles.
@@ -349,8 +353,14 @@ impl ArtifactScaffold {
             page_roles: vec![],
             page_template: None,
             page_chain: None,
+            atlas: false,
             demo_entity: None,
         }
+    }
+
+    pub fn atlas(mut self, atlas: bool) -> Self {
+        self.atlas = atlas;
+        self
     }
 
     pub fn dry_run(mut self, dry_run: bool) -> Self {
@@ -1201,23 +1211,67 @@ fn create_crud(
         ));
     }
     let (overview, _) = crate::forms::crud_page_names(entity);
-    for page in [
+    let shown_in = page_layout(transaction, root, module_name)?;
+    let pages = [
         crate::forms::crud_edit_page(
-            &page_layout(transaction, root, module_name)?,
+            &shown_in,
             module_name,
             entity,
             &attributes,
             &options.page_roles,
         ),
         crate::forms::crud_overview_page(
-            &page_layout(transaction, root, module_name)?,
+            &shown_in,
             module_name,
             entity,
             &attributes,
             &options.page_roles,
         ),
-    ] {
-        add_page(transaction, root, module_name, &page)?;
+    ];
+    if options.atlas {
+        // The same pages, from Atlas's templates: what mxrs's own compile
+        // to is what binds the templates' widgets to the entity.
+        let find = |name: &str| {
+            installed_templates::find(root, name)?.ok_or_else(|| {
+                ScaffoldError::InvalidProjectSource {
+                    path: format!("{module_name}.{entity}"),
+                    reason: format!(
+                        "--atlas needs the page template {name} of Atlas Web Content installed (run `mxrs page templates`)"
+                    ),
+                }
+            })
+        };
+        let grid = find(atlas_crud::OVERVIEW_TEMPLATE)?;
+        let form = find(atlas_crud::EDIT_TEMPLATE)?;
+        for page in &pages {
+            refuse_declared_page(transaction, root, module_name, &page.name)?;
+        }
+        let version = forms_version(transaction, root)?;
+        let own_edit = crate::forms::page_document(&version, &pages[0])?;
+        let own_overview = crate::forms::page_document(&version, &pages[1])?;
+        let (list, edit, notes) = atlas_crud::pages(&atlas_crud::Crud {
+            overview: &grid,
+            edit: &form,
+            version: &version,
+            shown_in: &shown_in,
+            entity: &format!("{module_name}.{entity}"),
+            attributes: &attributes,
+            roles: &options.page_roles,
+            own_overview: &own_overview,
+            own_edit: &own_edit,
+        })?;
+        for note in notes {
+            transaction.note(note);
+        }
+        crate::forms::add_forms(
+            transaction,
+            root,
+            &[(module_name, edit), (module_name, list)],
+        )?;
+    } else {
+        for page in &pages {
+            add_page(transaction, root, module_name, page)?;
+        }
     }
     add_to_navigation(
         transaction,

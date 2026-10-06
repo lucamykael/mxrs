@@ -732,4 +732,71 @@ fn a_new_project_brings_atlas_from_the_cache() {
             && orders.contains("Datagrid"),
         "{orders}"
     );
+
+    // An entity's CRUD from Atlas's templates: the grid lists the entity, a
+    // column per attribute, and the form holds an input per attribute.
+    assert!(
+        scaffold(&root, &["entity", "new", "Main.Customer"])
+            .status
+            .success()
+    );
+    let entity = root.join("src/domain/entities/main/customer.rs");
+    let source = std::fs::read_to_string(&entity).unwrap();
+    std::fs::write(
+        &entity,
+        source.replace(
+            "pub struct Customer {}",
+            "pub struct Customer {\n    pub name: MxString,\n    pub email: MxString,\n    pub active: MxBool,\n}",
+        ),
+    )
+    .unwrap();
+    let crud = scaffold(
+        &root,
+        &[
+            "page",
+            "new",
+            "Main.Customer",
+            "--template",
+            "crud",
+            "--atlas",
+        ],
+    );
+    assert!(
+        crud.status.success(),
+        "{}",
+        String::from_utf8_lossy(&crud.stderr)
+    );
+    let overview =
+        std::fs::read_to_string(root.join("frontend/src/pages/main/Customer_Overview.tsx"))
+            .unwrap();
+    for expected in [
+        "datasource: <CustomWidgetXPathSource entityRef=\"Main.Customer\" />",
+        "attribute: \"Main.Customer.Name\"",
+        "attribute: \"Main.Customer.Email\"",
+        "attribute: \"Main.Customer.Active\"",
+        "header: { en_US: \"Email\" }",
+        "form=\"Main.Customer_Edit\"",
+        "parameter=\"Main.Customer_Edit.Customer\"",
+        "content={{ en_US: \"Customers\" }}",
+        "<LayoutCall form=\"Atlas_Core.Atlas_Default\">",
+    ] {
+        assert!(overview.contains(expected), "{expected}\n{overview}");
+    }
+    let edit =
+        std::fs::read_to_string(root.join("frontend/src/pages/main/Customer_Edit.tsx")).unwrap();
+    for expected in [
+        "<PageParameter",
+        "<DataViewSource sourceVariable=\"Customer\" />",
+        "attributeRef=\"Main.Customer.Name\"",
+        "attributeRef=\"Main.Customer.Active\"",
+        "SaveChangesClientAction",
+    ] {
+        assert!(edit.contains(expected), "{expected}\n{edit}");
+    }
+    let navigation =
+        std::fs::read_to_string(root.join("frontend/src/navigation/index.ts")).unwrap();
+    assert!(
+        navigation.contains("Main.Customer_Overview"),
+        "{navigation}"
+    );
 }

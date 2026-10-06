@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod artifact;
+mod atlas_crud;
 mod forms;
 pub mod installed_templates;
 pub mod lifecycle;

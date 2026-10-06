@@ -902,6 +902,19 @@ fn an_entity_crud_and_an_underscored_slice_compile_and_reach_the_model() {
         ),
     )
     .unwrap();
+    // From Atlas's templates only when the project installed them.
+    let atlas = scaffold_artifact(
+        &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Animal", &root)
+            .page_template(Some("crud".to_string()))
+            .atlas(true),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        atlas.contains("--atlas needs the page template Grid"),
+        "{atlas}"
+    );
+    assert!(!root.join("frontend/src/pages/sales").exists());
     crud("Sales.Animal").unwrap();
     let pages = root.join("frontend/src/pages/sales");
     let overview = std::fs::read_to_string(pages.join("Animal_Overview.tsx")).unwrap();
