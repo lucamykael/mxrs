@@ -361,7 +361,12 @@ and Delete) and `<Entity>_Edit` (an input per attribute, Save and Cancel) —
 from the attributes its struct has, and adds the overview to the
 navigation. With `--atlas` the pages are Atlas's `Grid` and
 `Form_Vertical_Edit` templates bound to the entity, and the edit page is in
-Atlas's `PopupLayout`, as Studio Pro's is, so it opens over the list. A
+Atlas's `PopupLayout`, as Studio Pro's is, so it opens over the list.
+`--role Module.Role` (repeatable) allows a page to a module role: one of a
+module the project declares must be a variant of that module's
+`#[module_roles]` enum (`mxrs security init <Module>` writes it), and is
+refused otherwise; a role of an installed or imported module is in its
+model, and a build warns of a page allowed to a role no module has. A
 declaration file exports data the frontend's own types check:
 
 ```ts

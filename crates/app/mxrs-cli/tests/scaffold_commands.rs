@@ -240,6 +240,12 @@ fn a_dry_run_renders_the_json_document_without_touching_the_project() {
             .status
             .success()
     );
+    // The roles a page is allowed to are the module's.
+    assert!(
+        scaffold(&root, &["security", "init", "Sales"])
+            .status
+            .success()
+    );
     let output = scaffold(
         &root,
         &[

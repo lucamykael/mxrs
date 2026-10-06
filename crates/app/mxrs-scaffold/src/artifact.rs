@@ -22,6 +22,7 @@
 //!    `pub mod` line per level — and the scaffold never has to recognize how
 //!    a project composes its model, or refuse one it does not recognize.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::templates::snake_case;
@@ -454,6 +455,9 @@ pub fn scaffold_artifact(options: &ArtifactScaffold) -> Result<ScaffoldOutcome> 
         }
     } else {
         let (module_name, artifact_name) = qualified_name(options.kind, &options.name)?;
+        if options.kind == ArtifactKind::Page {
+            refuse_undeclared_roles(&transaction, &root, &options.page_roles)?;
+        }
         create_artifact(&mut transaction, &root, options, module_name, artifact_name)?;
     }
 
@@ -817,6 +821,123 @@ fn create_demo_user(
 /// User roles the project's security declaration names: every
 /// `security.role("Name", …)` — the form both `security init` and the
 /// importer write — and the struct-literal forms earlier imports used.
+/// A page is allowed to module roles, each `Module.Role`: one of a module
+/// the project declares must be among the roles its `#[module_roles]` enum
+/// declares. A module the project installed or imported keeps its roles in
+/// its model, which the build checks.
+fn refuse_undeclared_roles(transaction: &Transaction, root: &Path, roles: &[String]) -> Result<()> {
+    if roles.is_empty() {
+        return Ok(());
+    }
+    let declared = declared_module_roles(transaction, root)?;
+    for role in roles {
+        let refused = |reason: String| ScaffoldError::UnknownModuleRole {
+            role: role.clone(),
+            reason,
+        };
+        let Some((module, name)) = role.rsplit_once('.') else {
+            return Err(refused(
+                "a page is allowed to module roles, named `Module.Role`".to_string(),
+            ));
+        };
+        match declared.get(module) {
+            Some(names) if names.contains(name) => {}
+            Some(names) => {
+                return Err(refused(format!(
+                    "{module} declares {} in src/domain/module_security",
+                    names.iter().cloned().collect::<Vec<_>>().join(", ")
+                )));
+            }
+            None => {
+                let own = root.join(format!("src/domain/modules/{}.rs", snake_case(module)));
+                if transaction.content(&own)?.is_some() {
+                    return Err(refused(format!(
+                        "{module} declares no module roles yet: run `mxrs security init {module}` first"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The module roles the project declares, by module: the variants of each
+/// `#[module_roles(module = "...")]` enum under `src/domain/module_security`
+/// (a variant's `#[mxrs(name = "...")]` is its name).
+fn declared_module_roles(
+    transaction: &Transaction,
+    root: &Path,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut declared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut folders = vec![root.join("src/domain/module_security")];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            let Some(source) = transaction.content(&path)? else {
+                continue;
+            };
+            let Ok(file) = syn::parse_file(&source) else {
+                continue;
+            };
+            for item in file.items {
+                let syn::Item::Enum(roles) = item else {
+                    continue;
+                };
+                let Some(module) = roles.attrs.iter().find_map(|attribute| {
+                    if attribute
+                        .path()
+                        .segments
+                        .last()
+                        .is_none_or(|segment| segment.ident != "module_roles")
+                    {
+                        return None;
+                    }
+                    let mut module = None;
+                    attribute
+                        .parse_nested_meta(|meta| {
+                            if meta.path.is_ident("module") {
+                                module = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                            } else if meta.input.peek(syn::Token![=]) {
+                                meta.value()?.parse::<syn::Expr>()?;
+                            }
+                            Ok(())
+                        })
+                        .ok()?;
+                    module
+                }) else {
+                    continue;
+                };
+                let names = declared.entry(module).or_default();
+                for variant in &roles.variants {
+                    let mut name = variant.ident.to_string();
+                    for attribute in &variant.attrs {
+                        if attribute.path().is_ident("mxrs") {
+                            let _ = attribute.parse_nested_meta(|meta| {
+                                if meta.path.is_ident("name") {
+                                    name = meta.value()?.parse::<syn::LitStr>()?.value();
+                                }
+                                Ok(())
+                            });
+                        }
+                    }
+                    names.insert(name);
+                }
+            }
+        }
+    }
+    Ok(declared)
+}
+
 fn declared_user_roles(source: &str) -> Vec<String> {
     let mut roles = Vec::new();
     for pattern in [

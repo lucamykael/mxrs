@@ -835,7 +835,7 @@ fn reference_field(field: &str) -> Option<(ArtifactKind, &'static str)> {
         "attribute" => (Attribute, "uses_attribute"),
         "association" => (Association, "uses_association"),
         "enumeration" => (Enumeration, "uses_enumeration"),
-        "allowedmoduleroles" => (ModuleRole, "allowed_role"),
+        "allowedmoduleroles" | "allowedroles" => (ModuleRole, "allowed_role"),
         _ => return None,
     })
 }
@@ -1449,6 +1449,22 @@ mod tests {
         assert_eq!(index.diagnostics().len(), 1);
         assert_eq!(index.diagnostics()[0].code, "unresolved_reference");
         assert!(!index.analyze().valid());
+
+        // A page's allowed roles are module roles of the model.
+        let mut builder = IndexBuilder::default();
+        builder.add(artifact("page", ArtifactKind::Page));
+        builder.document_references(
+            "page",
+            &mxrs_bson::doc! { "AllowedRoles": ["Sales.Ghost"] },
+            "page",
+        );
+        let index = builder.finish().unwrap();
+        assert_eq!(index.diagnostics()[0].code, "unresolved_reference");
+        assert!(
+            index.diagnostics()[0]
+                .message
+                .contains("allowed_role \"Sales.Ghost\"")
+        );
 
         let mut builder = IndexBuilder::default();
         builder.add(artifact("first", ArtifactKind::Entity));

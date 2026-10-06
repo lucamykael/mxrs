@@ -95,6 +95,8 @@ pub enum ScaffoldError {
         "demo user references user role {0:?}, which src/domain/security declares nowhere; declare it with `security.role({0:?}, …)` or scaffold it via `mxrs security init`"
     )]
     UnknownDemoUserRole(String),
+    #[error("page role {role:?}: {reason}")]
+    UnknownModuleRole { role: String, reason: String },
     #[error(
         "demo user entity {0:?} was not found in this project's domain layer (expected `Module.Entity` with src/domain/entities/<module>/<entity>.rs, or `System.User`)"
     )]

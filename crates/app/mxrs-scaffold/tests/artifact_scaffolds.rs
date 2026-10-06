@@ -260,6 +260,42 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     assert!(example.contains("MXRS_DEMO_USER_SUPPORT_PASSWORD=\n"));
 }
 
+/// A page is allowed to module roles that exist: one of a module the
+/// project declares must be a role its `#[module_roles]` enum declares,
+/// and is refused, saying which there are, when it is not.
+#[test]
+fn a_page_is_allowed_only_to_module_roles_that_exist() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    let page = |roles: &[&str]| {
+        scaffold_artifact(
+            &ArtifactScaffold::new(ArtifactKind::Page, "Sales.Orders", &root)
+                .page_roles(roles.iter().map(ToString::to_string).collect()),
+        )
+    };
+    let refused = |roles: &[&str]| match page(roles) {
+        Err(ScaffoldError::UnknownModuleRole { role, reason }) => format!("{role}: {reason}"),
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        refused(&["Sales.User"]).contains("declares no module roles yet"),
+        "{}",
+        refused(&["Sales.User"])
+    );
+    assert!(refused(&["User"]).contains("`Module.Role`"));
+    scaffold(&root, ArtifactKind::Security, "Sales");
+    assert_eq!(
+        refused(&["Sales.User", "Sales.Ghost"]),
+        "Sales.Ghost: Sales declares Administrator, User in src/domain/module_security"
+    );
+    assert!(!root.join("frontend/src/pages/sales/Orders.tsx").exists());
+    // A module the project did not declare keeps its roles in its model.
+    page(&["Sales.Administrator", "Administration.User"]).unwrap();
+    let source = std::fs::read_to_string(root.join("frontend/src/pages/sales/Orders.tsx")).unwrap();
+    assert!(source.contains("\"Administration.User\""), "{source}");
+}
+
 #[test]
 fn demo_user_scaffolds_fail_closed_on_missing_prerequisites() {
     let directory = tempfile::tempdir().unwrap();
