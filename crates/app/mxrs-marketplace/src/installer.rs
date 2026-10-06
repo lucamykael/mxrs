@@ -100,7 +100,16 @@ impl InstallPlan {
                     } else {
                         unit.container_id.clone()
                     };
-                    let document = source.parse_contents(unit)?;
+                    let mut document = source.parse_contents(unit)?;
+                    // Installed, the module is the Marketplace's — as
+                    // Studio Pro marks one it imports — and the project
+                    // treats it as a dependency, not as its own code.
+                    if unit.unit_id == units[0].unit_id {
+                        document.insert("FromAppStore", true);
+                        if let Some(version) = &descriptor.version {
+                            document.insert("AppStoreVersion", version.clone());
+                        }
+                    }
                     target.insert_unit(
                         &container,
                         &unit.containment_name,

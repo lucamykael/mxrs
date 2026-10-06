@@ -330,9 +330,12 @@ fn import_cargo_project_inner(
         .iter()
         .map(|page| (page.module_name.clone(), page.decl.name.clone()))
         .collect();
+    // An installed module's layouts, snippets and pages are the frontend's
+    // as well: a page of the project is shown in Atlas's layout, and the
+    // browser draws it from its TSX.
     let frontend_forms = frontend_forms::declare_in_frontend(
         &modules,
-        |module| module_root(&module_stem(module), &packages) == ModuleRoot::Authored,
+        |_| true,
         |module, ty, name| {
             ty == "Forms$Page" && rust_pages.contains(&(module.to_string(), name.to_string()))
         },

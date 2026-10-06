@@ -49,6 +49,7 @@
 //! can and cannot see.
 
 pub mod arguments;
+pub mod atlas;
 pub mod browse;
 pub mod cargo_project;
 pub mod changelog;

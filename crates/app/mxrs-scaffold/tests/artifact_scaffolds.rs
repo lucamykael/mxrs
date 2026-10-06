@@ -1211,3 +1211,35 @@ fn destroying_a_page_leaves_what_other_pages_are_written_with() {
         "{again:?}"
     );
 }
+
+/// A page is shown in Atlas's default layout when the project has Atlas,
+/// and in its module's own layout — declared for it — when it does not.
+#[test]
+fn a_page_lands_in_atlas_default_layout_when_the_project_has_atlas() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = application(directory.path());
+    scaffold(&root, ArtifactKind::Module, "Sales");
+    scaffold(&root, ArtifactKind::Page, "Sales.Orders");
+    let orders = std::fs::read_to_string(root.join("frontend/src/pages/sales/Orders.tsx")).unwrap();
+    assert!(
+        orders.contains("<LayoutCall form=\"Sales.ApplicationLayout\">")
+            && orders.contains("<FormCallArgument parameter=\"Sales.ApplicationLayout.Main\">"),
+        "{orders}"
+    );
+    let own = root.join("frontend/src/components/layout/sales/ApplicationLayout.tsx");
+    assert!(own.exists());
+
+    // Atlas installed: its default layout, and no layout of the module's own.
+    scaffold(&root, ArtifactKind::Module, "Stock");
+    let atlas = root.join("frontend/src/components/layout/atlas_core/Atlas_Default.tsx");
+    std::fs::create_dir_all(atlas.parent().unwrap()).unwrap();
+    std::fs::write(&atlas, "// Atlas Core's default layout, as installed\n").unwrap();
+    scaffold(&root, ArtifactKind::Page, "Stock.Items");
+    let items = std::fs::read_to_string(root.join("frontend/src/pages/stock/Items.tsx")).unwrap();
+    assert!(
+        items.contains("<LayoutCall form=\"Atlas_Core.Atlas_Default\">")
+            && items.contains("<FormCallArgument parameter=\"Atlas_Core.Atlas_Default.Main\">"),
+        "{items}"
+    );
+    assert!(!root.join("frontend/src/components/layout/stock").exists());
+}

@@ -22,6 +22,8 @@ fn text(output: &Output) -> String {
 
 fn project(directory: &Path) -> PathBuf {
     let root = directory.join("app");
+    // A plain project: what the scaffolds are checked against is their own
+    // output, not Atlas's.
     let output = cli(&[
         "new",
         "Order Portal",
@@ -29,6 +31,7 @@ fn project(directory: &Path) -> PathBuf {
         root.to_str().unwrap(),
         "--mxrs-workspace",
         workspace().to_str().unwrap(),
+        "--no-atlas",
     ]);
     assert!(output.status.success(), "{:?}", output.stderr);
     root
@@ -630,4 +633,62 @@ fn a_chained_page_reports_every_file_of_the_slice_and_rejects_an_unknown_chain()
         "{ caption: \"Order Overview\", page: \"Sales.OrderOverview\", icon: { glyph: \"file\" } },"
     ));
     assert!(text(&scaffold(&root, &["scaffold", "list"])).contains("page:Sales.OrderOverview"));
+}
+
+/// `mxrs new` brings Atlas from the Marketplace cache: both packages
+/// installed under `src/packages/`, the project's own `Main` module, a home
+/// page in Atlas's default layout, and the theme files Atlas Core reads.
+/// Without the cache (CI) there is nothing to bring, and the plain project
+/// is checked elsewhere.
+#[test]
+fn a_new_project_brings_atlas_from_the_cache() {
+    let cache = mxrs_cli::atlas::cache_dir();
+    if mxrs_cli::atlas::PACKAGES
+        .iter()
+        .any(|package| !cache.join(package.file).is_file())
+    {
+        eprintln!("skipped: no Atlas packages under {}", cache.display());
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("petshop");
+    let output = cli(&[
+        "new",
+        "petshop",
+        "--output",
+        root.to_str().unwrap(),
+        "--mxrs-workspace",
+        workspace().to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text(&output).contains("with Atlas"));
+    for path in [
+        "src/packages/atlas_core/mod.rs",
+        "src/packages/atlas_web_content/mod.rs",
+        "src/domain/modules/main.rs",
+        "frontend/src/components/layout/atlas_core/Atlas_Default.tsx",
+        "assets/theme/web/custom-variables.scss",
+        "assets/theme/web/exclusion-variables.scss",
+        "assets/theme/web/main.scss",
+        "assets/theme/web/settings.json",
+        "assets/themesource/atlas_core/web/main.scss",
+    ] {
+        assert!(root.join(path).is_file(), "{path}");
+    }
+    assert!(!root.join("src/modules").exists());
+    let home = std::fs::read_to_string(root.join("frontend/src/pages/main/Home.tsx")).unwrap();
+    assert!(
+        home.contains("<LayoutCall form=\"Atlas_Core.Atlas_Default\">"),
+        "{home}"
+    );
+    let navigation =
+        std::fs::read_to_string(root.join("frontend/src/navigation/index.ts")).unwrap();
+    assert!(
+        navigation.contains("homePage: \"Main.Home\""),
+        "{navigation}"
+    );
 }

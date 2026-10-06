@@ -243,6 +243,18 @@ pub fn apply_with_frontend(
     add_forms(project, forms, &form_origins)
 }
 
+/// The module the frontend declares something of. One no Rust declaration
+/// made is a module the project installed: what the frontend states of it
+/// is written, and the rest of it is left as the model holds it.
+fn module_of<'a>(project: &'a mut ProjectDecl, name: &str) -> &'a mut mxrs_ir::ModuleDecl {
+    let declared = project.modules.iter().any(|module| module.name == name);
+    let module = project.module_mut(name);
+    if !declared {
+        module.installed = true;
+    }
+    module
+}
+
 /// Adds the pages, layouts and snippets the frontend's TSX declares to
 /// their modules; one Rust declares too is declared twice.
 fn add_forms(
@@ -251,7 +263,7 @@ fn add_forms(
     origins: &std::collections::HashMap<String, String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     for (module, form) in forms {
-        let declared = project.module_mut(&module);
+        let declared = module_of(project, &module);
         let twice = match form.kind() {
             "Forms$Page" => declared.pages.iter().any(|page| page.name == form.name()),
             "Forms$Layout" => declared
@@ -287,7 +299,7 @@ fn add_nanoflows(
     origins: &std::collections::HashMap<String, String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     for (module, nanoflow) in nanoflows {
-        let declared = project.module_mut(&module);
+        let declared = module_of(project, &module);
         if declared
             .nanoflows
             .iter()

@@ -20,7 +20,14 @@ pub(crate) fn validate_project(project: &ProjectDecl, existing: &[Module]) -> Re
     let mut entities = HashSet::new();
     for module in existing {
         let name = module.name.as_deref().unwrap_or_default();
-        if !project.modules.iter().any(|decl| decl.name == name) {
+        // A module's declaration supersedes what the model holds of its
+        // entities — unless the project only installed the module, and
+        // declares nothing of it but what the frontend states.
+        let restated = project
+            .modules
+            .iter()
+            .any(|decl| decl.name == name && !decl.installed);
+        if !restated {
             add_entities(&mut entities, module);
         }
     }

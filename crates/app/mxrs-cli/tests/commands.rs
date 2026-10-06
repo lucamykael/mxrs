@@ -1633,6 +1633,7 @@ fn cargo_import_export_scaffold_and_java_generation_have_real_filesystem_effects
         generated.to_str().unwrap(),
         "--mxrs-workspace",
         workspace.to_str().unwrap(),
+        "--no-atlas",
     ];
     assert!(cli(&args).status.success());
     assert!(!cli(&args).status.success());

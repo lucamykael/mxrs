@@ -51,6 +51,7 @@ regex = "1"
 # The project's theme is Sass (Atlas); compiled here so a project needs no
 # Sass toolchain of its own.
 grass = { version = "0.13", default-features = false }
+mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
 serde_json.workspace = true
 serde.workspace = true
 sha2 = "0.10"

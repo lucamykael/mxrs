@@ -1031,9 +1031,9 @@ fn create_page_slice(
         }
     });
     let page = crate::forms::templated_page(
+        &page_layout(transaction, root, module_name)?,
         module_name,
         artifact_name,
-        LAYOUT_PARAMETER,
         template.name,
         refresh,
         &options.page_roles,
@@ -1137,17 +1137,17 @@ fn create_crud(
     let (overview, _) = crate::forms::crud_page_names(entity);
     for page in [
         crate::forms::crud_edit_page(
+            &page_layout(transaction, root, module_name)?,
             module_name,
             entity,
             &attributes,
-            LAYOUT_PARAMETER,
             &options.page_roles,
         ),
         crate::forms::crud_overview_page(
+            &page_layout(transaction, root, module_name)?,
             module_name,
             entity,
             &attributes,
-            LAYOUT_PARAMETER,
             &options.page_roles,
         ),
     ] {
@@ -1353,18 +1353,16 @@ fn create_artifact(
             library.display().to_string(),
         ));
     }
-    if options.kind == ArtifactKind::Page {
-        ensure_module_layout(transaction, root, module_name)?;
-        if options.page_template.is_some() || options.page_chain.is_some() {
-            return create_page_slice(transaction, root, options, module_name, artifact_name);
-        }
+    if options.kind == ArtifactKind::Page
+        && (options.page_template.is_some() || options.page_chain.is_some())
+    {
+        return create_page_slice(transaction, root, options, module_name, artifact_name);
     }
     if options.kind == ArtifactKind::Page {
         // A page is the frontend's: the TSX that states its document.
         let page = crate::forms::plain_page(
-            module_name,
+            &page_layout(transaction, root, module_name)?,
             artifact_name,
-            LAYOUT_PARAMETER,
             &options.page_roles,
         );
         return add_page(transaction, root, module_name, &page);
@@ -1521,6 +1519,28 @@ fn connect_plain_family(
 /// mxrb's `ensure_presentation` creates the module's `ApplicationLayout`
 /// before a page that references it. Ported for pages only: the mxrs family
 /// directories are flat, so a nanoflow has no layout dependency to satisfy.
+/// The layout a page scaffolded into `module_name` is shown in: Atlas's
+/// default when the project has Atlas, the module's own otherwise — which
+/// is declared for it when it has none yet.
+fn page_layout(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+) -> Result<crate::forms::PageLayout> {
+    let atlas = root.join("frontend/src/components/layout/atlas_core/Atlas_Default.tsx");
+    if transaction.content(&atlas)?.is_some() {
+        return Ok(crate::forms::PageLayout {
+            layout: "Atlas_Core.Atlas_Default".to_string(),
+            parameter: LAYOUT_PARAMETER.to_string(),
+        });
+    }
+    ensure_module_layout(transaction, root, module_name)?;
+    Ok(crate::forms::PageLayout::of_module(
+        module_name,
+        LAYOUT_PARAMETER,
+    ))
+}
+
 fn ensure_module_layout(
     transaction: &mut Transaction,
     root: &Path,

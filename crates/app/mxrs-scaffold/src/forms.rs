@@ -238,12 +238,29 @@ fn button(name: &str, caption: &str, action: ButtonAction) -> WidgetDecl {
     }
 }
 
-fn page(module_name: &str, name: &str, parameter: &str, title: &str, roles: &[String]) -> PageDecl {
+/// The layout a scaffolded page is shown in, and the placeholder it fills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PageLayout {
+    pub(crate) layout: String,
+    pub(crate) parameter: String,
+}
+
+impl PageLayout {
+    /// The layout the module of a page declares for itself.
+    pub(crate) fn of_module(module_name: &str, parameter: &str) -> Self {
+        Self {
+            layout: format!("{module_name}.ApplicationLayout"),
+            parameter: parameter.to_string(),
+        }
+    }
+}
+
+fn page(shown_in: &PageLayout, name: &str, title: &str, roles: &[String]) -> PageDecl {
     let mut page = PageDecl::new(name);
     page.title = Some(title.to_string());
     page.layout = Some(LayoutRef::new(
-        format!("{module_name}.ApplicationLayout"),
-        parameter,
+        shown_in.layout.clone(),
+        shown_in.parameter.as_str(),
     ));
     page.allowed_module_roles = roles.to_vec();
     page
@@ -259,14 +276,9 @@ pub(crate) fn home_page(application: &str) -> PageDecl {
 }
 
 /// A page with its title and nothing else.
-pub(crate) fn plain_page(
-    module_name: &str,
-    name: &str,
-    parameter: &str,
-    roles: &[String],
-) -> PageDecl {
+pub(crate) fn plain_page(shown_in: &PageLayout, name: &str, roles: &[String]) -> PageDecl {
     let title = humanize(name);
-    let mut page = page(module_name, name, parameter, &title, roles);
+    let mut page = page(shown_in, name, &title, roles);
     page.widgets.push(text(&title));
     page
 }
@@ -296,17 +308,17 @@ pub(crate) fn crud_page_names(entity: &str) -> (String, String) {
 /// The overview of an entity: a button that creates one, and every object
 /// with what it holds, a way into its edit page and a way to delete it.
 pub(crate) fn crud_overview_page(
+    shown_in: &PageLayout,
     module_name: &str,
     entity: &str,
     attributes: &[CrudAttribute],
-    parameter: &str,
     roles: &[String],
 ) -> PageDecl {
     let (overview, edit) = crud_page_names(entity);
     let qualified_entity = format!("{module_name}.{entity}");
     let edit_page = format!("{module_name}.{edit}");
     let title = humanize(&crate::templates::plural(entity));
-    let mut page = page(module_name, &overview, parameter, &title, roles);
+    let mut page = page(shown_in, &overview, &title, roles);
     let list = "list";
     let mut row: Vec<WidgetDecl> = attributes
         .iter()
@@ -359,16 +371,16 @@ pub(crate) fn crud_overview_page(
 /// The edit page of an entity: the object it is given, an input per
 /// attribute, and Save and Cancel.
 pub(crate) fn crud_edit_page(
+    shown_in: &PageLayout,
     module_name: &str,
     entity: &str,
     attributes: &[CrudAttribute],
-    parameter: &str,
     roles: &[String],
 ) -> PageDecl {
     let (_, edit) = crud_page_names(entity);
     let qualified_entity = format!("{module_name}.{entity}");
     let title = humanize(entity);
-    let mut page = page(module_name, &edit, parameter, &title, roles);
+    let mut page = page(shown_in, &edit, &title, roles);
     page.parameters.push(PageParameterDecl {
         name: entity.to_string(),
         entity: qualified_entity.clone(),
@@ -441,15 +453,15 @@ const CHAIN_ATTRIBUTES: [&str; 3] = ["Reference", "Total", "Active"];
 /// A page from a catalogued template, with the Refresh button of its chain
 /// when it has one.
 pub(crate) fn templated_page(
+    shown_in: &PageLayout,
     module_name: &str,
     name: &str,
-    parameter: &str,
     template: &str,
     refresh: Option<RefreshAction>,
     roles: &[String],
 ) -> PageDecl {
     let title = humanize(name);
-    let mut page = page(module_name, name, parameter, &title, roles);
+    let mut page = page(shown_in, name, &title, roles);
     let refresh = refresh.map(|refresh| {
         button(
             "refresh",
@@ -750,7 +762,14 @@ mod tests {
         // only what it lacks, after it.
         let orders = page_document(
             "11.12.1",
-            &templated_page("Sales", "Orders", "Main", "dashboard", None, &[]),
+            &templated_page(
+                &PageLayout::of_module("Sales", "Main"),
+                "Sales",
+                "Orders",
+                "dashboard",
+                None,
+                &[],
+            ),
         )
         .unwrap();
         let second = declare(Some(&elements), &[], &[("Sales", orders)]).unwrap();
@@ -761,7 +780,14 @@ mod tests {
         // Once more needs nothing new.
         let again = page_document(
             "11.12.1",
-            &templated_page("Sales", "Stock", "Main", "dashboard", None, &[]),
+            &templated_page(
+                &PageLayout::of_module("Sales", "Main"),
+                "Sales",
+                "Stock",
+                "dashboard",
+                None,
+                &[],
+            ),
         )
         .unwrap();
         assert!(

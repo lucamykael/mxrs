@@ -597,3 +597,47 @@ fn duplicate_flow_declarations_are_rejected_before_creation() {
     );
     assert!(!path.exists());
 }
+
+/// An installed module's entities stay known to a flow's signature when
+/// the project declares that module without them — as it does for a module
+/// of which only the forms are stated, in the frontend.
+#[test]
+fn an_installed_modules_entities_stay_known_when_only_its_forms_are_declared() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Installed.mpr");
+    let mut builder = ProjectBuilder::new("11.12.1");
+    builder.module("Installed", |module| {
+        module.entity("Thing", |_| {});
+    });
+    builder.module("Core", |module| {
+        module.microflow("Target", |_| {});
+    });
+    let mut project = builder.build();
+    project.modules[1].microflows[0]
+        .parameters
+        .push(FlowParameterDecl::new(
+            "thing",
+            FlowReturnType::Object("Installed.Thing".into()),
+        ));
+    mxrs_writer::write_project(&path, &project).unwrap();
+
+    // The module installed, declared without its entities: the model's
+    // stay, and the flow keeps its parameter.
+    project.modules[0].entities.clear();
+    project.modules[0].installed = true;
+    mxrs_writer::synchronize_project(&path, &project).unwrap();
+    assert_eq!(
+        parameters(&flow(&path, "Target"))[0]
+            .get_str("Name")
+            .unwrap(),
+        "thing"
+    );
+
+    // Declared by the project without them: superseded.
+    project.modules[0].installed = false;
+    let error = mxrs_writer::synchronize_project(&path, &project).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown flow value entity"),
+        "{error}"
+    );
+}

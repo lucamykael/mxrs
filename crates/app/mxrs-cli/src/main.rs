@@ -114,7 +114,7 @@ fn command_options(
         "javagen" => (&["--project-root"], &[], &[]),
         "new" => (
             &["--output", "-o", "--version", "--mxrs-workspace"],
-            &[],
+            &["--no-atlas"],
             &[],
         ),
         "oql" => (&["--dialect"], &["--json"], &[]),
@@ -240,7 +240,7 @@ commands! {
     "modules", "<file.mpr> [--json | --names] [--no-progress]", "List modules with entity, page and microflow counts", run_modules;
     "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a unit move, composing rename across modules", run_move;
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
-    "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]", "Create a Cargo-native project", run_new;
+    "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>] [--no-atlas]", "Create a Cargo-native project with Atlas", run_new;
     "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
     "pack", "<file.mpr> [--output FILE.mda] [--deployment DIR] [--force]", "Package a materialized deployment into an MDA", run_pack;
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
@@ -753,11 +753,46 @@ fn run_new(mut args: Vec<String>) -> ExitCode {
     let output = take_value(&mut args, "--output").or_else(|| take_value(&mut args, "-o"));
     let version = take_value(&mut args, "--version").unwrap_or_else(|| "11.12.1".to_string());
     let workspace = take_value(&mut args, "--mxrs-workspace");
+    let plain = take_flag(&mut args, "--no-atlas");
     if args.len() != 1 || output.is_none() {
         eprintln!(
-            "[mxrs] error: usage: mxrs new <name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>]"
+            "[mxrs] error: usage: mxrs new <name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>] [--no-atlas]"
         );
         return ExitCode::FAILURE;
+    }
+    // A new project looks the way Studio Pro's does: Atlas, from the
+    // Marketplace. Without the packages, or asked not to, it is a plain one.
+    if !plain {
+        match mxrs_cli::atlas::packages(&version) {
+            Ok(packages) => {
+                // Absolute, as the plain scaffold makes it: what is run in the
+                // project — rustfmt, Cargo — is given its path from anywhere.
+                let destination =
+                    std::path::PathBuf::from(output.as_deref().expect("validated above"));
+                let destination = std::path::absolute(&destination).unwrap_or(destination);
+                return match mxrs_cli::atlas::create(
+                    &args[0],
+                    &version,
+                    &destination,
+                    workspace.as_deref().map(std::path::Path::new),
+                    &packages,
+                ) {
+                    Ok(()) => {
+                        println!(
+                            "[mxrs] created {} at {} with Atlas",
+                            args[0],
+                            destination.display()
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("[mxrs] error: {error}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            Err(why) => eprintln!("[mxrs] warning: without Atlas: {why}"),
+        }
     }
     let mut scaffold =
         mxrs_scaffold::ProjectScaffold::new(&args[0], version, output.expect("validated above"));

@@ -162,6 +162,18 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
                 module_id
             }
         };
+        // Of a module the project installed, only the forms the frontend
+        // states are written: the rest is the model's, as it was installed.
+        if decl.installed {
+            crate::native::synchronize_forms_with_identity(
+                &mut mpr,
+                &module_id,
+                &decl.name,
+                &decl.forms,
+                identity,
+            )?;
+            continue;
+        }
         domain::synchronize_domain_model(
             &mut mpr,
             &module_id,

@@ -218,6 +218,8 @@ fn installing_adds_the_module_and_its_assets_and_leaves_the_project_readable() {
             .iter()
             .any(|flow| flow.name.as_deref() == Some("ACT_DoThing"))
     );
+    // Installed, the module is the Marketplace's, as Studio Pro marks one.
+    assert!(toolkit.from_app_store);
 
     assert_eq!(
         std::fs::read_to_string(root.join("javasource/toolkit/Helper.java")).unwrap(),

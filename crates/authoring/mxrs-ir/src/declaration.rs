@@ -660,6 +660,10 @@ pub struct ModuleDecl {
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
+    /// A module the project installed rather than declared: nothing in Rust
+    /// declares it, and only what the frontend states of it — its forms —
+    /// is written. The rest of it, its entities first, stays the model's.
+    pub installed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

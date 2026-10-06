@@ -58,6 +58,7 @@ impl ModuleBuilder {
                 layouts: vec![],
                 forms: Vec::new(),
                 roles: None,
+                installed: false,
             },
         }
     }
