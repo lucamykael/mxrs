@@ -412,6 +412,7 @@ const MXRS_PRELUDE: &[&str] = &[
     "Expr",
     "FlowBuilder",
     "FlowVar",
+    "ImageFormat",
     "JavaScriptPlatform",
     "JsonPrimitiveType",
     "LayoutBuilder",

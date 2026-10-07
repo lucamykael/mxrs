@@ -436,6 +436,99 @@ pub(crate) fn synchronize_enumerations_with_identity(
     Ok(())
 }
 
+/// Writes the image collections a module declares: a stored one keeps its
+/// identities and its images theirs, matched by name, and is left as stored
+/// when it says what is stored.
+pub(crate) fn synchronize_image_collections_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    declarations: &[mxrs_ir::ImageCollectionDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    if declarations.is_empty() {
+        return Ok(());
+    }
+    let existing = existing_documents_by_name(mpr, module_id, "Images$ImageCollection")?;
+    for declaration in declarations {
+        let qualified_name = format!("{module_name}.{}", declaration.name);
+        let previous = existing.get(&declaration.name);
+        let id = previous.map(|(id, _)| id.clone()).unwrap_or_else(|| {
+            identity.artifact_id(ArtifactKind::ImageCollection, &qualified_name)
+        });
+        let stored_images: HashMap<String, String> = previous
+            .and_then(|(_, document)| document.get_array("Images").ok())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Bson::as_document)
+                    .filter_map(|image| {
+                        Some((
+                            image.get_str("Name").ok()?.to_string(),
+                            extract_id(image.get("$ID")?)?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let images = declaration
+            .images
+            .iter()
+            .map(|image| {
+                let image_id = stored_images.get(&image.name).cloned().unwrap_or_else(|| {
+                    identity.artifact_id(
+                        ArtifactKind::Image,
+                        &format!("{qualified_name}.{}", image.name),
+                    )
+                });
+                Bson::Document(mxrs_bson::doc! {
+                    "$ID": blob(&image_id),
+                    "$Type": "Images$Image",
+                    "Image": Bson::Binary(mxrs_bson::Binary {
+                        subtype: mxrs_bson::BinarySubtype::Generic,
+                        bytes: image.data.clone(),
+                    }),
+                    "ImageFormat": image.format.as_str(),
+                    "Name": image.name.clone(),
+                })
+            })
+            .collect();
+        let document = mxrs_bson::doc! {
+            "$ID": blob(&id),
+            "$Type": "Images$ImageCollection",
+            "Documentation": declaration.documentation.clone(),
+            "Excluded": declaration.excluded,
+            "ExportLevel": match declaration.export_level {
+                ExportLevel::Hidden => "Hidden",
+                ExportLevel::Published => "Published",
+            },
+            "Images": build_array(images, 3),
+            "Name": declaration.name.clone(),
+        };
+        match previous {
+            Some((_, stored)) if *stored == document => {}
+            Some(_) => {
+                mpr.update_unit(&id, document)?;
+            }
+            None => {
+                mpr.insert_unit(module_id, "Documents", document, Some(&id))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A stored identity: the binary form Mendix keeps it in.
+fn blob(id: &str) -> Bson {
+    match mxrs_bson::uuid_to_blob(id) {
+        Ok(bytes) => Bson::Binary(mxrs_bson::Binary {
+            subtype: mxrs_bson::BinarySubtype::Generic,
+            bytes: bytes.to_vec(),
+        }),
+        Err(_) => Bson::String(id.to_string()),
+    }
+}
+
 pub(crate) fn synchronize_oql_view_sources_with_identity(
     mpr: &mut MprFile,
     module_id: &str,

@@ -158,6 +158,10 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
             .count(),
     );
     stated_whole.insert(
+        "Images$ImageCollection".to_string(),
+        super::images::declare(&modules, authored).len(),
+    );
+    stated_whole.insert(
         "DataSets$DataSet".to_string(),
         super::data_sets::declare(&project, authored)?.len(),
     );

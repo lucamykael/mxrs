@@ -62,6 +62,7 @@ impl ModuleBuilder {
                 json_structures: Vec::new(),
                 mappings: Vec::new(),
                 data_sets: Vec::new(),
+                image_collections: Vec::new(),
                 roles: None,
                 installed: false,
             },
@@ -270,6 +271,19 @@ impl ModuleBuilder {
         let mut builder = crate::DataSetBuilder::new(name, query);
         configure(&mut builder);
         self.decl.data_sets.push(builder.into_decl());
+        self
+    }
+
+    /// Declares an image collection: the images its module's pages show,
+    /// each its bytes — `mxrs::asset!("images/...")` — and their format.
+    pub fn image_collection(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut crate::ImageCollectionBuilder),
+    ) -> &mut Self {
+        let mut builder = crate::ImageCollectionBuilder::new(name);
+        configure(&mut builder);
+        self.decl.image_collections.push(builder.into_decl());
         self
     }
 

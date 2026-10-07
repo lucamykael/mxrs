@@ -56,6 +56,7 @@ mod entity;
 mod enumeration;
 mod flow;
 pub mod flow_actions;
+mod image;
 mod javascript_action;
 mod json_structure;
 mod mapping;
@@ -84,6 +85,7 @@ pub use flow_actions::{
     EntityName, FlowVar, ListChange, LogSeverity, MemberName, MessageKind, MicroflowName,
     NanoflowName, SortOrder, Variable, var,
 };
+pub use image::ImageCollectionBuilder;
 pub use javascript_action::{CodeActionValue, JavaActionBuilder, JavaScriptActionBuilder};
 pub use json_structure::{JsonElementBuilder, JsonStructureBuilder};
 pub use mapping::{MappingBuilder, ObjectMappingBuilder, ValueMappingBuilder};

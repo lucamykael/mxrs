@@ -74,6 +74,7 @@ mod flow_general;
 mod frontend_export;
 mod frontend_flows;
 mod frontend_forms;
+mod images;
 mod json_structures;
 mod layout;
 mod mappings;
@@ -437,6 +438,14 @@ fn import_cargo_project_inner(
     let java_actions = code_actions::declare(&project, code_actions::Kind::Java, authored)?;
     let json_structures = json_structures::declare(&project, authored)?;
     let data_sets = data_sets::declare(&project, authored)?;
+    let image_collections = images::declare(&modules, authored);
+    declared.extend(image_collections.iter().map(|collection| {
+        (
+            "Images$ImageCollection".to_string(),
+            collection.module.clone(),
+            collection.name.clone(),
+        )
+    }));
     // The persistence module declares every OQL view source.
     declared.extend(modules.iter().flat_map(|module| {
         let module_name = module.name.clone().unwrap_or_default();
@@ -551,6 +560,16 @@ fn import_cargo_project_inner(
         let java = destination.join("java");
         std::fs::rename(&captured_java, &java).map_err(|source| io_error(&java, source))?;
     }
+    for (path, bytes) in image_collections
+        .iter()
+        .flat_map(|collection| &collection.files)
+    {
+        let file = destination.join("assets").join(path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+        }
+        std::fs::write(&file, bytes).map_err(|source| io_error(&file, source))?;
+    }
     mxrs_materializers::materialize_frontend_sources(destination.join("frontend"))?;
     let package_name = cargo_package_name(&manifest.project_name);
     let crate_name = package_name.replace('-', "_");
@@ -638,6 +657,11 @@ fn import_cargo_project_inner(
         generated_module(&mut generated_modules, &structure.module)
             .documents
             .push((structure.stem.clone(), structure.source.clone()));
+    }
+    for collection in &image_collections {
+        generated_module(&mut generated_modules, &collection.module)
+            .documents
+            .push((collection.stem.clone(), collection.source.clone()));
     }
     for data_set in &data_sets {
         generated_module(&mut generated_modules, &data_set.module)

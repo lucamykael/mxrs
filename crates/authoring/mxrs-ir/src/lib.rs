@@ -12,6 +12,7 @@ pub mod application;
 pub mod data_set;
 pub mod declaration;
 pub mod flow;
+pub mod image;
 pub mod javascript_action;
 pub mod json_structure;
 pub mod mapping;
@@ -39,6 +40,7 @@ pub use flow::{
     Activity, DataType, ErrorHandling, FlowParameterDecl, FlowRelations, Member,
     MicroflowCallMapping, MicroflowDecl, NativeDocument, NativeValue, SwitchCase,
 };
+pub use image::{ImageCollectionDecl, ImageDecl, ImageFormat};
 pub use javascript_action::{
     CodeActionParameter, CodeActionType, JavaActionDecl, JavaScriptActionDecl, JavaScriptPlatform,
 };

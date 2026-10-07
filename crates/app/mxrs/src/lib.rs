@@ -13,12 +13,12 @@ pub use mxrs_dsl::{
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, CodeActionValue, ConstantBuilder, ContainerBuilder,
     DataSetBuilder, DataViewBuilder, DemoUserBuilder, EntityBuilder, EnumerationBuilder,
-    FlowBuilder, FlowParameterBuilder, JavaActionBuilder, JavaScriptActionBuilder,
-    JsonElementBuilder, JsonStructureBuilder, LayoutBuilder, LayoutGridBuilder,
-    LayoutGridColumnBuilder, LayoutGridRowBuilder, MappingBuilder, MenuBuilder, MenuItemBuilder,
-    MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder, NavigationBuilder,
-    NavigationItemBuilder, NavigationProfileBuilder, ObjectMappingBuilder, PageBuilder,
-    PluggableWidgetBuilder, ProjectBuilder, ScheduledEventBuilder, SecurityBuilder,
+    FlowBuilder, FlowParameterBuilder, ImageCollectionBuilder, JavaActionBuilder,
+    JavaScriptActionBuilder, JsonElementBuilder, JsonStructureBuilder, LayoutBuilder,
+    LayoutGridBuilder, LayoutGridColumnBuilder, LayoutGridRowBuilder, MappingBuilder, MenuBuilder,
+    MenuItemBuilder, MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder,
+    NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder, ObjectMappingBuilder,
+    PageBuilder, PluggableWidgetBuilder, ProjectBuilder, ScheduledEventBuilder, SecurityBuilder,
     TaskQueueBuilder, UserRoleBuilder, ValueMappingBuilder,
 };
 pub use mxrs_expr::*;
@@ -103,6 +103,16 @@ pub use mxrs_writer::{synchronize_project, write_project};
 pub mod mapping;
 pub mod ports;
 pub mod registry;
+
+/// The bytes of a file of the project's `assets/` folder, read when the
+/// project compiles: `mxrs::asset!("images/main/images/logo.png")`. A file
+/// that is not there fails the build that names it.
+#[macro_export]
+macro_rules! asset {
+    ($path:literal) => {
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/", $path))
+    };
+}
 
 /// Registers a declaration assembled by hand.
 ///
@@ -285,13 +295,13 @@ pub mod prelude {
     };
     pub use crate::{
         AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, CodeActionType,
-        JavaScriptPlatform, JsonPrimitiveType, LayoutBuilder, LifecycleEvent, MappingValueType,
-        MemberRights, MxBinary, MxList, MxObject, NullValueOption, ObjectHandling, SystemMember,
-        aggregate_list, call_java_action, call_javascript_action, call_microflow, call_nanoflow,
-        change_list, change_object, change_variable, close_page, commit_object, constant,
-        create_list, create_object, create_variable, declaration, delete_object, demo_user, dto,
-        entity, enumeration, layout, log, menu, microflow, module_roles, nanoflow, navigation,
-        navigation_item, page, retrieve, rollback_object, route, security, service, show_message,
-        show_page, view,
+        ImageFormat, JavaScriptPlatform, JsonPrimitiveType, LayoutBuilder, LifecycleEvent,
+        MappingValueType, MemberRights, MxBinary, MxList, MxObject, NullValueOption,
+        ObjectHandling, SystemMember, aggregate_list, call_java_action, call_javascript_action,
+        call_microflow, call_nanoflow, change_list, change_object, change_variable, close_page,
+        commit_object, constant, create_list, create_object, create_variable, declaration,
+        delete_object, demo_user, dto, entity, enumeration, layout, log, menu, microflow,
+        module_roles, nanoflow, navigation, navigation_item, page, retrieve, rollback_object,
+        route, security, service, show_message, show_page, view,
     };
 }

@@ -320,6 +320,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.data_sets,
             identity,
         )?;
+        documents::synchronize_image_collections_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.image_collections,
+            identity,
+        )?;
     }
     synchronize_mappings(&mut mpr, &root_id, project, identity)?;
     security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;

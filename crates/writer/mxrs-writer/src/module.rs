@@ -156,6 +156,13 @@ pub fn write_module(
         &decl.data_sets,
         identity,
     )?;
+    documents::synchronize_image_collections_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.image_collections,
+        identity,
+    )?;
 
     Ok(())
 }
