@@ -395,9 +395,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrb's TF-IDF ranking (512 FNV-1a buckets, compensated sums, cosine distance) with its text and JSON output: xtask command-oracle search; mxrb's optional ONNX backend is refused by name rather than approximated",
         ),
         "frontend" => (
-            Status::Partial,
-            "cargo mxrs frontend-dev",
-            "pinned React shell",
+            Status::Verified,
+            "mxrs frontend migrate",
+            "mxrb's frontend migrator: pluggable widgets rebound by property key to the schema their installed widgets/*.mpk declares (Boolean-to-Expression conversion, nested objects, model normalization, inactive default captions, the audited Data Grid 2 digest), legacy layout-grid weights normalized by largest remainder, renamed and legacy-spacing design properties from the theme catalogs, every one of mxrb's fourteen issue kinds and messages, fail-closed safety and a transactional --apply guarded by each unit's ContentsHash: xtask command-oracle frontend compares preview text, JSON, a blocked --apply and a safe --apply on separate copies (both CLIs then find nothing left in either copy, and both wrote the same document); two stated differences: an unreadable package names the zip reader's own error, and a package property of no known type blocks its widget instead of being stored untyped",
         ),
         "generate" => (
             Status::Verified,

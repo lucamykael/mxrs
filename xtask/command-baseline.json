@@ -25,7 +25,7 @@
   "evaluation": "verified",
   "export": "verified",
   "find": "verified",
-  "frontend": "partial",
+  "frontend": "verified",
   "functional-instrument": "verified",
   "functional-test": "verified",
   "generate": "verified",

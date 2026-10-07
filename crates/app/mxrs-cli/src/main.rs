@@ -150,6 +150,7 @@ fn command_options(
             &["--apply", "--json", "--force", "--yes"],
             &["--module"],
         ),
+        "frontend" => (&[], &["--apply", "--json", "--help", "-h"], &[]),
         "update" => (&[], &["--check", "--changelog"], &[]),
         "widgets" => (&["--project"], &[], &[]),
         "ci" | "constant" | "consumed-rest" | "dto" | "entity" | "enumeration" | "evaluation"
@@ -238,6 +239,7 @@ commands! {
     "evaluation", "new <Name> [--target DIR] [--dry-run] [--json]", "Create declarative static model checks", run_evaluation;
     "export", "<file.mpr> <project-dir> [--mode axum|actix-web|rocket] [--mxrs-workspace <path>] | <file.mpr> [-o <out.rs>]", "Export the model as a Cargo-native project, or its declarations as one Rust file", run_export;
     "find", "<file.mpr> <text> [--semantic]", "Find artifacts by name or semantic text", run_find;
+    "frontend", "migrate <file.mpr> [--apply] [--json]", "Preview or apply frontend widget, layout-row and design-property migrations", run_frontend;
     "functional-test", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create a declarative runtime test suite", run_functional_test;
     "functional-instrument", "<writable.mpr> <suite.json> [--json]", "Instrument a disposable MPR with a functional test runner", run_functional_instrument;
     "help", "[command]", "Show command usage", run_help;
@@ -3638,6 +3640,75 @@ fn run_verify_package(args: Vec<String>) -> ExitCode {
             eprintln!("[mxrs] error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn run_frontend(mut args: Vec<String>) -> ExitCode {
+    const USAGE: &str = "Usage: mxrs frontend migrate FILE.mpr [--apply] [--json]\n\n\
+        Preview frontend widget, layout-row, and design-property migrations.\n\
+        The MPR is changed only when --apply is provided and the plan is safe.";
+    let action = (!args.is_empty()).then(|| args.remove(0));
+    match action.as_deref() {
+        None => {
+            println!("{USAGE}");
+            return ExitCode::FAILURE;
+        }
+        Some("-h" | "--help" | "help") => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Some("migrate") => {}
+        Some(other) => {
+            eprintln!("Unknown frontend action {other:?}; use migrate");
+            return ExitCode::FAILURE;
+        }
+    }
+    if matches!(args.first().map(String::as_str), Some("-h" | "--help")) {
+        println!(
+            "Usage: mxrs frontend migrate FILE.mpr [--apply] [--json]\n\n\
+             Preview a frontend migration; the MPR is changed only when --apply is provided.\n\n\
+             Example:\n  mxrs frontend migrate Shop.mpr --apply\n\n\
+             Parent help: mxrs frontend --help"
+        );
+        return ExitCode::SUCCESS;
+    }
+    if args.is_empty() {
+        eprintln!("Usage: mxrs frontend migrate FILE.mpr [--apply] [--json]");
+        return ExitCode::FAILURE;
+    }
+    let path = args.remove(0);
+    let apply = take_flag(&mut args, "--apply");
+    let json = take_flag(&mut args, "--json");
+    if !args.is_empty() {
+        eprintln!("Unknown arguments: {}", args.join(" "));
+        return ExitCode::FAILURE;
+    }
+    let mut plan = match mxrs_cli::frontend_migrate::MigrationPlan::build(&path) {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if apply
+        && plan.is_safe()
+        && let Err(error) = plan.apply()
+    {
+        eprintln!("[mxrs] error: {error}");
+        return ExitCode::FAILURE;
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&plan.report()).expect("the report is serializable")
+        );
+    } else {
+        print!("{}", plan.render_text());
+    }
+    if plan.is_safe() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

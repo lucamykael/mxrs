@@ -47,6 +47,11 @@
 //! so they preview by default and write only under `--apply` — see
 //! `refactor`'s module doc and `mxrs-refactor`'s crate doc for what a rename
 //! can and cannot see.
+//!
+//! **`frontend migrate`** ports mxrb's frontend migrator: it previews, and
+//! under `--apply` writes, the pluggable-widget, layout-row and
+//! design-property migrations a model needs, and fails closed on anything it
+//! cannot migrate losslessly. See `frontend_migrate`'s module doc.
 
 pub mod arguments;
 pub mod atlas;
@@ -63,6 +68,7 @@ pub mod diagram_server;
 pub mod doctor;
 pub mod environment;
 pub mod evaluation;
+pub mod frontend_migrate;
 pub mod functional;
 pub mod inspect;
 pub mod marketplace;
