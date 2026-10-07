@@ -699,6 +699,32 @@ pub(crate) fn synchronize_java_actions_with_identity(
     synchronize_documents(mpr, module_id, &documents, identity)
 }
 
+/// Writes the data sets a module declares.
+pub(crate) fn synchronize_data_sets_with_identity(
+    mpr: &mut mxrs_mpr::MprFile,
+    module_id: &str,
+    module_name: &str,
+    data_sets: &[mxrs_ir::DataSetDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let stated: Vec<NativeDocument> = data_sets
+        .iter()
+        .map(mxrs_ir::DataSetDecl::document)
+        .collect();
+    let documents: Vec<(ArtifactKind, String, &NativeDocument)> = data_sets
+        .iter()
+        .zip(&stated)
+        .map(|(data_set, document)| {
+            (
+                ArtifactKind::DataSet,
+                format!("{module_name}.{}", data_set.name),
+                document,
+            )
+        })
+        .collect();
+    synchronize_documents(mpr, module_id, &documents, identity)
+}
+
 /// Writes the JSON structures a module declares.
 pub(crate) fn synchronize_json_structures_with_identity(
     mpr: &mut mxrs_mpr::MprFile,

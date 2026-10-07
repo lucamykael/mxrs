@@ -12,14 +12,14 @@ pub use mxrs_dsl::{
 };
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, CodeActionValue, ConstantBuilder, ContainerBuilder,
-    DataViewBuilder, DemoUserBuilder, EntityBuilder, EnumerationBuilder, FlowBuilder,
-    FlowParameterBuilder, JavaActionBuilder, JavaScriptActionBuilder, JsonElementBuilder,
-    JsonStructureBuilder, LayoutBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
-    LayoutGridRowBuilder, MappingBuilder, MenuBuilder, MenuItemBuilder, MicroflowModuleBuilder,
-    ModuleBuilder, NanoflowModuleBuilder, NavigationBuilder, NavigationItemBuilder,
-    NavigationProfileBuilder, ObjectMappingBuilder, PageBuilder, PluggableWidgetBuilder,
-    ProjectBuilder, ScheduledEventBuilder, SecurityBuilder, TaskQueueBuilder, UserRoleBuilder,
-    ValueMappingBuilder,
+    DataSetBuilder, DataViewBuilder, DemoUserBuilder, EntityBuilder, EnumerationBuilder,
+    FlowBuilder, FlowParameterBuilder, JavaActionBuilder, JavaScriptActionBuilder,
+    JsonElementBuilder, JsonStructureBuilder, LayoutBuilder, LayoutGridBuilder,
+    LayoutGridColumnBuilder, LayoutGridRowBuilder, MappingBuilder, MenuBuilder, MenuItemBuilder,
+    MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder, NavigationBuilder,
+    NavigationItemBuilder, NavigationProfileBuilder, ObjectMappingBuilder, PageBuilder,
+    PluggableWidgetBuilder, ProjectBuilder, ScheduledEventBuilder, SecurityBuilder,
+    TaskQueueBuilder, UserRoleBuilder, ValueMappingBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_frontend::{FrontendDecl, FrontendError, read_frontend};

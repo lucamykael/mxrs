@@ -61,6 +61,7 @@ impl ModuleBuilder {
                 java_actions: Vec::new(),
                 json_structures: Vec::new(),
                 mappings: Vec::new(),
+                data_sets: Vec::new(),
                 roles: None,
                 installed: false,
             },
@@ -255,6 +256,20 @@ impl ModuleBuilder {
         let mut builder = crate::MappingBuilder::new(direction, name, json_structure);
         configure(&mut builder);
         self.decl.mappings.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a data set: the OQL `query` a report runs, the parameters
+    /// it takes and the module roles that may run it.
+    pub fn data_set(
+        &mut self,
+        name: impl Into<String>,
+        query: impl Into<String>,
+        configure: impl FnOnce(&mut crate::DataSetBuilder),
+    ) -> &mut Self {
+        let mut builder = crate::DataSetBuilder::new(name, query);
+        configure(&mut builder);
+        self.decl.data_sets.push(builder.into_decl());
         self
     }
 

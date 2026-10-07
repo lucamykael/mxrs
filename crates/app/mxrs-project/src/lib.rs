@@ -331,6 +331,7 @@ fn declares(declaration: &mxrs_ir::ProjectDecl, unit: &DeclaredUnit) -> bool {
         "JsonStructures$JsonStructure" => {
             module.json_structures.iter().any(|item| item.name == name)
         }
+        "DataSets$DataSet" => module.data_sets.iter().any(|item| item.name == name),
         "ImportMappings$ImportMapping" | "ExportMappings$ExportMapping" => {
             module.mappings.iter().any(|item| item.name == name)
         }
@@ -355,6 +356,7 @@ fn kind_of(native_type: &str) -> &str {
         "JavaScriptActions$JavaScriptAction" => "JavaScript action",
         "JavaActions$JavaAction" => "Java action",
         "JsonStructures$JsonStructure" => "JSON structure",
+        "DataSets$DataSet" => "data set",
         "ImportMappings$ImportMapping" => "import mapping",
         "ExportMappings$ExportMapping" => "export mapping",
         other => other,

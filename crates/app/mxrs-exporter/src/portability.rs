@@ -145,6 +145,10 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
         "JsonStructures$JsonStructure".to_string(),
         super::json_structures::declare(&project, authored)?.len(),
     );
+    stated_whole.insert(
+        "DataSets$DataSet".to_string(),
+        super::data_sets::declare(&project, authored)?.len(),
+    );
     for mapping in super::mappings::declare(&project, authored)? {
         *stated_whole
             .entry(mapping.native_type.to_string())

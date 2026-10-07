@@ -313,6 +313,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.json_structures,
             identity,
         )?;
+        crate::native::synchronize_data_sets_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.data_sets,
+            identity,
+        )?;
     }
     synchronize_mappings(&mut mpr, &root_id, project, identity)?;
     security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;

@@ -665,6 +665,8 @@ pub struct ModuleDecl {
     pub json_structures: Vec<crate::JsonStructureDecl>,
     /// The import and export mappings of its JSON structures.
     pub mappings: Vec<crate::MappingDecl>,
+    /// The data sets its reports run.
+    pub data_sets: Vec<crate::DataSetDecl>,
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
@@ -756,6 +758,7 @@ impl ProjectDecl {
         target.java_actions.extend(declared.java_actions);
         target.json_structures.extend(declared.json_structures);
         target.mappings.extend(declared.mappings);
+        target.data_sets.extend(declared.data_sets);
         target.layouts.extend(declared.layouts);
         if let Some(roles) = declared.roles {
             target.roles = Some(roles);

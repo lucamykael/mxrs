@@ -252,7 +252,7 @@ fn render(module: &str, stem: &str, structure: &JsonStructureDecl, changes: &[Ch
 
 /// The snippet as Rust writes it: as it reads, in a raw string, unless it
 /// holds what a raw string cannot.
-fn snippet_literal(snippet: &str) -> String {
+pub(crate) fn snippet_literal(snippet: &str) -> String {
     if snippet
         .chars()
         .any(|c| c.is_control() && c != '\n' && c != '\t')

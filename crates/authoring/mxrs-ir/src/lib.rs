@@ -9,6 +9,7 @@
 //! storage-oriented model structs and assigns identities to new artifacts.
 
 pub mod application;
+pub mod data_set;
 pub mod declaration;
 pub mod flow;
 pub mod javascript_action;
@@ -24,6 +25,7 @@ pub use application::{
     NavigationProfileDecl, PasswordPolicyDecl, ProjectSecurityDecl, RoleHomeDecl, SecurityLevel,
     UserRoleDecl,
 };
+pub use data_set::{DataSetDecl, DataSetParameter, DataSetParameterType};
 pub use declaration::{
     AccessMemberKind, AccessRuleDecl, AssociationDecl, AssociationOwner, AssociationStorage,
     AssociationType, AttributeDecl, AttributeType, ConstantDecl, ConstantType, EntityDecl,

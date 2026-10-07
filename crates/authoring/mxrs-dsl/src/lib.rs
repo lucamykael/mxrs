@@ -51,6 +51,7 @@
 
 mod access;
 mod constant;
+mod data_set;
 mod entity;
 mod enumeration;
 mod flow;
@@ -72,6 +73,7 @@ pub use task_queue::TaskQueueBuilder;
 
 pub use access::AccessRuleBuilder;
 pub use constant::ConstantBuilder;
+pub use data_set::DataSetBuilder;
 pub use entity::{EntityBuilder, EntityIndexBuilder, LifecycleBuilder, SystemMembersBuilder};
 pub use enumeration::EnumerationBuilder;
 pub use flow::{

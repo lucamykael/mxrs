@@ -67,6 +67,7 @@ use mxrs_model::{Association, Module, Project};
 use entity_export::TypedEntityTarget;
 
 mod code_actions;
+mod data_sets;
 mod entity_export;
 mod flow_export;
 mod flow_general;
@@ -435,6 +436,14 @@ fn import_cargo_project_inner(
         code_actions::declare(&project, code_actions::Kind::JavaScript, authored)?;
     let java_actions = code_actions::declare(&project, code_actions::Kind::Java, authored)?;
     let json_structures = json_structures::declare(&project, authored)?;
+    let data_sets = data_sets::declare(&project, authored)?;
+    declared.extend(data_sets.iter().map(|data_set| {
+        (
+            "DataSets$DataSet".to_string(),
+            data_set.module.clone(),
+            data_set.name.clone(),
+        )
+    }));
     let mappings = mappings::declare(&project, authored)?;
     // An export mapping whose structure is declared too reads its runtime
     // mapping from the declaration: one source for both.
@@ -612,6 +621,11 @@ fn import_cargo_project_inner(
         generated_module(&mut generated_modules, &structure.module)
             .documents
             .push((structure.stem.clone(), structure.source.clone()));
+    }
+    for data_set in &data_sets {
+        generated_module(&mut generated_modules, &data_set.module)
+            .documents
+            .push((data_set.stem.clone(), data_set.source.clone()));
     }
     for mapping in &mappings {
         generated_module(&mut generated_modules, &mapping.module)
