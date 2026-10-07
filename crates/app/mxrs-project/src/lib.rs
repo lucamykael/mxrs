@@ -301,6 +301,10 @@ fn declares(declaration: &mxrs_ir::ProjectDecl, unit: &DeclaredUnit) -> bool {
         }
         "Menus$MenuDocument" => module.menus.iter().any(|item| item.name == name),
         "Queues$Queue" => module.task_queues.iter().any(|item| item.name == name),
+        "JavaScriptActions$JavaScriptAction" => module
+            .javascript_actions
+            .iter()
+            .any(|item| item.name == name),
         _ => true,
     }
 }
@@ -319,6 +323,7 @@ fn kind_of(native_type: &str) -> &str {
         "ScheduledEvents$ScheduledEvent" => "scheduled event",
         "Menus$MenuDocument" => "menu",
         "Queues$Queue" => "task queue",
+        "JavaScriptActions$JavaScriptAction" => "JavaScript action",
         other => other,
     }
 }

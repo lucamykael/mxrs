@@ -77,6 +77,7 @@ pub enum ArtifactKind {
     PasswordPolicy,
     Navigation,
     DataStorage,
+    JavaScriptAction,
 }
 
 impl fmt::Display for ArtifactKind {
@@ -134,6 +135,7 @@ impl fmt::Display for ArtifactKind {
             Self::PasswordPolicy => "password-policy",
             Self::Navigation => "navigation",
             Self::DataStorage => "data-storage",
+            Self::JavaScriptAction => "javascript-action",
         })
     }
 }

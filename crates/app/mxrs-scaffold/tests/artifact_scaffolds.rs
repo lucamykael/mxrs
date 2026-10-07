@@ -109,6 +109,13 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     scaffold(&root, ArtifactKind::PublishedRest, "Sales.HandleOrder");
     scaffold(&root, ArtifactKind::ConsumedRest, "Sales.FetchCatalog");
     scaffold(&root, ArtifactKind::JavaAction, "Sales.InvokeCheckout");
+    scaffold(&root, ArtifactKind::JavaScriptAction, "Sales.OpenMap");
+    // Its JavaScript is the function Studio Pro would write, where every
+    // build ships it from.
+    let script =
+        std::fs::read_to_string(root.join("assets/javascriptsource/sales/actions/OpenMap.js"))
+            .unwrap();
+    assert!(script.contains("export async function OpenMap() {\n\t// BEGIN USER CODE"));
     scaffold(&root, ArtifactKind::Repository, "Sales.Orders");
     scaffold(&root, ArtifactKind::Security, "Sales");
     scaffold_artifact(
@@ -195,6 +202,7 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     for expected in [
         ("Constants$Constant", "ApiEndpoint"),
         ("ScheduledEvents$ScheduledEvent", "SE_ExpireCarts"),
+        ("JavaScriptActions$JavaScriptAction", "OpenMap"),
     ] {
         let expected = (expected.0.to_string(), expected.1.to_string());
         assert!(documents.contains(&expected), "{expected:?}: {documents:?}");

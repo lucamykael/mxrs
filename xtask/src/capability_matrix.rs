@@ -236,6 +236,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         // argument grammar, rendering and registry behavior are ported and
         // covered by mxrs-cli's scaffold_commands tests, which is exactly
         // "partial", not "verified".
+        "javascript-action" => (
+            Status::Verified,
+            "mxrs javascript-action new",
+            "a typed JavaScript action declaration (`module.javascript_action`, parameters and return as Rust types, written as the document Studio Pro stores) in src/ports/javascript_actions/<module>, and the JavaScript Studio Pro writes for a new action in assets/javascriptsource/<module>/actions, which every build ships; own evidence: the scaffold compiles in a generated project and the action reaches the written model",
+        ),
         "consumed-rest" | "entity" | "enumeration" | "java-action" | "nanoflow"
         | "published-rest" | "use-case" => (
             Status::Verified,
@@ -268,9 +273,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "native workspace inventory with explicit Cargo path/field mapping, text/JSON and errors: xtask command-oracle project; docs/commands/project.md",
         ),
         "preflight" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs preflight",
-            "read-only MPR, page/layout, flow/code-action and nanoflow compatibility audit; unversioned-corpus and CLI oracles remain incomplete",
+            "read-only audit of what mxrs's own page, layout, flow, code-action and nanoflow compilers do not take, plus storage integrity and the Mendix 11 version band, in mxrb's report shape (collapsed findings with count, its order, header and summary); which constructs are unsupported is each tool's own coverage by construction, so the line-for-line oracle compares a model both take whole: xtask command-oracle preflight",
         ),
         "portability" => (
             Status::Partial,
@@ -553,12 +558,12 @@ mod tests {
     #[test]
     fn parses_and_classifies_command_inventory_without_counting_headers() {
         let report = build(&format!(
-            "Available MXRB commands (3):\n\n  cache  Cache operations\n  validate  Validate project\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
+            "Available MXRB commands (3):\n\n  cache  Cache operations\n  oql  Project OQL\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
         ))
         .unwrap();
         assert_eq!(report.rows.len(), 3);
         // `cache` is own-evidence verified since the 2026-09-21 policy
-        // amendment; `validate` remains partial; the fake command is missing.
+        // amendment; `oql` remains partial; the fake command is missing.
         assert_eq!(report.verified, 1);
         assert_eq!(report.partial, 1);
         assert_eq!(report.missing, 1);
@@ -652,7 +657,7 @@ mod tests {
     /// assertion.
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["query", "oql", "preflight", "frontend"])).unwrap();
+        let report = build(&inventory(&["query", "oql", "export", "frontend"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

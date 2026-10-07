@@ -657,6 +657,8 @@ pub struct ModuleDecl {
     pub layouts: Vec<LayoutDecl>,
     /// Pages, layouts and snippets stated as the documents they are.
     pub forms: Vec<crate::FormDecl>,
+    /// The JavaScript actions its nanoflows call.
+    pub javascript_actions: Vec<crate::JavaScriptActionDecl>,
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
@@ -742,6 +744,9 @@ impl ProjectDecl {
         target.nanoflows.extend(declared.nanoflows);
         target.pages.extend(declared.pages);
         target.forms.extend(declared.forms);
+        target
+            .javascript_actions
+            .extend(declared.javascript_actions);
         target.layouts.extend(declared.layouts);
         if let Some(roles) = declared.roles {
             target.roles = Some(roles);

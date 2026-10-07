@@ -57,6 +57,7 @@ impl ModuleBuilder {
                 pages: vec![],
                 layouts: vec![],
                 forms: Vec::new(),
+                javascript_actions: Vec::new(),
                 roles: None,
                 installed: false,
             },
@@ -181,6 +182,20 @@ impl ModuleBuilder {
         let mut builder = ScheduledEventBuilder::new(name, microflow, unit);
         configure(&mut builder);
         self.decl.scheduled_events.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a JavaScript action: what its nanoflow calls take and
+    /// return. Its JavaScript is the project's own, in
+    /// `javascriptsource/<module>/actions/<Name>.js`.
+    pub fn javascript_action(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut crate::JavaScriptActionBuilder),
+    ) -> &mut Self {
+        let mut builder = crate::JavaScriptActionBuilder::new(name);
+        configure(&mut builder);
+        self.decl.javascript_actions.push(builder.into_decl());
         self
     }
 

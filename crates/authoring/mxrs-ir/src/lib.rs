@@ -11,6 +11,7 @@
 pub mod application;
 pub mod declaration;
 pub mod flow;
+pub mod javascript_action;
 pub mod markers;
 pub mod page;
 pub mod task_queue;
@@ -33,6 +34,9 @@ pub use declaration::{
 pub use flow::{
     Activity, DataType, ErrorHandling, FlowParameterDecl, FlowRelations, Member,
     MicroflowCallMapping, MicroflowDecl, NativeDocument, NativeValue, SwitchCase,
+};
+pub use javascript_action::{
+    CodeActionType, JavaScriptActionDecl, JavaScriptActionParameter, JavaScriptPlatform,
 };
 pub use markers::system;
 pub use markers::{

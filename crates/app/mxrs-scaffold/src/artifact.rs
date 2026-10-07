@@ -52,6 +52,7 @@ pub enum ArtifactKind {
     PublishedRest,
     ConsumedRest,
     JavaAction,
+    JavaScriptAction,
     FunctionalTest,
     Evaluation,
     Validation,
@@ -167,6 +168,14 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         summary: "Create a Java Action adapter microflow",
         destination: "src/domain/actions/<module>",
         kind: ArtifactKind::JavaAction,
+    },
+    ScaffoldCommand {
+        name: "javascript-action",
+        action: "new",
+        argument: "<Module.Action>",
+        summary: "Create JavaScript Action adapter",
+        destination: "src/ports/javascript_actions/<module>",
+        kind: ArtifactKind::JavaScriptAction,
     },
     ScaffoldCommand {
         name: "module",
@@ -286,6 +295,7 @@ impl ArtifactKind {
             Self::PublishedRest => "published_rest",
             Self::ConsumedRest => "consumed_rest",
             Self::JavaAction => "java_action",
+            Self::JavaScriptAction => "javascript_action",
             Self::FunctionalTest => "functional_test",
             Self::Evaluation => "evaluation",
             Self::Validation => "validation",
@@ -1643,6 +1653,9 @@ fn create_artifact(
     if options.kind == ArtifactKind::Repository {
         return create_repository(transaction, root, module_name, artifact_name);
     }
+    if options.kind == ArtifactKind::JavaScriptAction {
+        return create_javascript_action(transaction, root, module_name, artifact_name);
+    }
     // A nanoflow is the frontend's: a method of a TypeScript service.
     if options.kind == ArtifactKind::Nanoflow {
         return add_frontend_nanoflow(
@@ -1709,7 +1722,9 @@ fn create_artifact(
         ArtifactKind::Evaluation | ArtifactKind::Ci => unreachable!("handled by the caller"),
         ArtifactKind::Validation => templates::validation(module_name, artifact_name),
         ArtifactKind::Integration => templates::integration(module_name, artifact_name),
-        ArtifactKind::Repository | ArtifactKind::Nanoflow => unreachable!("handled above"),
+        ArtifactKind::Repository | ArtifactKind::Nanoflow | ArtifactKind::JavaScriptAction => {
+            unreachable!("handled above")
+        }
         ArtifactKind::Page => unreachable!("handled above"),
         ArtifactKind::Security
         | ArtifactKind::Module
@@ -1734,6 +1749,31 @@ fn create_artifact(
         module_folder(options.kind),
         &stem,
         source,
+    )
+}
+
+/// A JavaScript action is a contract and the JavaScript behind it: the
+/// declaration of what a call takes and returns, a port of the project,
+/// and the function Studio Pro would create for it in
+/// `javascriptsource/<module>/actions/`, which every build ships.
+fn create_javascript_action(
+    transaction: &mut Transaction,
+    root: &Path,
+    module_name: &str,
+    artifact_name: &str,
+) -> Result<()> {
+    let source = templates::javascript_action_source_path(module_name, artifact_name);
+    create_concept_file(
+        transaction,
+        root,
+        module_name,
+        module_folder(ArtifactKind::JavaScriptAction),
+        &snake_case(artifact_name),
+        templates::javascript_action(module_name, artifact_name),
+    )?;
+    transaction.create(
+        root.join(source),
+        templates::javascript_action_source(artifact_name),
     )
 }
 
@@ -1884,6 +1924,7 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Nanoflow => "ui/nanoflows",
         ArtifactKind::ConsumedRest | ArtifactKind::Integration => "domain/integrations",
         ArtifactKind::JavaAction => "domain/actions",
+        ArtifactKind::JavaScriptAction => "ports/javascript_actions",
         ArtifactKind::Security => "domain/module_security",
         ArtifactKind::Presentation => "ui/layouts",
         // A module is declared by a file of its own in the registry, not by a

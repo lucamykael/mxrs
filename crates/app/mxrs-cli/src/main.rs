@@ -144,9 +144,9 @@ fn command_options(
         "update" => (&[], &["--check", "--changelog"], &[]),
         "widgets" => (&["--project"], &[], &[]),
         "ci" | "constant" | "consumed-rest" | "dto" | "entity" | "enumeration" | "evaluation"
-        | "functional-test" | "integration" | "java-action" | "microflow" | "nanoflow"
-        | "published-rest" | "repository" | "scheduled-event" | "security" | "use-case"
-        | "validation" => (&["--target"], &["--dry-run", "--json"], &[]),
+        | "functional-test" | "integration" | "java-action" | "javascript-action" | "microflow"
+        | "nanoflow" | "published-rest" | "repository" | "scheduled-event" | "security"
+        | "use-case" | "validation" => (&["--target"], &["--dry-run", "--json"], &[]),
         "module" => (&["--target", "--registry"], &["--dry-run", "--json"], &[]),
         "presentation" => (
             &["--target"],
@@ -233,6 +233,7 @@ commands! {
     "inspect", "<file.mpr> [--json]", "Show a structural model snapshot", run_inspect;
     "integration", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Create an integration adapter microflow", run_integration;
     "java-action", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Scaffold a Java Action adapter microflow", run_java_action;
+    "javascript-action", "new <Module.Action> [--target DIR] [--dry-run] [--json]", "Scaffold a JavaScript action and its JavaScript", run_javascript_action;
     "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;
     "module", "new <Module> [--target DIR] [--dry-run] [--json] | search [query] --registry SOURCE [--json] | add <name|directory> --registry SOURCE [--target DIR] [--json]", "Scaffold an editable module declaration layer, or search/install from a private module catalog", run_module;
@@ -1124,6 +1125,13 @@ fn run_published_rest(args: Vec<String>) -> ExitCode {
 fn run_consumed_rest(args: Vec<String>) -> ExitCode {
     reported(mxrs_cli::scaffold::generate(
         mxrs_scaffold::ArtifactKind::ConsumedRest,
+        args,
+    ))
+}
+
+fn run_javascript_action(args: Vec<String>) -> ExitCode {
+    reported(mxrs_cli::scaffold::generate(
+        mxrs_scaffold::ArtifactKind::JavaScriptAction,
         args,
     ))
 }

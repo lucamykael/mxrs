@@ -280,6 +280,57 @@ pub(crate) fn java_action(module_name: &str, name: &str) -> String {
     )
 }
 
+/// The declaration of a JavaScript action: mxrb's — no parameters, nothing
+/// returned, for the web client, documented by its name.
+pub(crate) fn javascript_action(module_name: &str, name: &str) -> String {
+    let (function, _) = document_function(name);
+    let source = javascript_action_source_path(module_name, name);
+    format!(
+        "//! JavaScript action `{module_name}.{name}`: what a nanoflow's call takes\n\
+         //! and returns. Its JavaScript is `{source}`.\n\
+         //!\n\
+         //! Parameter and return vocabulary: `mxrs::JavaScriptActionBuilder`.\n\n\
+         use mxrs::prelude::*;\n\n\
+         #[declaration(module = {module_name:?})]\n\
+         pub fn {function}(module: &mut ModuleBuilder) {{\n    \
+         module.javascript_action({name:?}, |action| {{\n        \
+         action\n            \
+         .platform(JavaScriptPlatform::Web)\n            \
+         .documentation({documentation:?});\n    \
+         }});\n\
+         }}\n",
+        documentation = humanize(name),
+    )
+}
+
+/// Where a JavaScript action's source is, from the project root: the
+/// `javascriptsource` tree every build ships beside the model.
+pub(crate) fn javascript_action_source_path(module_name: &str, name: &str) -> String {
+    format!(
+        "assets/javascriptsource/{}/actions/{name}.js",
+        module_name.to_lowercase()
+    )
+}
+
+/// The JavaScript Studio Pro writes for a new action, which it keeps
+/// between its `BEGIN`/`END` markers when it regenerates the file.
+pub(crate) fn javascript_action_source(name: &str) -> String {
+    format!(
+        "// This file follows the Mendix JavaScript action regeneration contract.\n\
+         // Imports and code inside the USER/EXTRA sections are retained by Studio Pro.\n\n\
+         // BEGIN EXTRA CODE\n\
+         // END EXTRA CODE\n\n\
+         /**\n \
+         * @returns {{Promise.<void>}}\n \
+         */\n\
+         export async function {name}() {{\n\
+         \t// BEGIN USER CODE\n\
+         \treturn;\n\
+         \t// END USER CODE\n\
+         }}\n"
+    )
+}
+
 pub(crate) fn repository_port(module_name: &str, name: &str) -> String {
     format!(
         "//! Application repository port `{module_name}.{name}`.\n\

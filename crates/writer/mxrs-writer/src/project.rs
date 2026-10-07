@@ -173,6 +173,7 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
                 (!decl.pages.is_empty(), "pages"),
                 (!decl.layouts.is_empty(), "layouts"),
                 (!decl.enumerations.is_empty(), "enumerations"),
+                (!decl.javascript_actions.is_empty(), "JavaScript actions"),
             ]
             .into_iter()
             .filter_map(|(declares, what)| declares.then_some(what))
@@ -288,6 +289,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &module_id,
             &decl.name,
             &decl.forms,
+            identity,
+        )?;
+        crate::native::synchronize_javascript_actions_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.javascript_actions,
             identity,
         )?;
     }

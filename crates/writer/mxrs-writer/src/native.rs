@@ -625,33 +625,80 @@ pub(crate) fn synchronize_forms_with_identity(
     forms: &[mxrs_ir::FormDecl],
     identity: ProjectIdentity,
 ) -> Result<()> {
+    let documents: Vec<(ArtifactKind, String, &NativeDocument)> = forms
+        .iter()
+        .map(|form| {
+            // A layout has its own kind; a page and a snippet of one name
+            // are told apart by what they are.
+            let (artifact, qualified) = match form.kind() {
+                "Forms$Layout" => (
+                    ArtifactKind::Layout,
+                    format!("{module_name}.{}", form.name()),
+                ),
+                "Forms$Snippet" => (
+                    ArtifactKind::Page,
+                    format!("snippet:{module_name}.{}", form.name()),
+                ),
+                _ => (ArtifactKind::Page, format!("{module_name}.{}", form.name())),
+            };
+            (artifact, qualified, &form.document)
+        })
+        .collect();
+    synchronize_documents(mpr, module_id, &documents, identity)
+}
+
+/// Writes the JavaScript actions a module declares.
+pub(crate) fn synchronize_javascript_actions_with_identity(
+    mpr: &mut mxrs_mpr::MprFile,
+    module_id: &str,
+    module_name: &str,
+    actions: &[mxrs_ir::JavaScriptActionDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let stated: Vec<NativeDocument> = actions
+        .iter()
+        .map(mxrs_ir::JavaScriptActionDecl::document)
+        .collect();
+    let documents: Vec<(ArtifactKind, String, &NativeDocument)> = actions
+        .iter()
+        .zip(&stated)
+        .map(|(action, document)| {
+            (
+                ArtifactKind::JavaScriptAction,
+                format!("{module_name}.{}", action.name),
+                document,
+            )
+        })
+        .collect();
+    synchronize_documents(mpr, module_id, &documents, identity)
+}
+
+/// Writes documents a module states whole, each by its type and name: one
+/// the module stores keeps its identities and is left as it is when it says
+/// what is stored; a new one takes the identity its kind and qualified name
+/// derive.
+fn synchronize_documents(
+    mpr: &mut mxrs_mpr::MprFile,
+    module_id: &str,
+    documents: &[(ArtifactKind, String, &NativeDocument)],
+    identity: ProjectIdentity,
+) -> Result<()> {
     let mut existing: HashMap<String, HashMap<String, (String, Document)>> = HashMap::new();
-    for form in forms {
-        let kind = form.kind().to_string();
+    for (artifact, qualified, document) in documents {
+        let kind = document.ty.clone();
+        let name = document.text("Name").unwrap_or_default();
         if !existing.contains_key(&kind) {
             let found = crate::documents::existing_documents_by_name(mpr, module_id, &kind)?;
             existing.insert(kind.clone(), found);
         }
-        let previous = existing[&kind].get(form.name());
+        let previous = existing[&kind].get(name);
         let id = previous.map_or_else(
-            || {
-                // A layout has its own kind; a page and a snippet of one
-                // name are told apart by what they are.
-                let artifact = match kind.as_str() {
-                    "Forms$Layout" => ArtifactKind::Layout,
-                    _ => ArtifactKind::Page,
-                };
-                let qualified = match kind.as_str() {
-                    "Forms$Snippet" => format!("snippet:{module_name}.{}", form.name()),
-                    _ => format!("{module_name}.{}", form.name()),
-                };
-                identity.artifact_id(artifact, &qualified)
-            },
+            || identity.artifact_id(*artifact, qualified),
             |(id, _)| id.clone(),
         );
         let namespace = uuid::Uuid::parse_str(&id).unwrap_or(uuid::Uuid::NAMESPACE_OID);
         let fresh = lower(
-            &form.document,
+            document,
             &mut |path| {
                 if path.is_empty() {
                     id.clone()
@@ -664,7 +711,7 @@ pub(crate) fn synchronize_forms_with_identity(
         match previous {
             Some((_, stored)) => {
                 let document = keep_identities(stored, fresh);
-                // A form that states what is stored is left as it is stored.
+                // A document that states what is stored is left as stored.
                 if &document != stored {
                     mpr.update_unit(&id, document)?;
                 }
