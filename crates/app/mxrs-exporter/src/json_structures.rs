@@ -253,10 +253,20 @@ fn render(module: &str, stem: &str, structure: &JsonStructureDecl, changes: &[Ch
 /// The snippet as Rust writes it: as it reads, in a raw string, unless it
 /// holds what a raw string cannot.
 pub(crate) fn snippet_literal(snippet: &str) -> String {
-    if snippet
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t')
-    {
+    let unwritable = |text: &str| {
+        text.chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+    };
+    // Lines ending as Windows ends them are each their own literal: Rust
+    // reads a raw string's line breaks as `\n` alone.
+    if snippet.contains("\r\n") && !unwritable(&snippet.replace("\r\n", "\n")) {
+        let lines: Vec<String> = snippet
+            .split_inclusive("\r\n")
+            .map(crate::rust_string)
+            .collect();
+        return format!("concat!({})", lines.join(", "));
+    }
+    if unwritable(snippet) {
         return crate::rust_string(snippet);
     }
     let mut hashes = String::from("#");

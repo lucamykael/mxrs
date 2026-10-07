@@ -461,14 +461,35 @@ pub(crate) fn synchronize_oql_view_sources_with_identity(
         document.insert("$Type", "DomainModels$ViewEntitySourceDocument");
         document.insert("Name", declaration.name.clone());
         document.insert("Oql", declaration.query.clone());
-        document.insert("Documentation", declaration.documentation.clone());
-        document.insert("Excluded", declaration.excluded);
-        document.insert(
+        // A version that stores none of these leaves them out: a stored
+        // document gains one only when the declaration says other than its
+        // default.
+        let stored = previous.is_some();
+        let mut option = |key: &str, value: Bson, default: bool| {
+            if !stored || document.contains_key(key) || !default {
+                document.insert(key, value);
+            }
+        };
+        option(
+            "Documentation",
+            Bson::String(declaration.documentation.clone()),
+            declaration.documentation.is_empty(),
+        );
+        option(
+            "Excluded",
+            Bson::Boolean(declaration.excluded),
+            !declaration.excluded,
+        );
+        option(
             "ExportLevel",
-            match declaration.export_level {
-                ExportLevel::Hidden => "Hidden",
-                ExportLevel::Published => "Published",
-            },
+            Bson::String(
+                match declaration.export_level {
+                    ExportLevel::Hidden => "Hidden",
+                    ExportLevel::Published => "Published",
+                }
+                .to_string(),
+            ),
+            declaration.export_level == ExportLevel::Hidden,
         );
         if previous.is_some() {
             mpr.update_unit(&id, document)?;

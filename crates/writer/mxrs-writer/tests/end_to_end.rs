@@ -1651,6 +1651,10 @@ fn oql_view_source_and_entity_source_preserve_identity_and_future_fields() {
     let source_id = source_unit.unit_id.clone();
     let mut source_document = mpr.parse_contents(&source_unit).unwrap();
     source_document.insert("FutureSourceField", "preserved");
+    // A version that stores no documentation, exclusion or export level.
+    source_document.remove("Documentation");
+    source_document.remove("Excluded");
+    source_document.remove("ExportLevel");
     mpr.update_unit(&source_id, source_document).unwrap();
 
     let domain_unit = mpr.units_by_containment("DomainModel").unwrap().remove(0);
@@ -1677,6 +1681,10 @@ fn oql_view_source_and_entity_source_preserve_identity_and_future_fields() {
         updated_source.get_str("FutureSourceField").unwrap(),
         "preserved"
     );
+    // A declaration that says their defaults adds none of them.
+    for key in ["Documentation", "Excluded", "ExportLevel"] {
+        assert!(!updated_source.contains_key(key), "{key}");
+    }
     let project = Project::open(&path, true).unwrap();
     let sales = project.modules().unwrap().remove(0);
     let report = sales.entities().first().unwrap();

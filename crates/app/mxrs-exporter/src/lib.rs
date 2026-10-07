@@ -437,6 +437,23 @@ fn import_cargo_project_inner(
     let java_actions = code_actions::declare(&project, code_actions::Kind::Java, authored)?;
     let json_structures = json_structures::declare(&project, authored)?;
     let data_sets = data_sets::declare(&project, authored)?;
+    // The persistence module declares every OQL view source.
+    declared.extend(modules.iter().flat_map(|module| {
+        let module_name = module.name.clone().unwrap_or_default();
+        module
+            .artifact_units
+            .iter()
+            .filter(|document| {
+                document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+            })
+            .filter_map(move |document| {
+                Some((
+                    "DomainModels$ViewEntitySourceDocument".to_string(),
+                    module_name.clone(),
+                    document.get_str("Name").ok()?.to_string(),
+                ))
+            })
+    }));
     declared.extend(data_sets.iter().map(|data_set| {
         (
             "DataSets$DataSet".to_string(),

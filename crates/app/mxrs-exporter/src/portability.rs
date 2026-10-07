@@ -145,6 +145,18 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
         "JsonStructures$JsonStructure".to_string(),
         super::json_structures::declare(&project, authored)?.len(),
     );
+    // Every OQL view source is declared by the project's persistence
+    // module (`render_persistence_module`).
+    stated_whole.insert(
+        "DomainModels$ViewEntitySourceDocument".to_string(),
+        modules
+            .iter()
+            .flat_map(|module| &module.artifact_units)
+            .filter(|document| {
+                document.get_str("$Type").ok() == Some("DomainModels$ViewEntitySourceDocument")
+            })
+            .count(),
+    );
     stated_whole.insert(
         "DataSets$DataSet".to_string(),
         super::data_sets::declare(&project, authored)?.len(),
