@@ -31,7 +31,13 @@ impl ReleaseStatus {
 /// The error carries the real cause — a repository with no releases yet
 /// surfaces as GitHub's HTTP 404, never as "already up to date".
 pub fn status(installed: &str) -> Result<ReleaseStatus, ChangelogError> {
-    let release = fetch(None)?;
+    release_status(fetch(None)?, installed)
+}
+
+fn release_status(
+    release: crate::changelog::Release,
+    installed: &str,
+) -> Result<ReleaseStatus, ChangelogError> {
     Ok(ReleaseStatus {
         installed: installed.to_string(),
         latest: release
@@ -211,6 +217,93 @@ mod tests {
         assert!(error.contains("source checkout"), "{error}");
         assert!(error.contains("git pull"), "{error}");
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    /// One HTTP answer to one request, from a local stand-in for GitHub's
+    /// Releases API: the path asked for, and the answer's status and body.
+    fn releases_api(status: u16, body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!(
+            "http://{}/repos/lucamykael/mxrs/releases",
+            listener.local_addr().unwrap()
+        );
+        let served = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header.trim().is_empty() {
+                    break;
+                }
+            }
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            request
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string()
+        });
+        (api, served)
+    }
+
+    /// The whole update: the latest release read from the Releases API, its
+    /// version compared with the installed one, and the released tag
+    /// installed.
+    #[test]
+    fn a_published_release_newer_than_the_installed_one_is_installed() {
+        let (api, served) = releases_api(
+            200,
+            r#"{"tag_name":"v0.3.0","name":"0.3.0","published_at":"2026-10-07T00:00:00Z","body":"Notes","html_url":"https://github.com/lucamykael/mxrs/releases/tag/v0.3.0"}"#,
+        );
+        let release = crate::changelog::fetch_from(&api, None).unwrap();
+        assert_eq!(
+            served.join().unwrap(),
+            "/repos/lucamykael/mxrs/releases/latest"
+        );
+        let status = release_status(release, "0.2.0").unwrap();
+        assert!(status.available());
+        let calls: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        Updater::with_runner(
+            Box::new(move |command| {
+                recorded.lock().unwrap().push(command.to_vec());
+                Ok(true)
+            }),
+            Some(PathBuf::from("/usr/local/bin/mxrs")),
+        )
+        .install(&status)
+        .unwrap();
+        assert_eq!(calls.lock().unwrap()[0][6], "v0.3.0");
+        // The installed release is up to date with itself.
+        let (api, served) = releases_api(
+            200,
+            r#"{"tag_name":"v0.2.0","name":null,"published_at":null,"body":null,"html_url":"https://github.com/lucamykael/mxrs/releases/tag/v0.2.0"}"#,
+        );
+        let release = crate::changelog::fetch_from(&api, None).unwrap();
+        served.join().unwrap();
+        assert!(!release_status(release, "0.2.0").unwrap().available());
+    }
+
+    /// A repository without releases answers 404, which is said as such.
+    #[test]
+    fn a_missing_release_is_the_http_failure_it_is() {
+        let (api, served) = releases_api(404, r#"{"message":"Not Found"}"#);
+        let error = crate::changelog::fetch_from(&api, None).unwrap_err();
+        served.join().unwrap();
+        assert!(
+            matches!(error, ChangelogError::Status { status: 404, .. }),
+            "{error}"
+        );
     }
 
     #[test]

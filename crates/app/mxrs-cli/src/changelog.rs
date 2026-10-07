@@ -41,8 +41,13 @@ struct GithubRelease {
 }
 
 pub fn endpoint(version: Option<&str>) -> Result<String, ChangelogError> {
+    endpoint_at(RELEASES_API, version)
+}
+
+/// The release endpoint under `api`, a GitHub Releases API root.
+fn endpoint_at(api: &str, version: Option<&str>) -> Result<String, ChangelogError> {
     match version {
-        None => Ok(format!("{RELEASES_API}/latest")),
+        None => Ok(format!("{api}/latest")),
         Some(raw) => {
             let version = raw.strip_prefix('v').unwrap_or(raw);
             if version.is_empty()
@@ -52,13 +57,18 @@ pub fn endpoint(version: Option<&str>) -> Result<String, ChangelogError> {
             {
                 return Err(ChangelogError::InvalidVersion(raw.to_string()));
             }
-            Ok(format!("{RELEASES_API}/tags/v{version}"))
+            Ok(format!("{api}/tags/v{version}"))
         }
     }
 }
 
 pub fn fetch(version: Option<&str>) -> Result<Release, ChangelogError> {
-    let url = endpoint(version)?;
+    fetch_from(RELEASES_API, version)
+}
+
+/// [`fetch`] from the Releases API at `api` — a test's double of GitHub's.
+pub(crate) fn fetch_from(api: &str, version: Option<&str>) -> Result<Release, ChangelogError> {
+    let url = endpoint_at(api, version)?;
     let config = ureq::Agent::config_builder().max_redirects(0).build();
     let agent = ureq::Agent::new_with_config(config);
     let mut response = agent

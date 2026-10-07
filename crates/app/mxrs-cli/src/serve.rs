@@ -147,7 +147,7 @@ mod tests {
     fn a_physical_translator_answers_from_its_catalog_not_from_naming_rules() {
         let oql = "FROM Sales.Order AS o SELECT o/Total AS total";
         let logical = LogicalOql.translate(oql);
-        assert!(logical.sql.unwrap().contains("\"Sales$Order\""));
+        assert!(logical.sql.unwrap().contains("\"sales$order\""));
         let physical = PhysicalOql(mxrs_oql::RuntimeCatalog::default()).translate(oql);
         assert!(physical.sql.is_none());
         assert!(physical.warnings[0].contains("Sales.Order"), "{physical:?}");

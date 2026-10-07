@@ -1638,6 +1638,29 @@ fn cargo_import_export_scaffold_and_java_generation_have_real_filesystem_effects
             .status
             .success()
     );
+    // As mxrb's, a project directory: the Cargo-native project import writes.
+    let project = directory.path().join("exported");
+    let output = query(
+        "export",
+        &path,
+        &[
+            project.to_str().unwrap(),
+            "--mxrs-workspace",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(text(&output).starts_with("[mxrs] Exported axum project to "));
+    assert!(project.join("Cargo.toml").is_file());
+    assert!(
+        !query(
+            "export",
+            &path,
+            &[project.to_str().unwrap(), "--mode", "rails"]
+        )
+        .status
+        .success()
+    );
     let generated = directory.path().join("scaffold");
     let args = [
         "new",

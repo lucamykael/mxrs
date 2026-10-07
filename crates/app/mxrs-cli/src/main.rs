@@ -103,7 +103,7 @@ fn command_options(
         "dump-unit" | "units" | "sql" => (&[], &["--no-progress"], &[]),
         "protocols" | "compare" | "diff" | "callees" | "callers" | "describe" | "impact"
         | "refs" | "tree" => (&[], &["--json", "--no-progress"], &[]),
-        "export" => (&["-o"], &[], &[]),
+        "export" => (&["-o", "--mode", "--mxrs-workspace"], &[], &[]),
         "convert" => (
             &["--output", "-o", "--mode", "--mxrs-workspace"],
             &["--release", "--offline"],
@@ -176,7 +176,11 @@ fn command_options(
         "mda" => (&[], &["--json", "--no-progress"], &[]),
         "migrate" => (&[], &["--json"], &[]),
         "project" => (&[], &["--json", "--no-progress"], &[]),
-        "team-server" => (&["--pat-file"], &["--json"], &[]),
+        "team-server" => (
+            &["--pat-file", "--branch", "--depth", "--remote"],
+            &["--json"],
+            &[],
+        ),
         "uml" => (
             &[
                 "--export",
@@ -228,7 +232,7 @@ commands! {
     "env", "[DIR] [--environment NAME] [--json]", "Inspect an environment profile without values", run_env;
     "evaluate", "<file.mpr> <evaluation.json> [--json]", "Run declarative static model checks", run_evaluate;
     "evaluation", "new <Name> [--target DIR] [--dry-run] [--json]", "Create declarative static model checks", run_evaluation;
-    "export", "<file.mpr> [-o <out.rs>]", "Export complete editable Rust declarations", run_export;
+    "export", "<file.mpr> <project-dir> [--mode axum|actix-web|rocket] [--mxrs-workspace <path>] | <file.mpr> [-o <out.rs>]", "Export the model as a Cargo-native project, or its declarations as one Rust file", run_export;
     "find", "<file.mpr> <text> [--semantic]", "Find artifacts by name or semantic text", run_find;
     "functional-test", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create a declarative runtime test suite", run_functional_test;
     "functional-instrument", "<writable.mpr> <suite.json> [--json]", "Instrument a disposable MPR with a functional test runner", run_functional_instrument;
@@ -275,7 +279,7 @@ commands! {
     "serve", "<file.mpr> [--port PORT] [--db-port PORT] [--no-up] [--oql-layout auto|physical|mendix]", "Serve loopback read-only SQL and OQL queries over the project database", run_serve;
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
     "translate-oql", "<query> [--dialect postgresql|sql_server|ansi]", "Translate the supported safe OQL subset", run_translate_oql;
-    "team-server", "login --pat-file FILE [--json] | status DIR [--json]", "Configure a PAT pointer or inspect a local Team Server repository", run_team_server;
+    "team-server", "<login|projects|info|branches|commits|clone|status|fetch|pull|push> ... [--pat-file FILE]", "Reach Team Server: its APIs, and its Git repositories over HTTPS", run_team_server;
     "test", "<file.mpr> <suite.json> [--plan] [--json]", "Run a functional test suite on the MXRS runtime, or validate its plan", run_test;
     "tree", "<file.mpr> [module] [--json]", "Group indexed artifacts by module and kind", run_tree;
     "uml", "<file.mpr> --export class|activity|sequence [--format mermaid|plantuml] [--module NAME] [--microflow Module.Flow] [--root NAME] [--depth N]", "Export class, activity, or sequence diagrams as Mermaid or PlantUML", run_uml;
@@ -634,61 +638,119 @@ fn run_db(mut args: Vec<String>) -> ExitCode {
 }
 
 fn run_team_server(mut args: Vec<String>) -> ExitCode {
+    use mxrs_cli::team_server::{Api, Credentials, Repository};
     let json = take_flag(&mut args, "--json");
     let pat_file = take_value(&mut args, "--pat-file");
-    match args.as_slice() {
-        [action] if action == "login" && pat_file.is_some() => {
-            match mxrs_cli::team_server::Credentials::default()
-                .configure_pat_file(pat_file.expect("validated above"))
-            {
-                Ok(report) => {
-                    if json {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&report)
-                                .expect("login report is serializable")
-                        );
-                    } else {
-                        println!(
-                            "[mxrs] configured {} to reference {}",
-                            report.credentials_file.display(),
-                            report.pat_file.display()
-                        );
+    let branch = take_value(&mut args, "--branch");
+    let depth = take_value(&mut args, "--depth");
+    let remote = take_value(&mut args, "--remote");
+    let credentials = || Credentials::default().with_pat_file(pat_file.as_deref());
+    let print_json = |value: &dyn erased_json::Json| println!("{}", value.pretty());
+    let current = || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result: Result<(), mxrs_cli::team_server::TeamServerError> = match words.as_slice() {
+        ["login"] if pat_file.is_some() => Credentials::default()
+            .configure_pat_file(pat_file.as_deref().expect("matched above"))
+            .map(|report| {
+                if json {
+                    print_json(&report);
+                } else {
+                    println!(
+                        "[mxrs] configured {} to reference {}",
+                        report.credentials_file.display(),
+                        report.pat_file.display()
+                    );
+                    println!(
+                        "[mxrs] The PAT remains in {} and is read only for requests.",
+                        report.pat_file.display()
+                    );
+                }
+            }),
+        ["projects"] => Api::new(credentials())
+            .projects()
+            .map(|projects| print_json(&projects)),
+        ["info", app] => Api::new(credentials())
+            .info(app)
+            .map(|info| print_json(&info)),
+        ["branches", app] => Api::new(credentials())
+            .branches(app)
+            .map(|branches| print_json(&branches)),
+        ["commits", app, branch_name] => Api::new(credentials())
+            .commits(app, branch_name)
+            .map(|commits| print_json(&commits)),
+        ["clone", source, target] => Repository::new(credentials())
+            .clone(source, target, branch.as_deref(), depth.as_deref())
+            .map(|report| {
+                if json {
+                    print_json(&report);
+                } else {
+                    println!(
+                        "[mxrs] Cloned {} to {}",
+                        report.repository_url,
+                        report.root.display()
+                    );
+                    for mpr in &report.mpr_files {
+                        println!("[mxrs] Valid MPR: {}", mpr.display());
                     }
-                    ExitCode::SUCCESS
                 }
-                Err(error) => {
-                    eprintln!("[mxrs] error: {error}");
-                    ExitCode::FAILURE
+            }),
+        ["status", rest @ ..] if rest.len() <= 1 => {
+            let root = rest.first().map_or_else(current, std::path::PathBuf::from);
+            Repository::new(credentials()).status(&root).map(|report| {
+                if json {
+                    print_json(&report);
+                } else {
+                    println!("Repository : {}", report.root.display());
+                    println!("Remote     : {}", report.repository_url);
+                    print!("{}", report.status);
                 }
-            }
+            })
         }
-        [action, root] if action == "status" && pat_file.is_none() => {
-            match mxrs_cli::team_server::status(root) {
-                Ok(report) => {
-                    if json {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&report)
-                                .expect("repository status is serializable")
-                        );
-                    } else {
-                        println!("Repository : {}", report.root.display());
-                        println!("Remote     : {}", report.repository_url);
-                        print!("{}", report.status);
-                    }
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("[mxrs] error: {error}");
-                    ExitCode::FAILURE
-                }
-            }
+        [action @ ("fetch" | "pull"), rest @ ..] if rest.len() <= 1 => {
+            let root = rest.first().map_or_else(current, std::path::PathBuf::from);
+            let repository = Repository::new(credentials());
+            let output = if *action == "fetch" {
+                repository.fetch(&root)
+            } else {
+                repository.pull(&root)
+            };
+            output.map(|output| print!("{output}"))
+        }
+        ["push", rest @ ..] if rest.len() <= 1 => {
+            let root = rest.first().map_or_else(current, std::path::PathBuf::from);
+            Repository::new(credentials())
+                .push(
+                    &root,
+                    remote.as_deref().unwrap_or("origin"),
+                    branch.as_deref(),
+                )
+                .map(|output| print!("{output}"))
         }
         _ => {
-            eprintln!("Usage: mxrs team-server login --pat-file FILE [--json]");
-            eprintln!("       mxrs team-server status DIR [--json]");
+            eprintln!(
+                "Usage: mxrs team-server <login|projects|info|branches|commits|clone|status|fetch|pull|push> ...\n\n  team-server login --pat-file FILE [--json]\n  team-server projects [--pat-file FILE]\n  team-server info APP_ID [--pat-file FILE]\n  team-server branches APP_ID [--pat-file FILE]\n  team-server commits APP_ID BRANCH [--pat-file FILE]\n  team-server clone APP_ID|URL TARGET [--branch NAME] [--depth N] [--pat-file FILE] [--json]\n  team-server status|fetch|pull [PATH] [--pat-file FILE] [--json]\n  team-server push [PATH] [--remote NAME] [--branch NAME] [--pat-file FILE]\n\nThe PAT file may be plain text, JSON, or .env with MXRS_TEAM_SERVER_PAT=...; it reaches Git\nonly through a temporary GIT_ASKPASS helper, never a URL, argument or .git/config."
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Printing any serializable report as pretty JSON, from one closure.
+mod erased_json {
+    pub trait Json {
+        fn pretty(&self) -> String;
+    }
+
+    impl<T: serde::Serialize> Json for T {
+        fn pretty(&self) -> String {
+            serde_json::to_string_pretty(self).expect("serializable report")
         }
     }
 }
@@ -3693,10 +3755,51 @@ fn run_modules(mut args: Vec<String>) -> ExitCode {
 
 fn run_export(mut args: Vec<String>) -> ExitCode {
     let out_path = take_value(&mut args, "-o");
+    let mode = take_value(&mut args, "--mode");
+    let workspace = take_value(&mut args, "--mxrs-workspace").map(std::path::PathBuf::from);
+    // As mxrb's: the model exported as a project in a directory — here the
+    // Cargo-native one `import` writes.
+    if let [source, destination] = args.as_slice() {
+        if out_path.is_some() {
+            eprintln!("[mxrs] error: -o writes one Rust file; a project directory takes none");
+            return ExitCode::FAILURE;
+        }
+        let mode_name = mode.unwrap_or_else(|| "axum".to_string());
+        let Some(api) = mxrs_exporter::ApiMode::parse(&mode_name) else {
+            eprintln!("[mxrs] error: --mode must be axum, actix-web, or rocket");
+            return ExitCode::FAILURE;
+        };
+        return match mxrs_exporter::import_cargo_project_with_mode(
+            source,
+            destination,
+            workspace.as_deref(),
+            api,
+        ) {
+            Ok(_) => {
+                let destination = std::path::absolute(destination)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(destination));
+                println!(
+                    "[mxrs] Exported {mode_name} project to {}",
+                    destination.display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[mxrs] error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let [path] = args.as_slice() else {
-        eprintln!("[mxrs] error: usage: mxrs export <file.mpr> [-o <out.rs>]");
+        eprintln!(
+            "[mxrs] error: usage: mxrs export <file.mpr> <project-dir> [--mode axum|actix-web|rocket] [--mxrs-workspace <path>] | <file.mpr> [-o <out.rs>]"
+        );
         return ExitCode::FAILURE;
     };
+    if mode.is_some() || workspace.is_some() {
+        eprintln!("[mxrs] error: --mode and --mxrs-workspace apply to a project directory");
+        return ExitCode::FAILURE;
+    }
 
     let exported = mxrs_exporter::export_project(path).map_err(|error| {
         let mut message = error.to_string();

@@ -364,7 +364,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs diff",
             "native MPR change records and CLI: xtask command-oracle diff; docs/commands/diff.md",
         ),
-        "export" => (Status::Partial, "mxrs export", "typed Rust export"),
+        "export" => (
+            Status::Verified,
+            "mxrs export",
+            "the model exported as a project in a directory, as mxrb's is: here the Cargo-native project of `import` (--mode axum|actix-web|rocket for its HTTP adapter, where mxrb's modes are its Ruby DSL and Rails stacks), plus `-o` for the declarations as one Rust file; generated content is not mxrb-comparable by construction; own evidence: the corpus and fixture import round trips build back to 0 changes, and the CLI suite exports a project directory",
+        ),
         "env" => (
             Status::Verified,
             "mxrs env",
@@ -471,9 +475,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "transactional preview/apply migrates pre-layered generated source and optionally updates generated Cargo-native version markers; incomplete layouts and inconsistent declarations fail closed; full CLI oracle missing; own evidence: preview/apply layout+version migration suite incl. pre-layered projects and fail-closed inconsistencies",
         ),
         "team-server" => (
-            Status::Partial,
-            "mxrs team-server login/status",
-            "private PAT-file pointer configuration and validated offline Git status; remote APIs and mutating Git operations are not ported",
+            Status::Verified,
+            "mxrs team-server",
+            "full port of mxrb's command: PAT-file pointer, the App Repository API (info, branches, commits) and the paginated Projects API with MxToken authorization and pagination confined to its host, and Git clone/status/fetch/pull/push confined to the official remote with the PAT only in an ephemeral GIT_ASKPASS helper and every root MPR validated; own evidence: the APIs against a local double (paths, escaping, authorization, pagination, refusals) and the Git flow run by Git itself against a local repository standing in for Team Server's through url.insteadOf; a live Team Server is external by nature",
         ),
         // Semantic refactoring. All three preview by default and mutate only
         // under `--apply`, like MXRB's own; none has a command-contract
@@ -514,9 +518,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "ports the framework-neutral core (the diagram JSON projection and the audited visual layout writer, cross-module anchors interoperable through mxrb's own sidecar table); the browser server and its db-style lifecycle are refused explicitly, not pretended",
         ),
         "update" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs update",
-            "full port of mxrb's check/changelog/install contract onto lucamykael/mxrs GitHub releases (source checkouts refused, cargo-install runner seam tested); live-verified to report the real HTTP failure while the repository has no published releases, so no success path is verifiable yet",
+            "full port of mxrb's check/changelog/install contract onto lucamykael/mxrs GitHub releases (source checkouts refused, cargo-install runner seam); own evidence: the success path runs end to end against a local double of the Releases API (latest release read, version compared, released tag installed) and a missing release is its HTTP 404; live-verified to report the real HTTP failure while the repository publishes no release — a live success is external by nature",
         ),
         "widgets" => (
             Status::Verified,
@@ -558,12 +562,12 @@ mod tests {
     #[test]
     fn parses_and_classifies_command_inventory_without_counting_headers() {
         let report = build(&format!(
-            "Available MXRB commands (3):\n\n  cache  Cache operations\n  export  Export project\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
+            "Available MXRB commands (3):\n\n  cache  Cache operations\n  db  Database workspace\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
         ))
         .unwrap();
         assert_eq!(report.rows.len(), 3);
         // `cache` is own-evidence verified since the 2026-09-21 policy
-        // amendment; `export` remains partial; the fake command is missing.
+        // amendment; `db` remains partial; the fake command is missing.
         assert_eq!(report.verified, 1);
         assert_eq!(report.partial, 1);
         assert_eq!(report.missing, 1);
@@ -657,7 +661,7 @@ mod tests {
     /// assertion.
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["db", "update", "export", "frontend"])).unwrap();
+        let report = build(&inventory(&["db", "run", "portability", "frontend"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(
