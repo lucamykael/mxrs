@@ -1,5 +1,5 @@
-use mxrs_ir::ScheduleUnit;
 use mxrs_ir::declaration::{ModuleDecl, OqlViewSourceDecl};
+use mxrs_ir::{MappingDirection, ScheduleUnit};
 
 use crate::constant::ConstantBuilder;
 use crate::entity::EntityBuilder;
@@ -60,6 +60,7 @@ impl ModuleBuilder {
                 javascript_actions: Vec::new(),
                 java_actions: Vec::new(),
                 json_structures: Vec::new(),
+                mappings: Vec::new(),
                 roles: None,
                 installed: false,
             },
@@ -219,6 +220,41 @@ impl ModuleBuilder {
         let mut builder = crate::JsonStructureBuilder::new(&self.decl.name, name, snippet);
         configure(&mut builder);
         self.decl.json_structures.push(builder.into_decl());
+        self
+    }
+
+    /// Declares an import mapping of `json_structure` — its qualified name —
+    /// into objects: which entity each of its objects is, and which
+    /// attribute each value fills.
+    pub fn import_mapping(
+        &mut self,
+        name: impl Into<String>,
+        json_structure: impl Into<String>,
+        configure: impl FnOnce(&mut crate::MappingBuilder),
+    ) -> &mut Self {
+        self.mapping(MappingDirection::Import, name, json_structure, configure)
+    }
+
+    /// Declares an export mapping of objects into `json_structure`.
+    pub fn export_mapping(
+        &mut self,
+        name: impl Into<String>,
+        json_structure: impl Into<String>,
+        configure: impl FnOnce(&mut crate::MappingBuilder),
+    ) -> &mut Self {
+        self.mapping(MappingDirection::Export, name, json_structure, configure)
+    }
+
+    fn mapping(
+        &mut self,
+        direction: MappingDirection,
+        name: impl Into<String>,
+        json_structure: impl Into<String>,
+        configure: impl FnOnce(&mut crate::MappingBuilder),
+    ) -> &mut Self {
+        let mut builder = crate::MappingBuilder::new(direction, name, json_structure);
+        configure(&mut builder);
+        self.decl.mappings.push(builder.into_decl());
         self
     }
 

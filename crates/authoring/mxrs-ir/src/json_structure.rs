@@ -154,6 +154,7 @@ impl JsonElement {
         }
         let number = |key: &str| match document.get(key)? {
             NativeValue::Int32(value) => Some(*value),
+            NativeValue::Int64(value) => i32::try_from(*value).ok(),
             _ => None,
         };
         let flag = |key: &str| match document.get(key)? {
@@ -270,10 +271,17 @@ impl JsonStructureDecl {
     /// The declaration a stored structure is, when [`Self::document`] states
     /// that document again.
     pub fn from_document(document: &NativeDocument) -> Option<Self> {
+        let declaration = Self::read(document)?;
+        (declaration.document() == document.narrowed()).then_some(declaration)
+    }
+
+    /// What a stored structure says, whatever order its fields are stored
+    /// in: what a mapping of it maps.
+    pub fn read(document: &NativeDocument) -> Option<Self> {
         if document.ty != "JsonStructures$JsonStructure" {
             return None;
         }
-        let declaration = Self {
+        Some(Self {
             name: document.text("Name")?.to_string(),
             documentation: document.text("Documentation")?.to_string(),
             snippet: document.text("JsonSnippet")?.to_string(),
@@ -284,8 +292,7 @@ impl JsonStructureDecl {
                 "Published" => ExportLevel::Published,
                 _ => return None,
             },
-        };
-        (declaration.document() == *document).then_some(declaration)
+        })
     }
 
     /// The document the model stores for the structure, its fields in the

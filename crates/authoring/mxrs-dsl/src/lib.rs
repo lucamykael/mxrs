@@ -57,6 +57,7 @@ mod flow;
 pub mod flow_actions;
 mod javascript_action;
 mod json_structure;
+mod mapping;
 mod menu;
 mod module;
 mod navigation;
@@ -83,6 +84,7 @@ pub use flow_actions::{
 };
 pub use javascript_action::{CodeActionValue, JavaActionBuilder, JavaScriptActionBuilder};
 pub use json_structure::{JsonElementBuilder, JsonStructureBuilder};
+pub use mapping::{MappingBuilder, ObjectMappingBuilder, ValueMappingBuilder};
 pub use menu::{MenuBuilder, MenuItemBuilder};
 pub use module::{ModuleBuilder, OqlViewSourceBuilder};
 pub use mxrs_expr::{

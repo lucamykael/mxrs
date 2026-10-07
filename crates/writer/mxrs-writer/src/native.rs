@@ -725,6 +725,63 @@ pub(crate) fn synchronize_json_structures_with_identity(
     synchronize_documents(mpr, module_id, &documents, identity)
 }
 
+/// Writes the import and export mappings a module declares, each of the
+/// JSON structure the model stores under its qualified name — so every
+/// module's structures are written first.
+pub(crate) fn synchronize_mappings_with_identity(
+    mpr: &mut mxrs_mpr::MprFile,
+    module_id: &str,
+    module_name: &str,
+    mappings: &[mxrs_ir::MappingDecl],
+    modules: &HashMap<String, String>,
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let mut stated = Vec::with_capacity(mappings.len());
+    for mapping in mappings {
+        let invalid = |reason: String| {
+            crate::WriterError::InvalidMapping(format!("{module_name}.{}: {reason}", mapping.name))
+        };
+        let (structure_module, structure_name) = mapping
+            .json_structure
+            .split_once('.')
+            .ok_or_else(|| invalid(format!("{} is no qualified name", mapping.json_structure)))?;
+        let structure = match modules.get(structure_module) {
+            Some(structure_module_id) => crate::documents::existing_documents_by_name(
+                mpr,
+                structure_module_id,
+                "JsonStructures$JsonStructure",
+            )?
+            .remove(structure_name),
+            None => None,
+        };
+        let structure = structure
+            .and_then(|(_, document)| stated_document(&document).ok())
+            .and_then(|document| mxrs_ir::JsonStructureDecl::read(&document))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "the model has no JSON structure {}",
+                    mapping.json_structure
+                ))
+            })?;
+        stated.push(mapping.document(&structure).map_err(invalid)?);
+    }
+    let documents: Vec<(ArtifactKind, String, &NativeDocument)> = mappings
+        .iter()
+        .zip(&stated)
+        .map(|(mapping, document)| {
+            (
+                match mapping.direction {
+                    mxrs_ir::MappingDirection::Import => ArtifactKind::ImportMapping,
+                    mxrs_ir::MappingDirection::Export => ArtifactKind::ExportMapping,
+                },
+                format!("{module_name}.{}", mapping.name),
+                document,
+            )
+        })
+        .collect();
+    synchronize_documents(mpr, module_id, &documents, identity)
+}
+
 /// Writes documents a module states whole, each by its type and name: one
 /// the module stores keeps its identities and is left as it is when it says
 /// what is stored; a new one takes the identity its kind and qualified name

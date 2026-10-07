@@ -52,6 +52,7 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
             &project.mendix_version,
         )?;
     }
+    synchronize_mappings(&mut mpr, &root_id, project, identity)?;
     security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;
     if let Some(declaration) = &project.navigation {
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
@@ -313,6 +314,7 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             identity,
         )?;
     }
+    synchronize_mappings(&mut mpr, &root_id, project, identity)?;
     security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;
     if let Some(declaration) = &project.navigation {
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
@@ -488,6 +490,34 @@ fn validate_oql_sources(project: &ProjectDecl, existing: &HashSet<String>) -> Re
                 });
             }
         }
+    }
+    Ok(())
+}
+
+/// Writes every module's mappings once every module's JSON structures are
+/// in the model: a mapping maps a structure any module may declare.
+fn synchronize_mappings(
+    mpr: &mut MprFile,
+    root_id: &str,
+    project: &ProjectDecl,
+    identity: ProjectIdentity,
+) -> Result<()> {
+    if project.modules.iter().all(|decl| decl.mappings.is_empty()) {
+        return Ok(());
+    }
+    let modules = existing_module_ids_by_name(mpr, root_id)?;
+    for decl in &project.modules {
+        if decl.mappings.is_empty() {
+            continue;
+        }
+        crate::native::synchronize_mappings_with_identity(
+            mpr,
+            &modules[&decl.name],
+            &decl.name,
+            &decl.mappings,
+            &modules,
+            identity,
+        )?;
     }
     Ok(())
 }

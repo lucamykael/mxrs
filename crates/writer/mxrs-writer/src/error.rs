@@ -55,6 +55,9 @@ pub enum WriterError {
     #[error("widget package error: {0}")]
     WidgetPackage(String),
 
+    #[error("{0}")]
+    InvalidMapping(String),
+
     #[error("association target {0:?} does not match any entity declared in this module")]
     UnknownAssociationTarget(String),
 

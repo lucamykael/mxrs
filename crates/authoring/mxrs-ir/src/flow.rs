@@ -223,6 +223,31 @@ impl NativeDocument {
         self
     }
 
+    /// The document with every whole number that fits 32 bits stored as
+    /// one: the same document whichever width a version stores numbers in.
+    pub fn narrowed(&self) -> NativeDocument {
+        fn narrow(value: &NativeValue) -> NativeValue {
+            match value {
+                NativeValue::Int64(number) => {
+                    i32::try_from(*number).map_or(NativeValue::Int64(*number), NativeValue::Int32)
+                }
+                NativeValue::Document(document) => NativeValue::Document(document.narrowed()),
+                NativeValue::List(marker, items) => {
+                    NativeValue::List(*marker, items.iter().map(narrow).collect())
+                }
+                other => other.clone(),
+            }
+        }
+        NativeDocument {
+            ty: self.ty.clone(),
+            fields: self
+                .fields
+                .iter()
+                .map(|(key, value)| (key.clone(), narrow(value)))
+                .collect(),
+        }
+    }
+
     /// Builder-style [`NativeDocument::set`].
     pub fn with(mut self, key: &str, value: impl Into<NativeValue>) -> Self {
         self.set(key, value);

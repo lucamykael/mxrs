@@ -75,6 +75,7 @@ mod frontend_flows;
 mod frontend_forms;
 mod json_structures;
 mod layout;
+mod mappings;
 mod names;
 #[cfg(test)]
 #[path = "../../../../xtask/support/nested_cargo.rs"]
@@ -434,6 +435,14 @@ fn import_cargo_project_inner(
         code_actions::declare(&project, code_actions::Kind::JavaScript, authored)?;
     let java_actions = code_actions::declare(&project, code_actions::Kind::Java, authored)?;
     let json_structures = json_structures::declare(&project, authored)?;
+    let mappings = mappings::declare(&project, authored)?;
+    declared.extend(mappings.iter().map(|mapping| {
+        (
+            mapping.native_type.to_string(),
+            mapping.module.clone(),
+            mapping.name.clone(),
+        )
+    }));
     declared.extend(json_structures.iter().map(|structure| {
         (
             "JsonStructures$JsonStructure".to_string(),
@@ -589,6 +598,11 @@ fn import_cargo_project_inner(
         generated_module(&mut generated_modules, &structure.module)
             .documents
             .push((structure.stem.clone(), structure.source.clone()));
+    }
+    for mapping in &mappings {
+        generated_module(&mut generated_modules, &mapping.module)
+            .documents
+            .push((mapping.stem.clone(), mapping.source.clone()));
     }
     for action in &javascript_actions {
         generated_module(&mut generated_modules, &action.module)
