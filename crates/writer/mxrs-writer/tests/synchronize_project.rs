@@ -122,6 +122,19 @@ fn synchronize_project_adds_a_new_module_to_an_existing_project() {
         .collect();
     names.sort();
     assert_eq!(names, vec!["CRM".to_string(), "Sales".to_string()]);
+    // Every module has the settings Studio Pro gives one, as 11.12 stores
+    // them.
+    let mpr = project.mpr();
+    let settings = mpr.units_by_containment("ModuleSettings").unwrap();
+    assert_eq!(settings.len(), 2);
+    let document = mpr.parse_contents(&settings[0]).unwrap();
+    assert_eq!(
+        document.get_str("$Type").unwrap(),
+        "Projects$ModuleSettings"
+    );
+    assert_eq!(document.get_str("Version").unwrap(), "1.0.0");
+    assert_eq!(document.get_str("ProtectedModuleType").unwrap(), "AddOn");
+    assert!(document.contains_key("EnableDetailedTroubleshooting"));
 }
 
 #[test]

@@ -181,5 +181,43 @@ pub(crate) fn insert_bare_module(
         module.to_bson(),
         Some(&module_id),
     )?;
+    insert_module_settings(mpr, &module_id, name, identity)?;
     Ok(module_id)
+}
+
+/// The settings Studio Pro gives a module it creates: its version, how it
+/// is exported, and no Java dependencies. Mendix 10 and later keep them in a
+/// unit of their own, which every module of such a project has.
+fn insert_module_settings(
+    mpr: &mut MprFile,
+    module_id: &str,
+    name: &str,
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let Some(version) = mpr.mendix_version()? else {
+        return Ok(());
+    };
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok());
+    if major.is_none_or(|major| major < 10) {
+        return Ok(());
+    }
+    let id = identity.artifact_id(ArtifactKind::ModuleSettings, name);
+    let mut document = mxrs_bson::doc! {
+        "$ID": id.clone(),
+        "$Type": "Projects$ModuleSettings",
+        "BasedOnVersion": "",
+        "ExportLevel": "Source",
+        "ExtensionName": "",
+        "JarDependencies": mxrs_bson::build_array(Vec::new(), 2),
+        "ProtectedModuleType": "AddOn",
+        "SolutionIdentifier": "",
+        "Version": "1.0.0",
+    };
+    // What the version's own schema adds to them.
+    mxrs_schema::apply_document(&version, &mut document);
+    mpr.insert_unit(module_id, "ModuleSettings", document, Some(&id))?;
+    Ok(())
 }
