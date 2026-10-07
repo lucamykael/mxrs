@@ -637,13 +637,39 @@ imported one.
 
 `model/imported/declared.json` lists the documents the import wrote as
 declarations in source: flows, pages, layouts, snippets, enumerations,
-constants, regular expressions, scheduled events, menus and task queues of
-the modules the project made. A build leaves out of the model each one the
+constants, regular expressions, scheduled events, menus, task queues, Java
+and JavaScript actions and JSON structures of the modules the project made.
+A build leaves out of the model each one the
 source no longer declares — deleted, or renamed into a new one — and says
 so (`[mxrs] removed microflow Sales.ACT_Old: the source no longer declares
 it`). A document the import kept in the snapshot only is not listed, and
 stays; an entity the source no longer declares already leaves its domain
 model. A project imported before the list existed removes nothing.
+
+A JSON structure is its snippet and what differs from the elements Studio
+Pro derives from it, in `src/domain/documents/<module>/<structure>.rs`:
+
+```rust
+const SNIPPET: &str = r#"{"number": "A-1", "lines": [{"sku": ""}]}"#;
+
+#[declaration(module = "Sales")]
+pub fn json_order(module: &mut ModuleBuilder) {
+    module.json_structure("JSON_Order", SNIPPET, |json| {
+        json.element("(Object)|number", |element| {
+            element.max_length(20);
+        });
+    });
+}
+```
+
+The derivation names each element as a mapping knows it (`number` is
+`Number`, a name Mendix keeps for itself such as `id` is `_id`), merges an
+array's objects into one named in the singular (`Line`), wraps an array's
+values (`Wrapper`, `Wrapper_2`, ...), types a number by its size and keeps a
+UTC time to seven digits of a second. An element is addressed by Studio
+Pro's own path, and naming one the snippet does not have fails the build.
+The importer declares a structure whose elements are its snippet's; one whose
+snippet was edited without refreshing them stays in the imported model.
 
 ## API and Axum rules
 
