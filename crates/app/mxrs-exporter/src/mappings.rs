@@ -22,6 +22,8 @@ pub(crate) struct DeclaredMapping {
     pub(crate) module: String,
     pub(crate) native_type: &'static str,
     pub(crate) name: String,
+    /// The JSON structure it maps, by its qualified name.
+    pub(crate) json_structure: String,
     pub(crate) stem: String,
     pub(crate) source: String,
 }
@@ -90,6 +92,7 @@ pub(crate) fn declare(
             module,
             native_type,
             name: mapping.name,
+            json_structure: mapping.json_structure,
             stem,
             source,
         });

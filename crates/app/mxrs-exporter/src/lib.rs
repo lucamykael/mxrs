@@ -436,6 +436,20 @@ fn import_cargo_project_inner(
     let java_actions = code_actions::declare(&project, code_actions::Kind::Java, authored)?;
     let json_structures = json_structures::declare(&project, authored)?;
     let mappings = mappings::declare(&project, authored)?;
+    // An export mapping whose structure is declared too reads its runtime
+    // mapping from the declaration: one source for both.
+    let declared_structures: std::collections::BTreeSet<String> = json_structures
+        .iter()
+        .map(|structure| format!("{}.{}", structure.module, structure.name))
+        .collect();
+    let declared_export_mappings: std::collections::BTreeSet<String> = mappings
+        .iter()
+        .filter(|mapping| {
+            mapping.native_type == "ExportMappings$ExportMapping"
+                && declared_structures.contains(&mapping.json_structure)
+        })
+        .map(|mapping| format!("{}.{}", mapping.module, mapping.name))
+        .collect();
     declared.extend(mappings.iter().map(|mapping| {
         (
             mapping.native_type.to_string(),
@@ -727,7 +741,13 @@ fn import_cargo_project_inner(
         let module = generated_module(&mut generated_modules, &module_name);
         module.mappings = mappings
             .iter()
-            .map(|mapping| (mapping.file_stem.clone(), render_export_mapping(mapping)))
+            .map(|mapping| {
+                let declared = declared_export_mappings.contains(&mapping.qualified_name);
+                (
+                    mapping.file_stem.clone(),
+                    render_export_mapping(mapping, declared),
+                )
+            })
             .collect();
         if !services.is_empty() {
             let mut files: Vec<(String, String)> = services
@@ -5278,7 +5298,10 @@ fn render_module_http_index(module_name: &str, files: &[(String, String)]) -> St
 /// One export mapping as an editable declaration: the element tree the model
 /// declares, ready for [`mxrs::mapping::ExportMapping::apply`] at the HTTP
 /// boundary.
-fn render_export_mapping(mapping: &ExportMappingDocument) -> String {
+fn render_export_mapping(mapping: &ExportMappingDocument, declared: bool) -> String {
+    if declared {
+        return render_declared_export_mapping(mapping);
+    }
     let shape = if mapping.root.multiple {
         "an array of"
     } else {
@@ -5311,6 +5334,23 @@ fn render_export_mapping(mapping: &ExportMappingDocument) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+/// An export mapping the project declares, with its JSON structure: the
+/// runtime mapping is what that declaration states, so editing it is
+/// editing what the boundary answers.
+fn render_declared_export_mapping(mapping: &ExportMappingDocument) -> String {
+    let (module, name) = mapping
+        .qualified_name
+        .split_once('.')
+        .unwrap_or(("", &mapping.qualified_name));
+    format!(
+        "//! `{qualified}` — the JSON document the operations declaring it answer\n//! with, as its declaration in `domain::documents::{module_stem}::{stem}` states it.\n\nuse std::sync::OnceLock;\n\nuse mxrs::mapping::ExportMapping;\n\n/// The mapping its declaration states, read once.\npub fn mapping() -> ExportMapping {{\n    static MAPPING: OnceLock<ExportMapping> = OnceLock::new();\n    MAPPING\n        .get_or_init(|| mxrs::mapping::declared(env!(\"CARGO_CRATE_NAME\"), {qualified_literal}))\n        .clone()\n}}\n\n#[cfg(test)]\nmod tests {{\n    /// The declaration states the mapping, of its declared JSON structure.\n    #[test]\n    fn the_declaration_states_a_document() {{\n        super::mapping();\n    }}\n}}\n",
+        qualified = mapping.qualified_name,
+        module_stem = module_stem(module),
+        stem = inner_file_stem(name),
+        qualified_literal = rust_string(&mapping.qualified_name),
+    )
 }
 
 /// One level of the element tree as a builder chain. `depth` counts four-space
@@ -6610,23 +6650,14 @@ fn export_mapping(
     document: &mxrs_bson::Document,
     module_name: &str,
 ) -> Option<ExportMappingDocument> {
-    if document.get_bool("Excluded").unwrap_or(false) {
-        return None;
-    }
     let name = document
         .get_str("Name")
         .ok()
         .filter(|name| !name.is_empty())?;
-    // Mendix allows exactly one root element per mapping; more than one is
-    // not a document this declaration can describe.
-    let elements = documents_in(document, "Elements");
-    let [root] = elements.as_slice() else {
-        return None;
-    };
-    let root = mapped_object(root)?;
-    if !root.key.is_empty() || !root.association.is_empty() {
-        return None;
-    }
+    // The runtime's own reading of the document, so the mapping an imported
+    // project applies and the one a declaration states are read alike.
+    let stated = mxrs_writer::stated_document(document).ok()?;
+    let mapping = mxrs_runtime_flows::ExportMapping::from_document(&stated)?;
     Some(ExportMappingDocument {
         module_name: module_name.to_string(),
         qualified_name: format!("{module_name}.{name}"),
@@ -6635,137 +6666,27 @@ fn export_mapping(
             .get_str("Documentation")
             .unwrap_or_default()
             .to_string(),
-        send_nils: document.get_str("NullValueOption").unwrap_or_default() == "SendAsNil",
-        root,
+        send_nils: mapping.null_values() == mxrs_runtime_flows::NullValues::SendAsNil,
+        root: mapped_object(mapping.root()),
     })
 }
 
-fn mapped_object(element: &mxrs_bson::Document) -> Option<MappedObject> {
-    if element.get_str("$Type").ok()? != "ExportMappings$ObjectMappingElement"
-        || !element
-            .get_str("CustomHandlerCall")
-            .unwrap_or_default()
-            .is_empty()
-    {
-        return None;
-    }
-    let children = documents_in(element, "Children");
-    let entity = element.get_str("Entity").unwrap_or_default();
-    // Mendix wraps a *repeated* nested object in an element of its own: the
-    // wrapper carries the JSON key and no entity, its single object child
-    // carries the entity, the association and `MaxOccurs: -1`. The wrapper
-    // adds no level to the document — its child's own path already names the
-    // same key — so it collapses into that child.
-    if entity.is_empty() {
-        let [wrapped] = children.as_slice() else {
-            return None;
-        };
-        return mapped_object(wrapped);
-    }
-    // Multiplicity decides whether the key answers an array, and getting it
-    // wrong changes the document's shape, so an element that does not state
-    // it is not an element this declaration can describe.
-    // Studio Pro writes the bound as a 32-bit integer; read the 64-bit
-    // spelling too so a model that widened it still states its shape.
-    let occurs = element
-        .get_i32("MaxOccurs")
-        .map(i64::from)
-        .or_else(|_| element.get_i64("MaxOccurs"))
-        .ok()?;
-    let path = element.get_str("JsonPath").unwrap_or_default();
-    let key = object_json_key(path)?;
-    let association = element.get_str("Association").unwrap_or_default();
-    // A nested level is reached by association; the root is supplied by the
-    // flow result itself. Anything else is a level we cannot walk to.
-    if key.is_some() == association.is_empty() {
-        return None;
-    }
-    // At the root the path states the shape too, as `(Array)|(Object)`. The
-    // two must agree; if they do not, the element is not read the way this
-    // declaration would read it.
-    if key.is_none() && json_path_segments(path).contains(&"(Array)") != (occurs != 1) {
-        return None;
-    }
-    let mut values = Vec::new();
-    let mut nested = Vec::new();
-    for child in children {
-        match child.get_str("$Type").ok()? {
-            "ExportMappings$ValueMappingElement" => values.push(mapped_value(&child)?),
-            "ExportMappings$ObjectMappingElement" => nested.push(mapped_object(&child)?),
-            _ => return None,
-        }
-    }
-    if values.is_empty() && nested.is_empty() {
-        return None;
-    }
-    Some(MappedObject {
-        entity: entity.to_string(),
-        association: association.to_string(),
-        key: key.unwrap_or_default(),
-        multiple: occurs != 1,
-        values,
-        children: nested,
-    })
-}
-
-fn mapped_value(element: &mxrs_bson::Document) -> Option<MappedValue> {
-    // A converter rewrites the value on its way out; the declaration has no
-    // surface for one yet, so the whole mapping steps aside.
-    if !element.get_str("Converter").unwrap_or_default().is_empty() {
-        return None;
-    }
-    let attribute = element
-        .get_str("Attribute")
-        .ok()
-        .filter(|attribute| !attribute.is_empty())?
-        .rsplit('.')
-        .next()
-        .filter(|attribute| !attribute.is_empty())?
-        .to_string();
-    let key = value_json_key(element.get_str("JsonPath").unwrap_or_default())?;
-    Some(MappedValue { key, attribute })
-}
-
-/// `(Object)` and `(Array)` mark structure in a mapping element's `JsonPath`;
-/// every other segment names a key. The model's `ExposedName` is the Studio
-/// Pro caption, which can differ in case from the key the document carries —
-/// so the path, not the caption, is the key.
-fn json_path_segments(path: &str) -> Vec<&str> {
-    path.split('|')
-        .filter(|segment| !segment.is_empty())
-        .collect()
-}
-
-fn json_path_marker(segment: &str) -> bool {
-    matches!(segment, "(Object)" | "(Array)")
-}
-
-/// The JSON key a value element answers under, e.g. `lane` from
-/// `(Object)|lane`.
-fn value_json_key(path: &str) -> Option<String> {
-    let segments = json_path_segments(path);
-    let last = segments.last()?;
-    (!json_path_marker(last)).then(|| (*last).to_string())
-}
-
-/// The JSON key an object element nests under, or `None` at the root, which
-/// *is* the document: `(Object)` and `(Array)|(Object)` are the root shapes,
-/// `(Object)|metadata` a single object under `metadata`, and
-/// `(Object)|data|(Object)` the repeated object under `data`. Whether a key
-/// answers an array comes from `MaxOccurs`, not from the path — Mendix writes
-/// the `(Array)` marker only at the root.
-fn object_json_key(path: &str) -> Option<Option<String>> {
-    let mut segments = json_path_segments(path);
-    if segments.last() == Some(&"(Object)") {
-        segments.pop();
-    }
-    if segments.last() == Some(&"(Array)") {
-        segments.pop();
-    }
-    match segments.pop() {
-        Some(segment) if json_path_marker(segment) => None,
-        Some(segment) => Some(Some(segment.to_string())),
-        None => Some(None),
+/// A runtime mapping as the tree the generated declaration renders.
+fn mapped_object(object: &mxrs_runtime_flows::ObjectMapping) -> MappedObject {
+    MappedObject {
+        entity: object.entity().to_string(),
+        association: object.association().to_string(),
+        key: object.key().to_string(),
+        multiple: object.is_multiple(),
+        values: object
+            .values()
+            .iter()
+            .map(|value| MappedValue {
+                key: value.key().to_string(),
+                attribute: value.attribute().to_string(),
+            })
+            .collect(),
+        children: object.children().iter().map(mapped_object).collect(),
     }
 }
 
@@ -8885,7 +8806,7 @@ mod tests {
         );
         assert!(lowered.root.children[1].multiple);
 
-        let rendered = render_export_mapping(&lowered);
+        let rendered = render_export_mapping(&lowered, false);
         assert!(
             rendered.contains(
                 "//! `Sales.EM_Order_List` — the JSON document the operations\n//! declaring it answer with: an array of `Sales.Order`."

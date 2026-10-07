@@ -19,6 +19,7 @@ mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-materializers = { path = "../../compiler/mxrs-materializers" }
 mxrs-forms = { path = "../../model/mxrs-forms" }
 mxrs-project = { path = "../mxrs-project" }
+mxrs-runtime-flows = { path = "../mxrs-runtime-flows" }
 mxrs-typegen = { path = "../../authoring/mxrs-typegen" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
 serde.workspace = true

@@ -28,6 +28,7 @@
 //!   is a value a Mendix string attribute genuinely holds, so
 //!   [`NullValues::LeaveOut`] keeps it rather than dropping the key.
 
+use mxrs_ir::{NativeDocument, NativeValue};
 use serde_json::{Map, Value};
 
 use mxrs_runtime::{ObjectValue, Store};
@@ -75,6 +76,34 @@ impl ExportMapping {
 
     pub fn root(&self) -> &ObjectMapping {
         &self.root
+    }
+
+    /// The mapping an `ExportMappings$ExportMapping` document states, when
+    /// it is one a document of objects can answer with: one root element,
+    /// JSON keys on every level, no custom handler, no value converter, not
+    /// excluded. Mendix's wrapper around a repeated object — an element with
+    /// no entity holding the one that has it — adds no level and collapses
+    /// into what it wraps.
+    pub fn from_document(document: &NativeDocument) -> Option<Self> {
+        if document.ty != "ExportMappings$ExportMapping"
+            || matches!(document.get("Excluded"), Some(NativeValue::Bool(true)))
+        {
+            return None;
+        }
+        let elements = documents_in(document, "Elements");
+        let [root] = elements.as_slice() else {
+            return None;
+        };
+        let root = mapped_object(root)?;
+        if !root.key.is_empty() || !root.association.is_empty() {
+            return None;
+        }
+        let mapping = Self::new(root);
+        Some(if document.text("NullValueOption") == Some("SendAsNil") {
+            mapping.sending_nils()
+        } else {
+            mapping
+        })
     }
 
     pub fn null_values(&self) -> NullValues {
@@ -305,6 +334,137 @@ fn sources(store: &Store, value: &FlowValue) -> Vec<ObjectValue> {
 
 fn object_value(store: &Store, reference: &ObjectRef) -> Option<ObjectValue> {
     store.find(&reference.entity, &reference.id).ok().flatten()
+}
+
+/// The documents a stored list field holds, in order.
+fn documents_in<'a>(document: &'a NativeDocument, field: &str) -> Vec<&'a NativeDocument> {
+    match document.get(field) {
+        Some(NativeValue::List(_, items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                NativeValue::Document(document) => Some(document),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn text<'a>(document: &'a NativeDocument, field: &str) -> &'a str {
+    document.text(field).unwrap_or_default()
+}
+
+/// One `ExportMappings$ObjectMappingElement`, a wrapper collapsed into what
+/// it wraps.
+fn mapped_object(element: &NativeDocument) -> Option<ObjectMapping> {
+    let handled = match element.get("CustomHandlerCall") {
+        None | Some(NativeValue::Null) => false,
+        Some(NativeValue::Text(text)) => !text.is_empty(),
+        Some(_) => true,
+    };
+    if element.ty != "ExportMappings$ObjectMappingElement" || handled {
+        return None;
+    }
+    let children = documents_in(element, "Children");
+    let entity = text(element, "Entity");
+    if entity.is_empty() {
+        let [wrapped] = children.as_slice() else {
+            return None;
+        };
+        return mapped_object(wrapped);
+    }
+    // Multiplicity decides whether the key answers an array, so an element
+    // that does not state it is not one a document can be shaped by.
+    let occurs = match element.get("MaxOccurs")? {
+        NativeValue::Int32(occurs) => i64::from(*occurs),
+        NativeValue::Int64(occurs) => *occurs,
+        _ => return None,
+    };
+    let path = text(element, "JsonPath");
+    let key = object_json_key(path)?;
+    let association = text(element, "Association");
+    // A nested level is reached by association; the root is the flow's
+    // result itself.
+    if key.is_some() == association.is_empty() {
+        return None;
+    }
+    // At the root the path states the shape too; the two must agree.
+    if key.is_none() && json_path_segments(path).contains(&"(Array)") != (occurs != 1) {
+        return None;
+    }
+    let mut values = Vec::new();
+    let mut nested = Vec::new();
+    for child in children {
+        match child.ty.as_str() {
+            "ExportMappings$ValueMappingElement" => values.push(mapped_value(child)?),
+            "ExportMappings$ObjectMappingElement" => nested.push(mapped_object(child)?),
+            _ => return None,
+        }
+    }
+    if values.is_empty() && nested.is_empty() {
+        return None;
+    }
+    Some(ObjectMapping {
+        entity: entity.to_string(),
+        association: association.to_string(),
+        key: key.unwrap_or_default(),
+        multiple: occurs != 1,
+        values,
+        children: nested,
+    })
+}
+
+fn mapped_value(element: &NativeDocument) -> Option<ValueMapping> {
+    // A converter rewrites the value on its way out, which a document of
+    // stored members cannot.
+    if !text(element, "Converter").is_empty() {
+        return None;
+    }
+    let attribute = text(element, "Attribute")
+        .rsplit('.')
+        .next()
+        .filter(|attribute| !attribute.is_empty())?
+        .to_string();
+    let key = value_json_key(text(element, "JsonPath"))?;
+    Some(ValueMapping { key, attribute })
+}
+
+/// `(Object)` and `(Array)` mark structure in a `JsonPath`; every other
+/// segment names a key — the document's own, which the element's caption
+/// may spell otherwise.
+fn json_path_segments(path: &str) -> Vec<&str> {
+    path.split('|')
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn json_path_marker(segment: &str) -> bool {
+    matches!(segment, "(Object)" | "(Array)")
+}
+
+/// The key a value answers under: `lane` from `(Object)|lane`.
+fn value_json_key(path: &str) -> Option<String> {
+    let segments = json_path_segments(path);
+    let last = segments.last()?;
+    (!json_path_marker(last)).then(|| (*last).to_string())
+}
+
+/// The key an object nests under, or `None` at the root: `(Object)` and
+/// `(Array)|(Object)` are the root, `(Object)|metadata` one object under
+/// `metadata`, `(Object)|data|(Object)` the repeated object under `data`.
+fn object_json_key(path: &str) -> Option<Option<String>> {
+    let mut segments = json_path_segments(path);
+    if segments.last() == Some(&"(Object)") {
+        segments.pop();
+    }
+    if segments.last() == Some(&"(Array)") {
+        segments.pop();
+    }
+    match segments.pop() {
+        Some(segment) if json_path_marker(segment) => None,
+        Some(segment) => Some(Some(segment.to_string())),
+        None => Some(None),
+    }
 }
 
 #[cfg(test)]

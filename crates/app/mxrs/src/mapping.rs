@@ -36,3 +36,75 @@
 //! ```
 
 pub use mxrs_runtime_flows::{ExportMapping, NullValues, ObjectMapping, ValueMapping};
+
+use mxrs_ir::declaration::ProjectDecl;
+use mxrs_ir::{MappingDirection, NativeDocument};
+
+/// The export mapping `qualified` — `Module.EM_Name` — as `crate_name`
+/// declares it: the document its declaration writes against the JSON
+/// structure it maps, both of them declared, shaped into what the boundary
+/// applies. A project imported with both declared reads its runtime mapping
+/// here, so the declaration is the mapping's one source.
+///
+/// # Panics
+///
+/// When `crate_name` does not declare the mapping and its structure, or
+/// they state no document of objects — a mistake in the declarations the
+/// project's own test of the mapping names.
+pub fn declared(crate_name: &str, qualified: &str) -> ExportMapping {
+    declared_document(crate_name, qualified)
+        .and_then(|document| {
+            ExportMapping::from_document(&document)
+                .ok_or_else(|| format!("{qualified} maps no document of objects"))
+        })
+        .unwrap_or_else(|error| panic!("export mapping {error}"))
+}
+
+/// The document the export mapping `qualified` writes, or why there is none.
+fn declared_document(crate_name: &str, qualified: &str) -> Result<NativeDocument, String> {
+    let mut project = ProjectDecl {
+        mendix_version: String::new(),
+        modules: Vec::new(),
+        security: None,
+        navigation: None,
+        demo_users: Vec::new(),
+    };
+    // Mappings and JSON structures are documents: nothing else need be
+    // assembled to read them.
+    for declaration in crate::registry::declarations(crate_name) {
+        if declaration.stage() == crate::registry::Stage::Document {
+            declaration.apply(&mut project);
+        }
+    }
+    let find = |qualified: &str| {
+        let (module, name) = qualified.split_once('.')?;
+        project
+            .modules
+            .iter()
+            .find(|candidate| candidate.name == module)
+            .map(|module| (module, name.to_string()))
+    };
+    let (module, name) =
+        find(qualified).ok_or_else(|| format!("{qualified}: its module declares nothing"))?;
+    let mapping = module
+        .mappings
+        .iter()
+        .find(|mapping| mapping.name == name && mapping.direction == MappingDirection::Export)
+        .ok_or_else(|| format!("{qualified} is not declared"))?;
+    let structure = find(&mapping.json_structure)
+        .and_then(|(module, name)| {
+            module
+                .json_structures
+                .iter()
+                .find(|structure| structure.name == name)
+        })
+        .ok_or_else(|| {
+            format!(
+                "{qualified}: its JSON structure {} is not declared",
+                mapping.json_structure
+            )
+        })?;
+    mapping
+        .document(structure)
+        .map_err(|error| format!("{qualified}: {error}"))
+}

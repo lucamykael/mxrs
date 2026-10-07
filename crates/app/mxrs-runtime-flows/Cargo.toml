@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 base64 = "0.22"
 mxrs-bson = { path = "../../io/mxrs-bson" }
+mxrs-ir = { path = "../../authoring/mxrs-ir" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-runtime = { path = "../mxrs-runtime" }
 serde_json.workspace = true

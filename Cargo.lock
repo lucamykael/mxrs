@@ -1081,6 +1081,7 @@ dependencies = [
  "mxrs-model",
  "mxrs-mpr",
  "mxrs-project",
+ "mxrs-runtime-flows",
  "mxrs-typegen",
  "mxrs-writer",
  "serde",
@@ -1403,6 +1404,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "mxrs-bson",
+ "mxrs-ir",
  "mxrs-model",
  "mxrs-runtime",
  "serde_json",
