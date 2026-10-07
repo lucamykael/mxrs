@@ -239,7 +239,7 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         "javascript-action" => (
             Status::Verified,
             "mxrs javascript-action new",
-            "a typed JavaScript action declaration (`module.javascript_action`, parameters and return as Rust types, written as the document Studio Pro stores) in src/ports/javascript_actions/<module>, and the JavaScript Studio Pro writes for a new action in assets/javascriptsource/<module>/actions, which every build ships; own evidence: the scaffold compiles in a generated project and the action reaches the written model",
+            "a typed JavaScript action declaration (`module.javascript_action`, parameters and return as Rust types, written as the document Studio Pro stores) in src/ports/<module>/javascript_actions (where the importer also declares the actions a declaration restates), and the JavaScript Studio Pro writes for a new action in assets/javascriptsource/<module>/actions, which every build ships; own evidence: the scaffold compiles in a generated project and the action reaches the written model",
         ),
         "consumed-rest" | "entity" | "enumeration" | "java-action" | "nanoflow"
         | "published-rest" | "use-case" => (

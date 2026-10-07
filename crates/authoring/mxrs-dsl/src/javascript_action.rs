@@ -96,6 +96,24 @@ impl JavaScriptActionBuilder {
         self
     }
 
+    /// A parameter a call may leave out, of a type no Rust type names.
+    pub fn takes_optional_type(
+        &mut self,
+        name: impl Into<String>,
+        ty: CodeActionType,
+    ) -> &mut Self {
+        let mut parameter = JavaScriptActionParameter::new(name, ty);
+        parameter.required = false;
+        self.decl.parameters.push(parameter);
+        self
+    }
+
+    /// What the action returns, of a type no Rust type names.
+    pub fn returns_type(&mut self, ty: CodeActionType) -> &mut Self {
+        self.decl.return_type = ty;
+        self
+    }
+
     /// What the action returns; nothing unless said.
     pub fn returns<T: CodeActionValue>(&mut self) -> &mut Self {
         self.decl.return_type = T::code_action_type();

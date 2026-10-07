@@ -72,6 +72,7 @@ mod flow_general;
 mod frontend_export;
 mod frontend_flows;
 mod frontend_forms;
+mod javascript_actions;
 mod layout;
 mod names;
 #[cfg(test)]
@@ -428,6 +429,14 @@ fn import_cargo_project_inner(
                 )
             }),
     );
+    let javascript_actions = javascript_actions::declare(&project, authored)?;
+    declared.extend(javascript_actions.iter().map(|action| {
+        (
+            "JavaScriptActions$JavaScriptAction".to_string(),
+            action.module.clone(),
+            action.declaration.name.clone(),
+        )
+    }));
     declared.retain(|(_, module, _)| authored(module));
     drop(project);
 
@@ -526,6 +535,11 @@ fn import_cargo_project_inner(
         generated_module(&mut generated_modules, module_name)
             .documents
             .push((stem.clone(), source.clone()));
+    }
+    for action in &javascript_actions {
+        generated_module(&mut generated_modules, &action.module)
+            .javascript_actions
+            .push((action.stem.clone(), action.source.clone()));
     }
     for module in &modules {
         let Some(module_name) = module.name.as_deref() else {
@@ -7271,6 +7285,9 @@ struct GeneratedModule {
     ports_services: Option<String>,
     /// `ports/actions.rs` — the module's action port traits.
     ports_actions: Option<String>,
+    /// `(file stem, source)` per JavaScript action the module declares, in
+    /// `ports/<module>/javascript_actions/`.
+    javascript_actions: Vec<(String, String)>,
     /// `markers.rs` — the module's compile-time model markers.
     markers: Option<String>,
     /// `(file stem, source)` per export mapping a published REST operation
@@ -7602,7 +7619,11 @@ fn write_authored_ports(
 ) -> Result<()> {
     let owned: Vec<_> = modules
         .iter()
-        .filter(|(_, module)| module.ports_services.is_some() || module.ports_actions.is_some())
+        .filter(|(_, module)| {
+            module.ports_services.is_some()
+                || module.ports_actions.is_some()
+                || !module.javascript_actions.is_empty()
+        })
         .collect();
     if owned.is_empty() {
         return Ok(());
@@ -7626,6 +7647,20 @@ fn write_authored_ports(
         if let Some(actions) = &module.ports_actions {
             module_index.push_str("pub mod actions;\n");
             write_text(&folder.join("actions.rs"), actions)?;
+        }
+        if !module.javascript_actions.is_empty() {
+            module_index.push_str("pub mod javascript_actions;\n");
+            let actions = folder.join("javascript_actions");
+            std::fs::create_dir_all(&actions).map_err(|source| io_error(&actions, source))?;
+            let mut actions_index = format!(
+                "//! The JavaScript actions of the {} module: what a nanoflow's call\n//! takes and returns. Their JavaScript is `javascriptsource/`'s.\n\n",
+                module.name
+            );
+            for (stem, source) in &module.javascript_actions {
+                let _ = writeln!(actions_index, "pub mod {stem};");
+                write_text(&actions.join(format!("{stem}.rs")), source)?;
+            }
+            write_text(&actions.join("mod.rs"), &actions_index)?;
         }
         if let Some(services) = &module.ports_services {
             module_index.push_str("pub mod services;\n");

@@ -117,9 +117,34 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     // Only the counts are read here, and a module's provenance does not change
     // them; the inventory is about what the export covers, not about where it
     // lands.
-    let editable_documents =
-        super::render_documents_module(&project, &super::package_stems(&modules))?.counts;
+    let packages = super::package_stems(&modules);
+    let editable_documents = super::render_documents_module(&project, &packages)?.counts;
     let converted_flows = super::flow_export::collect(&project, &modules)?;
+    // What the importer states whole, and reads back as stored: the forms
+    // its TSX declares, and the JavaScript actions of the modules the
+    // project made.
+    let rust_pages: std::collections::HashSet<(String, String)> = typed_pages
+        .iter()
+        .map(|page| (page.module_name.clone(), page.decl.name.clone()))
+        .collect();
+    let frontend_forms = super::frontend_forms::declare_in_frontend(
+        &modules,
+        |_| true,
+        |module, ty, name| {
+            ty == "Forms$Page" && rust_pages.contains(&(module.to_string(), name.to_string()))
+        },
+    );
+    let mut stated_whole = BTreeMap::<String, usize>::new();
+    for (_, ty, _) in &frontend_forms.declared {
+        *stated_whole.entry(ty.clone()).or_default() += 1;
+    }
+    let authored = |module: &str| {
+        super::module_root(&super::module_stem(module), &packages) == super::ModuleRoot::Authored
+    };
+    stated_whole.insert(
+        "JavaScriptActions$JavaScriptAction".to_string(),
+        super::javascript_actions::declare(&project, authored)?.len(),
+    );
 
     let mut families = Vec::with_capacity(counts.len());
     for (native_type, total) in counts {
@@ -132,6 +157,7 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
                 .filter(|flow| flow.native_type == native_type)
                 .count();
         let typed = typed_pages_by_type.get(&native_type).copied().unwrap_or(0)
+            + stated_whole.get(&native_type).copied().unwrap_or(0)
             + if matches!(
                 native_type.as_str(),
                 "RegularExpressions$RegularExpression"
@@ -156,8 +182,11 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
                 ) {
                     "the complete semantic document is emitted as typed Rust and byte-exactly round-tripped"
                         .to_string()
+                } else if native_type == "JavaScriptActions$JavaScriptAction" {
+                    "each action a declaration restates is emitted as typed Rust and read back as stored; the rest are preserved byte-for-byte"
+                        .to_string()
                 } else {
-                    "typed pages are recompiled and field-compared; remaining pages are preserved byte-for-byte"
+                    "each form is stated whole as TSX (or a typed Rust page) and read back as stored; the rest are preserved byte-for-byte"
                         .to_string()
                 },
             )

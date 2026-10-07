@@ -1982,13 +1982,22 @@ fn update_flags_are_mutually_exclusive_and_arguments_are_validated() {
 }
 
 #[test]
-fn diagram_er_refuses_the_browser_lifecycle_and_validates_arguments() {
-    for action in ["up", "down", "status", "destroy", "__serve"] {
-        let output = cli(&["diagram-er", action, "/tmp/x.mpr"]);
-        assert!(!output.status.success());
+fn diagram_er_lifecycle_actions_validate_their_arguments() {
+    let state = tempfile::tempdir().unwrap();
+    let state = state.path().to_str().unwrap();
+    for (action, reason) in [
+        ("up", "MPR not found"),
+        ("down", "no managed diagram"),
+        ("destroy", "--yes"),
+        ("__serve", "requires --output"),
+    ] {
+        let output = cli(&["diagram-er", action, "/tmp/x.mpr", "--state-root", state]);
+        assert!(!output.status.success(), "{action}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("not ported"), "{action}: {stderr}");
+        assert!(stderr.contains(reason), "{action}: {stderr}");
     }
+    let status = cli(&["diagram-er", "status", "/tmp/x.mpr", "--state-root", state]);
+    assert!(text(&status).contains("[mxrs] ER diagram: absent"));
     let missing = cli(&["diagram-er", "/nonexistent.mpr"]);
     assert!(!missing.status.success());
     let bare = cli(&["diagram-er"]);

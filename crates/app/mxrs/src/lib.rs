@@ -282,13 +282,13 @@ pub mod prelude {
         float, integer, long, project, string,
     };
     pub use crate::{
-        AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, JavaScriptPlatform,
-        LayoutBuilder, LifecycleEvent, MemberRights, MxBinary, MxList, MxObject, SystemMember,
-        aggregate_list, call_java_action, call_javascript_action, call_microflow, call_nanoflow,
-        change_list, change_object, change_variable, close_page, commit_object, constant,
-        create_list, create_object, create_variable, declaration, delete_object, demo_user, dto,
-        entity, enumeration, layout, log, menu, microflow, module_roles, nanoflow, navigation,
-        navigation_item, page, retrieve, rollback_object, route, security, service, show_message,
-        show_page, view,
+        AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, CodeActionType,
+        JavaScriptPlatform, LayoutBuilder, LifecycleEvent, MemberRights, MxBinary, MxList,
+        MxObject, SystemMember, aggregate_list, call_java_action, call_javascript_action,
+        call_microflow, call_nanoflow, change_list, change_object, change_variable, close_page,
+        commit_object, constant, create_list, create_object, create_variable, declaration,
+        delete_object, demo_user, dto, entity, enumeration, layout, log, menu, microflow,
+        module_roles, nanoflow, navigation, navigation_item, page, retrieve, rollback_object,
+        route, security, service, show_message, show_page, view,
     };
 }

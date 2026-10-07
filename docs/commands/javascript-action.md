@@ -8,7 +8,7 @@ A JavaScript action is code a nanoflow runs in the browser. Its contract —
 what a call takes and returns, and where it runs — is the model's; its
 JavaScript is the project's. The scaffold writes both, as mxrb's does:
 
-- `src/ports/javascript_actions/<module>/<action>.rs` declares the action:
+- `src/ports/<module>/javascript_actions/<action>.rs` declares the action:
 
   ```rust
   #[declaration(module = "Sales")]
@@ -35,6 +35,10 @@ JavaScript is the project's. The scaffold writes both, as mxrb's does:
   `BEGIN EXTRA CODE` sections. Every build ships `assets/javascriptsource`
   beside the `.mpr`.
 
-The scaffold is transactional and refuses to overwrite either file. A
+The importer writes the same file for every JavaScript action of a module the
+project made whose declaration states its stored document again; one with a
+toolbox icon, a type parameter, or a parameter description stays in the
+imported model. The scaffold is transactional and refuses to overwrite
+either file. A
 nanoflow calls the action with `callJavaScriptAction("Sales.OpenMap", ...)`
 in the frontend's TypeScript, or `call_javascript_action!` in Rust.

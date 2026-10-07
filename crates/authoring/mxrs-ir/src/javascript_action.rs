@@ -22,6 +22,32 @@ pub enum CodeActionType {
 }
 
 impl CodeActionType {
+    /// The type a stored document states, when it is one of these.
+    pub fn from_document(document: &NativeDocument) -> Option<Self> {
+        let entity = |document: &NativeDocument| document.text("Entity").map(str::to_string);
+        Some(match document.ty.as_str() {
+            "CodeActions$VoidType" => Self::Void,
+            "CodeActions$BooleanType" => Self::Boolean,
+            "CodeActions$DateTimeType" => Self::DateTime,
+            "CodeActions$DecimalType" => Self::Decimal,
+            "CodeActions$IntegerType" => Self::Integer,
+            "CodeActions$StringType" => Self::String,
+            "CodeActions$ConcreteEntityType" => Self::Object(entity(document)?),
+            "CodeActions$ListType" => match document.get("Parameter")? {
+                NativeValue::Document(parameter)
+                    if parameter.ty == "CodeActions$ConcreteEntityType" =>
+                {
+                    Self::List(entity(parameter)?)
+                }
+                _ => return None,
+            },
+            "CodeActions$EnumerationType" => {
+                Self::Enumeration(document.text("Enumeration")?.to_string())
+            }
+            _ => return None,
+        })
+    }
+
     /// The document the model stores for the type.
     pub fn document(&self) -> NativeDocument {
         let named = |ty: &str| NativeDocument::new(format!("CodeActions${ty}Type"));
@@ -57,6 +83,15 @@ pub enum JavaScriptPlatform {
 }
 
 impl JavaScriptPlatform {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "All" => Some(Self::All),
+            "Web" => Some(Self::Web),
+            "Native" => Some(Self::Native),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             JavaScriptPlatform::All => "All",
@@ -85,6 +120,28 @@ impl JavaScriptActionParameter {
             category: String::new(),
             required: true,
         }
+    }
+
+    fn from_document(document: &NativeDocument) -> Option<Self> {
+        let ty = match document.get("ParameterType")? {
+            NativeValue::Document(kind) if kind.ty == "CodeActions$BasicParameterType" => {
+                match kind.get("Type")? {
+                    NativeValue::Document(ty) => CodeActionType::from_document(ty)?,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        Some(Self {
+            name: document.text("Name")?.to_string(),
+            ty,
+            description: document.text("Description")?.to_string(),
+            category: document.text("Category")?.to_string(),
+            required: match document.get("IsRequired")? {
+                NativeValue::Bool(required) => *required,
+                _ => return None,
+            },
+        })
     }
 
     fn document(&self) -> NativeDocument {
@@ -128,6 +185,46 @@ impl JavaScriptActionDecl {
             excluded: false,
             export_level: ExportLevel::Hidden,
         }
+    }
+
+    /// The declaration a stored action is, when [`Self::document`] states
+    /// that document again: an action this cannot say — a type parameter,
+    /// a toolbox icon, a parameter of another kind — is none.
+    pub fn from_document(document: &NativeDocument) -> Option<Self> {
+        if document.ty != "JavaScriptActions$JavaScriptAction" {
+            return None;
+        }
+        let parameters = match document.get("Parameters")? {
+            NativeValue::List(_, items) => items
+                .iter()
+                .map(|item| match item {
+                    NativeValue::Document(parameter) => {
+                        JavaScriptActionParameter::from_document(parameter)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?,
+            _ => return None,
+        };
+        let return_type = match document.get("JavaReturnType")? {
+            NativeValue::Document(ty) => CodeActionType::from_document(ty)?,
+            _ => return None,
+        };
+        let declaration = Self {
+            name: document.text("Name")?.to_string(),
+            documentation: document.text("Documentation")?.to_string(),
+            parameters,
+            return_type,
+            return_name: document.text("ActionDefaultReturnName")?.to_string(),
+            platform: JavaScriptPlatform::parse(document.text("Platform")?)?,
+            excluded: matches!(document.get("Excluded")?, NativeValue::Bool(true)),
+            export_level: match document.text("ExportLevel")? {
+                "Hidden" => ExportLevel::Hidden,
+                "Published" => ExportLevel::Published,
+                _ => return None,
+            },
+        };
+        (declaration.document() == *document).then_some(declaration)
     }
 
     /// The document the model stores for the action, its fields in the
@@ -203,5 +300,14 @@ mod tests {
             parameter.get("Entity"),
             Some(&NativeValue::Text("Sales.Address".into()))
         );
+        // The document reads back as the declaration that states it; one
+        // with a toolbox icon says what the declaration cannot.
+        assert_eq!(JavaScriptActionDecl::from_document(&document), Some(action));
+        let mut iconed = document.clone();
+        iconed.set(
+            "MicroflowActionInfo",
+            NativeDocument::new("CodeActions$MicroflowActionInfo").with("Caption", "Open"),
+        );
+        assert_eq!(JavaScriptActionDecl::from_document(&iconed), None);
     }
 }

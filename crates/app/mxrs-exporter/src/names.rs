@@ -397,6 +397,7 @@ const MXRS_PRELUDE: &[&str] = &[
     "ButtonBuilder",
     "CallArgument",
     "ChangeKind",
+    "CodeActionType",
     "Commit",
     "ConstantBuilder",
     "ConstantType",

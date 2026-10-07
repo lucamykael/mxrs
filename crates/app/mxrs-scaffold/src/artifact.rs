@@ -174,7 +174,7 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         action: "new",
         argument: "<Module.Action>",
         summary: "Create JavaScript Action adapter",
-        destination: "src/ports/javascript_actions/<module>",
+        destination: "src/ports/<module>/javascript_actions",
         kind: ArtifactKind::JavaScriptAction,
     },
     ScaffoldCommand {
@@ -1762,17 +1762,54 @@ fn create_javascript_action(
     module_name: &str,
     artifact_name: &str,
 ) -> Result<()> {
-    let source = templates::javascript_action_source_path(module_name, artifact_name);
-    create_concept_file(
-        transaction,
-        root,
-        module_name,
-        module_folder(ArtifactKind::JavaScriptAction),
-        &snake_case(artifact_name),
+    let library = root.join("src/lib.rs");
+    if transaction.content(&library)?.is_none() {
+        return Err(ScaffoldError::ProjectNotFound(
+            library.display().to_string(),
+        ));
+    }
+    // `src/ports/<module>/javascript_actions/`, each index written as the
+    // importer writes it.
+    let module_directory = snake_case(module_name);
+    let levels = [
+        (
+            "ports",
+            "//! The contracts between the model and hand-written code, one folder per\n//! Mendix module: what a module's services offer, and what its actions\n//! need an adapter in `infrastructure` to provide.\n\n"
+                .to_string(),
+        ),
+        (
+            module_directory.as_str(),
+            format!("//! Contracts the {module_name} module exposes to hand-written code.\n\n"),
+        ),
+        (
+            "javascript_actions",
+            format!(
+                "//! The JavaScript actions of the {module_name} module: what a nanoflow's call\n//! takes and returns. Their JavaScript is `javascriptsource/`'s.\n\n"
+            ),
+        ),
+    ];
+    let mut parent = library;
+    let mut current = root.join("src");
+    for (segment, header) in levels {
+        current = current.join(segment);
+        let index = current.join("mod.rs");
+        if transaction.content(&index)?.is_none() {
+            transaction.create(&index, header)?;
+        }
+        declare_child_module(transaction, &parent, segment)?;
+        parent = index;
+    }
+    let stem = snake_case(artifact_name);
+    transaction.create(
+        current.join(format!("{stem}.rs")),
         templates::javascript_action(module_name, artifact_name),
     )?;
+    declare_child_module(transaction, &parent, &stem)?;
     transaction.create(
-        root.join(source),
+        root.join(templates::javascript_action_source_path(
+            module_name,
+            artifact_name,
+        )),
         templates::javascript_action_source(artifact_name),
     )
 }
@@ -1924,7 +1961,9 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Nanoflow => "ui/nanoflows",
         ArtifactKind::ConsumedRest | ArtifactKind::Integration => "domain/integrations",
         ArtifactKind::JavaAction => "domain/actions",
-        ArtifactKind::JavaScriptAction => "ports/javascript_actions",
+        ArtifactKind::JavaScriptAction => {
+            unreachable!("a JavaScript action is written by create_javascript_action")
+        }
         ArtifactKind::Security => "domain/module_security",
         ArtifactKind::Presentation => "ui/layouts",
         // A module is declared by a file of its own in the registry, not by a
