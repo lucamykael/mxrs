@@ -117,7 +117,7 @@ fn command_options(
             &["--no-atlas"],
             &[],
         ),
-        "oql" => (&["--dialect"], &["--json"], &[]),
+        "oql" => (&["--dialect", "--layout"], &["--json"], &[]),
         "analyze" => (&["--dialect", "--sql", "--oql"], &["--json"], &[]),
         "pack" => (&["--output", "--deployment"], &["--force"], &[]),
         "portable" => (
@@ -129,6 +129,11 @@ fn command_options(
         "search" => (&["--limit", "--backend"], &["--json"], &[]),
         "find" => (&[], &["--semantic"], &[]),
         "translate-oql" => (&["--dialect"], &[], &[]),
+        "query" => (
+            &["--from", "--to", "--dialect", "--project", "--input"],
+            &["--json"],
+            &[],
+        ),
         "page" => (
             &["--target", "--template", "--chain"],
             &["--dry-run", "--json", "--atlas"],
@@ -245,7 +250,7 @@ commands! {
     "move", "<file.mpr> <name> <container> [--apply] [--json]", "Preview or apply a unit move, composing rename across modules", run_move;
     "nanoflow", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Scaffold a client nanoflow declaration", run_nanoflow;
     "new", "<name> --output <directory> [--version 11.12.1] [--mxrs-workspace <path>] [--no-atlas]", "Create a Cargo-native project with Atlas", run_new;
-    "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--json]", "Catalog OQL and logical query risks", run_oql;
+    "oql", "<file.mpr> [--dialect postgresql|sql_server|ansi] [--layout logical|physical] [--json]", "Translate the model's OQL to SQL", run_oql;
     "pack", "<file.mpr> [--output FILE.mda] [--deployment DIR] [--force]", "Package a materialized deployment into an MDA", run_pack;
     "package", "<file.mpr> --web <directory> --output <archive.tar>", "Create a deterministic MXRS archive", run_package;
     "portability", "<file.mpr> [--json] [--verify-round-trip] [--require-typed]", "Audit typed authoring versus lossless model preservation", run_portability;
@@ -256,6 +261,7 @@ commands! {
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
     "presentation", "init <Module> [--target DIR] [--dry-run] [--json]", "Initialize presentation and the application layout", run_presentation;
     "published-rest", "new <Module.Handler> [--target DIR] [--dry-run] [--json]", "Scaffold a published REST handler microflow", run_published_rest;
+    "query", "\"SELECT ...\" --from sql|oql [--to oql|sql] [--dialect ansi|postgresql|sql_server] [--project FILE.mpr] [--input FILE|-] [--json]", "Convert a read-only query between SQL and OQL", run_query;
     "refs", "<file.mpr> <artifact> [--json]", "Show incoming references with their property paths", run_refs;
     "remove", "<file.mpr> <qualified-name> [--apply] [--json]", "Preview or apply a reference-safe removal", run_remove;
     "rename", "<file.mpr> <old-name> <new-name> [--apply] [--json]", "Preview or apply a model-wide rename", run_rename;
@@ -2832,6 +2838,19 @@ fn run_analyze(mut args: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// One query of the model and its SQL, as `oql --json` lists it.
+#[derive(serde::Serialize)]
+struct OqlView<'a> {
+    name: &'a str,
+    kind: &'a str,
+    oql: &'a str,
+    sql: Option<&'a str>,
+    dialect: &'a str,
+    confidence: &'a str,
+    parameters: &'a [String],
+    warnings: &'a [String],
+}
+
 fn run_oql(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let dialect = match take_value(&mut args, "--dialect")
@@ -2844,9 +2863,19 @@ fn run_oql(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Logical SQL names tables as the Mendix Runtime does, as mxrb does;
+    // physical SQL names the tables mxrs's own runtime stores.
+    let physical = match take_value(&mut args, "--layout").as_deref() {
+        None | Some("logical") => false,
+        Some("physical") => true,
+        Some(other) => {
+            eprintln!("[mxrs] error: unknown OQL layout {other:?}: use logical or physical");
+            return ExitCode::FAILURE;
+        }
+    };
     if args.len() != 1 {
         eprintln!(
-            "[mxrs] error: usage: mxrs oql <file.mpr> [--dialect postgresql|sql_server|ansi] [--json]"
+            "[mxrs] error: usage: mxrs oql <file.mpr> [--dialect postgresql|sql_server|ansi] [--layout logical|physical] [--json]"
         );
         return ExitCode::FAILURE;
     }
@@ -2866,39 +2895,55 @@ fn run_oql(mut args: Vec<String>) -> ExitCode {
     };
     let mut rows = Vec::with_capacity(queries.len());
     for query in &queries {
-        let projection = match mxrs_oql::translate_project(&query.oql, dialect, &project) {
-            Ok(projection) => projection,
-            Err(error) => {
-                eprintln!("[mxrs] error: {error}");
-                return ExitCode::FAILURE;
+        let projection = if physical {
+            match mxrs_oql::translate_project(&query.oql, dialect, &project) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    eprintln!("[mxrs] error: {error}");
+                    return ExitCode::FAILURE;
+                }
             }
+        } else {
+            mxrs_oql::translate(&query.oql, dialect)
         };
         rows.push((query, projection));
     }
     if json {
-        let values = rows
+        let views: Vec<OqlView<'_>> = rows
             .iter()
-            .map(|(query, projection)| {
-                serde_json::json!({
-                    "query": query,
-                    "projection": projection,
-                    "findings": mxrs_oql::analyze(&query.oql),
-                })
+            .map(|(query, projection)| OqlView {
+                name: &query.qualified_name,
+                kind: query.kind.as_str(),
+                oql: &query.oql,
+                sql: projection.sql.as_deref(),
+                dialect: projection.dialect.as_str(),
+                confidence: &projection.confidence,
+                parameters: &projection.parameters,
+                warnings: &projection.warnings,
             })
-            .collect::<Vec<_>>();
+            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&values).expect("serializable OQL report")
+            serde_json::to_string_pretty(&views).expect("serializable OQL report")
         );
     } else if rows.is_empty() {
-        println!("[mxrs] no native OQL queries found");
+        println!("[mxrs] No native OQL found");
     } else {
-        for (query, projection) in rows {
-            println!("{}", query.qualified_name);
-            if let Some(sql) = projection.sql {
-                println!("{sql}");
-            } else {
-                println!("unsupported: {}", projection.warnings.join("; "));
+        for (index, (query, projection)) in rows.iter().enumerate() {
+            if index > 0 {
+                println!();
+            }
+            println!("{} ({})", query.qualified_name, query.kind.as_str());
+            println!("OQL:");
+            println!("{}", query.oql);
+            println!(
+                "SQL ({}, {}):",
+                projection.dialect.as_str(),
+                projection.confidence
+            );
+            println!("{}", projection.sql.as_deref().unwrap_or("(not generated)"));
+            for warning in &projection.warnings {
+                eprintln!("[mxrs] warning: {warning}");
             }
         }
     }
@@ -3068,6 +3113,147 @@ fn run_serve(mut args: Vec<String>) -> ExitCode {
             eprintln!("[mxrs] error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// One query converted, as `query --json` says it.
+#[derive(serde::Serialize)]
+struct QueryConversion<'a> {
+    supported: bool,
+    from: &'a str,
+    to: &'a str,
+    sql: Option<&'a str>,
+    oql: Option<&'a str>,
+    dialect: &'a str,
+    confidence: &'a str,
+    parameters: &'a [String],
+    warnings: &'a [String],
+}
+
+fn run_query(mut args: Vec<String>) -> ExitCode {
+    let fail = |message: &str| {
+        eprintln!("[mxrs] error: {message}");
+        ExitCode::FAILURE
+    };
+    let Some(from) = take_value(&mut args, "--from") else {
+        return fail("--from is required: use sql or oql");
+    };
+    if !matches!(from.as_str(), "sql" | "oql") {
+        return fail("--from must be sql or oql");
+    }
+    let to = take_value(&mut args, "--to")
+        .unwrap_or_else(|| if from == "sql" { "oql" } else { "sql" }.to_string());
+    if from == to || !matches!(to.as_str(), "sql" | "oql") {
+        return fail("Supported query conversions are sql to oql and oql to sql");
+    }
+    let dialect = match take_value(&mut args, "--dialect")
+        .as_deref()
+        .map_or(Ok(mxrs_oql::Dialect::PostgreSql), mxrs_oql::Dialect::parse)
+    {
+        Ok(dialect) => dialect,
+        Err(error) => return fail(&error.to_string()),
+    };
+    let project = take_value(&mut args, "--project");
+    if project.is_some() && from != "sql" {
+        return fail("--project applies only when converting SQL to OQL");
+    }
+    let input = take_value(&mut args, "--input");
+    let json = take_flag(&mut args, "--json");
+    if input.is_some() && !args.is_empty() {
+        return fail("Query must be provided either as an argument or through --input");
+    }
+    let source = match input.as_deref() {
+        Some("-") => {
+            let mut text = String::new();
+            if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut text) {
+                return fail(&error.to_string());
+            }
+            text
+        }
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => return fail(&format!("{path}: {error}")),
+        },
+        None if args.is_empty() => {
+            return fail(
+                "usage: mxrs query \"SELECT ...\" --from sql|oql [--to oql|sql] [--dialect ansi|postgresql|sql_server] [--project FILE.mpr] [--input FILE] [--json]",
+            );
+        }
+        None => args.remove(0),
+    };
+    if !args.is_empty() {
+        return fail(&format!("Unknown arguments: {}", args.join(" ")));
+    }
+    // SQL comes back as logical OQL, with the project's casing when given;
+    // OQL goes to SQL the Mendix Runtime's way.
+    let (sql, oql, confidence, parameters, warnings) = if from == "sql" {
+        let catalog = match project.as_deref() {
+            Some(path) => match mxrs_model::Project::open(path, true)
+                .map_err(mxrs_oql::OqlError::from)
+                .and_then(|project| mxrs_oql::EntityCatalog::of(&project))
+            {
+                Ok(catalog) => catalog,
+                Err(error) => return fail(&error.to_string()),
+            },
+            None => mxrs_oql::EntityCatalog::default(),
+        };
+        let projection = mxrs_oql::sql_to_oql(&source, dialect, &catalog);
+        (
+            Some(source.clone()),
+            projection.oql,
+            projection.confidence.to_string(),
+            projection.parameters,
+            projection.warnings,
+        )
+    } else {
+        let projection = mxrs_oql::translate(&source, dialect);
+        (
+            projection.sql,
+            Some(source.clone()),
+            projection.confidence,
+            projection.parameters,
+            projection.warnings,
+        )
+    };
+    let supported = if to == "sql" {
+        sql.is_some()
+    } else {
+        oql.is_some()
+    };
+    if json {
+        let conversion = QueryConversion {
+            supported,
+            from: &from,
+            to: &to,
+            sql: sql.as_deref(),
+            oql: oql.as_deref(),
+            dialect: dialect.as_str(),
+            confidence: &confidence,
+            parameters: &parameters,
+            warnings: &warnings,
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&conversion).expect("serializable query conversion")
+        );
+    } else {
+        println!("{} source:", from.to_uppercase());
+        println!("{source}");
+        println!(
+            "{} ({}, {confidence}):",
+            to.to_uppercase(),
+            dialect.as_str()
+        );
+        let converted = if to == "sql" { &sql } else { &oql };
+        println!("{}", converted.as_deref().unwrap_or("(not generated)"));
+        for warning in &warnings {
+            eprintln!("[mxrs] warning: {warning}");
+        }
+    }
+    if supported {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

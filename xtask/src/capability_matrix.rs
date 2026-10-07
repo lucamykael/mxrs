@@ -416,9 +416,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "native metadata, sorted types and ordered unit inventory, v1/v2 and BSON errors: xtask command-oracle inspect; docs/commands/inspect.md",
         ),
         "oql" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs oql",
-            "catalog, logical SQL projection onto the physical runtime tables, and aliased association-path JOINs; an association path used directly as a FROM source is refused by name rather than guessed",
+            "mxrb's OQL catalog and logical translator (Runtime table and column naming, :parameters, FROM-first reordering, association paths refused) with its text, warnings and JSON: xtask command-oracle oql; `--layout physical` adds mxrs's projection onto its own runtime tables with aliased association-path JOINs",
         ),
         "pack" => (
             Status::Verified,
@@ -431,9 +431,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "full port of portable_packager.rb: a validated deployment plus an installed Mendix Runtime tree become one self-contained runtime.zip (Runtime under lib/runtime, deployment roots plus run under app/, first-boot state directories, start scripts rendered from the Runtime's own pad/bin/*.hbs templates or the fallback POSIX bin/start, and HOCON configuration rendered from model/metadata.json), with pack's validations plus a named refusal for a Runtime missing its launcher, symlinks refused, and the fixed timestamp actually written so the same inputs repack byte-identically (mxrb's FIXED_TIME is overwritten by rubyzip); own evidence: the five rendered configuration files and three fallback assets pinned byte-for-byte against mxrb's own rendering, an offline end-to-end bundle suite incl. PAD and no-PAD Runtimes, determinism under touched sources and every refusal message, and a live oracle where mxrb and mxrs packed the real Mendix 11.12.1 Runtime with a deployment mxrb materialized into archives identical per entry in name, mode, size and CRC (3993 files), differing only in mxrb's non-deterministic timestamps",
         ),
         "query" => (
-            Status::Partial,
-            "mxrs translate-oql",
-            "safe OQL-to-SQL subset",
+            Status::Verified,
+            "mxrs query",
+            "SQL to logical OQL (mxrb's reverse translator: physical and schema-qualified names, canonical casing from --project, named parameters, every refusal) and OQL to logical SQL, from an argument or --input, with its text, warnings and JSON: xtask command-oracle query",
         ),
         "run" => (
             Status::Partial,
@@ -558,12 +558,12 @@ mod tests {
     #[test]
     fn parses_and_classifies_command_inventory_without_counting_headers() {
         let report = build(&format!(
-            "Available MXRB commands (3):\n\n  cache  Cache operations\n  oql  Project OQL\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
+            "Available MXRB commands (3):\n\n  cache  Cache operations\n  export  Export project\n  {UNIMPLEMENTED}  Something unported\n\nRun `mxrb COMMAND --help` for usage and an example.\n",
         ))
         .unwrap();
         assert_eq!(report.rows.len(), 3);
         // `cache` is own-evidence verified since the 2026-09-21 policy
-        // amendment; `oql` remains partial; the fake command is missing.
+        // amendment; `export` remains partial; the fake command is missing.
         assert_eq!(report.verified, 1);
         assert_eq!(report.partial, 1);
         assert_eq!(report.missing, 1);
@@ -657,7 +657,7 @@ mod tests {
     /// assertion.
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["query", "oql", "export", "frontend"])).unwrap();
+        let report = build(&inventory(&["db", "update", "export", "frontend"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

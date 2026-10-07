@@ -59,7 +59,7 @@ pub trait TranslateOql: Send + Sync {
     fn translate(&self, oql: &str) -> mxrs_oql::Projection;
 }
 
-/// Mendix Runtime naming (`"Sales$Order"`, `o."Number"`) — the layout of a
+/// Mendix Runtime naming (`"sales$order"`, `o."number"`) — the layout of a
 /// database the Mendix Runtime created, and the only one mxrb's server knows.
 /// Use it to serve such a database; a database written by MXRS's own
 /// `db sync` needs the caller to supply a physical translator instead.

@@ -4,10 +4,13 @@
 mod analysis;
 pub mod baseline;
 pub mod index_advisor;
+mod lexer;
+mod logical;
 pub mod plan;
+mod reverse;
 pub mod workload;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use mxrs_relational_schema::physical_name;
 use serde::{Deserialize, Serialize};
@@ -15,6 +18,7 @@ use serde::{Deserialize, Serialize};
 pub use analysis::{
     Finding, QueryKind, Report, Suggestions, analyze, analyze_query, analyze_source, catalog,
 };
+pub use reverse::{EntityCatalog, OqlProjection, sql_to_oql};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OqlError {
@@ -30,11 +34,21 @@ pub type Result<T> = std::result::Result<T, OqlError>;
 #[serde(rename_all = "snake_case")]
 pub enum Dialect {
     Ansi,
+    #[serde(rename = "postgresql")]
     PostgreSql,
     SqlServer,
 }
 
 impl Dialect {
+    /// The dialect as mxrb names it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ansi => "ansi",
+            Self::PostgreSql => "postgresql",
+            Self::SqlServer => "sql_server",
+        }
+    }
+
     pub fn parse(value: &str) -> Result<Self> {
         match value.to_ascii_lowercase().as_str() {
             "ansi" => Ok(Self::Ansi),
@@ -241,24 +255,18 @@ struct Token {
     text: String,
 }
 
+/// The names of the parameters `source` uses, each once, in order.
 pub fn parameters(source: &str) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    tokenize(source)
-        .into_iter()
-        .filter(|token| token.kind == TokenKind::Parameter)
-        .filter_map(|token| {
-            let value = token.text.trim_start_matches('$').to_string();
-            seen.insert(value.clone()).then_some(value)
-        })
-        .collect()
+    logical::parameters(source)
 }
 
-/// Projects OQL onto Mendix Runtime naming (`"Sales$Order"`, `o."Number"`) —
-/// the layout a database the Mendix Runtime created has. Without storage
-/// identities an association path cannot be expanded, so those queries come
-/// back unsupported instead of guessed.
+/// Projects OQL onto the Mendix Runtime's logical naming as mxrb does
+/// (`"sales$order"`, `o."number"`, `:parameter`; `"Sales.Order"` in ANSI) —
+/// names inferred, and said to be. Without storage identities an association
+/// path cannot be expanded, so those queries come back unsupported instead
+/// of guessed.
 pub fn translate(source: &str, dialect: Dialect) -> Projection {
-    translate_with_catalog(source, dialect, None)
+    logical::translate(source, dialect)
 }
 
 /// Projects OQL onto the physical tables MXRS's own storage backends create.
@@ -816,7 +824,8 @@ fn tokenize(source: &str) -> Vec<Token> {
             }
             (TokenKind::Word, index)
         } else {
-            index += 1;
+            // One character, however many bytes it takes.
+            index += source[index..].chars().next().map_or(1, char::len_utf8);
             (TokenKind::Symbol, index)
         };
         tokens.push(Token {
@@ -933,7 +942,7 @@ mod tests {
         );
         assert_eq!(
             projected.sql.as_deref(),
-            Some("SELECT o.\"Number\" FROM \"Sales$Order\" AS o WHERE o.\"Number\" = :number")
+            Some("SELECT o.\"number\" FROM \"sales$order\" AS o WHERE o.\"number\" = :number")
         );
     }
 
@@ -942,7 +951,7 @@ mod tests {
         let projected = translate("FROM Sales.Order o SELECT o/Number", Dialect::SqlServer);
         assert_eq!(
             projected.sql.as_deref(),
-            Some("SELECT o.[Number]\nFROM [Sales$Order] o")
+            Some("SELECT o.[number]\nFROM [sales$order] o")
         );
     }
 
@@ -1079,6 +1088,15 @@ mod tests {
                 .get(Dialect::Ansi)
                 .contains("Normalize")
         );
+    }
+
+    /// A character outside the ASCII range, outside quotes, is one symbol,
+    /// not half of one.
+    #[test]
+    fn a_non_ascii_character_outside_quotes_is_one_symbol() {
+        assert_eq!(parameters("SELECT § FROM Sales.Order WHERE x = $p"), ["p"]);
+        // Translating it reads past it rather than panicking inside it.
+        let _ = translate("SELECT é FROM Sales.Order", Dialect::Ansi);
     }
 
     #[test]

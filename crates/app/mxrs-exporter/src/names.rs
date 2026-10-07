@@ -411,6 +411,7 @@ const MXRS_PRELUDE: &[&str] = &[
     "Expr",
     "FlowBuilder",
     "FlowVar",
+    "JavaScriptPlatform",
     "LayoutBuilder",
     "LayoutGridBuilder",
     "LifecycleEvent",
