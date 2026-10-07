@@ -47,16 +47,7 @@ fn invalid(path: &Path, reason: impl ToString) -> ScaffoldError {
 /// Where the project keeps its imported model: what `mxrs.toml` says, or
 /// `model/imported`, where an import writes it.
 fn snapshot(root: &Path) -> PathBuf {
-    let manifest = root.join("mxrs.toml");
-    let declared = std::fs::read_to_string(&manifest)
-        .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "imported_snapshot")
-                    .then(|| value.trim().trim_matches('"').to_string())
-            })
-        })
+    let declared = crate::manifest::read_project_setting(root, "imported_snapshot")
         .unwrap_or_else(|| "model/imported".to_string());
     root.join(declared)
 }

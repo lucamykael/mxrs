@@ -122,6 +122,18 @@ pub fn resolve_target(root: &Path) -> Result<RunTarget, RunError> {
     })
 }
 
+/// What serving without the dev server leaves out: a project whose pages
+/// are its frontend's, served without that frontend built, gets the
+/// embedded shell, which draws the model's manifest and none of its pages.
+fn unbuilt_frontend(root: &Path, web_root: &Path) -> Option<String> {
+    let pages = root.join("frontend/src/pages");
+    let declares_pages =
+        std::fs::read_dir(&pages).is_ok_and(|mut entries| entries.next().is_some());
+    (declares_pages && web_root != root.join("frontend/dist")).then(|| {
+        "the project's pages are its frontend's, and frontend/dist is not built: the embedded shell draws the model's manifest instead (its buttons do not work as the pages' do). Build it (`npm run build --prefix frontend`) or run with the dev server".to_string()
+    })
+}
+
 /// A host as a URL writes it: an IPv6 address goes in brackets.
 pub fn url_host(host: &str) -> String {
     if host.contains(':') {
@@ -558,6 +570,8 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     );
     if options.frontend {
         println!("[mxrs] React client: http://{host}:{}", options.client_port);
+    } else if let Some(warning) = unbuilt_frontend(&options.root, &target.web_root) {
+        println!("[mxrs] warning: {warning}");
     }
 
     let frontend = if options.frontend {
@@ -951,6 +965,23 @@ mod tests {
         let saved = save("Ana").unwrap();
         assert_eq!(saved["members"]["Name"], "Ana");
         assert_eq!(saved["effects"][0]["type"], "validation_feedback");
+    }
+
+    /// Served without its dev server, a project whose pages are its
+    /// frontend's is warned when its frontend is not built.
+    #[test]
+    fn serving_without_the_frontend_built_is_warned_of() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let web = root.join("build/web");
+        assert!(unbuilt_frontend(root, &web).is_none());
+        std::fs::create_dir_all(root.join("frontend/src/pages/main")).unwrap();
+        assert!(
+            unbuilt_frontend(root, &web)
+                .unwrap()
+                .contains("frontend/dist is not built")
+        );
+        assert!(unbuilt_frontend(root, &root.join("frontend/dist")).is_none());
     }
 
     #[test]

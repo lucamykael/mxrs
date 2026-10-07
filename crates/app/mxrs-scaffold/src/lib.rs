@@ -10,6 +10,7 @@ mod atlas_crud;
 mod forms;
 pub mod installed_templates;
 pub mod lifecycle;
+mod manifest;
 mod nanoflow;
 pub mod page_templates;
 pub mod registry;

@@ -217,21 +217,33 @@ fn render(outcome: &ScaffoldOutcome, json: bool) {
         );
         return;
     }
-    let prefix = if outcome.dry_run {
-        "would create"
+    print!("{}", rendered(outcome));
+}
+
+/// What a scaffold did, as a person reads it: what it created and
+/// updated — or, in a dry run, would have, and that it wrote nothing.
+fn rendered(outcome: &ScaffoldOutcome) -> String {
+    let (create, update) = if outcome.dry_run {
+        ("would create", "would update")
     } else {
-        "create"
+        ("create", "update")
     };
+    let mut text = String::new();
     for file in &outcome.files {
-        println!("  {prefix}  {}", file.display());
+        text.push_str(&format!("  {create}  {}\n", file.display()));
     }
     for file in &outcome.updated {
-        println!("  update  {}", file.display());
+        text.push_str(&format!("  {update}  {}\n", file.display()));
     }
     for note in &outcome.notes {
-        println!("  note    {note}");
+        text.push_str(&format!("  note    {note}\n"));
     }
-    println!("\nDone. Run:\n  {BUILD_HINT}");
+    if outcome.dry_run {
+        text.push_str("\nDry run: nothing was written. Run it without --dry-run to write it.\n");
+    } else {
+        text.push_str(&format!("\nDone. Run:\n  {BUILD_HINT}\n"));
+    }
+    text
 }
 
 fn paths(paths: &[std::path::PathBuf]) -> Vec<String> {
@@ -336,6 +348,31 @@ fn fields(inspection: &ProjectInspection) -> Vec<(&'static str, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dry run says what it would create and update, and that it wrote
+    /// nothing; a run says what it did and what to run next.
+    #[test]
+    fn a_dry_run_says_it_wrote_nothing() {
+        let outcome = |dry_run| mxrs_scaffold::ScaffoldOutcome {
+            kind: "dto",
+            name: "Main.PetFilter".to_string(),
+            dry_run,
+            files: vec!["src/domain/dtos/main/pet_filter.rs".into()],
+            updated: vec!["src/domain/mod.rs".into()],
+            notes: Vec::new(),
+        };
+        let dry = rendered(&outcome(true));
+        assert!(
+            dry.contains("  would create  src/domain/dtos/main/pet_filter.rs\n"),
+            "{dry}"
+        );
+        assert!(dry.contains("  would update  src/domain/mod.rs\n"), "{dry}");
+        assert!(dry.contains("nothing was written"), "{dry}");
+        assert!(!dry.contains("Done."), "{dry}");
+        let done = rendered(&outcome(false));
+        assert!(done.contains("  update  src/domain/mod.rs\n"), "{done}");
+        assert!(done.contains("Done. Run:"), "{done}");
+    }
 
     #[test]
     fn every_catalogued_generator_has_a_usage_line_naming_its_action() {

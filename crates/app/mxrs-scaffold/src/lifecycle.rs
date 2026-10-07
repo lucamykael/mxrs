@@ -380,10 +380,7 @@ fn manifest_version(path: &Path) -> Result<Option<String>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error(path, error)),
     };
-    Ok(source.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("mendix_version")?.trim();
-        quoted(value.strip_prefix('=')?.trim())
-    }))
+    Ok(crate::manifest::project_setting(&source, "mendix_version"))
 }
 
 fn quoted(value: &str) -> Option<String> {

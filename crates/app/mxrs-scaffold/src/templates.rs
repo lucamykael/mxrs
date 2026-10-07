@@ -731,17 +731,25 @@ mod tests {
             "{:?}",
             loader.body
         );
-        // The client half is the frontend's, calling the microflow by name.
+        // The client half is the frontend's, calling the microflow by name,
+        // and both say the slice was refreshed, as mxrb's templates do.
         let nanoflow = page_chain_nanoflow("Sales", "OrderOverview", true);
         assert_eq!(nanoflow.name, "NAN_RefreshOrderOverview");
+        let shown = "await showMessage(\"information\", { en_US: \"Order Overview refreshed\" });";
         assert_eq!(
             nanoflow.body,
-            ["await callMicroflow(\"Sales.ACT_RefreshOrderOverview\");"]
+            [
+                "await callMicroflow(\"Sales.ACT_RefreshOrderOverview\");",
+                shown
+            ]
         );
-        assert!(
-            page_chain_nanoflow("Sales", "OrderOverview", false)
-                .body
-                .is_empty()
+        assert_eq!(
+            page_chain_nanoflow("Sales", "OrderOverview", false).body,
+            [shown]
+        );
+        assert_eq!(
+            page_chain_action("Sales", "OrderOverview").body,
+            ["log!(flow, Info, \"Sales\", \"Order Overview refreshed from the page scaffold\");"]
         );
     }
 }
@@ -824,27 +832,25 @@ pub(crate) fn page_chain_loader(module_name: &str, feature: &str) -> crate::serv
 }
 
 /// `ACT_Refresh<Feature>`: the server-side half of a chain that ends in a
-/// microflow. mxrb's template logs a message here; `mxrs_ir::Activity` has no
-/// log activity, so the body is left empty rather than faked with an
-/// unrelated activity.
+/// microflow. It logs that the slice was refreshed, as mxrb's template does.
 pub(crate) fn page_chain_action(module_name: &str, feature: &str) -> crate::service::ServiceMethod {
     crate::service::ServiceMethod {
         name: format!("ACT_Refresh{feature}"),
-        docs: vec![
-            format!("Refresh action for the `{module_name}.{feature}` page slice."),
-            String::new(),
-            "Body intentionally empty: mxrb's template logs a message here and".to_string(),
-            "`mxrs_ir::Activity` has no log activity to mirror it with.".to_string(),
-        ],
+        docs: vec![format!(
+            "Refresh action for the `{module_name}.{feature}` page slice."
+        )],
         imports: Vec::new(),
-        body: Vec::new(),
+        body: vec![format!(
+            "log!(flow, Info, {module_name:?}, {:?});",
+            format!("{} refreshed from the page scaffold", humanize(feature))
+        )],
     }
 }
 
 /// `NAN_Refresh<Feature>`: the client-side half, a method of the
 /// frontend's services. With a `page:nanoflow:microflow` chain it calls the
-/// generated microflow, which is the only part of mxrb's two nanoflow
-/// templates that has an mxrs equivalent (its `show_message` does not).
+/// generated microflow first; either way it tells the user the slice was
+/// refreshed, as mxrb's templates do.
 pub(crate) fn page_chain_nanoflow(
     module_name: &str,
     feature: &str,
@@ -853,6 +859,10 @@ pub(crate) fn page_chain_nanoflow(
     let mut docs = vec![format!(
         "Client refresh action for the `{module_name}.{feature}` page slice."
     )];
+    let shown = format!(
+        "await showMessage(\"information\", {{ en_US: {:?} }});",
+        format!("{} refreshed", humanize(feature))
+    );
     let (body, vocabulary) = if calls_microflow {
         docs.push(String::new());
         docs.push(
@@ -860,13 +870,14 @@ pub(crate) fn page_chain_nanoflow(
         );
         docs.push("`page:nanoflow:microflow` chain.".to_string());
         (
-            vec![format!(
-                "await callMicroflow(\"{module_name}.ACT_Refresh{feature}\");"
-            )],
-            vec!["callMicroflow"],
+            vec![
+                format!("await callMicroflow(\"{module_name}.ACT_Refresh{feature}\");"),
+                shown,
+            ],
+            vec!["callMicroflow", "showMessage"],
         )
     } else {
-        (Vec::new(), Vec::new())
+        (vec![shown], vec!["showMessage"])
     };
     crate::nanoflow::NanoflowMethod {
         name: format!("NAN_Refresh{feature}"),

@@ -29,6 +29,12 @@ server proxies `/api` and `/model.json` to). Interrupting terminates it (TERM, t
 reap); the frontend exiting non-zero on its own stops the run with
 `frontend process exited with status N`.
 
+With `--no-frontend` the runtime serves the project's own frontend build
+(`frontend/dist`, with the model's `model.json`) when there is one, and the
+embedded shell otherwise — which draws the model's manifest, not the
+project's pages, so a project that declares pages and has no build is
+warned of it.
+
 ## Flow execution
 
 Every named microflow/nanoflow/rule is registered on the native interpreter
