@@ -635,6 +635,16 @@ stable across builds and machines, and never random. The consequence is that
 renaming an artifact in Rust declares a new one rather than renaming the
 imported one.
 
+`model/imported/declared.json` lists the documents the import wrote as
+declarations in source: flows, pages, layouts, snippets, enumerations,
+constants, regular expressions, scheduled events, menus and task queues of
+the modules the project made. A build leaves out of the model each one the
+source no longer declares — deleted, or renamed into a new one — and says
+so (`[mxrs] removed microflow Sales.ACT_Old: the source no longer declares
+it`). A document the import kept in the snapshot only is not listed, and
+stays; an entity the source no longer declares already leaves its domain
+model. A project imported before the list existed removes nothing.
+
 ## API and Axum rules
 
 - Build routers from small functions and merge/nest them at the HTTP boundary.

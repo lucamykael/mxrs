@@ -63,8 +63,25 @@ pub use mxrs_project::{
     ImportedProjectManifest, ImportedUnit, PROJECT_ASSET_DIRECTORIES, ProjectError,
     capture_imported_project, capture_project_assets, installed_modules, materialize_java_sources,
     materialize_project_assets, read_imported_manifest, rebuild_imported_project,
-    replace_imported_project, restore_imported_project,
+    restore_imported_project,
 };
+
+/// Builds `project` over the imported snapshot into `output`, replacing an
+/// earlier build only once the new one is complete. What the import
+/// declared and the source no longer declares is left out — unless the
+/// source names it with `mxrs::imported!`, which keeps the model's own.
+pub fn replace_imported_project(
+    snapshot: impl AsRef<std::path::Path>,
+    output: impl AsRef<std::path::Path>,
+    project: &ProjectDecl,
+) -> Result<std::path::PathBuf, ProjectError> {
+    mxrs_project::replace_imported_project_keeping(
+        snapshot,
+        output,
+        project,
+        &registry::imported_markers(),
+    )
+}
 pub use mxrs_runtime::{
     Action, EntityAction, EntityRule, MemberRight, ObjectValue, Runtime, RuntimeError,
     SecurityContext, SecurityPolicy, Store, StoreSchema,
@@ -138,7 +155,31 @@ macro_rules! register {
 #[macro_export]
 macro_rules! imported {
     (module = $module:literal; $($kind:ident $marker:ident $(= $name:literal)?;)*) => {
-        $($crate::__imported_flow!($kind, $module, $marker $(, $name)?);)*
+        $(
+            $crate::__imported_flow!($kind, $module, $marker $(, $name)?);
+            $crate::__imported_marker!($kind, $module, $marker $(, $name)?);
+        )*
+    };
+}
+
+/// Registers a flow `mxrs::imported!` names as one the source keeps from
+/// the imported model, so a build does not take it for a deleted
+/// declaration.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __imported_marker {
+    ($kind:ident, $module:literal, $marker:ident) => {
+        $crate::__imported_marker!($kind, $module, $marker, ::core::stringify!($marker));
+    };
+    (microflow, $module:literal, $marker:ident, $name:expr) => {
+        $crate::inventory::submit! {
+            $crate::registry::ImportedMarker::new("Microflows$Microflow", $module, $name)
+        }
+    };
+    (nanoflow, $module:literal, $marker:ident, $name:expr) => {
+        $crate::inventory::submit! {
+            $crate::registry::ImportedMarker::new("Microflows$Nanoflow", $module, $name)
+        }
     };
 }
 

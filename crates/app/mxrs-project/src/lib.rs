@@ -7,7 +7,7 @@
 //! This gives unsupported model concepts a lossless generated home while
 //! typed Rust coverage grows incrementally.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const SNAPSHOT_VERSION: u32 = 2;
 const MANIFEST_NAME: &str = "manifest.json";
+const DECLARED_NAME: &str = "declared.json";
 static BUILD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub const PROJECT_ASSET_DIRECTORIES: &[&str] = &[
@@ -174,6 +175,154 @@ pub fn capture_imported_project(
     Ok(manifest)
 }
 
+/// A unit of the snapshot the import wrote as a declaration in source: its
+/// type, its module and its name, which a declaration matches it by.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DeclaredUnit {
+    pub unit_id: String,
+    pub native_type: String,
+    pub module: String,
+    pub name: String,
+}
+
+/// Records beside the snapshot which of its units the import declared in
+/// source, given as `(type, module, name)`: a build leaves out of the model
+/// each one the source no longer declares. A unit the import kept in the
+/// snapshot only is not one of them.
+pub fn record_declared_units(
+    snapshot: impl AsRef<Path>,
+    manifest: &ImportedProjectManifest,
+    declared: &BTreeSet<(String, String, String)>,
+) -> Result<Vec<DeclaredUnit>> {
+    let units: HashMap<&str, &ImportedUnit> = manifest
+        .units
+        .iter()
+        .map(|unit| (unit.unit_id.as_str(), unit))
+        .collect();
+    // A document's module is the module its folders are in; the project,
+    // which contains itself, is in none.
+    let module_of = |unit: &ImportedUnit| {
+        let mut seen = HashSet::new();
+        let mut container = units.get(unit.container_id.as_str());
+        while let Some(parent) = container {
+            if !seen.insert(parent.unit_id.as_str()) {
+                return None;
+            }
+            if parent.native_type.starts_with("Projects$Module") {
+                return parent.name.clone();
+            }
+            container = units.get(parent.container_id.as_str());
+        }
+        None
+    };
+    let mut recorded: Vec<DeclaredUnit> = manifest
+        .units
+        .iter()
+        .filter_map(|unit| {
+            let name = unit.name.clone()?;
+            let module = module_of(unit)?;
+            let key = (unit.native_type.clone(), module, name);
+            declared.contains(&key).then(|| DeclaredUnit {
+                unit_id: unit.unit_id.clone(),
+                native_type: key.0,
+                module: key.1,
+                name: key.2,
+            })
+        })
+        .collect();
+    recorded.sort();
+    let path = snapshot.as_ref().join(DECLARED_NAME);
+    let bytes = serde_json::to_vec_pretty(&recorded)?;
+    std::fs::write(&path, bytes).map_err(|error| io_error(&path, error))?;
+    Ok(recorded)
+}
+
+/// The units the import declared in source that `declaration` no longer
+/// declares, but for those `kept` names as `(type, module, name)`: what the
+/// source keeps from the imported model. A snapshot taken before imports
+/// recorded them has none.
+pub fn undeclared_units(
+    snapshot: impl AsRef<Path>,
+    declaration: &mxrs_ir::ProjectDecl,
+    kept: &BTreeSet<(String, String, String)>,
+) -> Result<Vec<DeclaredUnit>> {
+    let path = snapshot.as_ref().join(DECLARED_NAME);
+    let recorded: Vec<DeclaredUnit> = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io_error(&path, error)),
+    };
+    Ok(recorded
+        .into_iter()
+        .filter(|unit| {
+            !declares(declaration, unit)
+                && !kept.contains(&(
+                    unit.native_type.clone(),
+                    unit.module.clone(),
+                    unit.name.clone(),
+                ))
+        })
+        .collect())
+}
+
+/// Whether `declaration` states the unit: a document of its type and name
+/// in its module. A type a build does not remove is always stated.
+fn declares(declaration: &mxrs_ir::ProjectDecl, unit: &DeclaredUnit) -> bool {
+    let Some(module) = declaration
+        .modules
+        .iter()
+        .find(|module| module.name == unit.module)
+    else {
+        return false;
+    };
+    let name = unit.name.as_str();
+    let form = |kind: &str| {
+        module
+            .forms
+            .iter()
+            .any(|form| form.kind() == kind && form.name() == name)
+    };
+    match unit.native_type.as_str() {
+        "Microflows$Microflow" => module.microflows.iter().any(|flow| flow.name == name),
+        "Microflows$Nanoflow" => module.nanoflows.iter().any(|flow| flow.name == name),
+        "Forms$Page" => module.pages.iter().any(|page| page.name == name) || form("Forms$Page"),
+        "Forms$Layout" => {
+            module.layouts.iter().any(|layout| layout.name == name) || form("Forms$Layout")
+        }
+        "Forms$Snippet" => form("Forms$Snippet"),
+        "Enumerations$Enumeration" => module.enumerations.iter().any(|item| item.name == name),
+        "Constants$Constant" => module.constants.iter().any(|item| item.name == name),
+        "RegularExpressions$RegularExpression" => module
+            .regular_expressions
+            .iter()
+            .any(|item| item.name == name),
+        "ScheduledEvents$ScheduledEvent" => {
+            module.scheduled_events.iter().any(|item| item.name == name)
+        }
+        "Menus$MenuDocument" => module.menus.iter().any(|item| item.name == name),
+        "Queues$Queue" => module.task_queues.iter().any(|item| item.name == name),
+        _ => true,
+    }
+}
+
+/// What a unit is, in a developer's words.
+fn kind_of(native_type: &str) -> &str {
+    match native_type {
+        "Microflows$Microflow" => "microflow",
+        "Microflows$Nanoflow" => "nanoflow",
+        "Forms$Page" => "page",
+        "Forms$Layout" => "layout",
+        "Forms$Snippet" => "snippet",
+        "Enumerations$Enumeration" => "enumeration",
+        "Constants$Constant" => "constant",
+        "RegularExpressions$RegularExpression" => "regular expression",
+        "ScheduledEvents$ScheduledEvent" => "scheduled event",
+        "Menus$MenuDocument" => "menu",
+        "Queues$Queue" => "task queue",
+        other => other,
+    }
+}
+
 pub fn read_imported_manifest(snapshot: impl AsRef<Path>) -> Result<ImportedProjectManifest> {
     let path = snapshot.as_ref().join(MANIFEST_NAME);
     let bytes = std::fs::read(&path).map_err(|error| io_error(&path, error))?;
@@ -263,16 +412,61 @@ pub fn rebuild_imported_project(
     output: impl AsRef<Path>,
     declaration: &mxrs_ir::ProjectDecl,
 ) -> Result<PathBuf> {
+    rebuild_imported_project_keeping(snapshot, output, declaration, &BTreeSet::new())
+}
+
+/// [`rebuild_imported_project`], keeping what the source names as the
+/// imported model's (`(type, module, name)`) though it declares it no more.
+pub fn rebuild_imported_project_keeping(
+    snapshot: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    declaration: &mxrs_ir::ProjectDecl,
+    kept: &BTreeSet<(String, String, String)>,
+) -> Result<PathBuf> {
     let snapshot = snapshot.as_ref();
     let output = output.as_ref();
     let contents = format::contents_dir(output);
     restore_imported_project(snapshot, output)?;
-    if let Err(error) = mxrs_writer::synchronize_project(output, declaration) {
+    let built = mxrs_writer::synchronize_project(output, declaration)
+        .map_err(ProjectError::from)
+        .and_then(|()| remove_undeclared(snapshot, output, declaration, kept));
+    if let Err(error) = built {
         let _ = std::fs::remove_file(output);
         let _ = std::fs::remove_dir_all(&contents);
-        return Err(error.into());
+        return Err(error);
     }
     Ok(output.to_path_buf())
+}
+
+/// Leaves out of the built model what the import declared in source and
+/// the source no longer declares — a document deleted, or renamed, in Rust
+/// or in the frontend — and says what it left out.
+fn remove_undeclared(
+    snapshot: &Path,
+    output: &Path,
+    declaration: &mxrs_ir::ProjectDecl,
+    kept: &BTreeSet<(String, String, String)>,
+) -> Result<()> {
+    let removed = undeclared_units(snapshot, declaration, kept)?;
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let mut mpr = MprFile::open(output, false)?;
+    mpr.transaction(|mpr| {
+        for unit in &removed {
+            mpr.delete_unit(&unit.unit_id)?;
+        }
+        Ok(())
+    })?;
+    for unit in &removed {
+        eprintln!(
+            "[mxrs] removed {} {}.{}: the source no longer declares it",
+            kind_of(&unit.native_type),
+            unit.module,
+            unit.name
+        );
+    }
+    Ok(())
 }
 
 /// Reconstructs exactly the imported `.mpr` snapshot without applying the
@@ -308,11 +502,22 @@ pub fn replace_imported_project(
     output: impl AsRef<Path>,
     declaration: &mxrs_ir::ProjectDecl,
 ) -> Result<PathBuf> {
+    replace_imported_project_keeping(snapshot, output, declaration, &BTreeSet::new())
+}
+
+/// [`replace_imported_project`], keeping what the source names as the
+/// imported model's (`(type, module, name)`) though it declares it no more.
+pub fn replace_imported_project_keeping(
+    snapshot: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    declaration: &mxrs_ir::ProjectDecl,
+    kept: &BTreeSet<(String, String, String)>,
+) -> Result<PathBuf> {
     let output =
         std::path::absolute(output.as_ref()).map_err(|error| io_error(output.as_ref(), error))?;
     let output_contents = format::contents_dir(&output);
     if !output.exists() && !output_contents.exists() {
-        return rebuild_imported_project(snapshot, &output, declaration);
+        return rebuild_imported_project_keeping(snapshot, &output, declaration, kept);
     }
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     let sequence = BUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -322,7 +527,8 @@ pub fn replace_imported_project(
     prepare_build_staging(&staging, &fresh_directory, &previous_directory)?;
     let file_name = output.file_name().unwrap_or_default();
     let fresh_output = fresh_directory.join(file_name);
-    if let Err(error) = rebuild_imported_project(snapshot, &fresh_output, declaration) {
+    if let Err(error) = rebuild_imported_project_keeping(snapshot, &fresh_output, declaration, kept)
+    {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -544,6 +750,86 @@ mod tests {
             document.get_str("$Type").ok() == Some("Microflows$Microflow")
                 && document.get_str("Name").ok() == Some("ACT_Ping")
         }));
+    }
+
+    /// What the import declared and the source no longer declares — a flow
+    /// deleted or renamed — is left out of the build; what the import kept
+    /// in the snapshot only, and what is still declared, stay.
+    #[test]
+    fn a_declaration_deleted_from_source_leaves_the_built_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("Source.mpr");
+        let snapshot = directory.path().join("model/imported");
+        let output_directory = tempfile::tempdir().unwrap();
+        let output = output_directory.path().join("Built.mpr");
+        let mut project = ProjectBuilder::new("11.12.1");
+        project.module("Sales", |module| {
+            module.microflow("ACT_Kept", |_flow| {});
+            module.microflow("ACT_Deleted", |_flow| {});
+            module.microflow("ACT_Imported", |_flow| {});
+        });
+        mxrs_writer::write_project(&source_path, &project.build()).unwrap();
+        let manifest = capture_imported_project(&source_path, &snapshot).unwrap();
+        let declared = ["ACT_Kept", "ACT_Deleted"]
+            .map(|name| {
+                (
+                    "Microflows$Microflow".to_string(),
+                    "Sales".to_string(),
+                    name.to_string(),
+                )
+            })
+            .into_iter()
+            .collect();
+        let recorded = record_declared_units(&snapshot, &manifest, &declared).unwrap();
+        assert_eq!(recorded.len(), 2);
+
+        let mut source = ProjectBuilder::new("11.12.1");
+        source.module("Sales", |module| {
+            module.microflow("ACT_Kept", |_flow| {});
+        });
+        let declaration = source.build();
+        assert_eq!(
+            undeclared_units(&snapshot, &declaration, &BTreeSet::new())
+                .unwrap()
+                .iter()
+                .map(|unit| unit.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ACT_Deleted"]
+        );
+        rebuild_imported_project(&snapshot, &output, &declaration).unwrap();
+        let rebuilt = MprFile::open(&output, true).unwrap();
+        let mut flows = rebuilt
+            .all_units()
+            .unwrap()
+            .into_iter()
+            .filter_map(|unit| {
+                let document = rebuilt.parse_contents(&unit).unwrap();
+                (document.get_str("$Type").ok() == Some("Microflows$Microflow"))
+                    .then(|| document.get_str("Name").unwrap().to_string())
+            })
+            .collect::<Vec<_>>();
+        flows.sort();
+        assert_eq!(flows, ["ACT_Imported", "ACT_Kept"]);
+        // One the source names as the imported model's is kept.
+        let kept = BTreeSet::from([(
+            "Microflows$Microflow".to_string(),
+            "Sales".to_string(),
+            "ACT_Deleted".to_string(),
+        )]);
+        assert!(
+            undeclared_units(&snapshot, &declaration, &kept)
+                .unwrap()
+                .is_empty()
+        );
+
+        // A snapshot taken before imports recorded what they declared
+        // removes nothing.
+        std::fs::remove_file(snapshot.join(DECLARED_NAME)).unwrap();
+        assert!(
+            undeclared_units(&snapshot, &declaration, &BTreeSet::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

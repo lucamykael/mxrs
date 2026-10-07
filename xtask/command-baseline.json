@@ -1,6 +1,6 @@
 {
   "analyze": "partial",
-  "benchmark": "partial",
+  "benchmark": "verified",
   "cache": "verified",
   "callees": "verified",
   "callers": "verified",
@@ -44,8 +44,8 @@
   "move": "verified",
   "nanoflow": "verified",
   "oql": "partial",
-  "pack": "partial",
-  "page": "partial",
+  "pack": "verified",
+  "page": "verified",
   "portability": "partial",
   "portable": "verified",
   "preflight": "partial",

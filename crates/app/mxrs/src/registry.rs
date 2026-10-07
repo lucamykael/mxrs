@@ -129,6 +129,42 @@ impl FrontendMarker {
 
 inventory::collect!(FrontendMarker);
 
+/// A flow the source keeps from the imported model rather than declaring
+/// it (`mxrs::imported!`): its type, module and name.
+pub struct ImportedMarker {
+    native_type: &'static str,
+    module: &'static str,
+    name: &'static str,
+}
+
+impl ImportedMarker {
+    /// Called by `mxrs::imported!`.
+    pub const fn new(native_type: &'static str, module: &'static str, name: &'static str) -> Self {
+        Self {
+            native_type,
+            module,
+            name,
+        }
+    }
+}
+
+inventory::collect!(ImportedMarker);
+
+/// Every flow the program's source keeps from the imported model, as
+/// `(type, module, name)`.
+pub fn imported_markers() -> std::collections::BTreeSet<(String, String, String)> {
+    inventory::iter::<ImportedMarker>
+        .into_iter()
+        .map(|marker| {
+            (
+                marker.native_type.to_string(),
+                marker.module.to_string(),
+                marker.name.to_string(),
+            )
+        })
+        .collect()
+}
+
 /// The crate a `module_path!()` value belongs to.
 pub fn crate_of(module_path: &str) -> &str {
     module_path.split("::").next().unwrap_or(module_path)

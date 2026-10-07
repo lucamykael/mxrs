@@ -376,10 +376,64 @@ fn import_cargo_project_inner(
             .map(|operation| operation.export_mapping.clone())
             .collect(),
     )?;
+    // What the import states in source, of the modules the project made: a
+    // build leaves out of the model each of these the source no longer
+    // declares, as Studio Pro does a document its developer deleted.
+    let authored =
+        |module: &str| module_root(&module_stem(module), &packages) == ModuleRoot::Authored;
+    let mut declared: std::collections::BTreeSet<(String, String, String)> = converted_flows
+        .iter()
+        .map(|flow| {
+            (
+                flow.native_type.clone(),
+                flow.module.clone(),
+                flow.declaration.name.clone(),
+            )
+        })
+        .chain(
+            frontend_nanoflows
+                .declared
+                .iter()
+                .flat_map(|(module, names)| {
+                    names.iter().map(move |name| {
+                        (
+                            "Microflows$Nanoflow".to_string(),
+                            module.clone(),
+                            name.clone(),
+                        )
+                    })
+                }),
+        )
+        .chain(
+            frontend_forms
+                .declared
+                .iter()
+                .map(|(module, ty, name)| (ty.clone(), module.clone(), name.clone())),
+        )
+        .chain(
+            rust_pages
+                .iter()
+                .map(|(module, name)| ("Forms$Page".to_string(), module.clone(), name.clone())),
+        )
+        .collect();
+    declared.extend(
+        collect_editable_documents(&project)?
+            .iter()
+            .map(|document| {
+                let (module, _, name) = editable_document_key(document);
+                (
+                    editable_document_type(document).to_string(),
+                    module.to_string(),
+                    name.to_string(),
+                )
+            }),
+    );
+    declared.retain(|(_, module, _)| authored(module));
     drop(project);
 
     let imported = destination.join("model/imported");
     let manifest = mxrs_project::capture_imported_project(mpr_path, &imported)?;
+    mxrs_project::record_declared_units(&imported, &manifest, &declared)?;
     let imported_assets =
         mxrs_project::capture_project_assets(mpr_path, destination.join("assets"))?;
     // The Java behind the Java actions is the project's own code, kept in
@@ -1192,15 +1246,9 @@ fn render_documents_module(
     let mut declarations = collect_editable_documents(project)?;
     let mut counts = HashMap::new();
     for declaration in &declarations {
-        let native_type = match declaration {
-            EditableDocument::Enumeration { .. } => "Enumerations$Enumeration",
-            EditableDocument::Constant { .. } => "Constants$Constant",
-            EditableDocument::RegularExpression { .. } => "RegularExpressions$RegularExpression",
-            EditableDocument::ScheduledEvent { .. } => "ScheduledEvents$ScheduledEvent",
-            EditableDocument::Menu { .. } => "Menus$MenuDocument",
-            EditableDocument::TaskQueue { .. } => "Queues$Queue",
-        };
-        *counts.entry(native_type).or_default() += 1;
+        *counts
+            .entry(editable_document_type(declaration))
+            .or_default() += 1;
     }
 
     declarations.retain(|document| !matches!(document, EditableDocument::TaskQueue { .. }));
@@ -2627,6 +2675,18 @@ fn option_localized_text(text: Option<&mxrs_ir::LocalizedText>) -> String {
 
 fn option_u32(value: Option<u32>) -> String {
     value.map_or_else(|| "None".to_string(), |value| format!("Some({value})"))
+}
+
+/// The type of the document an editable declaration states.
+fn editable_document_type(document: &EditableDocument) -> &'static str {
+    match document {
+        EditableDocument::Enumeration { .. } => "Enumerations$Enumeration",
+        EditableDocument::Constant { .. } => "Constants$Constant",
+        EditableDocument::RegularExpression { .. } => "RegularExpressions$RegularExpression",
+        EditableDocument::ScheduledEvent { .. } => "ScheduledEvents$ScheduledEvent",
+        EditableDocument::Menu { .. } => "Menus$MenuDocument",
+        EditableDocument::TaskQueue { .. } => "Queues$Queue",
+    }
 }
 
 fn editable_document_module(document: &EditableDocument) -> &str {
