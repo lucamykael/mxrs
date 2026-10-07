@@ -219,7 +219,11 @@ fn validate_contents(
             report.error(format!("unit {} missing $Type", u.unit_id));
         }
 
-        let doc_id = doc.get("$ID").and_then(mxrs_bson::extract_id);
+        // An empty identity is none, as mxrb's `to_s.empty?` reads it.
+        let doc_id = doc
+            .get("$ID")
+            .and_then(mxrs_bson::extract_id)
+            .filter(|id| !id.is_empty());
         match doc_id {
             None => report.error(format!("unit {} missing $ID", u.unit_id)),
             Some(id) if id != u.unit_id => {
@@ -357,7 +361,14 @@ fn validate_v2_files(mpr: &MprFile, units: &[RawUnit], report: &mut ValidateRepo
         return Ok(());
     }
 
-    let expected: Vec<_> = units.iter().filter_map(|u| mpr.content_path(u)).collect();
+    // A set in the order units list them, as mxrb's `to_set`: a path two
+    // units claim is missing once.
+    let mut seen = HashSet::new();
+    let expected: Vec<_> = units
+        .iter()
+        .filter_map(|u| mpr.content_path(u))
+        .filter(|path| seen.insert(path.clone()))
+        .collect();
     let actual = mpr.content_files()?;
     let (expected_set, actual_set): (HashSet<_>, HashSet<_>) =
         (expected.iter().collect(), actual.iter().collect());

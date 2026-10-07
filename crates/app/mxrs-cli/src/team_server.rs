@@ -316,6 +316,15 @@ impl Repository {
     ) -> Result<String, TeamServerError> {
         let root = self.repository_root(root.as_ref())?;
         self.remote_url(&root, remote)?;
+        // Git pushes to the push URLs, which a configuration may set apart
+        // from the one it fetches from: each must be Team Server's.
+        let push_urls = self.git(
+            &command(&["git", "remote", "get-url", "--push", "--all", remote]),
+            Some(&root),
+        )?;
+        for url in push_urls.lines().filter(|line| !line.trim().is_empty()) {
+            repository_url(url.trim())?;
+        }
         let mut arguments = command(&["git", "push", "--", remote]);
         arguments.extend(branch.map(str::to_string));
         self.git(&arguments, Some(&root))
@@ -342,7 +351,18 @@ impl Repository {
         arguments: &[String],
         directory: Option<&Path>,
     ) -> Result<String, TeamServerError> {
-        let mut environment = vec![("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())];
+        // No credential helper is asked to remember what authenticated: a
+        // PAT stays in its file, not in the user's keychain or
+        // `.git-credentials`.
+        let mut environment = vec![
+            ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
+            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            (
+                "GIT_CONFIG_KEY_0".to_string(),
+                "credential.helper".to_string(),
+            ),
+            ("GIT_CONFIG_VALUE_0".to_string(), String::new()),
+        ];
         let helper = match self.credentials.pat()? {
             Some(token) => {
                 let helper = askpass_helper()?;
@@ -351,7 +371,6 @@ impl Repository {
                         "GIT_ASKPASS".to_string(),
                         helper.path().join("askpass").display().to_string(),
                     ),
-                    ("GIT_ASKPASS_REQUIRE".to_string(), "force".to_string()),
                     ("MXRS_TEAM_SERVER_PAT".to_string(), token),
                 ]);
                 Some(helper)
@@ -374,7 +393,8 @@ fn command(words: &[&str]) -> Vec<String> {
 }
 
 /// A private folder holding the helper Git asks for the credentials: the
-/// user `pat`, the password the PAT the environment holds.
+/// user `pat`, the password the PAT the environment holds — only for a
+/// prompt naming Team Server's host, so no other host is answered.
 fn askpass_helper() -> Result<tempfile::TempDir, TeamServerError> {
     let directory = tempfile::Builder::new()
         .prefix("mxrs-askpass-")
@@ -383,7 +403,7 @@ fn askpass_helper() -> Result<tempfile::TempDir, TeamServerError> {
     let helper = directory.path().join("askpass");
     std::fs::write(
         &helper,
-        "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' pat ;;\n  *Password*) printf '%s\\n' \"$MXRS_TEAM_SERVER_PAT\" ;;\n  *) exit 1 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n  *Username*git.api.mendix.com*) printf '%s\\n' pat ;;\n  *Password*git.api.mendix.com*) printf '%s\\n' \"$MXRS_TEAM_SERVER_PAT\" ;;\n  *) exit 1 ;;\nesac\n",
     )
     .map_err(|source| io(&helper, source))?;
     #[cfg(unix)]
@@ -834,12 +854,17 @@ mod tests {
         let target = directory.path().join("app");
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = seen.clone();
+        let helpers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let helper_paths = helpers.clone();
         let repository = Repository::with_runner(
             credentials(directory.path()),
             Box::new(move |environment, arguments, _| {
                 let variables: std::collections::HashMap<_, _> =
                     environment.iter().cloned().collect();
                 let helper = &variables["GIT_ASKPASS"];
+                helper_paths.lock().unwrap().push(PathBuf::from(helper));
+                assert_eq!(variables["GIT_CONFIG_KEY_0"], "credential.helper");
+                assert_eq!(variables["GIT_CONFIG_VALUE_0"], "");
                 let answer = |prompt: &str| {
                     let output = Command::new("sh")
                         .arg(helper)
@@ -857,6 +882,8 @@ mod tests {
                     answer("Password for 'https://pat@git.api.mendix.com':"),
                     "secret-token\n"
                 );
+                // Another host is not answered.
+                assert_eq!(answer("Password for 'https://pat@evil.example':"), "");
                 recorded.lock().unwrap().push(arguments.to_vec());
                 let root = PathBuf::from(arguments.last().unwrap());
                 std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -879,6 +906,9 @@ mod tests {
                 .all(|argument| !argument.contains("secret-token"))
         );
         // The helper is gone once Git is done.
+        let helper = helpers.lock().unwrap()[0].clone();
+        assert!(!helper.exists());
+        assert!(!helper.parent().unwrap().exists());
         assert!(matches!(
             repository.clone(APP_ID, &target, None, None),
             Err(TeamServerError::DestinationExists(_))
@@ -1135,6 +1165,39 @@ mod tests {
             strict
                 .safe_page("https://projects-api.home.mendix.com/v2/accounts/x/projects?cursor=y")
                 .is_ok()
+        );
+    }
+    /// A push URL set apart from the fetch URL must be Team Server's too:
+    /// one elsewhere is refused before anything is pushed.
+    #[test]
+    fn a_push_url_elsewhere_is_refused_before_pushing() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("app");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = commands.clone();
+        let repository = Repository::with_runner(
+            credentials(directory.path()),
+            Box::new(move |_, arguments, _| {
+                recorded.lock().unwrap().push(arguments.join(" "));
+                let answer = if arguments.iter().any(|argument| argument == "--push") {
+                    "https://evil.example/x.git\n".to_string()
+                } else {
+                    format!("https://{HOST}/{APP_ID}.git\n")
+                };
+                Ok((true, answer))
+            }),
+        );
+        assert!(matches!(
+            repository.push(&root, "origin", None),
+            Err(TeamServerError::InvalidUrl(_))
+        ));
+        assert!(
+            commands
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|command| !command.starts_with("git push"))
         );
     }
 }

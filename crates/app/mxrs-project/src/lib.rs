@@ -7,7 +7,7 @@
 //! This gives unsupported model concepts a lossless generated home while
 //! typed Rust coverage grows incrementally.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -53,6 +53,10 @@ pub enum ProjectError {
     OutputExists(String),
     #[error("source project has no root unit")]
     MissingRoot,
+    #[error(
+        "{folder} is missing, and a build without it would remove the {count} unit(s) the import declared there; restore it, or create it empty to remove them"
+    )]
+    MissingDeclarationSource { folder: String, count: usize },
     #[error("source project has no Mendix version")]
     MissingVersion,
     #[error("snapshot format {0} is unsupported")]
@@ -183,6 +187,11 @@ pub struct DeclaredUnit {
     pub native_type: String,
     pub module: String,
     pub name: String,
+    /// The folder of the project, relative to its root, a build reads the
+    /// declaration from when that is not the Rust source: one a checkout
+    /// lacks is not read, which says nothing about what it declares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Records beside the snapshot which of its units the import declared in
@@ -193,6 +202,17 @@ pub fn record_declared_units(
     snapshot: impl AsRef<Path>,
     manifest: &ImportedProjectManifest,
     declared: &BTreeSet<(String, String, String)>,
+) -> Result<Vec<DeclaredUnit>> {
+    let declared = declared.iter().map(|key| (key.clone(), None)).collect();
+    record_declared_units_from(snapshot, manifest, &declared)
+}
+
+/// [`record_declared_units`], each unit with the folder a build reads its
+/// declaration from when that is not the Rust source.
+pub fn record_declared_units_from(
+    snapshot: impl AsRef<Path>,
+    manifest: &ImportedProjectManifest,
+    declared: &BTreeMap<(String, String, String), Option<String>>,
 ) -> Result<Vec<DeclaredUnit>> {
     let units: HashMap<&str, &ImportedUnit> = manifest
         .units
@@ -222,11 +242,13 @@ pub fn record_declared_units(
             let name = unit.name.clone()?;
             let module = module_of(unit)?;
             let key = (unit.native_type.clone(), module, name);
-            declared.contains(&key).then(|| DeclaredUnit {
+            let source = declared.get(&key)?.clone();
+            Some(DeclaredUnit {
                 unit_id: unit.unit_id.clone(),
                 native_type: key.0,
                 module: key.1,
                 name: key.2,
+                source,
             })
         })
         .collect();
@@ -455,6 +477,21 @@ fn remove_undeclared(
     let removed = undeclared_units(snapshot, declaration, kept)?;
     if removed.is_empty() {
         return Ok(());
+    }
+    // The snapshot is `<project>/model/imported`.
+    if let Some(root) = snapshot.parent().and_then(Path::parent) {
+        let mut missing: BTreeMap<&str, usize> = BTreeMap::new();
+        for source in removed.iter().filter_map(|unit| unit.source.as_deref()) {
+            if !root.join(source).is_dir() {
+                *missing.entry(source).or_default() += 1;
+            }
+        }
+        if let Some((folder, count)) = missing.into_iter().next() {
+            return Err(ProjectError::MissingDeclarationSource {
+                folder: folder.to_string(),
+                count,
+            });
+        }
     }
     let mut mpr = MprFile::open(output, false)?;
     mpr.transaction(|mpr| {
@@ -835,6 +872,44 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A declaration the frontend states is not removed because the
+    /// frontend's folder is missing: the build is refused, and goes on once
+    /// the folder is there, empty.
+    #[test]
+    fn a_missing_frontend_folder_removes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("Source.mpr");
+        let snapshot = directory.path().join("model/imported");
+        let mut project = ProjectBuilder::new("11.12.1");
+        project.module("Sales", |module| {
+            module.nanoflow("NAV_Open", |_flow| {});
+        });
+        mxrs_writer::write_project(&source_path, &project.build()).unwrap();
+        let manifest = capture_imported_project(&source_path, &snapshot).unwrap();
+        let declared = BTreeMap::from([(
+            (
+                "Microflows$Nanoflow".to_string(),
+                "Sales".to_string(),
+                "NAV_Open".to_string(),
+            ),
+            Some("frontend/src/services".to_string()),
+        )]);
+        record_declared_units_from(&snapshot, &manifest, &declared).unwrap();
+        let mut source = ProjectBuilder::new("11.12.1");
+        source.module("Sales", |_module| {});
+        let declaration = source.build();
+        let output_directory = tempfile::tempdir().unwrap();
+        let output = output_directory.path().join("Built.mpr");
+        let refused = rebuild_imported_project(&snapshot, &output, &declaration).unwrap_err();
+        assert!(
+            matches!(&refused, ProjectError::MissingDeclarationSource { folder, count: 1 } if folder == "frontend/src/services"),
+            "{refused}"
+        );
+        assert!(!output.exists());
+        std::fs::create_dir_all(directory.path().join("frontend/src/services")).unwrap();
+        rebuild_imported_project(&snapshot, &output, &declaration).unwrap();
     }
 
     #[test]

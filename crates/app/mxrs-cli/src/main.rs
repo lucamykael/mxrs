@@ -1685,7 +1685,12 @@ fn diagram_lifecycle(action: &str, mut args: Vec<String>) -> ExitCode {
     let modules_given = !modules.is_empty();
     let output = take_value(&mut args, "--output");
     let port = take_value(&mut args, "--port");
-    let token = take_value(&mut args, "--token");
+    // A managed worker is given its token in the environment, where no
+    // other user reads it.
+    let explicit_token = take_value(&mut args, "--token");
+    let token_given = explicit_token.is_some();
+    let token = explicit_token
+        .or_else(|| std::env::var(mxrs_cli::diagram_server::LIFECYCLE_TOKEN_VARIABLE).ok());
     let state_root = take_value(&mut args, "--state-root");
     let force = take_flag(&mut args, "--force");
     let yes = take_flag(&mut args, "--yes");
@@ -1717,7 +1722,7 @@ fn diagram_lifecycle(action: &str, mut args: Vec<String>) -> ExitCode {
     let unexpected = |extra: bool| extra.then(|| fail("Unknown arguments".to_string()));
     let status = match action {
         "up" => {
-            if let Some(code) = unexpected(token.is_some() || yes) {
+            if let Some(code) = unexpected(token_given || yes) {
                 return code;
             }
             lifecycle.up(

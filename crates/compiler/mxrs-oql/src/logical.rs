@@ -91,15 +91,19 @@ fn identifier(token: &Token) -> bool {
 }
 
 fn identifier_text(token: &Token) -> String {
-    if token.kind != Kind::QuotedIdentifier || token.text.chars().count() < 2 {
-        return token.text.clone();
+    let text = &token.text;
+    if token.kind != Kind::QuotedIdentifier || text.len() < 2 {
+        return text.clone();
     }
-    let inner = &token.text[1..token.text.len() - 1];
-    if token.text.starts_with('[') {
-        inner.replace("]]", "]")
-    } else {
-        inner.replace("\"\"", "\"")
+    // Only a closed quotation is unquoted: one the source left open keeps
+    // its text, and its delimiters, one byte each, bound the slice.
+    if text.starts_with('[') && text.ends_with(']') {
+        return text[1..text.len() - 1].replace("]]", "]");
     }
+    if text.starts_with('"') && text.ends_with('"') {
+        return text[1..text.len() - 1].replace("\"\"", "\"");
+    }
+    text.clone()
 }
 
 fn validation_warning(tokens: &[Token]) -> Option<&'static str> {
@@ -320,6 +324,17 @@ mod tests {
             ansi.sql.as_deref(),
             Some("SELECT Order.\"Name\" FROM \"Sales.Order\"")
         );
+    }
+
+    /// An identifier the source leaves unquoted at its end, after a
+    /// character of several bytes, is read as written.
+    #[test]
+    fn an_open_quotation_is_read_as_written() {
+        let projection = translate(
+            "SELECT o/Name FROM Sales.Order AS o WHERE \"Salé",
+            Dialect::PostgreSql,
+        );
+        assert!(projection.sql.unwrap().ends_with("\"Salé"));
     }
 
     /// What a model alone cannot say is refused, with why.

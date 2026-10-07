@@ -1460,11 +1460,9 @@ fn invalid_search_limits_are_errors_instead_of_silent_defaults() {
     // A find by name lists what holds the text; by meaning, the ten nearest.
     let found = cli(&["find", path, "sales"]);
     assert!(found.status.success());
-    assert!(
-        text(&found)
-            .lines()
-            .all(|line| line.to_lowercase().contains("sales"))
-    );
+    let lines: Vec<String> = text(&found).lines().map(str::to_lowercase).collect();
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|line| line.contains("sales")));
     let semantic = cli(&["find", path, "sales", "--semantic"]);
     assert!((1..=10).contains(&text(&semantic).lines().count()));
 }

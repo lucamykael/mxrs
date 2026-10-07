@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -21,6 +21,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const MAX_BODY_BYTES: usize = 2_097_152;
+/// How much of a request line and headers a server reads.
+const MAX_HEAD_BYTES: u64 = 16 * 1024;
+/// How many connections a server serves at once.
+const MAX_CONNECTIONS: usize = 64;
+/// How long a request may take to arrive.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+/// The environment variable a managed worker reads its lifecycle token
+/// from, so no other user sees it on the command line.
+pub const LIFECYCLE_TOKEN_VARIABLE: &str = "MXRS_DIAGRAM_LIFECYCLE_TOKEN";
 const LOOPBACK_HOSTS: &[&str] = &["127.0.0.1", "::1", "localhost"];
 /// The port the editor is served on unless another is asked for.
 pub const DEFAULT_PORT: u16 = 4568;
@@ -92,11 +101,20 @@ impl Server {
             Some(output) => absolute(output)?,
             None => default_output(&source),
         };
-        let same = output == source
-            || (output.exists()
-                && std::fs::canonicalize(&output).ok() == std::fs::canonicalize(&source).ok());
-        if same {
+        if same_file(&output, &source) {
             return Err("output must be a safe copy, not the source MPR".to_string());
+        }
+        // A v2 model keeps its units in `mprcontents/` beside it: a copy in
+        // the same folder would share them, and a layout written into the
+        // copy would be written into the model.
+        let source_folder = source.parent().unwrap_or_else(|| Path::new("."));
+        let output_folder = output.parent().unwrap_or_else(|| Path::new("."));
+        if source_folder.join("mprcontents").is_dir() && output_folder == source_folder {
+            return Err(format!(
+                "output must be in another folder than the model: {} keeps its units in {}, which a copy beside it would share",
+                source.display(),
+                source_folder.join("mprcontents").display()
+            ));
         }
         if output.is_dir() {
             return Err(format!(
@@ -162,13 +180,34 @@ impl Server {
         self.bound.store(self.port, Ordering::SeqCst);
         ready(self.port);
         let server = Arc::new(self);
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut handlers: Vec<std::thread::JoinHandle<()>> = Vec::new();
         for stream in listener.incoming() {
             if server.stopped.load(Ordering::SeqCst) {
                 break;
             }
-            let Ok(stream) = stream else { continue };
+            let Ok(mut stream) = stream else { continue };
+            handlers.retain(|handler| !handler.is_finished());
+            if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+                let _ = respond(
+                    &mut stream,
+                    503,
+                    "application/json; charset=utf-8",
+                    br#"{"ok":false,"error":"busy"}"#,
+                );
+                continue;
+            }
+            active.fetch_add(1, Ordering::SeqCst);
             let server = server.clone();
-            std::thread::spawn(move || server.handle(stream));
+            let active = active.clone();
+            handlers.push(std::thread::spawn(move || {
+                server.handle(stream);
+                active.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        // What was asked before the server stopped is answered.
+        for handler in handlers {
+            let _ = handler.join();
         }
         Ok(())
     }
@@ -188,8 +227,28 @@ impl Server {
                         self.output.display()
                     ));
                 }
+                // The folder mxrs makes for a copy is its own: forced, the
+                // contents an earlier copy left there are replaced. Any
+                // other folder's are a project's, and are never touched.
+                let own = self.output == default_output(&self.source);
+                if force && own {
+                    let stale = self
+                        .output
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join("mprcontents");
+                    if stale.is_dir() && !stale.is_symlink() {
+                        std::fs::remove_dir_all(&stale).map_err(|error| {
+                            format!("cannot replace {}: {error}", stale.display())
+                        })?;
+                    }
+                }
                 let contents = self.external_contents()?;
                 let parent = self.output.parent().unwrap_or_else(|| Path::new("."));
+                if !parent.exists() {
+                    // A folder made for the copy goes with it.
+                    self.managed_paths.insert(0, parent.to_path_buf());
+                }
                 std::fs::create_dir_all(parent)
                     .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
                 std::fs::copy(&self.source, &self.output)
@@ -203,8 +262,9 @@ impl Server {
         }
     }
 
-    /// The model's v2 contents folder and where its copy goes, when the
-    /// copy is in another folder; a copy there must not already exist.
+    /// The model's v2 contents folder and where its copy goes, beside the
+    /// copy — always another folder than the model's; a copy there must not
+    /// already exist.
     fn external_contents(&self) -> Result<Option<(PathBuf, PathBuf)>, String> {
         let source_folder = self.source.parent().unwrap_or_else(|| Path::new("."));
         let contents = source_folder.join("mprcontents");
@@ -212,9 +272,6 @@ impl Server {
             return Ok(None);
         }
         let output_folder = self.output.parent().unwrap_or_else(|| Path::new("."));
-        if output_folder == source_folder {
-            return Ok(None);
-        }
         let target = output_folder.join("mprcontents");
         if target.exists() || target.is_symlink() {
             return Err(format!(
@@ -226,18 +283,33 @@ impl Server {
     }
 
     fn handle(&self, mut stream: TcpStream) {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        let _ = stream.set_read_timeout(Some(REQUEST_DEADLINE));
         let Some(request) = read_request(&stream) else {
             return;
         };
+        // A page of another origin names its own host: one the browser
+        // reached through a rebound name is refused.
+        let port = self.bound.load(Ordering::SeqCst);
+        let host_allowed = request.header("host").is_some_and(|host| {
+            ["127.0.0.1", "localhost", "[::1]"]
+                .iter()
+                .any(|name| host == format!("{name}:{port}"))
+        });
+        if !host_allowed {
+            let _ = respond(
+                &mut stream,
+                403,
+                "application/json; charset=utf-8",
+                br#"{"ok":false,"error":"forbidden host"}"#,
+            );
+            return;
+        }
         let (status, kind, body) = self.dispatch(&request);
-        let _ = write!(
-            stream,
-            "HTTP/1.1 {status} {}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-            reason(status),
-            body.len()
-        );
-        let _ = stream.write_all(&body);
+        let _ = respond(&mut stream, status, kind, &body);
+        // A shutdown is answered before the server stops.
+        if status == 200 && request.path == "/api/admin/shutdown" {
+            (self.stopper())();
+        }
     }
 
     fn dispatch(&self, request: &Request) -> (u16, &'static str, Vec<u8>) {
@@ -278,11 +350,7 @@ impl Server {
                 }
                 match (method, path) {
                     ("GET", "/api/admin/status") => json_answer(200, json!({ "ok": true })),
-                    ("POST", "/api/admin/shutdown") => {
-                        let stop = self.stopper();
-                        std::thread::spawn(stop);
-                        json_answer(200, json!({ "ok": true }))
-                    }
+                    ("POST", "/api/admin/shutdown") => json_answer(200, json!({ "ok": true })),
                     _ => not_found(),
                 }
             }
@@ -328,18 +396,37 @@ impl Request {
     }
 }
 
+fn respond(stream: &mut TcpStream, status: u16, kind: &str, body: &[u8]) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status} {}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        reason(status),
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+/// A request, read within [`MAX_HEAD_BYTES`] of request line and headers
+/// and [`REQUEST_DEADLINE`] in all.
 fn read_request(stream: &TcpStream) -> Option<Request> {
-    let mut reader = BufReader::new(stream);
+    let started = Instant::now();
+    let mut head = BufReader::new(stream).take(MAX_HEAD_BYTES);
     let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
+    head.read_line(&mut line).ok()?;
     let mut parts = line.split_whitespace();
     let method = parts.next()?.to_string();
     let target = parts.next()?;
     let path = target.split('?').next().unwrap_or(target).to_string();
     let mut headers = Vec::new();
     loop {
+        if started.elapsed() > REQUEST_DEADLINE {
+            return None;
+        }
         let mut header = String::new();
-        reader.read_line(&mut header).ok()?;
+        if head.read_line(&mut header).ok()? == 0 {
+            return None;
+        }
         let header = header.trim_end();
         if header.is_empty() {
             break;
@@ -355,10 +442,13 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
         .unwrap_or(0);
     // One byte past the limit is enough to refuse it.
     let mut body = Vec::new();
-    reader
+    head.into_inner()
         .take(length.min(MAX_BODY_BYTES + 1) as u64)
         .read_to_end(&mut body)
         .ok()?;
+    if started.elapsed() > REQUEST_DEADLINE {
+        return None;
+    }
     Some(Request {
         method,
         path,
@@ -371,17 +461,46 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         403 => "Forbidden",
+        503 => "Service Unavailable",
         404 => "Not Found",
         _ => "Unprocessable Entity",
     }
 }
 
+/// `<stem>.domain-layout.mpr` beside the model, as mxrb's; for a v2 model,
+/// whose units are in the folder's `mprcontents/`, in a folder of its own
+/// (`<stem>.domain-layout/`) so the copy has contents of its own.
 fn default_output(source: &Path) -> PathBuf {
     let stem = source
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
-    source.with_file_name(format!("{stem}.domain-layout.mpr"))
+    let name = format!("{stem}.domain-layout.mpr");
+    let folder = source.parent().unwrap_or_else(|| Path::new("."));
+    if folder.join("mprcontents").is_dir() {
+        folder.join(format!("{stem}.domain-layout")).join(name)
+    } else {
+        source.with_file_name(name)
+    }
+}
+
+/// Whether two paths are one file: the same path, or the same file by its
+/// device and inode — a hard link included.
+fn same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) {
+            return left.dev() == right.dev() && left.ino() == right.ino();
+        }
+    }
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
 }
 
 fn absolute(path: &Path) -> Result<PathBuf, String> {
@@ -557,16 +676,29 @@ impl Lifecycle {
             "host": "127.0.0.1",
         });
         self.write_state(&state)?;
-        let started = self.spawn_worker(&state).and_then(|pid| {
+        let started = self.spawn_worker(&state).and_then(|mut child| {
             let mut state = self.read_state()?.unwrap_or(state.clone());
-            state["pid"] = json!(pid);
+            state["pid"] = json!(child.id());
             self.write_state(&state)?;
-            self.wait_until(START_TIMEOUT, || {
+            let mut exited = None;
+            let waited = self.wait_until(START_TIMEOUT, || {
+                if let Ok(Some(status)) = child.try_wait() {
+                    exited = Some(status);
+                    return true;
+                }
                 self.read_state()
                     .ok()
                     .flatten()
                     .is_some_and(|state| self.running(&state, Some(&token)))
-            })
+            });
+            match exited {
+                // A worker that stopped before it served says why in its log.
+                Some(status) => Err(format!(
+                    "the diagram server stopped before it served ({status}):\n{}",
+                    self.log_tail()
+                )),
+                None => waited,
+            }
         });
         if let Err(error) = started {
             self.mark_stopped(&token);
@@ -702,7 +834,7 @@ impl Lifecycle {
         }
     }
 
-    fn spawn_worker(&self, state: &Value) -> Result<u32, String> {
+    fn spawn_worker(&self, state: &Value) -> Result<std::process::Child, String> {
         self.prepare_instance_dir()?;
         let log_path = self.log_path();
         let log = std::fs::File::create(&log_path)
@@ -719,7 +851,7 @@ impl Lifecycle {
             .arg(&self.source)
             .args(["--output", text(state, "output")])
             .args(["--port", &state["port"].to_string()])
-            .args(["--token", text(state, "token")])
+            .env(LIFECYCLE_TOKEN_VARIABLE, text(state, "token"))
             .arg("--state-root")
             .arg(&self.state_root)
             .stdin(std::process::Stdio::null())
@@ -730,8 +862,14 @@ impl Lifecycle {
         }
         command
             .spawn()
-            .map(|child| child.id())
             .map_err(|error| format!("cannot start the diagram server: {error}"))
+    }
+
+    /// The last lines the worker logged.
+    fn log_tail(&self) -> String {
+        let log = std::fs::read_to_string(self.log_path()).unwrap_or_default();
+        let lines: Vec<&str> = log.lines().collect();
+        lines[lines.len().saturating_sub(20)..].join("\n")
     }
 
     fn running(&self, state: &Value, token: Option<&str>) -> bool {
@@ -775,8 +913,24 @@ impl Lifecycle {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("mprcontents");
-        if path == self.source {
-            return Err("refusing to remove the source MPR".to_string());
+        let source_contents = self
+            .source
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("mprcontents");
+        if path == self.source || path == source_contents {
+            return Err("refusing to remove the source model".to_string());
+        }
+        // The folder made for the copy goes once it is empty.
+        if Some(path.as_path()) == output.parent() {
+            if path
+                .read_dir()
+                .is_ok_and(|mut entries| entries.next().is_none())
+            {
+                std::fs::remove_dir(&path)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+            }
+            return Ok(());
         }
         if path != output && path != external {
             return Err(format!(
@@ -884,7 +1038,7 @@ fn request(state: &Value, method: &str, path: &str, token: &str) -> Option<u16> 
         .ok()?;
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{LIFECYCLE_TOKEN}: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{LIFECYCLE_TOKEN}: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     )
     .ok()?;
     let mut line = String::new();
@@ -895,6 +1049,7 @@ fn request(state: &Value, method: &str, path: &str, token: &str) -> Option<u16> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn model(directory: &Path) -> PathBuf {
         let path = directory.join("App.mpr");
@@ -906,6 +1061,25 @@ mod tests {
         });
         mxrs_writer::write_project(&path, &project.build()).unwrap();
         path
+    }
+
+    /// Every file under `folder`, by its path, with its bytes.
+    fn contents_of(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![folder.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(
+                    std::fs::read_dir(&path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+        assert!(!files.is_empty());
+        files
     }
 
     /// One request to the server: its status and body.
@@ -923,7 +1097,7 @@ mod tests {
             .collect();
         write!(
             stream,
-            "{method} {path} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
         .unwrap();
@@ -952,10 +1126,15 @@ mod tests {
             Some("lifecycle".to_string()),
         )
         .unwrap();
+        // A v2 model's copy is in a folder of its own, with contents of
+        // its own.
         assert_eq!(
             server.output(),
-            directory.path().join("App.domain-layout.mpr")
+            directory
+                .path()
+                .join("App.domain-layout/App.domain-layout.mpr")
         );
+        let source_contents = contents_of(&directory.path().join("mprcontents"));
         let (sender, receiver) = std::sync::mpsc::channel();
         let serving = std::thread::spawn(move || server.serve(|port| sender.send(port).unwrap()));
         let port = receiver.recv().unwrap();
@@ -1000,8 +1179,22 @@ mod tests {
         );
         assert_eq!(status, 200, "{applied}");
         assert_eq!(std::fs::read(&source).unwrap(), before);
+        assert_eq!(
+            contents_of(&directory.path().join("mprcontents")),
+            source_contents
+        );
 
         assert_eq!(ask(port, "GET", "/api/admin/status", &[], "").0, 403);
+        // A page reaching the port through another name is refused.
+        let mut rebound = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            rebound,
+            "GET /api/diagram HTTP/1.1\r\nHost: attacker.example:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut answer = String::new();
+        rebound.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
         assert_eq!(
             ask(
                 port,

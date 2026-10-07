@@ -439,10 +439,43 @@ fn import_cargo_project_inner(
     }));
     declared.retain(|(_, module, _)| authored(module));
     drop(project);
+    // A nanoflow, page, layout or snippet the frontend states is read from
+    // its folder, which a build must find before it removes what is not
+    // there.
+    let frontend_declared: std::collections::BTreeSet<(String, String, String)> =
+        frontend_nanoflows
+            .declared
+            .iter()
+            .flat_map(|(module, names)| {
+                names.iter().map(move |name| {
+                    (
+                        "Microflows$Nanoflow".to_string(),
+                        module.clone(),
+                        name.clone(),
+                    )
+                })
+            })
+            .chain(
+                frontend_forms
+                    .declared
+                    .iter()
+                    .map(|(module, ty, name)| (ty.clone(), module.clone(), name.clone())),
+            )
+            .collect();
+    let declared: std::collections::BTreeMap<_, _> = declared
+        .into_iter()
+        .map(|key| {
+            let source = frontend_declared
+                .contains(&key)
+                .then(|| frontend_source_folder(&key.0))
+                .flatten();
+            (key, source)
+        })
+        .collect();
 
     let imported = destination.join("model/imported");
     let manifest = mxrs_project::capture_imported_project(mpr_path, &imported)?;
-    mxrs_project::record_declared_units(&imported, &manifest, &declared)?;
+    mxrs_project::record_declared_units_from(&imported, &manifest, &declared)?;
     let imported_assets =
         mxrs_project::capture_project_assets(mpr_path, destination.join("assets"))?;
     // The Java behind the Java actions is the project's own code, kept in
@@ -2689,6 +2722,16 @@ fn option_localized_text(text: Option<&mxrs_ir::LocalizedText>) -> String {
 
 fn option_u32(value: Option<u32>) -> String {
     value.map_or_else(|| "None".to_string(), |value| format!("Some({value})"))
+}
+
+/// The folder of the project a frontend declaration of the type is read
+/// from.
+fn frontend_source_folder(native_type: &str) -> Option<String> {
+    let folder = match native_type {
+        "Microflows$Nanoflow" => "services",
+        ty => mxrs_frontend::forms::folder(ty)?,
+    };
+    Some(format!("frontend/src/{folder}"))
 }
 
 /// The type of the document an editable declaration states.
