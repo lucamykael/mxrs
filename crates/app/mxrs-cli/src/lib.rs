@@ -59,6 +59,7 @@ pub mod database;
 pub mod db_reports;
 pub mod design;
 pub mod diagram_er;
+pub mod diagram_server;
 pub mod doctor;
 pub mod environment;
 pub mod evaluation;

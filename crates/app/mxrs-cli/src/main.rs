@@ -145,7 +145,11 @@ fn command_options(
             &["--role"],
         ),
         "design" => (&["--target"], &["--apply", "--dry-run", "--json"], &[]),
-        "diagram-er" => (&[], &["--apply", "--json"], &["--module"]),
+        "diagram-er" => (
+            &["--output", "--port", "--token", "--state-root"],
+            &["--apply", "--json", "--force", "--yes"],
+            &["--module"],
+        ),
         "update" => (&[], &["--check", "--changelog"], &[]),
         "widgets" => (&["--project"], &[], &[]),
         "ci" | "constant" | "consumed-rest" | "dto" | "entity" | "enumeration" | "evaluation"
@@ -222,7 +226,7 @@ commands! {
     "describe", "<file.mpr> <artifact> [--json]", "Describe an artifact and its reference edges", run_describe;
     "design", "init [--target DIR] [--dry-run] [--json] | scan <file.mpr> [--json] | migrate <file.mpr> <literal> <token> [--apply] [--json]", "Initialize, inventory, or migrate the project design system", run_design;
     "db", "<status|up|down|destroy|credentials|url|shell> <file.mpr> [--port PORT] [--json] | sql <file.mpr> \"SELECT ...\" [--write] | explain <file.mpr> \"SELECT ...\" [--analyze] [--json] | workload <file.mpr> [--limit N] [--save FILE] [--compare FILE] [--json] | indexes <file.mpr> [--limit N] [--json] | sync <file.mpr> [--allow-destructive-schema] [--json]", "Manage, migrate, query and profile an isolated PostgreSQL workspace", run_db;
-    "diagram-er", "<file.mpr> [--module NAME] [--json] | layout <file.mpr> <layout.json> [--apply] [--json]", "Project the domain ER diagram or apply audited visual layout", run_diagram_er;
+    "diagram-er", "[up|down|status|destroy] <file.mpr> [--module NAME] [--output FILE] [--port PORT] [--force] [--yes] [--json] | layout <file.mpr> <layout.json> [--apply] [--json]", "Edit the domain ER diagram in the browser, or project it and apply audited layout", run_diagram_er;
     "diff", "<left.mpr> <right.mpr> [--json]", "List structural changes between two MPRs", run_diff;
     "doctor", "[DIR] [--json]", "Check a Cargo-native project and local toolchain", run_doctor;
     "dto", "new <Module.Dto> [--target DIR] [--dry-run] [--json]", "Scaffold a non-persistable entity (DTO) declaration", run_dto;
@@ -1511,16 +1515,14 @@ fn run_widgets(mut args: Vec<String>) -> ExitCode {
 }
 
 fn run_diagram_er(mut args: Vec<String>) -> ExitCode {
-    const USAGE: &str = "Usage: mxrs diagram-er <file.mpr> [--module NAME] [--json] | \
+    const USAGE: &str = "Usage: mxrs diagram-er <file.mpr> [--module NAME] [--output FILE] [--port PORT] [--force] | \
+        <file.mpr> [--module NAME] --json | up|down|status|destroy <file.mpr> [options] | \
         layout <file.mpr> <layout.json> [--apply] [--json]";
     match args.first().map(String::as_str) {
-        Some("up" | "down" | "status" | "destroy" | "__serve") => {
-            eprintln!(
-                "[mxrs] error: the browser ER-diagram server lifecycle is not ported; use \
-                 `mxrs diagram-er <file.mpr> --json` for the diagram data and \
-                 `mxrs diagram-er layout` to apply visual changes"
-            );
-            ExitCode::FAILURE
+        Some(action @ ("up" | "down" | "status" | "destroy" | "__serve")) => {
+            let action = action.to_string();
+            args.remove(0);
+            diagram_lifecycle(&action, args)
         }
         Some("layout") => {
             args.remove(0);
@@ -1575,10 +1577,56 @@ fn run_diagram_er(mut args: Vec<String>) -> ExitCode {
         Some(_) => {
             let json = take_flag(&mut args, "--json");
             let modules = take_values(&mut args, "--module");
+            let output = take_value(&mut args, "--output");
+            let port = take_value(&mut args, "--port");
+            let force = take_flag(&mut args, "--force");
             let [source] = args.as_slice() else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             };
+            // As mxrb's: the editor, served in the foreground.
+            if !json {
+                let port = match port.as_deref().map(str::parse::<u16>).transpose() {
+                    Ok(port) => port.unwrap_or(mxrs_cli::diagram_server::DEFAULT_PORT),
+                    Err(_) => {
+                        eprintln!("[mxrs] error: --port must be a port number");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let server = match mxrs_cli::diagram_server::Server::new(
+                    source,
+                    output.as_deref().map(Path::new),
+                    modules,
+                    port,
+                    mxrs_cli::diagram_server::Output::Fresh { force },
+                    None,
+                ) {
+                    Ok(server) => server,
+                    Err(error) => {
+                        eprintln!("[mxrs] {error}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let layout = server.output().display().to_string();
+                let served = server.serve(|port| {
+                    println!("[mxrs] ER Diagram: http://127.0.0.1:{port}");
+                    println!("[mxrs] Layout MPR: {layout}");
+                    println!("[mxrs] Use Exportar PNG in the browser to create the diagram image.");
+                });
+                return match served {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        eprintln!("[mxrs] {error}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            if output.is_some() || port.is_some() || force {
+                eprintln!(
+                    "[mxrs] error: --output, --port and --force start the editor; --json prints the diagram"
+                );
+                return ExitCode::FAILURE;
+            }
             let payload = match mxrs_cli::diagram_er::document(Path::new(source), &modules) {
                 Ok(payload) => payload,
                 Err(error) => {
@@ -1625,6 +1673,114 @@ fn run_diagram_er(mut args: Vec<String>) -> ExitCode {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `diagram-er up|down|status|destroy|__serve FILE.mpr [options]`.
+fn diagram_lifecycle(action: &str, mut args: Vec<String>) -> ExitCode {
+    use mxrs_cli::diagram_server::Lifecycle;
+    let modules = take_values(&mut args, "--module");
+    let modules_given = !modules.is_empty();
+    let output = take_value(&mut args, "--output");
+    let port = take_value(&mut args, "--port");
+    let token = take_value(&mut args, "--token");
+    let state_root = take_value(&mut args, "--state-root");
+    let force = take_flag(&mut args, "--force");
+    let yes = take_flag(&mut args, "--yes");
+    let json = take_flag(&mut args, "--json");
+    let fail = |message: String| {
+        eprintln!("[mxrs] {message}");
+        ExitCode::FAILURE
+    };
+    let [source] = args.as_slice() else {
+        return fail(format!(
+            "usage: mxrs diagram-er {action} FILE.mpr [options]"
+        ));
+    };
+    let port = match port.as_deref().map(str::parse::<u16>).transpose() {
+        Ok(port) => port,
+        Err(_) => return fail("--port must be a port number".to_string()),
+    };
+    let executable = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("mxrs"));
+    let lifecycle = match Lifecycle::new(
+        source,
+        state_root
+            .clone()
+            .map_or_else(Lifecycle::default_state_root, std::path::PathBuf::from),
+        executable,
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => return fail(error),
+    };
+    let unexpected = |extra: bool| extra.then(|| fail("Unknown arguments".to_string()));
+    let status = match action {
+        "up" => {
+            if let Some(code) = unexpected(token.is_some() || yes) {
+                return code;
+            }
+            lifecycle.up(
+                output.as_deref().map(Path::new),
+                modules_given.then_some(modules),
+                port,
+                force,
+            )
+        }
+        "down" => {
+            if let Some(code) = unexpected(
+                output.is_some() || port.is_some() || force || yes || json || modules_given,
+            ) {
+                return code;
+            }
+            lifecycle.down()
+        }
+        "status" => {
+            if let Some(code) = unexpected(output.is_some() || port.is_some() || force || yes) {
+                return code;
+            }
+            lifecycle.status()
+        }
+        "destroy" => {
+            if let Some(code) = unexpected(output.is_some() || port.is_some() || force || json) {
+                return code;
+            }
+            lifecycle.destroy(yes)
+        }
+        _ => {
+            let (Some(output), Some(port), Some(token), Some(_)) =
+                (output, port, token, state_root)
+            else {
+                return fail(
+                    "__serve requires --output, --port, --token, and --state-root".to_string(),
+                );
+            };
+            return match lifecycle.run_worker(Path::new(&output), modules, port, &token) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            };
+        }
+    };
+    match status {
+        Ok(status) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&status).expect("status is serializable")
+                );
+            } else {
+                println!("[mxrs] ER diagram: {}", status.state);
+                for (label, value) in [
+                    ("URL", &status.url),
+                    ("Layout MPR", &status.output),
+                    ("Log", &status.log),
+                ] {
+                    if let Some(value) = value {
+                        println!("[mxrs] {label}: {value}");
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
     }
 }
 

@@ -3,8 +3,7 @@
 //! projection mxrb serves to its browser UI (`Document#to_h`) and the
 //! audited visual-field writer (`LayoutWriter#apply!`, entity locations
 //! plus association connection anchors only). The browser server and its
-//! db-style lifecycle (`up|down|status|destroy|__serve`, port 4568) are
-//! deliberately not ported — the CLI refuses those actions explicitly.
+//! lifecycle are [`crate::diagram_server`].
 //! Cross-module anchor overrides interoperate with mxrb through the same
 //! `_MxrbDomainDiagramAssociation` sidecar table
 //! (`MprFile::domain_diagram_anchors`).

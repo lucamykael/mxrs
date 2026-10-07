@@ -36,11 +36,20 @@ impl Project {
         &mut self.mpr
     }
 
+    /// The project's name: its root unit's, else the file's — mxrb's
+    /// `project_name`.
     pub fn name(&self) -> Result<Option<String>> {
         let Some(root) = self.mpr.root_unit()? else {
             return Ok(None);
         };
-        Ok(get_str_any(&self.mpr.parse_contents(&root)?, &["Name"]))
+        Ok(
+            get_str_any(&self.mpr.parse_contents(&root)?, &["Name", "name"]).or_else(|| {
+                self.mpr
+                    .path()
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            }),
+        )
     }
 
     pub fn mendix_version(&self) -> Result<Option<String>> {

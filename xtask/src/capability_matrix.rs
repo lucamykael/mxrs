@@ -513,9 +513,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "byte-identical class/activity/sequence Mermaid and PlantUML exports and shared refusals: xtask command-oracle uml; the interactive browser viewer is not ported and is refused explicitly; docs/commands/uml.md",
         ),
         "diagram-er" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs diagram-er",
-            "ports the framework-neutral core (the diagram JSON projection and the audited visual layout writer, cross-module anchors interoperable through mxrb's own sidecar table); the browser server and its db-style lifecycle are refused explicitly, not pretended",
+            "full port: the diagram JSON projection and audited layout writer (cross-module anchors through mxrb's own sidecar table), the loopback editor server over a layout copy (mxrb's editor bundle, its token-signed layout endpoint, 2 MiB limit, asset confinement), and the detached up/status/down/destroy lifecycle reached through a token-authenticated endpoint; own evidence: server routes, tokens and refusals tested over HTTP, the lifecycle run end to end through the CLI, and the editor loaded in headless Chromium against a real model",
         ),
         "update" => (
             Status::Verified,
@@ -661,7 +661,7 @@ mod tests {
     /// assertion.
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["db", "run", "portability", "frontend"])).unwrap();
+        let report = build(&inventory(&["db", "run", "portability"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

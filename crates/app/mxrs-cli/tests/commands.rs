@@ -2157,3 +2157,48 @@ fn module_search_and_add_work_offline_against_a_local_catalog_and_directory() {
     assert!(added_local.status.success(), "{:?}", added_local.stderr);
     assert!(target.join("modules").join("Reporting").exists());
 }
+
+/// The managed editor: `up` starts it detached on a copy of the model,
+/// `status` reaches it, `down` stops it through its endpoint, and
+/// `destroy --yes` removes the copy and the state.
+#[test]
+fn the_er_diagram_editor_runs_detached_and_is_stopped_through_its_endpoint() {
+    let (directory, path) = fixture(false);
+    let state = directory.path().join("state");
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port().to_string()
+    };
+    let path = path.to_str().unwrap();
+    let state = state.to_str().unwrap();
+    let lifecycle = |arguments: &[&str]| {
+        let mut all = vec!["diagram-er"];
+        all.extend_from_slice(arguments);
+        all.extend_from_slice(&["--state-root", state]);
+        cli(&all)
+    };
+    let up = lifecycle(&["up", path, "--port", &port, "--json"]);
+    assert!(up.status.success(), "{}", text_err(&up));
+    let status: Value = serde_json::from_slice(&up.stdout).unwrap();
+    assert_eq!(status["state"], "running");
+    assert_eq!(status["url"], format!("http://127.0.0.1:{port}"));
+    let copy = std::path::PathBuf::from(status["output"].as_str().unwrap());
+    assert!(copy.is_file());
+    assert!(!lifecycle(&["up", path, "--port", &port]).status.success());
+    let running = lifecycle(&["status", path]);
+    assert!(text(&running).contains("[mxrs] ER diagram: running"));
+    let down = lifecycle(&["down", path]);
+    assert!(down.status.success(), "{}", text_err(&down));
+    assert!(text(&down).contains("[mxrs] ER diagram: stopped"));
+    assert!(!lifecycle(&["destroy", path]).status.success());
+    // As mxrb's, destroy says what it did in text only.
+    assert!(
+        !lifecycle(&["destroy", path, "--yes", "--json"])
+            .status
+            .success()
+    );
+    let destroyed = lifecycle(&["destroy", path, "--yes"]);
+    assert!(destroyed.status.success(), "{}", text_err(&destroyed));
+    assert!(text(&destroyed).contains("[mxrs] ER diagram: absent"));
+    assert!(!copy.exists());
+}
