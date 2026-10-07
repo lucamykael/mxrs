@@ -64,8 +64,10 @@ pub fn is_list_supported(expression: &str) -> bool {
             continue;
         }
         if *character == '[' && characters.get(index + 1) == Some(&'%') {
+            // Spelled as the evaluator reads it: another spelling would be
+            // compared as text, and the list would answer nothing.
             let token: String = characters[index..].iter().take(15).collect();
-            if !token.eq_ignore_ascii_case("[%CurrentUser%]") {
+            if token != "[%CurrentUser%]" {
                 return false;
             }
         }

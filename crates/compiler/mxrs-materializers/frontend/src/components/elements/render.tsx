@@ -23,6 +23,7 @@ import {
   ValidationError,
   type DataObject,
   type Query,
+  type Violation,
 } from '@/api/data';
 import type { Manifest, RuntimeValue } from '@/types/model';
 
@@ -291,8 +292,12 @@ function useAction(source: Source, field: string): (() => void) | undefined {
   // What the runtime refused: under the inputs it is about, and the rest said.
   const refused = (error: unknown) => {
     if (!(error instanceof ValidationError) || !draft) throw error;
-    draft.rejected(error.violations);
-    const unshown = error.violations.filter(({ member }) => !draft.inputs.has(member));
+    // What is wrong with another object than the form's is not its inputs' to show.
+    const ours = ({ object }: Violation) => !object || object === draft.object?.id;
+    draft.rejected(error.violations.filter(ours));
+    const unshown = error.violations.filter(
+      (violation) => !ours(violation) || !draft.inputs.get(violation.member),
+    );
     if (unshown.length) notify(unshown.map(({ message }) => message).join(' '), 'warning');
   };
   // What a flow asks the page to do once it has run; whether that left the page.
@@ -757,8 +762,18 @@ const input =
     const name = lastName(attribute ? plain(attribute, 'attribute', '') : '');
     const label = text(source, 'labelTemplate');
     // What the runtime refused of the member is said under its input, as
-    // the Mendix client does, until the user changes it.
-    draft?.inputs.add(name);
+    // the Mendix client does, until the user changes it — while the input
+    // is shown: one hidden since says nothing under it.
+    const inputs = draft?.inputs;
+    useEffect(() => {
+      if (!inputs || !name) return;
+      inputs.set(name, (inputs.get(name) ?? 0) + 1);
+      return () => {
+        const shown = (inputs.get(name) ?? 1) - 1;
+        if (shown) inputs.set(name, shown);
+        else inputs.delete(name);
+      };
+    }, [inputs, name]);
     const refused = draft?.violations.get(name);
     // Laid out as the Mendix client lays out a horizontal form: the label
     // in a column of its own and the control, with what was refused of it,
@@ -875,7 +890,7 @@ const DataView: Draw = (source) => {
   const [object, setObject] = useState<DataObject | null>(initial);
   const [changed, setChanged] = useState<ReadonlySet<string>>(new Set());
   const [violations, setViolations] = useState<ReadonlyMap<string, string>>(new Map());
-  const inputs = useRef(new Set<string>()).current;
+  const inputs = useRef(new Map<string, number>()).current;
   const scope = useContext(Scope);
   // A view over a microflow shows the object the flow answers with; a flow
   // the runtime cannot run is said in the view's place, not the page's.

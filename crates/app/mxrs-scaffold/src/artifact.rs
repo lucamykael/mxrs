@@ -624,11 +624,7 @@ fn optional_directory(path: &Path) -> Result<Option<std::fs::ReadDir>> {
 fn declared_version(root: &Path) -> Result<Option<String>> {
     let manifest = root.join("mxrs.toml");
     if let Some(text) = read_optional(&manifest)?
-        && let Some(version) = text
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("mendix_version"))
-            .filter_map(|value| value.trim_start().strip_prefix('='))
-            .find_map(|value| quoted(value.trim()))
+        && let Some(version) = crate::manifest::project_setting(&text, "mendix_version")
     {
         return Ok(Some(version));
     }
@@ -706,12 +702,6 @@ pub(crate) fn rust_application_metadata(source: &str) -> syn::Result<(Option<Str
         ));
     }
     Ok((versions.values.pop(), versions.has_project))
-}
-
-fn quoted(value: &str) -> Option<String> {
-    let rest = value.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>> {

@@ -11,7 +11,7 @@
 //! not inferred from defaults. Entity access rules must still be enforced by
 //! callers using the policy, not by the raw store passed to native actions.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
@@ -40,11 +40,16 @@ pub enum RuntimeError {
 }
 
 /// One thing wrong with an object a page saves: the member and the message
-/// the model states for it.
+/// the model states for it, and the object it is about when a flow
+/// committed another one than the page's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Violation {
     pub member: String,
     pub message: String,
+    /// The id of the object the violation is about; `None` when it is the
+    /// object the request saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
 }
 
 fn violations_text(violations: &[Violation]) -> String {
@@ -142,8 +147,9 @@ impl ValidationRule {
     }
 
     /// Whether the object breaks the rule; `others` are the values the
-    /// other objects of the entity hold in the member, for uniqueness.
-    fn broken(&self, record: &BTreeMap<String, Value>, others: &[&Value]) -> bool {
+    /// other objects of the entity hold in the member, for uniqueness, and
+    /// `numeric` whether the member's attribute holds a number.
+    fn broken(&self, record: &BTreeMap<String, Value>, others: &[&Value], numeric: bool) -> bool {
         let value = record.get(&self.member);
         let empty = value.is_none_or(|value| match value {
             Value::Null => true,
@@ -152,7 +158,20 @@ impl ValidationRule {
         });
         match &self.kind {
             RuleKind::Required => empty,
-            RuleKind::Unique => !empty && others.contains(&value.unwrap_or(&Value::Null)),
+            // As the database's unique index compares: a number by its value
+            // (5 is 5.0), text exactly as it is written.
+            RuleKind::Unique => {
+                !empty
+                    && value.is_some_and(|value| {
+                        others.iter().any(|other| {
+                            *other == value
+                                || numeric
+                                    && number_of(value)
+                                        .zip(number_of(other))
+                                        .is_some_and(|(left, right)| left == right)
+                        })
+                    })
+            }
             RuleKind::MaxLength(length) => value
                 .and_then(Value::as_str)
                 .is_some_and(|text| text.chars().count() > *length),
@@ -173,8 +192,12 @@ impl ValidationRule {
                 let Some(expected) = bound.of(record) else {
                     return !empty;
                 };
-                match (value.and_then(number_of), number_of(&expected)) {
-                    (Some(left), Some(right)) => left != right,
+                // A number by its value; text, even text of digits, as written.
+                let numbers = numeric
+                    .then(|| value.and_then(number_of).zip(number_of(&expected)))
+                    .flatten();
+                match numbers {
+                    Some((left, right)) => left != right,
                     _ => {
                         let text = |value: &Value| match value {
                             Value::String(text) => text.clone(),
@@ -288,6 +311,12 @@ pub enum MemberKind {
     /// An enumeration, a binary, a hashed string: text this runtime does
     /// not look into.
     Other,
+}
+
+impl MemberKind {
+    fn numeric(&self) -> bool {
+        matches!(self, MemberKind::Integer | MemberKind::Decimal)
+    }
 }
 
 impl StoreSchema {
@@ -414,6 +443,43 @@ impl Store {
             .flat_map(|records| records.values())
             .map(|object| object.as_ref().clone())
             .collect())
+    }
+
+    /// The objects of an entity as last committed, in no unit of work's
+    /// state.
+    pub fn retrieve_committed(&self, entity: &str) -> Vec<ObjectValue> {
+        self.committed
+            .get(entity)
+            .into_iter()
+            .flat_map(|records| records.values())
+            .map(|object| object.as_ref().clone())
+            .collect()
+    }
+
+    /// The members of an object that differ from what was last committed
+    /// of it — every member of one never committed.
+    pub fn uncommitted_members(&self, entity: &str, id: &str) -> BTreeMap<String, Value> {
+        let Some(current) = self.records.get(entity).and_then(|records| records.get(id)) else {
+            return BTreeMap::new();
+        };
+        let committed = self
+            .committed
+            .get(entity)
+            .and_then(|records| records.get(id));
+        current
+            .members
+            .iter()
+            .filter(|(member, value)| {
+                committed.is_none_or(|committed| committed.members.get(*member) != Some(*value))
+            })
+            .map(|(member, value)| (member.clone(), value.clone()))
+            .collect()
+    }
+
+    /// Whether an object holds what was not committed: new, or changed
+    /// since its last commit.
+    pub fn is_dirty(&self, entity: &str, id: &str) -> bool {
+        self.dirty.contains(&(entity.to_string(), id.to_string()))
     }
 
     pub fn find(&self, entity: &str, id: &str) -> Result<Option<ObjectValue>> {
@@ -853,15 +919,23 @@ impl SecurityPolicy {
     }
 }
 
+/// What the runtime runs by name, as the user who asked for it: a flow's
+/// own retrieves and commits are held to that user's rights.
 pub trait Action: Send + Sync {
-    fn execute(&self, store: &mut Store, arguments: &Value) -> Result<Value>;
+    fn execute(
+        &self,
+        store: &mut Store,
+        arguments: &Value,
+        context: &SecurityContext,
+    ) -> Result<Value>;
 }
 
+/// A closure is an action that has no use for who runs it.
 impl<F> Action for F
 where
     F: Fn(&mut Store, &Value) -> Result<Value> + Send + Sync,
 {
-    fn execute(&self, store: &mut Store, arguments: &Value) -> Result<Value> {
+    fn execute(&self, store: &mut Store, arguments: &Value, _: &SecurityContext) -> Result<Value> {
         self(store, arguments)
     }
 }
@@ -885,6 +959,94 @@ pub struct Runtime {
     security: SecurityPolicy,
     actions: BTreeMap<String, Box<dyn Action>>,
     lifecycle: Option<Box<dyn Lifecycle>>,
+    held: HeldObjects,
+}
+
+/// What a flow made of an object it handed a page without committing it:
+/// the members it set, and whether the object is new.
+#[derive(Debug, Clone, PartialEq)]
+struct Held {
+    user: Option<String>,
+    members: BTreeMap<String, Value>,
+    new: bool,
+}
+
+/// The objects flows handed pages uncommitted, kept for the user each was
+/// handed to — as the Mendix client keeps an object a microflow made — until
+/// a page saves or deletes it. A unit of work ends with its flow, so without
+/// them what the flow set would be gone by the time the page saves.
+#[derive(Debug, Default)]
+struct HeldObjects {
+    objects: BTreeMap<(String, String), Held>,
+    /// Oldest first, so the runtime keeps a bounded number.
+    order: VecDeque<(String, String)>,
+}
+
+/// How many objects handed over uncommitted the runtime keeps at once.
+const HELD_LIMIT: usize = 4096;
+
+impl HeldObjects {
+    /// What the caller was handed of an object, if it was handed one.
+    fn get(&self, entity: &str, id: &str, context: &SecurityContext) -> Option<&Held> {
+        self.objects
+            .get(&(entity.to_string(), id.to_string()))
+            .filter(|held| held.user == context.user)
+    }
+
+    fn keep(&mut self, entity: &str, id: &str, held: Held) {
+        let key = (entity.to_string(), id.to_string());
+        self.order.retain(|kept| kept != &key);
+        self.order.push_back(key.clone());
+        self.objects.insert(key, held);
+        while self.order.len() > HELD_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.objects.remove(&oldest);
+            }
+        }
+    }
+
+    fn release(&mut self, entity: &str, id: &str) {
+        let key = (entity.to_string(), id.to_string());
+        self.order.retain(|kept| kept != &key);
+        self.objects.remove(&key);
+    }
+}
+
+/// Every object (`{entity, id}`) a flow's answer names.
+fn named_objects(value: &Value, found: &mut BTreeSet<(String, String)>) {
+    match value {
+        Value::Object(map) => {
+            if let (Some(entity), Some(id)) = (
+                map.get("entity").and_then(Value::as_str),
+                map.get("id").and_then(Value::as_str),
+            ) {
+                found.insert((entity.to_string(), id.to_string()));
+            }
+            map.values().for_each(|value| named_objects(value, found));
+        }
+        Value::Array(values) => values.iter().for_each(|value| named_objects(value, found)),
+        _ => {}
+    }
+}
+
+/// Says of each object an answer names that is new to the store, that it
+/// is: the page saves it as the new object it is.
+fn mark_new(value: &mut Value, new: &BTreeSet<(String, String)>) {
+    match value {
+        Value::Object(map) => {
+            let named = map
+                .get("entity")
+                .and_then(Value::as_str)
+                .zip(map.get("id").and_then(Value::as_str))
+                .map(|(entity, id)| (entity.to_string(), id.to_string()));
+            if named.is_some_and(|named| new.contains(&named)) && map.contains_key("members") {
+                map.insert("new".to_string(), Value::Bool(true));
+            }
+            map.values_mut().for_each(|value| mark_new(value, new));
+        }
+        Value::Array(values) => values.iter_mut().for_each(|value| mark_new(value, new)),
+        _ => {}
+    }
 }
 
 impl Runtime {
@@ -894,6 +1056,7 @@ impl Runtime {
             security,
             actions: BTreeMap::new(),
             lifecycle: None,
+            held: HeldObjects::default(),
         }
     }
 
@@ -918,19 +1081,58 @@ impl Runtime {
             .get(name)
             .ok_or_else(|| RuntimeError::UnknownAction(name.to_string()))?;
         // An object a page gives a flow is one its user may read, with the
-        // changes its form holds and its user may make.
-        let given = given_objects(&self.store, &self.security, arguments, context)?;
-        let answer = self.store.transaction(|store| {
+        // changes its form holds and its user may make — over what a flow
+        // made of it before, when one handed it to the page.
+        let given = given_objects(&self.store, &self.security, &self.held, arguments, context)?;
+        let (mut answer, handed) = self.store.transaction(|store| {
             for object in &given {
                 if object.create {
                     store.create_as(&object.entity, &object.id)?;
                 }
-                for (member, value) in &object.values {
+                for (member, value) in object.restored.iter().chain(&object.values) {
                     store.set_member(&object.entity, &object.id, member, value.clone())?;
                 }
             }
-            action.execute(store, arguments)
+            let answer = action.execute(store, arguments, context)?;
+            // What the page holds once the flow has run, uncommitted: the
+            // objects it was given and those the flow answers or opens a
+            // page with.
+            let mut named = BTreeSet::new();
+            named_objects(&answer, &mut named);
+            named.extend(
+                given
+                    .iter()
+                    .map(|object| (object.entity.clone(), object.id.clone())),
+            );
+            let handed: Vec<((String, String), Option<Held>)> = named
+                .into_iter()
+                .filter(|(entity, _)| store.schema().contains(entity))
+                .map(|(entity, id)| {
+                    let held = (store.find(&entity, &id)?.is_some()
+                        && store.is_dirty(&entity, &id))
+                    .then(|| Held {
+                        user: context.user.clone(),
+                        members: store.uncommitted_members(&entity, &id),
+                        new: !store.is_committed(&entity, &id),
+                    });
+                    Ok(((entity, id), held))
+                })
+                .collect::<Result<_>>()?;
+            Ok((answer, handed))
         })?;
+        let mut new = BTreeSet::new();
+        for ((entity, id), held) in handed {
+            match held {
+                Some(held) => {
+                    if held.new {
+                        new.insert((entity.clone(), id.clone()));
+                    }
+                    self.held.keep(&entity, &id, held);
+                }
+                None => self.held.release(&entity, &id),
+            }
+        }
+        mark_new(&mut answer, &new);
         // What comes back to the page is what its user may read.
         Ok(readable(&self.store, &self.security, answer, context))
     }
@@ -1115,9 +1317,21 @@ impl Runtime {
                     .and_then(Value::as_object)
                     .ok_or_else(|| RuntimeError::Transaction("save needs `members`".into()))?;
                 let existing = self.store.find(entity, id)?;
-                let record = match (&existing, new) {
-                    (Some(object), _) => object.members.clone(),
-                    (None, true) => {
+                // What a flow made of the object before handing it to the
+                // page is saved with it, and what the user changed over it.
+                let held = self.held.get(entity, id, context).cloned();
+                let record = match (&existing, &held, new) {
+                    (Some(object), held, _) => {
+                        let mut record = object.members.clone();
+                        record.extend(held.iter().flat_map(|held| held.members.clone()));
+                        record
+                    }
+                    (None, Some(held), _) if held.new => {
+                        let mut record = schema.defaults.clone();
+                        record.extend(held.members.clone());
+                        record
+                    }
+                    (None, _, true) => {
                         if !security.entity_allowed(
                             entity,
                             EntityAction::Create,
@@ -1131,7 +1345,7 @@ impl Runtime {
                     }
                     // Not a new object, and gone: saving it would bring back
                     // what someone deleted.
-                    (None, false) => {
+                    (None, _, false) => {
                         return Err(RuntimeError::UnknownObject {
                             entity: entity.to_string(),
                             id: id.to_string(),
@@ -1139,13 +1353,15 @@ impl Runtime {
                     }
                 };
                 let values = written(security, &schema, entity, &record, members, context)?;
+                let was_held = held.is_some();
+                let restored = held.map(|held| held.members).unwrap_or_default();
                 let lifecycle = self.lifecycle.as_deref();
                 let (saved, effects) = self.store.transaction(|store| {
                     let id = match existing {
                         Some(object) => object.id,
                         None => store.create_as(entity, id)?.id,
                     };
-                    for (member, value) in values {
+                    for (member, value) in restored.into_iter().chain(values) {
                         store.set_member(entity, &id, &member, value)?;
                     }
                     // The lifecycle validates between the entity's
@@ -1167,6 +1383,11 @@ impl Runtime {
                             })?;
                     Ok((saved, effects))
                 })?;
+                // Saved, what the flow made of it is the store's; what it
+                // made for another user stays theirs.
+                if was_held {
+                    self.held.release(entity, &saved.id);
+                }
                 let mut answer = seen(&saved);
                 if !effects.is_empty() {
                     answer["effects"] = Value::Array(effects);
@@ -1185,9 +1406,9 @@ impl Runtime {
                 ) {
                     return Err(refused("delete", None));
                 }
-                self.store
-                    .transaction(|store| store.delete(entity, id))
-                    .map(|object| serde_json::json!({ "entity": object.entity, "id": object.id }))
+                let deleted = self.store.transaction(|store| store.delete(entity, id))?;
+                self.held.release(entity, id);
+                Ok(serde_json::json!({ "entity": deleted.entity, "id": deleted.id }))
             }
             other => Err(RuntimeError::UnknownAction(format!("data/{other}"))),
         }
@@ -1214,15 +1435,22 @@ pub fn validate_object(store: &Store, entity: &str, id: &str) -> Result<()> {
     let Some(object) = store.find(entity, id)? else {
         return Ok(());
     };
+    // Unique is the database's index: what other objects hold once
+    // committed, not what a unit of work has yet to commit.
     let others: Vec<ObjectValue> = if rules.iter().any(|rule| rule.kind == RuleKind::Unique) {
         store
-            .retrieve(entity)?
+            .retrieve_committed(entity)
             .into_iter()
             .filter(|other| other.id != id)
             .collect()
     } else {
         Vec::new()
     };
+    let kinds = store
+        .schema()
+        .entities
+        .get(entity)
+        .map(|schema| &schema.kinds);
     let violations: Vec<Violation> = rules
         .iter()
         .filter(|rule| {
@@ -1230,11 +1458,15 @@ pub fn validate_object(store: &Store, entity: &str, id: &str) -> Result<()> {
                 .iter()
                 .filter_map(|other| other.members.get(&rule.member))
                 .collect();
-            rule.broken(&object.members, &held)
+            let numeric = kinds
+                .and_then(|kinds| kinds.get(&rule.member))
+                .is_some_and(MemberKind::numeric);
+            rule.broken(&object.members, &held, numeric)
         })
         .map(|rule| Violation {
             member: rule.member.clone(),
             message: rule.message(),
+            object: Some(id.to_string()),
         })
         .collect();
     if violations.is_empty() {
@@ -1283,6 +1515,7 @@ fn written(
             Err(reason) => violations.push(Violation {
                 member: member.clone(),
                 message: format!("{member}: {reason}"),
+                object: None,
             }),
         }
     }
@@ -1299,6 +1532,8 @@ struct Given {
     id: String,
     /// A form's new object: it exists once the flow's unit of work does.
     create: bool,
+    /// What a flow made of it before, when one handed it to the page.
+    restored: Vec<(String, Value)>,
     values: Vec<(String, Value)>,
 }
 
@@ -1308,6 +1543,7 @@ struct Given {
 fn given_objects(
     store: &Store,
     security: &SecurityPolicy,
+    held: &HeldObjects,
     arguments: &Value,
     context: &SecurityContext,
 ) -> Result<Vec<Given>> {
@@ -1330,7 +1566,15 @@ fn given_objects(
             .ok_or_else(|| RuntimeError::UnknownEntity(entity.to_string()))?;
         let new = value.get("new").and_then(Value::as_bool) == Some(true);
         let existing = store.find(entity, id)?;
+        let kept = held.get(entity, id, context);
+        let restored: Vec<(String, Value)> =
+            kept.iter().flat_map(|kept| kept.members.clone()).collect();
         let record = match (&existing, new) {
+            (None, _) if kept.is_some_and(|kept| kept.new) => {
+                let mut record = schema.defaults.clone();
+                record.extend(restored.iter().cloned());
+                record
+            }
             (Some(object), _) => {
                 if !security.entity_allowed(
                     entity,
@@ -1344,7 +1588,9 @@ fn given_objects(
                         resource: entity.to_string(),
                     });
                 }
-                object.members.clone()
+                let mut record = object.members.clone();
+                record.extend(restored.iter().cloned());
+                record
             }
             (None, true) => {
                 if !security.entity_allowed(entity, EntityAction::Create, None, None, context) {
@@ -1370,6 +1616,7 @@ fn given_objects(
             entity: entity.to_string(),
             id: id.to_string(),
             create: existing.is_none(),
+            restored,
             values,
         });
     }
@@ -1916,13 +2163,16 @@ mod tests {
 
     /// What a page saves is held to the entity's validation rules, every
     /// broken one answered at once with the model's message.
-    #[test]
-    fn a_save_is_checked_against_the_entitys_validation_rules() {
-        let rule = |member: &str, kind: RuleKind, message: &str| ValidationRule {
+    fn rule(member: &str, kind: RuleKind, message: &str) -> ValidationRule {
+        ValidationRule {
             member: member.to_string(),
             kind,
             message: message.to_string(),
-        };
+        }
+    }
+
+    #[test]
+    fn a_save_is_checked_against_the_entitys_validation_rules() {
         let mut runtime = Runtime::new(
             Store::new(
                 StoreSchema::default()
@@ -1984,15 +2234,18 @@ mod tests {
             vec![
                 Violation {
                     member: "Name".into(),
-                    message: "Please name the customer".into()
+                    message: "Please name the customer".into(),
+                    object: Some(second.clone()),
                 },
                 Violation {
                     member: "Email".into(),
-                    message: "Email must be unique".into()
+                    message: "Email must be unique".into(),
+                    object: Some(second.clone()),
                 },
                 Violation {
                     member: "Age".into(),
-                    message: "Age must be between 0 and 150".into()
+                    message: "Age must be between 0 and 150".into(),
+                    object: Some(second.clone()),
                 },
             ]
         );
@@ -2030,6 +2283,159 @@ mod tests {
         .unwrap();
     }
 
+    /// Unique is the database's index: a number by its value whoever wrote
+    /// it, text as written, and only what was committed.
+    #[test]
+    fn unique_compares_what_was_committed_as_its_index_would() {
+        let kinds = BTreeMap::from([
+            ("Code".to_string(), MemberKind::Text { length: None }),
+            ("Price".to_string(), MemberKind::Decimal),
+        ]);
+        let mut runtime = Runtime::new(
+            Store::new(
+                StoreSchema::default()
+                    .entity("Main.Item", BTreeMap::new(), false)
+                    .members("Main.Item", kinds)
+                    .rules(
+                        "Main.Item",
+                        vec![
+                            rule("Code", RuleKind::Unique, ""),
+                            rule("Price", RuleKind::Unique, ""),
+                        ],
+                    ),
+            ),
+            SecurityPolicy::default(),
+        );
+        // What a flow commits: an integer, as the flow wrote it.
+        let store = runtime.store_mut();
+        let first = store.create("Main.Item").unwrap();
+        store
+            .set_member("Main.Item", &first.id, "Code", Value::from("Abc"))
+            .unwrap();
+        store
+            .set_member("Main.Item", &first.id, "Price", Value::from(5))
+            .unwrap();
+        store.commit("Main.Item", &first.id).unwrap();
+        // Held by a unit of work and never committed, it is no one's.
+        let draft = store.create("Main.Item").unwrap();
+        store
+            .set_member("Main.Item", &draft.id, "Code", Value::from("abc"))
+            .unwrap();
+        let context = SecurityContext::default();
+        let mut save = |members: Value| {
+            runtime.data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Item", "id": uuid::Uuid::new_v4().to_string(), "new": true, "members": members }),
+                &context,
+            )
+        };
+        let Err(RuntimeError::Validation(violations)) = save(serde_json::json!({ "Price": "5.0" }))
+        else {
+            panic!("5.0 is 5");
+        };
+        assert_eq!(violations[0].member, "Price");
+        save(serde_json::json!({ "Code": "abc", "Price": "6" })).unwrap();
+    }
+
+    /// Equal to a value compares a number by its value, and text — even
+    /// text of digits — as it is written.
+    #[test]
+    fn equals_to_compares_text_as_written() {
+        let equals = rule("Code", RuleKind::EqualsTo(Bound::Value("7".into())), "");
+        let record = |value: Value| BTreeMap::from([("Code".to_string(), value)]);
+        assert!(equals.broken(&record(Value::from("007")), &[], false));
+        assert!(!equals.broken(&record(Value::from("7")), &[], false));
+        assert!(!equals.broken(&record(Value::from(7.0)), &[], true));
+    }
+
+    /// An object a flow makes, or changes, and hands a page without
+    /// committing is saved by the page with what the flow set — for the
+    /// user it was handed to, and no one else.
+    #[test]
+    fn a_page_saves_what_a_flow_made_of_the_object_it_opened_it_with() {
+        let blank = BTreeMap::from([
+            ("Number".to_string(), Value::from("")),
+            ("Status".to_string(), Value::from("")),
+        ]);
+        let mut runtime = Runtime::new(
+            Store::new(StoreSchema::default().entity("Main.Order", blank, false)),
+            SecurityPolicy::default(),
+        );
+        runtime.register_action("Main.ACT_Order_New", |store: &mut Store, _: &Value| {
+            let order = store.create("Main.Order")?;
+            store.set_member("Main.Order", &order.id, "Status", Value::from("Draft"))?;
+            let order = store.find("Main.Order", &order.id)?.expect("created");
+            Ok(serde_json::json!({ "result": Value::Null, "effects": [
+                { "type": "open_page", "objects": [shown(&order)] },
+            ] }))
+        });
+        runtime.register_action(
+            "Main.ACT_Order_Reopen",
+            |store: &mut Store, arguments: &Value| {
+                let id = arguments["Order"]["id"].as_str().expect("given");
+                store.set_member("Main.Order", id, "Status", Value::from("Open"))?;
+                Ok(Value::Null)
+            },
+        );
+        let owner = SecurityContext {
+            user: Some("ana".into()),
+            ..SecurityContext::default()
+        };
+        let answer = runtime
+            .invoke("Main.ACT_Order_New", &serde_json::json!({}), &owner)
+            .unwrap();
+        let opened = &answer["effects"][0]["objects"][0];
+        assert_eq!(opened["new"], true);
+        let id = opened["id"].as_str().unwrap().to_string();
+        let save = |runtime: &mut Runtime, context: &SecurityContext, members: Value| {
+            runtime.data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Order", "id": id, "new": true, "members": members }),
+                context,
+            )
+        };
+        // Another user is not handed what the flow made.
+        let other = SecurityContext {
+            user: Some("bo".into()),
+            ..SecurityContext::default()
+        };
+        let mut elsewhere = Runtime::new(runtime.store().clone(), SecurityPolicy::default());
+        std::mem::swap(&mut elsewhere.held, &mut runtime.held);
+        let foreign = save(&mut elsewhere, &other, serde_json::json!({})).unwrap();
+        assert_eq!(foreign["members"]["Status"], "");
+        std::mem::swap(&mut elsewhere.held, &mut runtime.held);
+        let saved = save(&mut runtime, &owner, serde_json::json!({ "Number": "A1" })).unwrap();
+        assert_eq!(saved["members"]["Status"], "Draft");
+        assert_eq!(saved["members"]["Number"], "A1");
+        assert!(runtime.store().is_committed("Main.Order", &id));
+        // A flow that changes a committed object the page then holds: the
+        // change is saved with the page's.
+        runtime
+            .invoke(
+                "Main.ACT_Order_Reopen",
+                &serde_json::json!({ "Order": { "entity": "Main.Order", "id": id } }),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .store()
+                .find("Main.Order", &id)
+                .unwrap()
+                .unwrap()
+                .members["Status"],
+            "Draft"
+        );
+        let saved = runtime
+            .data(
+                "save",
+                &serde_json::json!({ "entity": "Main.Order", "id": id, "members": {} }),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(saved["members"]["Status"], "Open");
+    }
+
     /// A save is committed through the lifecycle the runtime was given: the
     /// effects its flows ask for come back with the object, and what it
     /// refuses is not kept.
@@ -2052,6 +2458,7 @@ mod tests {
                     return Err(RuntimeError::Validation(vec![Violation {
                         member: "Name".into(),
                         message: "Not that one".into(),
+                        object: None,
                     }]));
                 }
                 store.set_member(
@@ -2372,6 +2779,10 @@ mod tests {
         ));
         assert!(crate::xpath::is_list_supported(
             "[Name = '[%CurrentUser%]' or Owner = $currentUser]"
+        ));
+        // Spelled otherwise, the token would be compared as text.
+        assert!(!crate::xpath::is_list_supported(
+            "[Owner = '[%currentuser%]']"
         ));
     }
 

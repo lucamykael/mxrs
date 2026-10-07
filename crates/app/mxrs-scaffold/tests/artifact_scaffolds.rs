@@ -859,6 +859,28 @@ fn a_page_chain_generates_a_slice_that_compiles_and_reaches_the_written_model() 
             .collect::<Vec<_>>(),
         ["NAN_RefreshOrderOverview"]
     );
+    // The refresh flows say what they did, as mxrb's do: the microflow logs
+    // it, the nanoflow runs it and shows it.
+    let actions = |flow: &mxrs_model::microflow::Microflow| {
+        flow.objects
+            .iter()
+            .filter_map(|object| object.get_document("Action").ok())
+            .filter_map(|action| action.get_str("$Type").ok().map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    let refresh = module
+        .microflows
+        .iter()
+        .find(|flow| flow.name.as_deref() == Some("ACT_RefreshOrderOverview"))
+        .unwrap();
+    assert_eq!(actions(refresh), ["Microflows$LogMessageAction"]);
+    assert_eq!(
+        actions(&module.nanoflows[0]),
+        [
+            "Microflows$MicroflowCallAction",
+            "Microflows$ShowMessageAction"
+        ]
+    );
     assert_eq!(
         module
             .pages

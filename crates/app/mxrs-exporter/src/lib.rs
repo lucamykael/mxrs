@@ -3599,6 +3599,10 @@ fn space_generated_sources(root: &Path) -> Result<()> {
 }
 
 fn format_generated_cargo_project(destination: &Path) -> Result<()> {
+    // Cargo runs inside the project, so a relative destination would be
+    // read twice over: from there, its manifest is only absolute.
+    let destination =
+        &std::path::absolute(destination).map_err(|source| io_error(destination, source))?;
     let manifest = destination.join("Cargo.toml");
     let output = std::process::Command::new("cargo")
         .args(["fmt", "--manifest-path"])
@@ -7781,6 +7785,33 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    #[test]
+    fn a_project_named_relative_to_the_current_folder_is_formatted() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"relative\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(project.path().join("src")).unwrap();
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn  answer()->u8{42}\n",
+        )
+        .unwrap();
+        let current = std::env::current_dir().unwrap();
+        let relative = current
+            .ancestors()
+            .map(|_| "..")
+            .collect::<std::path::PathBuf>()
+            .join(project.path().strip_prefix("/").unwrap());
+        format_generated_cargo_project(&relative).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            "pub fn answer() -> u8 {\n    42\n}\n"
+        );
+    }
 
     /// The layered import is only worth its extra directories if every layer
     /// stays ignorant of the ones outside it — and a layer index is only a

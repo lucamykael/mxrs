@@ -15,8 +15,11 @@ export async function data<T>(operation: string, body: Record<string, unknown>):
   return invoke<T>('data', operation, body);
 }
 
-/** One thing wrong with what a form saved: the member and what the model says of it. */
-export type Violation = { member: string; message: string };
+/**
+ * One thing wrong with what a form saved: the member and what the model says
+ * of it — and the object it is about, when a flow committed another one.
+ */
+export type Violation = { member: string; message: string; object?: string };
 
 /** A save the runtime refused for the model's rules: what to show under which inputs. */
 export class ValidationError extends Error {

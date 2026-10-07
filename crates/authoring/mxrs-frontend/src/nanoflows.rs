@@ -49,7 +49,12 @@ type Registry = HashMap<String, HashMap<String, Signature>>;
 fn service_files(services: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut folders = vec![services.to_path_buf()];
+    // A link back to a folder already read would be read forever.
+    let mut seen = std::collections::BTreeSet::new();
     while let Some(folder) = folders.pop() {
+        if !seen.insert(std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone())) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
@@ -2418,6 +2423,17 @@ mod tests {
             std::fs::write(path, source).unwrap();
         }
         directory
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_back_to_a_folder_already_read_is_read_once() {
+        let directory = services(&[("sales/orderService.ts", "export {};\n")]);
+        std::os::unix::fs::symlink(directory.path(), directory.path().join("sales/again")).unwrap();
+        assert_eq!(
+            service_files(directory.path()),
+            [directory.path().join("sales/orderService.ts")]
+        );
     }
 
     #[test]

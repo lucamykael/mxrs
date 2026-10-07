@@ -156,6 +156,11 @@ pub trait RenderExpr {
 /// An expression whose Mendix persistence return type is known. Flow end
 /// events need both source text and this metadata; source text alone cannot
 /// distinguish e.g. Integer from Long or an object from a list.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not say what type the flow returns",
+    label = "the flow's return type cannot be read from this",
+    note = "a variable an activity made has no type of its own: declare the flow's type with `flow.returns_object::<Entity>()`, `flow.returns_list::<Entity>()` or `flow.returns(DataType::...)`, then return it with `flow.return_with(&variable)`"
+)]
 pub trait TypedRenderExpr: RenderExpr {
     fn flow_return_type(&self) -> FlowReturnType;
 }

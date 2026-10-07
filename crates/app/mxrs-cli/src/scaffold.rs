@@ -9,9 +9,11 @@
 //! same result as a document, absolute paths in both renderings, and the
 //! `create`/`would create`/`update` line prefixes.
 //!
-//! The one deliberate difference in the human rendering is the closing hint:
-//! mxrb points at `bundle exec mxrb generate project.rb`, mxrs at
-//! [`BUILD_HINT`], because that is the command that actually turns these
+//! The human rendering differs in what it says a dry run would do and in its
+//! closing line. A dry run's update is `would update` (mxrb says `update`
+//! whether or not it wrote), and it closes saying nothing was written. A run
+//! that wrote closes with [`BUILD_HINT`] where mxrb points at `bundle exec
+//! mxrb generate project.rb`, because that is the command that turns these
 //! declarations into an `.mpr` here.
 //!
 //! No model logic lives in this module: every decision about what a scaffold

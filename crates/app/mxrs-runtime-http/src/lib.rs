@@ -337,6 +337,7 @@ mod tests {
             runtime_error_response(RuntimeError::Validation(vec![mxrs_runtime::Violation {
                 member: "Name".into(),
                 message: "Name is required".into(),
+                object: None,
             }]));
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body: Value =

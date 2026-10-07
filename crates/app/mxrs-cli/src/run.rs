@@ -277,7 +277,6 @@ impl mxrs_runtime_flows::HttpCall for UreqHttp {
 struct FlowAction {
     engine: Arc<mxrs_runtime_flows::FlowEngine>,
     name: String,
-    context: mxrs_runtime::SecurityContext,
 }
 
 impl mxrs_runtime::Action for FlowAction {
@@ -285,6 +284,7 @@ impl mxrs_runtime::Action for FlowAction {
         &self,
         store: &mut Store,
         arguments: &serde_json::Value,
+        context: &mxrs_runtime::SecurityContext,
     ) -> mxrs_runtime::Result<serde_json::Value> {
         let mut variables = mxrs_runtime_flows::Variables::new();
         if let serde_json::Value::Object(map) = arguments {
@@ -310,17 +310,20 @@ impl mxrs_runtime::Action for FlowAction {
                 variables.insert(name.clone(), value);
             }
         }
-        let mut execution = self.engine.new_execution(Some(self.context.clone()));
-        match self
+        // The flow runs as the user who asked for it: its retrieves and
+        // commits are held to that user's rights, and `$currentUser` is them.
+        let mut execution = self.engine.new_execution(Some(context.clone()));
+        let outcome = self
             .engine
-            .call_in_unit(store, &mut execution, &self.name, variables)
-        {
+            .call_in_unit(store, &mut execution, &self.name, variables);
+        // What the flow logged is the server's to keep, as Mendix keeps it:
+        // on the console, not in the page's answer — the more so when the
+        // flow failed.
+        for line in &execution.log {
+            eprintln!("[mxrs] {}: {line}", self.name);
+        }
+        match outcome {
             Ok(value) => {
-                // What the flow logged is the server's to keep, as Mendix
-                // keeps it: on the console, not in the page's answer.
-                for line in &execution.log {
-                    eprintln!("[mxrs] {}: {line}", self.name);
-                }
                 let effects: Vec<serde_json::Value> = execution
                     .effects
                     .into_iter()
@@ -331,12 +334,37 @@ impl mxrs_runtime::Action for FlowAction {
                     "effects": effects,
                 }))
             }
-            Err(mxrs_runtime_flows::FlowError::Runtime(error)) => Err(error),
-            Err(mxrs_runtime_flows::FlowError::Native(message)) => {
-                Err(mxrs_runtime::RuntimeError::Transaction(message))
+            Err(error) => {
+                // A flow that gave validation feedback before it failed is
+                // answered as that feedback, each under the object it is about.
+                let violations = feedback(&execution.effects, None);
+                if !violations.is_empty() {
+                    return Err(mxrs_runtime::RuntimeError::Validation(violations));
+                }
+                Err(match error {
+                    mxrs_runtime_flows::FlowError::Runtime(error) => error,
+                    mxrs_runtime_flows::FlowError::Native(message) => {
+                        mxrs_runtime::RuntimeError::Transaction(message)
+                    }
+                })
             }
         }
     }
+}
+
+/// The validation feedback among a flow's effects, as violations of the
+/// objects it is about — of `only` that one, when given.
+fn feedback(effects: &[serde_json::Value], only: Option<&str>) -> Vec<mxrs_runtime::Violation> {
+    effects
+        .iter()
+        .filter(|effect| effect["type"] == "validation_feedback")
+        .filter(|effect| only.is_none_or(|id| effect["object_id"] == id))
+        .map(|effect| mxrs_runtime::Violation {
+            member: effect["member"].as_str().unwrap_or_default().to_string(),
+            message: effect["message"].as_str().unwrap_or_default().to_string(),
+            object: effect["object_id"].as_str().map(str::to_string),
+        })
+        .collect()
 }
 
 /// Commits what a page saves through the entity's event handlers, as a
@@ -368,16 +396,7 @@ impl mxrs_runtime::Lifecycle for FlowLifecycle {
             Err(error) => {
                 // The feedback about the object being saved is its
                 // violations; about another object, it is not this save's.
-                let violations: Vec<mxrs_runtime::Violation> = execution
-                    .effects
-                    .iter()
-                    .filter(|effect| effect["type"] == "validation_feedback")
-                    .filter(|effect| effect["object_id"] == id)
-                    .map(|effect| mxrs_runtime::Violation {
-                        member: effect["member"].as_str().unwrap_or_default().to_string(),
-                        message: effect["message"].as_str().unwrap_or_default().to_string(),
-                    })
-                    .collect();
+                let violations = feedback(&execution.effects, Some(id));
                 if !violations.is_empty() {
                     return Err(mxrs_runtime::RuntimeError::Validation(violations));
                 }
@@ -519,7 +538,6 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
             FlowAction {
                 engine: engine.clone(),
                 name: name.clone(),
-                context: mxrs_runtime::SecurityContext::default(),
             },
         );
     }
@@ -959,6 +977,7 @@ mod tests {
                 mxrs_runtime::Violation {
                     member: "Name".into(),
                     message: "Not that name".into(),
+                    object: Some("3f0b1a52-8b3e-4d6a-9f3c-2d7c1e5a9b01".into()),
                 }
             ]))
         );

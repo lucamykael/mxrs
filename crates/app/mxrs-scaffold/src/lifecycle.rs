@@ -406,29 +406,16 @@ fn replace_application_version(source: &str, from: &str, to: &str) -> Option<Str
     replaced.then_some(updated)
 }
 
+/// The manifest with its `[project]` table's Mendix version moved from
+/// `from` to `to` — read and changed as TOML, the rest left as written.
 fn replace_manifest_version(source: &str, from: &str, to: &str) -> String {
-    let mut replaced = false;
-    source
-        .split_inclusive('\n')
-        .map(|line| {
-            if !replaced
-                && line
-                    .trim()
-                    .strip_prefix("mendix_version")
-                    .and_then(|value| value.trim().strip_prefix('='))
-                    .and_then(|value| quoted(value.trim()))
-                    .as_deref()
-                    == Some(from)
-            {
-                replaced = true;
-                let start = line.find('"').expect("parsed quoted value");
-                let end = start + 1 + line[start + 1..].find('"').expect("parsed closing quote");
-                format!("{}{}{}", &line[..start + 1], to, &line[end..])
-            } else {
-                line.to_string()
-            }
-        })
-        .collect()
+    match crate::manifest::project_setting(source, "mendix_version") {
+        Some(version) if version == from => {
+            crate::manifest::with_project_setting(source, "mendix_version", to)
+                .unwrap_or_else(|| source.to_string())
+        }
+        _ => source.to_string(),
+    }
 }
 
 fn replace_builder_versions(source: &str, from: &str, to: &str) -> String {
@@ -824,6 +811,15 @@ mod tests {
         assert_eq!(
             replace_manifest_version(source, "11.12.1", "11.13.0"),
             "[project]\n  mendix_version=\"11.13.0\"\nname = \"App\"\n"
+        );
+        // A literal string is the version as much as a basic one is.
+        assert_eq!(
+            replace_manifest_version(
+                "[project]\nmendix_version = '11.12.1'\n",
+                "11.12.1",
+                "11.13.0"
+            ),
+            "[project]\nmendix_version = \"11.13.0\"\n"
         );
     }
 }

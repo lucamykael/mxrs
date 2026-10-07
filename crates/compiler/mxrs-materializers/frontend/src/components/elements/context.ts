@@ -25,8 +25,8 @@ export const Draft = createContext<{
   violations: ReadonlyMap<string, string>;
   /** Takes what a save was refused for, or what a flow's feedback said of a member. */
   rejected: (violations: Violation[]) => void;
-  /** The members the form has an input for, which a violation is shown under. */
-  inputs: Set<string>;
+  /** The members the form shows an input for, and how many: a violation is shown under one. */
+  inputs: Map<string, number>;
 } | null>(null);
 
 /** How a filter narrows: by a text it contains, an option it equals, or a day it falls on. */
