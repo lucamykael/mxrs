@@ -141,6 +141,10 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     let authored = |module: &str| {
         super::module_root(&super::module_stem(module), &packages) == super::ModuleRoot::Authored
     };
+    stated_whole.insert(
+        "JsonStructures$JsonStructure".to_string(),
+        super::json_structures::declare(&project, authored)?.len(),
+    );
     for kind in [
         super::code_actions::Kind::JavaScript,
         super::code_actions::Kind::Java,

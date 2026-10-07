@@ -661,6 +661,8 @@ pub struct ModuleDecl {
     pub javascript_actions: Vec<crate::JavaScriptActionDecl>,
     /// The Java actions its microflows call.
     pub java_actions: Vec<crate::JavaActionDecl>,
+    /// The JSON structures its mappings read and write.
+    pub json_structures: Vec<crate::JsonStructureDecl>,
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
@@ -750,6 +752,7 @@ impl ProjectDecl {
             .javascript_actions
             .extend(declared.javascript_actions);
         target.java_actions.extend(declared.java_actions);
+        target.json_structures.extend(declared.json_structures);
         target.layouts.extend(declared.layouts);
         if let Some(roles) = declared.roles {
             target.roles = Some(roles);

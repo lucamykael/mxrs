@@ -59,6 +59,7 @@ impl ModuleBuilder {
                 forms: Vec::new(),
                 javascript_actions: Vec::new(),
                 java_actions: Vec::new(),
+                json_structures: Vec::new(),
                 roles: None,
                 installed: false,
             },
@@ -197,6 +198,27 @@ impl ModuleBuilder {
         let mut builder = crate::JavaScriptActionBuilder::new(name);
         configure(&mut builder);
         self.decl.javascript_actions.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a JSON structure: the elements Studio Pro derives from
+    /// `snippet`, and what `configure` says differs from them.
+    ///
+    /// # Panics
+    ///
+    /// When `snippet` is not JSON, or `configure` names an element the
+    /// snippet has none at: either is a mistake in the declaration that no
+    /// build can write.
+    pub fn json_structure(
+        &mut self,
+        name: impl Into<String>,
+        snippet: impl Into<String>,
+        configure: impl FnOnce(&mut crate::JsonStructureBuilder),
+    ) -> &mut Self {
+        let name = name.into();
+        let mut builder = crate::JsonStructureBuilder::new(&self.decl.name, name, snippet);
+        configure(&mut builder);
+        self.decl.json_structures.push(builder.into_decl());
         self
     }
 

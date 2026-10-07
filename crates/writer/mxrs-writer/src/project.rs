@@ -305,6 +305,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.java_actions,
             identity,
         )?;
+        crate::native::synchronize_json_structures_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.json_structures,
+            identity,
+        )?;
     }
     security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;
     if let Some(declaration) = &project.navigation {

@@ -699,6 +699,32 @@ pub(crate) fn synchronize_java_actions_with_identity(
     synchronize_documents(mpr, module_id, &documents, identity)
 }
 
+/// Writes the JSON structures a module declares.
+pub(crate) fn synchronize_json_structures_with_identity(
+    mpr: &mut mxrs_mpr::MprFile,
+    module_id: &str,
+    module_name: &str,
+    structures: &[mxrs_ir::JsonStructureDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let stated: Vec<NativeDocument> = structures
+        .iter()
+        .map(mxrs_ir::JsonStructureDecl::document)
+        .collect();
+    let documents: Vec<(ArtifactKind, String, &NativeDocument)> = structures
+        .iter()
+        .zip(&stated)
+        .map(|(structure, document)| {
+            (
+                ArtifactKind::JsonStructure,
+                format!("{module_name}.{}", structure.name),
+                document,
+            )
+        })
+        .collect();
+    synchronize_documents(mpr, module_id, &documents, identity)
+}
+
 /// Writes documents a module states whole, each by its type and name: one
 /// the module stores keeps its identities and is left as it is when it says
 /// what is stored; a new one takes the identity its kind and qualified name

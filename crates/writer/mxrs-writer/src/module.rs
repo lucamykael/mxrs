@@ -142,6 +142,13 @@ pub fn write_module(
         &decl.java_actions,
         identity,
     )?;
+    crate::native::synchronize_json_structures_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.json_structures,
+        identity,
+    )?;
 
     Ok(())
 }

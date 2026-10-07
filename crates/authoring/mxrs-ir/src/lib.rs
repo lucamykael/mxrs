@@ -12,6 +12,7 @@ pub mod application;
 pub mod declaration;
 pub mod flow;
 pub mod javascript_action;
+pub mod json_structure;
 pub mod markers;
 pub mod page;
 pub mod task_queue;
@@ -38,6 +39,7 @@ pub use flow::{
 pub use javascript_action::{
     CodeActionParameter, CodeActionType, JavaActionDecl, JavaScriptActionDecl, JavaScriptPlatform,
 };
+pub use json_structure::{JsonElement, JsonElementType, JsonPrimitiveType, JsonStructureDecl};
 pub use markers::system;
 pub use markers::{
     AssociationMarker, AssociationRef, AttributeMarker, AttributeRef, EntityMarker,

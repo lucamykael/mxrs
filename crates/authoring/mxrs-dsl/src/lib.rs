@@ -56,6 +56,7 @@ mod enumeration;
 mod flow;
 pub mod flow_actions;
 mod javascript_action;
+mod json_structure;
 mod menu;
 mod module;
 mod navigation;
@@ -81,6 +82,7 @@ pub use flow_actions::{
     NanoflowName, SortOrder, Variable, var,
 };
 pub use javascript_action::{CodeActionValue, JavaActionBuilder, JavaScriptActionBuilder};
+pub use json_structure::{JsonElementBuilder, JsonStructureBuilder};
 pub use menu::{MenuBuilder, MenuItemBuilder};
 pub use module::{ModuleBuilder, OqlViewSourceBuilder};
 pub use mxrs_expr::{

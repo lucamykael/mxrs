@@ -13,11 +13,12 @@ pub use mxrs_dsl::{
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, CodeActionValue, ConstantBuilder, ContainerBuilder,
     DataViewBuilder, DemoUserBuilder, EntityBuilder, EnumerationBuilder, FlowBuilder,
-    FlowParameterBuilder, JavaActionBuilder, JavaScriptActionBuilder, LayoutBuilder,
-    LayoutGridBuilder, LayoutGridColumnBuilder, LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder,
-    MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder, NavigationBuilder,
-    NavigationItemBuilder, NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder,
-    ProjectBuilder, ScheduledEventBuilder, SecurityBuilder, TaskQueueBuilder, UserRoleBuilder,
+    FlowParameterBuilder, JavaActionBuilder, JavaScriptActionBuilder, JsonElementBuilder,
+    JsonStructureBuilder, LayoutBuilder, LayoutGridBuilder, LayoutGridColumnBuilder,
+    LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder, MicroflowModuleBuilder, ModuleBuilder,
+    NanoflowModuleBuilder, NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder,
+    PageBuilder, PluggableWidgetBuilder, ProjectBuilder, ScheduledEventBuilder, SecurityBuilder,
+    TaskQueueBuilder, UserRoleBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_frontend::{FrontendDecl, FrontendError, read_frontend};
@@ -283,12 +284,12 @@ pub mod prelude {
     };
     pub use crate::{
         AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, CodeActionType,
-        JavaScriptPlatform, LayoutBuilder, LifecycleEvent, MemberRights, MxBinary, MxList,
-        MxObject, SystemMember, aggregate_list, call_java_action, call_javascript_action,
-        call_microflow, call_nanoflow, change_list, change_object, change_variable, close_page,
-        commit_object, constant, create_list, create_object, create_variable, declaration,
-        delete_object, demo_user, dto, entity, enumeration, layout, log, menu, microflow,
-        module_roles, nanoflow, navigation, navigation_item, page, retrieve, rollback_object,
-        route, security, service, show_message, show_page, view,
+        JavaScriptPlatform, JsonPrimitiveType, LayoutBuilder, LifecycleEvent, MemberRights,
+        MxBinary, MxList, MxObject, SystemMember, aggregate_list, call_java_action,
+        call_javascript_action, call_microflow, call_nanoflow, change_list, change_object,
+        change_variable, close_page, commit_object, constant, create_list, create_object,
+        create_variable, declaration, delete_object, demo_user, dto, entity, enumeration, layout,
+        log, menu, microflow, module_roles, nanoflow, navigation, navigation_item, page, retrieve,
+        rollback_object, route, security, service, show_message, show_page, view,
     };
 }

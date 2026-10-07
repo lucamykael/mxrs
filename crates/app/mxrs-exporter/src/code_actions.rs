@@ -127,7 +127,7 @@ pub(crate) fn declare(
     Ok(declared)
 }
 
-fn module_of(
+pub(crate) fn module_of(
     unit: &str,
     containers: &std::collections::HashMap<&str, &str>,
     modules: &std::collections::HashMap<String, String>,

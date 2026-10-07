@@ -413,6 +413,7 @@ const MXRS_PRELUDE: &[&str] = &[
     "FlowBuilder",
     "FlowVar",
     "JavaScriptPlatform",
+    "JsonPrimitiveType",
     "LayoutBuilder",
     "LayoutGridBuilder",
     "LifecycleEvent",

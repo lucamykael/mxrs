@@ -73,6 +73,7 @@ mod flow_general;
 mod frontend_export;
 mod frontend_flows;
 mod frontend_forms;
+mod json_structures;
 mod layout;
 mod names;
 #[cfg(test)]
@@ -432,6 +433,14 @@ fn import_cargo_project_inner(
     let javascript_actions =
         code_actions::declare(&project, code_actions::Kind::JavaScript, authored)?;
     let java_actions = code_actions::declare(&project, code_actions::Kind::Java, authored)?;
+    let json_structures = json_structures::declare(&project, authored)?;
+    declared.extend(json_structures.iter().map(|structure| {
+        (
+            "JsonStructures$JsonStructure".to_string(),
+            structure.module.clone(),
+            structure.name.clone(),
+        )
+    }));
     for (kind, actions) in [
         (code_actions::Kind::JavaScript, &javascript_actions),
         (code_actions::Kind::Java, &java_actions),
@@ -575,6 +584,11 @@ fn import_cargo_project_inner(
         generated_module(&mut generated_modules, module_name)
             .documents
             .push((stem.clone(), source.clone()));
+    }
+    for structure in &json_structures {
+        generated_module(&mut generated_modules, &structure.module)
+            .documents
+            .push((structure.stem.clone(), structure.source.clone()));
     }
     for action in &javascript_actions {
         generated_module(&mut generated_modules, &action.module)
