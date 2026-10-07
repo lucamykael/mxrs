@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 mod analysis;
 pub mod cache;
 pub mod documents;
+pub mod embedding;
 mod pages;
 pub use analysis::{Analysis, CallCycle, ModuleDependency};
 
@@ -110,12 +111,6 @@ pub struct Reference {
     pub from: String,
     pub to: String,
     pub relation: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SearchHit {
-    pub artifact: Artifact,
-    pub score: u32,
 }
 
 /// The codes of what a page or snippet names that it, or the page it
@@ -478,48 +473,6 @@ impl SemanticIndex {
                 .then(left.key.cmp(&right.key))
         });
         Ok(artifacts)
-    }
-
-    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
-        let terms = query
-            .split(|character: char| !character.is_alphanumeric())
-            .filter(|term| !term.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect::<Vec<_>>();
-        let mut hits = self
-            .artifacts
-            .values()
-            .filter_map(|artifact| {
-                let qualified = artifact.qualified_name.to_ascii_lowercase();
-                let documentation = artifact.documentation.to_ascii_lowercase();
-                let score = terms
-                    .iter()
-                    .map(|term| {
-                        if qualified == *term {
-                            100
-                        } else if qualified.contains(term) {
-                            20
-                        } else if documentation.contains(term) {
-                            5
-                        } else {
-                            0
-                        }
-                    })
-                    .sum();
-                (score > 0).then(|| SearchHit {
-                    artifact: artifact.clone(),
-                    score,
-                })
-            })
-            .collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.artifact.key.cmp(&right.artifact.key))
-        });
-        hits.truncate(limit);
-        hits
     }
 }
 
@@ -1476,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_artifacts_and_search_order_are_deterministic() {
+    fn duplicate_artifacts_are_reported_and_resolution_is_deterministic() {
         let mut builder = IndexBuilder::default();
         builder.add(artifact("first", ArtifactKind::Entity));
         builder.add(artifact("first", ArtifactKind::Entity));
@@ -1486,19 +1439,6 @@ mod tests {
         builder.pending("first".into(), "Shared".into(), "ignored");
         let index = builder.finish().unwrap();
         assert_eq!(index.diagnostics()[0].code, "duplicate_artifact");
-        assert!(index.search("", 10).is_empty());
-        assert!(index.search("unknown", 10).is_empty());
-        assert!(index.search("order", 0).is_empty());
-        assert_eq!(index.search("order", 1)[0].score, 5);
-        assert_eq!(index.search("first", 10)[0].artifact.key, "first");
-        assert_eq!(
-            index
-                .search("Sales", 10)
-                .iter()
-                .map(|hit| hit.artifact.key.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "second"]
-        );
         assert_eq!(index.require("ID-FIRST").unwrap().key, "first");
         assert!(index.resolve("unknown").unwrap().is_none());
     }
@@ -1534,7 +1474,6 @@ mod tests {
             index.resolve("Number").unwrap().unwrap().kind,
             ArtifactKind::Attribute
         );
-        assert_eq!(index.search("home", 10)[0].qualified_name(), "Sales.Home");
         assert_eq!(index.fingerprint().len(), 64);
     }
 
@@ -1562,15 +1501,5 @@ mod tests {
         let right = SemanticIndex::build(&project).unwrap();
         assert_eq!(left.fingerprint(), right.fingerprint());
         assert_eq!(left.references().count(), right.references().count());
-    }
-
-    trait QualifiedName {
-        fn qualified_name(&self) -> &str;
-    }
-
-    impl QualifiedName for SearchHit {
-        fn qualified_name(&self) -> &str {
-            &self.artifact.qualified_name
-        }
     }
 }

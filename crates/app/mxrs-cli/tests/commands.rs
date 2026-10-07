@@ -1433,31 +1433,40 @@ fn lint_and_report_fail_for_cycles_and_disclose_their_analysis_boundary() {
 #[test]
 fn invalid_search_limits_are_errors_instead_of_silent_defaults() {
     let (_directory, path) = fixture(false);
+    let path = path.to_str().unwrap();
     for limit in ["0", "-1", "invalid", "18446744073709551616"] {
         assert!(
-            !query("search", &path, &["Sales", "--limit", limit])
+            !cli(&["search", "Sales", path, "--limit", limit])
                 .status
                 .success()
         );
     }
-    assert!(
-        !query("search", &path, &["Sales", "--limit"])
-            .status
-            .success()
-    );
-    assert!(
-        !query("search", &path, &["--limit", "--json"])
-            .status
-            .success()
-    );
-    let output = query("search", &path, &["Sales", "--limit", "1", "--json"]);
+    assert!(!cli(&["search", "Sales", path, "--limit"]).status.success());
+    assert!(!cli(&["search", path, "--limit", "--json"]).status.success());
+    for backend in ["onnx", "word2vec"] {
+        assert!(
+            !cli(&["search", "Sales", path, "--backend", backend])
+                .status
+                .success()
+        );
+    }
+    let output = cli(&["search", "Sales", path, "--limit", "1", "--json"]);
     assert!(output.status.success());
-    assert_eq!(
-        serde_json::from_slice::<Vec<Value>>(&output.stdout)
-            .unwrap()
-            .len(),
-        1
+    let ranked = serde_json::from_slice::<Vec<Value>>(&output.stdout).unwrap();
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0]["rank"], 1);
+    let output = cli(&["search", "Sales", path, "--backend", "tfidf"]);
+    assert!(text(&output).starts_with("rank\tdistance\tqualified_name\tkind\n"));
+    // A find by name lists what holds the text; by meaning, the ten nearest.
+    let found = cli(&["find", path, "sales"]);
+    assert!(found.status.success());
+    assert!(
+        text(&found)
+            .lines()
+            .all(|line| line.to_lowercase().contains("sales"))
     );
+    let semantic = cli(&["find", path, "sales", "--semantic"]);
+    assert!((1..=10).contains(&text(&semantic).lines().count()));
 }
 
 #[test]
@@ -1517,8 +1526,12 @@ fn storage_commands_report_real_model_data_and_reject_unrecognized_arguments() {
     ] {
         assert!(!query("compare", &path, &suffix).status.success());
     }
-    assert!(query("search", &path, &["order"]).status.success());
-    assert!(!cli(&["search", "/missing.mpr", "order"]).status.success());
+    assert!(
+        cli(&["search", "order", path.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(!cli(&["search", "order", "/missing.mpr"]).status.success());
 }
 
 #[test]

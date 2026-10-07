@@ -93,8 +93,7 @@ pub use mxrs_scaffold::{
 };
 pub use mxrs_semantic::{
     Artifact as SemanticArtifact, ArtifactKind as SemanticArtifactKind,
-    Diagnostic as SemanticDiagnostic, Reference as SemanticReference,
-    SearchHit as SemanticSearchHit, SemanticError, SemanticIndex,
+    Diagnostic as SemanticDiagnostic, Reference as SemanticReference, SemanticError, SemanticIndex,
 };
 pub use mxrs_writer::relations::relation_warnings as flow_relation_warnings;
 pub use mxrs_writer::{synchronize_project, write_project};

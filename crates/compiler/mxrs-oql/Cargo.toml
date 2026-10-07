@@ -11,6 +11,7 @@ description = "Fail-closed OQL discovery, analysis, and logical SQL projection f
 workspace = true
 
 [dependencies]
+mxrs-bson = { path = "../../io/mxrs-bson" }
 mxrs-model = { path = "../../model/mxrs-model" }
 mxrs-relational-schema = { path = "../../model/mxrs-relational-schema" }
 regex = "1"

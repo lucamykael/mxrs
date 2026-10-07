@@ -1273,6 +1273,7 @@ dependencies = [
 name = "mxrs-oql"
 version = "0.1.0"
 dependencies = [
+ "mxrs-bson",
  "mxrs-dsl",
  "mxrs-ir",
  "mxrs-model",

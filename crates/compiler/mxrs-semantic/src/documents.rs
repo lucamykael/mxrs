@@ -225,6 +225,52 @@ impl DocumentIndex {
     pub fn artifacts(&self) -> &[Artifact] {
         &self.artifacts
     }
+
+    /// The artifacts whose qualified name holds `text`, whatever its case,
+    /// by module, kind and name — mxrb's `search_artifacts`.
+    pub fn find(&self, text: &str) -> Vec<&Artifact> {
+        let wanted = text.to_lowercase();
+        let mut found: Vec<&Artifact> = self
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.qualified_name.to_lowercase().contains(&wanted))
+            .collect();
+        found.sort_by(|left, right| {
+            let key = |artifact: &&Artifact| {
+                (
+                    artifact.module_name.clone().unwrap_or_default(),
+                    artifact.kind.clone(),
+                    artifact.qualified_name.clone(),
+                )
+            };
+            key(left).cmp(&key(right))
+        });
+        found
+    }
+
+    /// The `limit` artifacts whose text is nearest the query's, nearest
+    /// first, each with its distance ([`crate::embedding`]).
+    pub fn search(&self, query: &str, limit: usize) -> Vec<(&Artifact, f64)> {
+        let wanted = crate::embedding::embed(query);
+        let mut ranked: Vec<(&Artifact, f64)> = self
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                let text = crate::embedding::embed(&crate::embedding::artifact_text(artifact));
+                (artifact, crate::embedding::similarity(&wanted, &text))
+            })
+            .collect();
+        ranked.sort_by(|(left, left_similarity), (right, right_similarity)| {
+            right_similarity
+                .total_cmp(left_similarity)
+                .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+        });
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(artifact, similarity)| (artifact, 1.0 - similarity))
+            .collect()
+    }
     pub fn references(&self) -> &[Reference] {
         &self.references
     }

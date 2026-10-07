@@ -4,13 +4,13 @@
 //! `UnitID`s, `ContentsHash`/`$ID` integrity, nested-`$ID` well-formedness,
 //! orphan/missing v2 `.mxunit` content files).
 //!
-//! Also rejects containment cycles that otherwise satisfy root uniqueness and
-//! parent existence. This remains storage integrity, not Studio Pro's complete
-//! model consistency checker. Deliberately narrower than mxrb's validator:
-//! - No v1 legacy content-`$ID`-mismatch allowance — mxrs's locked MVP
-//!   scope targets v2/`.mxunit` storage only (see
-//!   `decisions/mxrs-rust-rewrite-plan.md` in this project's ai-memory), so
-//!   every identity mismatch is an error, never a downgraded warning.
+//! Messages come in mxrb's order: tables, the unit tree, then each unit's
+//! content in storage order, then the v2 files. A content `$ID` mismatch
+//! mxrb recorded as legacy (`_MxrbCompatibility`) is a warning, as there.
+//! One check is mxrs's own, reported after all of mxrb's: a containment
+//! cycle that otherwise satisfies root uniqueness and parent existence.
+//! This remains storage integrity, not Studio Pro's complete model
+//! consistency checker.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -43,25 +43,49 @@ pub fn validate(path: impl AsRef<Path>) -> Result<ValidateReport> {
     let mut report = ValidateReport::default();
     validate_tables(&mpr, &mut report)?;
     if !report.is_valid() {
-        report.errors.sort();
         return Ok(report);
     }
     let units = mpr.all_units()?;
+    let legacy = legacy_identity_mismatches(&mpr)?;
 
     validate_root(&units, &mut report);
     validate_unit_ids(&units, &mut report);
-    validate_containment_cycles(&units, &mut report);
-    validate_contents(&mpr, &units, &mut report);
+    validate_contents(&mpr, &units, &legacy, &mut report);
     validate_v2_files(&mpr, &units, &mut report)?;
-
-    report.errors.sort();
-    report.warnings.sort();
+    validate_containment_cycles(&units, &mut report);
     Ok(report)
 }
 
+/// The content `$ID` mismatches mxrb kept from a legacy model and recorded
+/// as such: `(unit, content id, type)`.
+fn legacy_identity_mismatches(mpr: &MprFile) -> Result<HashSet<(String, String, String)>> {
+    if !mpr
+        .tables()?
+        .iter()
+        .any(|name| name == "_MxrbCompatibility")
+    {
+        return Ok(HashSet::new());
+    }
+    let text = |cell: Option<&SqlCell>| match cell {
+        Some(SqlCell::Text(text)) => text.clone(),
+        _ => String::new(),
+    };
+    Ok(mpr
+        .raw_query(
+            "SELECT UnitID, ContentID, UnitType FROM _MxrbCompatibility WHERE Kind = 'legacy-unit-identity'",
+        )?
+        .rows
+        .iter()
+        .map(|row| (text(row.first()), text(row.get(1)), text(row.get(2))))
+        .collect())
+}
+
 fn validate_tables(mpr: &MprFile, report: &mut ValidateReport) -> Result<()> {
-    if !mpr.tables()?.iter().any(|name| name == "_MetaData") {
-        report.error("missing _MetaData table");
+    let tables = mpr.tables()?;
+    for required in ["Unit", "_MetaData"] {
+        if !tables.iter().any(|name| name == required) {
+            report.error(format!("missing {required} table"));
+        }
     }
     let columns = mpr.raw_query("PRAGMA table_info(Unit)")?;
     for required in ["UnitID", "ContainerID", "ContainmentName", "ContentsHash"] {
@@ -119,17 +143,13 @@ fn validate_root(units: &[RawUnit], report: &mut ValidateReport) {
 }
 
 fn validate_unit_ids(units: &[RawUnit], report: &mut ValidateReport) {
-    let mut counts: HashMap<&str, u32> = HashMap::new();
     for u in units {
         if u.unit_id.is_empty() {
             report.error("blank UnitID");
         }
-        *counts.entry(u.unit_id.as_str()).or_insert(0) += 1;
     }
-    for (id, count) in &counts {
-        if *count > 1 {
-            report.error(format!("duplicate UnitID {id}"));
-        }
+    for id in repeated(units.iter().map(|unit| unit.unit_id.clone())) {
+        report.error(format!("duplicate UnitID {id}"));
     }
 
     let id_set: HashSet<&str> = units.iter().map(|u| u.unit_id.as_str()).collect();
@@ -146,7 +166,27 @@ fn validate_unit_ids(units: &[RawUnit], report: &mut ValidateReport) {
     }
 }
 
-fn validate_contents(mpr: &MprFile, units: &[RawUnit], report: &mut ValidateReport) {
+/// The values that occur more than once, in the order each first occurs.
+fn repeated(values: impl Iterator<Item = String>) -> Vec<String> {
+    let mut order = Vec::new();
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for value in values {
+        let count = counts.entry(value.clone()).or_insert(0);
+        if *count == 0 {
+            order.push(value);
+        }
+        *count += 1;
+    }
+    order.retain(|value| counts[value] > 1);
+    order
+}
+
+fn validate_contents(
+    mpr: &MprFile,
+    units: &[RawUnit],
+    legacy: &HashSet<(String, String, String)>,
+    report: &mut ValidateReport,
+) {
     for u in units {
         let bytes = match mpr.content_bytes(u) {
             Ok(Some(b)) if !b.is_empty() => b,
@@ -174,36 +214,36 @@ fn validate_contents(mpr: &MprFile, units: &[RawUnit], report: &mut ValidateRepo
             }
         };
 
-        match doc.get_str("$Type") {
-            Ok(t) if !t.is_empty() => {}
-            _ => report.error(format!("unit {} missing $Type", u.unit_id)),
+        let ty = doc.get_str("$Type").unwrap_or_default().to_string();
+        if ty.is_empty() {
+            report.error(format!("unit {} missing $Type", u.unit_id));
         }
 
         let doc_id = doc.get("$ID").and_then(mxrs_bson::extract_id);
         match doc_id {
             None => report.error(format!("unit {} missing $ID", u.unit_id)),
             Some(id) if id != u.unit_id => {
-                report.error(format!("unit {} content $ID mismatch {id}", u.unit_id));
+                if legacy.contains(&(u.unit_id.clone(), id.clone(), ty)) {
+                    report.warning(format!(
+                        "unit {} preserves legacy content $ID mismatch {id}",
+                        u.unit_id
+                    ));
+                } else {
+                    report.error(format!("unit {} content $ID mismatch {id}", u.unit_id));
+                }
             }
             _ => {}
         }
 
-        let mut nested_counts: HashMap<String, u32> = HashMap::new();
+        let document = Bson::Document(doc);
+        let mut ids = Vec::new();
         let mut misordered = Vec::new();
-        collect_nested_ids(
-            &Bson::Document(doc),
-            &mut nested_counts,
-            &mut misordered,
-            &u.unit_id,
-            report,
-        );
-        for (id, count) in &nested_counts {
-            if *count > 1 {
-                report.error(format!(
-                    "unit {} contains duplicate nested $ID {id}",
-                    u.unit_id
-                ));
-            }
+        collect_nested_ids(&document, &mut ids, &mut misordered);
+        for id in repeated(ids.into_iter()) {
+            report.error(format!(
+                "unit {} contains duplicate nested $ID {id}",
+                u.unit_id
+            ));
         }
         for id in misordered {
             report.error(format!(
@@ -211,6 +251,28 @@ fn validate_contents(mpr: &MprFile, units: &[RawUnit], report: &mut ValidateRepo
                 u.unit_id
             ));
         }
+        validate_mendix_semantics(&u.unit_id, &document, report);
+    }
+}
+
+/// Mirrors `Integrity::Validator#validate_mendix_semantics`: every
+/// attribute anywhere in the content, depth first.
+fn validate_mendix_semantics(unit_id: &str, value: &Bson, report: &mut ValidateReport) {
+    match value {
+        Bson::Document(d) => {
+            if d.get_str("$Type").ok() == Some("DomainModels$Attribute") {
+                validate_attribute_default(unit_id, d, report);
+            }
+            for v in d.values() {
+                validate_mendix_semantics(unit_id, v, report);
+            }
+        }
+        Bson::Array(items) => {
+            for v in items {
+                validate_mendix_semantics(unit_id, v, report);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -218,31 +280,26 @@ fn validate_contents(mpr: &MprFile, units: &[RawUnit], report: &mut ValidateRepo
 /// carrying a `$ID` is counted (duplicates are a corruption signal — ids
 /// must be unique within a unit's content tree), and flagged if `$ID` isn't
 /// serialized as the document's first key (Mendix's storage convention).
-fn collect_nested_ids(
-    value: &Bson,
-    counts: &mut HashMap<String, u32>,
-    misordered: &mut Vec<String>,
-    unit_id: &str,
-    report: &mut ValidateReport,
-) {
+fn collect_nested_ids(value: &Bson, ids: &mut Vec<String>, misordered: &mut Vec<String>) {
     match value {
         Bson::Document(d) => {
-            if d.get_str("$Type").ok() == Some("DomainModels$Attribute") {
-                validate_attribute_default(unit_id, d, report);
-            }
-            if let Some(id) = d.get("$ID").and_then(mxrs_bson::extract_id) {
-                *counts.entry(id.clone()).or_insert(0) += 1;
+            if let Some(id) = d
+                .get("$ID")
+                .and_then(mxrs_bson::extract_id)
+                .filter(|id| !id.is_empty())
+            {
+                ids.push(id.clone());
                 if d.keys().next().map(String::as_str) != Some("$ID") {
                     misordered.push(id);
                 }
             }
             for v in d.values() {
-                collect_nested_ids(v, counts, misordered, unit_id, report);
+                collect_nested_ids(v, ids, misordered);
             }
         }
         Bson::Array(items) => {
             for v in items {
-                collect_nested_ids(v, counts, misordered, unit_id, report);
+                collect_nested_ids(v, ids, misordered);
             }
         }
         _ => {}
@@ -300,12 +357,14 @@ fn validate_v2_files(mpr: &MprFile, units: &[RawUnit], report: &mut ValidateRepo
         return Ok(());
     }
 
-    let expected: HashSet<_> = units.iter().filter_map(|u| mpr.content_path(u)).collect();
-    let actual: HashSet<_> = mpr.content_files()?.into_iter().collect();
-    for path in expected.difference(&actual) {
+    let expected: Vec<_> = units.iter().filter_map(|u| mpr.content_path(u)).collect();
+    let actual = mpr.content_files()?;
+    let (expected_set, actual_set): (HashSet<_>, HashSet<_>) =
+        (expected.iter().collect(), actual.iter().collect());
+    for path in expected.iter().filter(|path| !actual_set.contains(path)) {
         report.error(format!("missing mxunit file {}", path.display()));
     }
-    for path in actual.difference(&expected) {
+    for path in actual.iter().filter(|path| !expected_set.contains(path)) {
         report.warning(format!("orphan mxunit file {}", path.display()));
     }
     Ok(())
@@ -499,15 +558,22 @@ mod tests {
                 .count(),
             1
         );
-        let mut counts = HashMap::new();
+        // Per unit, mxrb's order: duplicates, then misordered, then the
+        // attributes.
+        let position = |needle: &str| {
+            report
+                .errors
+                .iter()
+                .position(|error| error.contains(needle))
+                .unwrap()
+        };
+        assert!(position("duplicate nested $ID") < position("AutoNumber attribute"));
+        let mut ids = Vec::new();
         let mut misordered = Vec::new();
-        let mut report = ValidateReport::default();
         collect_nested_ids(
             &Bson::Document(mxrs_bson::doc! { "Name": "BadOrder", "$ID": &nested_id }),
-            &mut counts,
+            &mut ids,
             &mut misordered,
-            "unit",
-            &mut report,
         );
         assert_eq!(misordered, [nested_id]);
     }

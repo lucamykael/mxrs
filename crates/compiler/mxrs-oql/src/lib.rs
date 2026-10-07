@@ -1,6 +1,7 @@
 //! Conservative OQL tooling. Unsupported syntax returns an explicit reason;
 //! no translation result is ever presented as executable physical SQL.
 
+mod analysis;
 pub mod baseline;
 pub mod index_advisor;
 pub mod plan;
@@ -10,6 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mxrs_relational_schema::physical_name;
 use serde::{Deserialize, Serialize};
+
+pub use analysis::{
+    Finding, QueryKind, Report, Suggestions, analyze, analyze_query, analyze_source, catalog,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OqlError {
@@ -46,6 +51,7 @@ pub struct Query {
     pub qualified_name: String,
     pub oql: String,
     pub parameters: Vec<String>,
+    pub kind: QueryKind,
 }
 
 /// The relational names used by the MXRS runtime for one association. They
@@ -202,34 +208,6 @@ fn runtime_catalog(project: &mxrs_model::Project) -> Result<RuntimeCatalog> {
         entities,
         associations: relations,
     })
-}
-
-pub fn catalog(project: &mxrs_model::Project) -> Result<Vec<Query>> {
-    let mut queries = Vec::new();
-    for module in project.modules()? {
-        let module_name = module.name.as_deref().unwrap_or("Unnamed");
-        for entity in module.entities() {
-            let Some(oql) = entity
-                .oql_query
-                .as_ref()
-                .filter(|query| !query.trim().is_empty())
-            else {
-                continue;
-            };
-            let entity_name = entity.name.as_deref().unwrap_or("Unnamed");
-            queries.push(Query {
-                id: entity
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| format!("{module_name}.{entity_name}")),
-                qualified_name: format!("{module_name}.{entity_name}"),
-                oql: oql.clone(),
-                parameters: parameters(oql),
-            });
-        }
-    }
-    queries.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
-    Ok(queries)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -883,157 +861,6 @@ fn bracket_end(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Finding {
-    pub rule: String,
-    pub severity: String,
-    pub fragment: String,
-    pub message: String,
-    pub suggestions: BTreeMap<String, String>,
-}
-
-pub fn analyze(source: &str) -> Vec<Finding> {
-    let upper = source.to_ascii_uppercase();
-    let mut findings = Vec::new();
-    if let Some(body) = clause_body(&upper, "SELECT", &["FROM"])
-        && body.contains('*')
-    {
-        findings.push(finding(
-            "select_star",
-            "hint",
-            "*",
-            "Selecting every column increases transfer and couples callers to schema changes.",
-        ));
-    }
-    let mut offset = 0;
-    while let Some(found) = upper[offset..].find(" LIKE '") {
-        let start = offset + found;
-        let pattern_start = start + " LIKE '".len();
-        let Some(end) = source[pattern_start..].find('\'') else {
-            break;
-        };
-        let pattern = &source[pattern_start..pattern_start + end];
-        let fragment = &source[start..pattern_start + end + 1];
-        if pattern.starts_with('%') && pattern.ends_with('%') {
-            findings.push(finding(
-                "like_both_wildcard",
-                "warning",
-                fragment,
-                "Wildcards on both sides usually force a full scan.",
-            ));
-        } else if pattern.starts_with('%') {
-            findings.push(finding(
-                "like_leading_wildcard",
-                "error",
-                fragment,
-                "A leading wildcard prevents ordinary index seeks.",
-            ));
-        } else if pattern.ends_with('%') {
-            findings.push(finding(
-                "like_trailing_only",
-                "hint",
-                fragment,
-                "A trailing-only wildcard can use an index in many configurations.",
-            ));
-        }
-        offset = pattern_start + end + 1;
-    }
-    if let Some(body) = clause_body(
-        &upper,
-        "WHERE",
-        &["GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION"],
-    ) {
-        for function in ["LOWER", "UPPER", "CAST"] {
-            if body.contains(&format!("{function}(")) || body.contains(&format!("{function} (")) {
-                findings.push(finding(
-                    "function_in_where",
-                    "warning",
-                    function,
-                    "Applying a function to a filtered column can make the predicate non-sargable.",
-                ));
-            }
-        }
-    }
-    if let Some(body) = clause_body(
-        &upper,
-        "FROM",
-        &[
-            "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION",
-        ],
-    ) && body.contains(',')
-        && !body.contains("JOIN")
-    {
-        findings.push(finding(
-            "cartesian_join",
-            "error",
-            "FROM",
-            "Comma-separated entities without JOIN risk a Cartesian product.",
-        ));
-    }
-    findings
-}
-
-fn clause_body<'a>(source: &'a str, keyword: &str, stops: &[&str]) -> Option<&'a str> {
-    let start = source.find(&format!("{keyword} "))? + keyword.len() + 1;
-    let tail = &source[start..];
-    let end = stops
-        .iter()
-        .filter_map(|stop| tail.find(&format!(" {stop} ")))
-        .min()
-        .unwrap_or(tail.len());
-    Some(&tail[..end])
-}
-
-fn finding(rule: &str, severity: &str, fragment: &str, message: &str) -> Finding {
-    Finding {
-        rule: rule.to_string(),
-        severity: severity.to_string(),
-        fragment: fragment.to_string(),
-        message: message.to_string(),
-        suggestions: suggestions(rule),
-    }
-}
-
-fn suggestions(rule: &str) -> BTreeMap<String, String> {
-    let (postgresql, sql_server, ansi) = match rule {
-        "like_leading_wildcard" => (
-            "Use pg_trgm with a GIN/GiST index or full-text search.",
-            "Use CONTAINS with a full-text index.",
-            "Redesign the predicate or add a dedicated search index.",
-        ),
-        "like_both_wildcard" => (
-            "Use column % 'term' with the pg_trgm extension and an index.",
-            "Use CONTAINS(column, 'term') with a full-text index.",
-            "Use a search-specific index or redesign the lookup.",
-        ),
-        "like_trailing_only" => (
-            "Keep the prefix search; confirm operator class, collation, and index use.",
-            "Keep the prefix search; confirm collation and the execution plan.",
-            "Keep the prefix search, but verify collation and index behavior.",
-        ),
-        "function_in_where" => (
-            "Prefer ILIKE where appropriate or create a matching functional index.",
-            "Prefer a case-insensitive collation or an indexed computed column.",
-            "Normalize data or compare against a separately indexed normalized column.",
-        ),
-        "cartesian_join" => (
-            "Use an explicit JOIN with an ON predicate.",
-            "Use an explicit JOIN with an ON predicate.",
-            "Use an explicit JOIN with an ON predicate.",
-        ),
-        _ => (
-            "Project only the columns required by the caller.",
-            "Project only the columns required by the caller.",
-            "Project only the columns required by the caller.",
-        ),
-    };
-    BTreeMap::from([
-        ("postgresql".to_string(), postgresql.to_string()),
-        ("sql_server".to_string(), sql_server.to_string()),
-        ("ansi".to_string(), ansi.to_string()),
-    ])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1233,9 +1060,25 @@ mod tests {
             .iter()
             .find(|finding| finding.rule == "function_in_where")
             .unwrap();
-        assert!(function.suggestions.contains_key("postgresql"));
-        assert!(function.suggestions.contains_key("sql_server"));
-        assert!(function.suggestions.contains_key("ansi"));
+        assert_eq!(function.fragment, "LOWER(o/Name)");
+        assert!(
+            function
+                .suggestions
+                .get(Dialect::PostgreSql)
+                .contains("ILIKE")
+        );
+        assert!(
+            function
+                .suggestions
+                .get(Dialect::SqlServer)
+                .contains("collation")
+        );
+        assert!(
+            function
+                .suggestions
+                .get(Dialect::Ansi)
+                .contains("Normalize")
+        );
     }
 
     #[test]

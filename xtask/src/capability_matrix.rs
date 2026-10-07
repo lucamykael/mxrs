@@ -195,7 +195,11 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
         ),
         // A corresponding MXRS surface exists, but full option/output/model
         // parity has not been proved and must remain visibly partial.
-        "analyze" => (Status::Partial, "mxrs oql", "risk analyzer only"),
+        "analyze" => (
+            Status::Verified,
+            "mxrs analyze",
+            "mxrb's catalog and positional analyzer (LIKE wildcards, functions in WHERE, comma joins, SELECT *) over the model's OQL or a --sql/--oql query, with its text and JSON: xtask command-oracle analyze",
+        ),
         "benchmark" => (
             Status::Verified,
             "mxrs benchmark",
@@ -371,10 +375,15 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "mxrs db status/up/down/destroy/credentials/url/sql/sync/explain/workload/indexes/shell",
             "owned, labeled, loopback-only PostgreSQL Docker workspace with private external state, plus sql and shell: one statement or an interactive psql, read-only unless --write, enforced through default_transaction_read_only as a session setting (mxrb uses a separate reader role and BEGIN READ ONLY; a session setting no statement in the payload can turn off is the same guarantee for a single-role workspace), with a rejected statement reported as a query failure rather than as a Docker outage; own evidence: psql argv pinned against a mock Docker for both actions and both failure classes, plus a live workspace where a write is refused without --write, accepted with it, and then visible to a read-only query. explain ports Oql::PlanAnalyzer rule for rule (sequential scan hint vs warning, filter discard, 10x cardinality misestimation, high-volume nested loop, disk sort), matched against pg_indexes and rendered in mxrb's human and --json shapes, with EXPLAIN ANALYZE kept read-only by the same session setting so a data-modifying CTE cannot execute; own evidence: mxrb's plan-analyzer spec ported case for case, every threshold pinned on both sides of its boundary with the two conditions of a rule separated, the --json payload and the whole rendered human text pinned, the explain psql argv pinned for both modes, the CLI grammar pinned per flag and action, a non-ASCII statement refused rather than panicking on a character boundary, and a live workspace where the same captured EXPLAIN JSON and pg_indexes rows produce a payload identical to mxrb's own PlanAnalyzer, key order included. workload and indexes port Oql::WorkloadAnalyzer and Oql::IndexAdvisor rule for rule over pg_stat_statements, pg_stat_user_tables and pg_stat_user_indexes, with mxrb's baseline snapshot and regression comparison behind --save/--compare, and an index candidate required to carry both sequential-scan pressure and repeated predicate evidence; db up now waits for the server (two consecutive pg_isready probes, because the image runs a temporary initdb server) and configures pg_stat_statements and track_io_timing, restarting once per workspace; own evidence: mxrb's workload-analyzer and index-advisor specs ported case for case, every workload threshold pinned on both sides of its boundary, the three catalog queries pinned against literal SQL and the limit checked in both paths, the readiness and monitoring paths pinned on both the create and the already-running container including that the restart happens only on the first run, the rendered text pinned whole for all three reports and for the baseline snapshot's bytes, and a live 300k-row workspace whose captured statistics rows produce workload and index payloads identical to mxrb's own analyzers, key order included down to the nested finding metrics. sync applies the model's relational schema to the workspace: typed PostgreSQL columns (mxrb's SQLite layout is a cross-tool contract that PostgreSQL has no counterpart for, and inheriting it would make a bound parameter compare lexicographically and answer wrongly in silence), the mxrb_schema_* catalog, one implicit transaction, a second run a genuine no-op, and any loss refused unless --allow-destructive-schema names it. mxrb has no oracle for this at all: its db sync is up(force_build: true) and the Mendix Runtime does the schema work. Own evidence: the plan is a pure function pinned per case, plus a live workspace where sync creates typed tables, a rerun reports no change, a catalog entry with no model attribute is refused with the column still present, and the flag then removes it. serve now resolves which of the two layouts a database has (probing for the mxrb_schema_* catalog only MXRS's applier creates), so sync's tables answer raw SQL and OQL both. Still missing: Mendix Runtime boot beside PostgreSQL",
         ),
-        "find" | "search" => (
-            Status::Partial,
+        "find" => (
+            Status::Verified,
+            "mxrs find",
+            "case-insensitive qualified-name match listed by module, kind and name, and --semantic as the ten nearest by TF-IDF: xtask command-oracle find",
+        ),
+        "search" => (
+            Status::Verified,
             "mxrs search",
-            "ranked name/reference search",
+            "mxrb's TF-IDF ranking (512 FNV-1a buckets, compensated sums, cosine distance) with its text and JSON output: xtask command-oracle search; mxrb's optional ONNX backend is refused by name rather than approximated",
         ),
         "frontend" => (
             Status::Partial,
@@ -432,9 +441,9 @@ fn classify(command: &str) -> (Status, &'static str, &'static str) {
             "full port of mxrb's loopback-only JSON query contract (sql XOR oql, translated OQL parameter checks, psql-variable binding, CSV-derived rows, 405/413/400/422 statuses) over the owned Docker database workspace; raw-sql params are additionally bound instead of mxrb's silent discard; OQL targets whichever physical layout the database actually has — Mendix Runtime naming (mxrb's only behavior) or db sync's typed tables — resolved once at startup by probing for the mxrb_schema_* catalog only MXRS's applier creates, announced on the banner, and overridable with --oql-layout auto|physical|mendix rather than guessed; live command oracle still missing; own evidence: complete offline HTTP-contract suite (tower oneshot) incl. an injected-translator pin, MockDocker-pinned psql argv incl. the read-only layout probe, and a live workspace where db sync's tables answer the same OQL under auto and physical, a bound parameter round-trips (incl. a quote-and-DROP payload coming back as a literal), and the probe refuses to guess when the database is unreachable. That live check found and fixed a real transport bug: psql --command performs no variable interpolation, so every parameterized query died on syntax until bound statements moved to stdin over an interactive exec",
         ),
         "validate" => (
-            Status::Partial,
+            Status::Verified,
             "mxrs validate",
-            "storage validation; scope differs",
+            "mxrb's storage integrity checks in its order (tables, unit tree, per-unit hash/$Type/$ID/nested $IDs/AutoNumber defaults, v2 files) with its legacy $ID allowance, plus a containment-cycle check reported last: xtask command-oracle validate over clean and seven corrupted models",
         ),
         "marketplace" => (
             Status::Verified,
@@ -643,7 +652,7 @@ mod tests {
     /// assertion.
     #[test]
     fn a_named_implementation_never_implies_verified_behavior() {
-        let report = build(&inventory(&["search", "oql", "analyze", "frontend"])).unwrap();
+        let report = build(&inventory(&["query", "oql", "preflight", "frontend"])).unwrap();
         assert_eq!(report.verified, 0);
         assert!(!report.complete());
         assert_eq!(

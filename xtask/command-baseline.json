@@ -1,5 +1,5 @@
 {
-  "analyze": "partial",
+  "analyze": "verified",
   "benchmark": "verified",
   "cache": "verified",
   "callees": "verified",
@@ -24,7 +24,7 @@
   "evaluate": "verified",
   "evaluation": "verified",
   "export": "partial",
-  "find": "partial",
+  "find": "verified",
   "frontend": "partial",
   "functional-instrument": "verified",
   "functional-test": "verified",
@@ -62,7 +62,7 @@
   "run": "partial",
   "scaffold": "verified",
   "scheduled-event": "verified",
-  "search": "partial",
+  "search": "verified",
   "security": "verified",
   "serve": "verified",
   "sql": "verified",
@@ -73,7 +73,7 @@
   "update": "partial",
   "upgrade": "verified",
   "use-case": "verified",
-  "validate": "partial",
+  "validate": "verified",
   "validation": "verified",
   "widgets": "verified"
 }

@@ -126,7 +126,8 @@ fn command_options(
             &[],
         ),
         "package" => (&["--web", "--output", "-o"], &[], &[]),
-        "search" | "find" => (&["--limit"], &["--json"], &[]),
+        "search" => (&["--limit", "--backend"], &["--json"], &[]),
+        "find" => (&[], &["--semantic"], &[]),
         "translate-oql" => (&["--dialect"], &[], &[]),
         "page" => (
             &["--target", "--template", "--chain"],
@@ -223,7 +224,7 @@ commands! {
     "evaluate", "<file.mpr> <evaluation.json> [--json]", "Run declarative static model checks", run_evaluate;
     "evaluation", "new <Name> [--target DIR] [--dry-run] [--json]", "Create declarative static model checks", run_evaluation;
     "export", "<file.mpr> [-o <out.rs>]", "Export complete editable Rust declarations", run_export;
-    "find", "<file.mpr> <query> [--limit N] [--json]", "Find artifacts by name and documentation (as search does)", run_semantic_search;
+    "find", "<file.mpr> <text> [--semantic]", "Find artifacts by name or semantic text", run_find;
     "functional-test", "new <Module.Flow> [--target DIR] [--dry-run] [--json]", "Create a declarative runtime test suite", run_functional_test;
     "functional-instrument", "<writable.mpr> <suite.json> [--json]", "Instrument a disposable MPR with a functional test runner", run_functional_instrument;
     "help", "[command]", "Show command usage", run_help;
@@ -262,7 +263,7 @@ commands! {
     "run", "[DIR] [--host HOST] [--server-port PORT] [--client-port PORT] [--environment NAME] [--no-frontend] [--allow-destructive-schema]", "Run the built project on the MXRS runtime with its web shell", run_run;
     "scaffold", "<list|destroy> [<kind:name>] [--target DIR]", "List generators or remove a registered scaffold", run_scaffold;
     "scheduled-event", "new <Module.Event> [--target DIR] [--dry-run] [--json]", "Scaffold a scheduled event and its handler microflow", run_scheduled_event;
-    "search", "<file.mpr> <query> [--limit N] [--json]", "Search artifact names and documentation", run_semantic_search;
+    "search", "<text> <file.mpr> [--backend auto|tfidf] [--limit N] [--json]", "Rank artifacts by similarity to a text", run_search;
     "security", "init <Module> [--target DIR] [--dry-run] [--json]", "Scaffold module roles and project security", run_security;
     "serve", "<file.mpr> [--port PORT] [--db-port PORT] [--no-up] [--oql-layout auto|physical|mendix]", "Serve loopback read-only SQL and OQL queries over the project database", run_serve;
     "sql", "<file.mpr> <query>", "Run read-only model-store SQL", run_sql;
@@ -2608,11 +2609,20 @@ fn run_impact(args: Vec<String>) -> ExitCode {
     })
 }
 
-fn run_semantic_search(mut args: Vec<String>) -> ExitCode {
+/// One artifact a search ranked, as `search --json` lists it.
+#[derive(serde::Serialize)]
+struct RankedArtifact<'a> {
+    rank: usize,
+    qualified_name: &'a str,
+    kind: &'a str,
+    distance: f64,
+}
+
+fn run_search(mut args: Vec<String>) -> ExitCode {
     let json = take_flag(&mut args, "--json");
     let limit = match take_value(&mut args, "--limit")
         .as_deref()
-        .unwrap_or("20")
+        .unwrap_or("10")
         .parse::<usize>()
     {
         Ok(limit) if limit > 0 => limit,
@@ -2621,30 +2631,90 @@ fn run_semantic_search(mut args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if args.len() != 2 {
-        eprintln!("[mxrs] error: usage: mxrs search <file.mpr> <query> [--limit N] [--json]");
-        return ExitCode::FAILURE;
+    // mxrb ranks with an ONNX model when one is installed and with hashed
+    // term frequencies otherwise; mxrs ranks with the term frequencies.
+    match take_value(&mut args, "--backend").as_deref() {
+        None | Some("auto" | "tfidf") => {}
+        Some("onnx") => {
+            eprintln!(
+                "[mxrs] error: the onnx backend is not available; mxrs ranks by term frequency (--backend tfidf)"
+            );
+            return ExitCode::FAILURE;
+        }
+        Some(other) => {
+            eprintln!("[mxrs] error: unknown embedding backend: {other}");
+            return ExitCode::FAILURE;
+        }
     }
-    let index = match semantic_index(&args[0]) {
+    let [text, path] = args.as_slice() else {
+        eprintln!(
+            "[mxrs] error: usage: mxrs search <text> <file.mpr> [--backend auto|tfidf] [--limit N] [--json]"
+        );
+        return ExitCode::FAILURE;
+    };
+    let index = match document_index(path) {
         Ok(index) => index,
         Err(error) => {
             eprintln!("[mxrs] error: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let hits = index.search(&args[1], limit);
+    let hits = index.search(text, limit);
     if json {
+        let ranked: Vec<RankedArtifact<'_>> = hits
+            .iter()
+            .enumerate()
+            .map(|(index, (artifact, distance))| RankedArtifact {
+                rank: index + 1,
+                qualified_name: &artifact.qualified_name,
+                kind: &artifact.kind,
+                distance: *distance,
+            })
+            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&hits).expect("serializable search report")
+            serde_json::to_string_pretty(&ranked).expect("serializable search report")
         );
     } else {
-        for hit in hits {
+        println!("rank\tdistance\tqualified_name\tkind");
+        for (index, (artifact, distance)) in hits.iter().enumerate() {
             println!(
-                "{}\t{:?}\t{}",
-                hit.score, hit.artifact.kind, hit.artifact.qualified_name
+                "{}\t{distance:.6}\t{}\t{}",
+                index + 1,
+                artifact.qualified_name,
+                artifact.kind
             );
         }
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_find(mut args: Vec<String>) -> ExitCode {
+    let semantic = take_flag(&mut args, "--semantic");
+    let [path, text] = args.as_slice() else {
+        eprintln!("[mxrs] error: usage: mxrs find <file.mpr> <text> [--semantic]");
+        return ExitCode::FAILURE;
+    };
+    let index = match document_index(path) {
+        Ok(index) => index,
+        Err(error) => {
+            eprintln!("[mxrs] error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // By name, the artifacts whose name holds the text; by meaning, the ten
+    // a search ranks nearest.
+    let found: Vec<&mxrs_semantic::documents::Artifact> = if semantic {
+        index
+            .search(text, 10)
+            .into_iter()
+            .map(|(artifact, _)| artifact)
+            .collect()
+    } else {
+        index.find(text)
+    };
+    for artifact in found {
+        println!("{}\t{}", artifact.qualified_name, artifact.kind);
     }
     ExitCode::SUCCESS
 }
@@ -2667,8 +2737,10 @@ fn run_analyze(mut args: Vec<String>) -> ExitCode {
         eprintln!("[mxrs] error: use exactly one of --sql, --oql, or <file.mpr>");
         return ExitCode::FAILURE;
     }
-    let reports = if let Some(source) = sql.or(oql) {
-        vec![("AdHoc".to_string(), source)]
+    let reports: Vec<mxrs_oql::Report> = if let Some(source) = &sql {
+        vec![mxrs_oql::analyze_source(source, mxrs_oql::QueryKind::Sql)]
+    } else if let Some(source) = &oql {
+        vec![mxrs_oql::analyze_source(source, mxrs_oql::QueryKind::Oql)]
     } else {
         if args.len() != 1 {
             eprintln!(
@@ -2684,31 +2756,37 @@ fn run_analyze(mut args: Vec<String>) -> ExitCode {
             }
         };
         match mxrs_oql::catalog(&project) {
-            Ok(queries) => queries
-                .into_iter()
-                .map(|query| (query.qualified_name, query.oql))
-                .collect(),
+            Ok(queries) => queries.iter().map(mxrs_oql::analyze_query).collect(),
             Err(error) => {
                 eprintln!("[mxrs] error: {error}");
                 return ExitCode::FAILURE;
             }
         }
     };
-    let dialect_key = match dialect {
-        mxrs_oql::Dialect::Ansi => "ansi",
-        mxrs_oql::Dialect::PostgreSql => "postgresql",
-        mxrs_oql::Dialect::SqlServer => "sql_server",
-    };
     if json {
         let payload = reports
             .iter()
-            .map(|(name, source)| {
-                let findings = mxrs_oql::analyze(source);
+            .map(|report| {
+                let findings: Vec<serde_json::Value> = report
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        serde_json::json!({
+                            "rule": finding.rule,
+                            "severity": finding.severity,
+                            "fragment": finding.fragment,
+                            "message": finding.message,
+                            "suggestions": finding.suggestions,
+                            "selected_suggestion": finding.suggestions.get(dialect),
+                        })
+                    })
+                    .collect();
                 serde_json::json!({
-                    "name": name,
-                    "source": source,
-                    "clean": !findings.iter().any(|finding| finding.severity == "error"),
-                    "warnings": findings.iter().any(|finding| finding.severity == "warning"),
+                    "name": report.name,
+                    "kind": report.kind.as_str(),
+                    "source": report.source,
+                    "clean": report.clean(),
+                    "warnings": report.warnings(),
                     "findings": findings,
                 })
             })
@@ -2717,29 +2795,30 @@ fn run_analyze(mut args: Vec<String>) -> ExitCode {
             "{}",
             serde_json::to_string_pretty(&payload).expect("serializable OQL analysis")
         );
+    } else if reports.iter().all(|report| report.findings.is_empty()) {
+        println!("[mxrs] No analysis findings");
     } else {
-        let mut any = false;
-        for (name, source) in &reports {
-            for finding in mxrs_oql::analyze(source) {
-                any = true;
-                let suggestion = finding
-                    .suggestions
-                    .get(dialect_key)
-                    .expect("each OQL finding carries every supported dialect");
+        let dialect_name = match dialect {
+            mxrs_oql::Dialect::Ansi => "ANSI",
+            mxrs_oql::Dialect::PostgreSql => "PostgreSQL",
+            mxrs_oql::Dialect::SqlServer => "SQL Server",
+        };
+        for report in &reports {
+            for finding in &report.findings {
                 println!(
-                    "{name}  [{}] {}",
+                    "{}  [{}] {}",
+                    report.name,
                     finding.severity.to_ascii_uppercase(),
                     finding.rule
                 );
-                // The query is named on the line above; repeating its whole
-                // text here made every finding as long as the query itself.
-                println!("  {}", finding.fragment);
+                println!(
+                    "  {}: {}",
+                    report.kind.as_str().to_ascii_uppercase(),
+                    finding.fragment
+                );
                 println!("  {}", finding.message);
-                println!("  {dialect_key} -> {suggestion}");
+                println!("  {dialect_name} -> {}", finding.suggestions.get(dialect));
             }
-        }
-        if !any {
-            println!("[mxrs] No analysis findings");
         }
     }
     ExitCode::SUCCESS
