@@ -167,7 +167,16 @@ fn element_source(source: &mut String, owner: &str, element: &MappingElement, in
             let _ = writeln!(source, "{indent}{call};");
         }
         MappingElementKind::Object(object) => {
-            let variable = variable_name(&element.key, object, owner);
+            let says_nothing = object.association == MappingAssociation::Named
+                && object.handling.is_none()
+                && object.backup.is_none()
+                && !object.allow_override
+                && object.children.is_empty();
+            let variable = if says_nothing {
+                "_".to_string()
+            } else {
+                variable_name(&element.key, object, owner)
+            };
             let opening = match &object.entity {
                 Some(entity) => format!(
                     "{owner}.object({key}, {}, |{variable}| {{",
@@ -175,6 +184,10 @@ fn element_source(source: &mut String, owner: &str, element: &MappingElement, in
                 ),
                 None => format!("{owner}.array({key}, |{variable}| {{"),
             };
+            if says_nothing {
+                let _ = writeln!(source, "{indent}{opening}}});");
+                return;
+            }
             let _ = writeln!(source, "{indent}{opening}");
             let inner = format!("{indent}    ");
             match &object.association {
@@ -239,5 +252,36 @@ fn value_type_source(value_type: &MappingValueType) -> String {
             crate::rust_string(enumeration)
         ),
         other => format!("MappingValueType::{other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mxrs_ir::ValueMapping;
+
+    /// An object that says nothing of itself is declared with no name for
+    /// its builder; one that does names it after its entity.
+    #[test]
+    fn an_object_that_says_nothing_binds_no_builder() {
+        let mut mapping =
+            MappingDecl::new(MappingDirection::Import, "IMM_Order", "Sales.JSON_Order");
+        let mut root = ObjectMapping::new(Some("Sales.Order".into()));
+        root.children.push(MappingElement {
+            key: "number".into(),
+            kind: MappingElementKind::Value(ValueMapping::default()),
+        });
+        root.children.push(MappingElement {
+            key: "customer".into(),
+            kind: MappingElementKind::Object(ObjectMapping::new(Some("Sales.Customer".into()))),
+        });
+        mapping.elements.push(MappingElement {
+            key: "(Object)".into(),
+            kind: MappingElementKind::Object(root),
+        });
+        let source = render("Sales", "imm_order", &mapping);
+        assert!(source.contains("mapping.object(\"(Object)\", \"Sales.Order\", |order| {\n"));
+        assert!(source.contains("order.value(\"number\");\n"));
+        assert!(source.contains("order.object(\"customer\", \"Sales.Customer\", |_| {});\n"));
     }
 }
