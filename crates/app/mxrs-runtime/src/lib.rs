@@ -281,6 +281,8 @@ struct EntitySchema {
     kinds: BTreeMap<String, MemberKind>,
     /// What the model asks of an object before it is committed.
     rules: Vec<ValidationRule>,
+    /// The entity this one specializes, when the project declares it.
+    generalization: Option<String>,
 }
 
 /// Whether the runtime reads a regular expression: the model's are Java's,
@@ -333,6 +335,7 @@ impl StoreSchema {
                 transient,
                 kinds: BTreeMap::new(),
                 rules: Vec::new(),
+                generalization: None,
             },
         );
         self
@@ -362,6 +365,48 @@ impl StoreSchema {
 
     pub fn contains(&self, entity: &str) -> bool {
         self.entities.contains_key(entity)
+    }
+
+    /// Declares that `entity` specializes `generalization`: what is asked
+    /// of the generalization — a retrieve, a find — is asked of it too.
+    pub fn generalization(mut self, entity: &str, generalization: &str) -> Self {
+        if let Some(schema) = Arc::make_mut(&mut self.entities).get_mut(entity) {
+            schema.generalization = Some(generalization.to_string());
+        }
+        self
+    }
+
+    /// The entity `entity` specializes, if any.
+    pub fn generalization_of(&self, entity: &str) -> Option<&str> {
+        self.entities
+            .get(entity)
+            .and_then(|schema| schema.generalization.as_deref())
+    }
+
+    /// Whether an object of `entity` is one of `ancestor`: the entity
+    /// itself or one of its specializations.
+    pub fn is_a(&self, entity: &str, ancestor: &str) -> bool {
+        let mut current = Some(entity);
+        for _ in 0..64 {
+            match current {
+                Some(name) if name == ancestor => return true,
+                Some(name) => current = self.generalization_of(name),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// `entity` and every entity that specializes it, the entity first.
+    pub fn family(&self, entity: &str) -> Vec<String> {
+        let mut family = vec![entity.to_string()];
+        family.extend(
+            self.entities
+                .keys()
+                .filter(|name| name.as_str() != entity && self.is_a(name, entity))
+                .cloned(),
+        );
+        family
     }
 }
 
@@ -432,14 +477,17 @@ impl Store {
         Ok(object)
     }
 
+    /// The objects of `entity` the unit of work holds, its
+    /// specializations' among them, as a Mendix retrieve answers.
     pub fn retrieve(&self, entity: &str) -> Result<Vec<ObjectValue>> {
         if !self.schema.contains(entity) {
             return Err(RuntimeError::UnknownEntity(entity.to_string()));
         }
         Ok(self
-            .records
-            .get(entity)
-            .into_iter()
+            .schema
+            .family(entity)
+            .iter()
+            .filter_map(|member| self.records.get(member))
             .flat_map(|records| records.values())
             .map(|object| object.as_ref().clone())
             .collect())
@@ -448,9 +496,10 @@ impl Store {
     /// The objects of an entity as last committed, in no unit of work's
     /// state.
     pub fn retrieve_committed(&self, entity: &str) -> Vec<ObjectValue> {
-        self.committed
-            .get(entity)
-            .into_iter()
+        self.schema
+            .family(entity)
+            .iter()
+            .filter_map(|member| self.committed.get(member))
             .flat_map(|records| records.values())
             .map(|object| object.as_ref().clone())
             .collect()
@@ -459,6 +508,7 @@ impl Store {
     /// The members of an object that differ from what was last committed
     /// of it — every member of one never committed.
     pub fn uncommitted_members(&self, entity: &str, id: &str) -> BTreeMap<String, Value> {
+        let entity = &self.concrete(entity, id);
         let Some(current) = self.records.get(entity).and_then(|records| records.get(id)) else {
             return BTreeMap::new();
         };
@@ -479,21 +529,57 @@ impl Store {
     /// Whether an object holds what was not committed: new, or changed
     /// since its last commit.
     pub fn is_dirty(&self, entity: &str, id: &str) -> bool {
+        let entity = &self.concrete(entity, id);
         self.dirty.contains(&(entity.to_string(), id.to_string()))
     }
 
+    /// The object of `entity` with `id` — of the entity itself or one of
+    /// its specializations, which keeps its own entity.
     pub fn find(&self, entity: &str, id: &str) -> Result<Option<ObjectValue>> {
         if !self.schema.contains(entity) {
             return Err(RuntimeError::UnknownEntity(entity.to_string()));
         }
+        if let Some(object) = self.records.get(entity).and_then(|records| records.get(id)) {
+            return Ok(Some(object.as_ref().clone()));
+        }
         Ok(self
+            .schema
+            .family(entity)
+            .iter()
+            .skip(1)
+            .find_map(|member| {
+                self.records
+                    .get(member)
+                    .and_then(|records| records.get(id))
+                    .map(|object| object.as_ref().clone())
+            }))
+    }
+
+    /// The entity of the object with `id` that `entity` names: `entity`
+    /// itself, or the specialization of it the object is.
+    fn concrete(&self, entity: &str, id: &str) -> String {
+        let holds = |member: &String| {
+            [&self.records, &self.committed].iter().any(|map| {
+                map.get(member)
+                    .is_some_and(|records| records.contains_key(id))
+            })
+        };
+        if self
             .records
             .get(entity)
-            .and_then(|records| records.get(id))
-            .map(|object| object.as_ref().clone()))
+            .is_some_and(|records| records.contains_key(id))
+        {
+            return entity.to_string();
+        }
+        self.schema
+            .family(entity)
+            .into_iter()
+            .find(holds)
+            .unwrap_or_else(|| entity.to_string())
     }
 
     pub fn set_member(&mut self, entity: &str, id: &str, member: &str, value: Value) -> Result<()> {
+        let entity = &self.concrete(entity, id);
         if !valid_name(member) {
             return Err(RuntimeError::Transaction(
                 "member names must be nonempty and contain no control characters".into(),
@@ -507,6 +593,7 @@ impl Store {
     }
 
     pub fn commit(&mut self, entity: &str, id: &str) -> Result<ObjectValue> {
+        let entity = &self.concrete(entity, id);
         let object = self.object(entity, id)?.clone();
         put_record(&mut self.committed, object.clone());
         Arc::make_mut(&mut self.dirty).remove(&(entity.to_string(), id.to_string()));
@@ -514,6 +601,7 @@ impl Store {
     }
 
     pub fn rollback(&mut self, entity: &str, id: &str) -> Result<()> {
+        let entity = &self.concrete(entity, id);
         self.object(entity, id)?;
         let key = (entity.to_string(), id.to_string());
         if let Some(object) = self
@@ -531,6 +619,7 @@ impl Store {
     }
 
     pub fn delete(&mut self, entity: &str, id: &str) -> Result<ObjectValue> {
+        let entity = &self.concrete(entity, id);
         let object = self.object(entity, id)?.as_ref().clone();
         remove_record(&mut self.records, entity, id);
         remove_record(&mut self.committed, entity, id);
@@ -646,6 +735,7 @@ impl Store {
     }
 
     pub fn is_committed(&self, entity: &str, id: &str) -> bool {
+        let entity = &self.concrete(entity, id);
         self.committed
             .get(entity)
             .is_some_and(|records| records.contains_key(id))
@@ -1428,6 +1518,7 @@ impl Runtime {
 /// shows them all under their inputs. A page's save and a flow's commit
 /// both ask this before the object is committed.
 pub fn validate_object(store: &Store, entity: &str, id: &str) -> Result<()> {
+    let entity = &store.concrete(entity, id);
     let rules = store.schema().rules_of(entity);
     if rules.is_empty() {
         return Ok(());
@@ -1436,10 +1527,18 @@ pub fn validate_object(store: &Store, entity: &str, id: &str) -> Result<()> {
         return Ok(());
     };
     // Unique is the database's index: what other objects hold once
-    // committed, not what a unit of work has yet to commit.
+    // committed, not what a unit of work has yet to commit — over the
+    // generalization's whole family, which shares the index.
     let others: Vec<ObjectValue> = if rules.iter().any(|rule| rule.kind == RuleKind::Unique) {
+        let mut root: &str = entity;
+        for _ in 0..64 {
+            match store.schema().generalization_of(root) {
+                Some(parent) => root = parent,
+                None => break,
+            }
+        }
         store
-            .retrieve_committed(entity)
+            .retrieve_committed(root)
             .into_iter()
             .filter(|other| other.id != id)
             .collect()
@@ -2346,6 +2445,48 @@ mod tests {
         assert!(equals.broken(&record(Value::from("007")), &[], false));
         assert!(!equals.broken(&record(Value::from("7")), &[], false));
         assert!(!equals.broken(&record(Value::from(7.0)), &[], true));
+    }
+
+    /// A generalization answers for its specializations: a retrieve or a
+    /// find of it holds theirs, a change by its name reaches them, and a
+    /// unique attribute it declares is unique across the family.
+    #[test]
+    fn a_generalization_answers_for_its_specializations() {
+        let kinds = || BTreeMap::from([("Name".to_string(), MemberKind::Text { length: None })]);
+        let schema = StoreSchema::default()
+            .entity("App.Animal", BTreeMap::new(), false)
+            .members("App.Animal", kinds())
+            .rules("App.Animal", vec![rule("Name", RuleKind::Unique, "")])
+            .entity("App.Dog", BTreeMap::new(), false)
+            .members("App.Dog", kinds())
+            .rules("App.Dog", vec![rule("Name", RuleKind::Unique, "")])
+            .generalization("App.Dog", "App.Animal");
+        assert!(schema.is_a("App.Dog", "App.Animal"));
+        assert!(!schema.is_a("App.Animal", "App.Dog"));
+        let mut store = Store::new(schema);
+        let cat = store.create("App.Animal").unwrap();
+        store
+            .set_member("App.Animal", &cat.id, "Name", Value::from("Tom"))
+            .unwrap();
+        store.commit("App.Animal", &cat.id).unwrap();
+        let dog = store.create("App.Dog").unwrap();
+        store
+            .set_member("App.Animal", &dog.id, "Name", Value::from("Tom"))
+            .unwrap();
+        assert_eq!(store.retrieve("App.Animal").unwrap().len(), 2);
+        assert_eq!(store.retrieve("App.Dog").unwrap().len(), 1);
+        assert_eq!(
+            store.find("App.Animal", &dog.id).unwrap().unwrap().entity,
+            "App.Dog"
+        );
+        let Err(RuntimeError::Validation(violations)) =
+            validate_object(&store, "App.Animal", &dog.id)
+        else {
+            panic!("a name the family holds is not unique");
+        };
+        assert_eq!(violations[0].member, "Name");
+        store.commit("App.Animal", &dog.id).unwrap();
+        assert!(store.is_committed("App.Dog", &dog.id));
     }
 
     /// An object a flow makes, or changes, and hands a page without

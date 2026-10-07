@@ -197,6 +197,16 @@ pub const fn logical_type(kind: AttributeType) -> &'static str {
 pub fn derive(modules: &[Module]) -> RuntimeSchema {
     let mut entities = Vec::new();
     let mut associations = Vec::new();
+    let all: BTreeMap<String, &mxrs_model::Entity> = modules
+        .iter()
+        .filter_map(|module| Some((module.name.as_deref()?, module)))
+        .flat_map(|(module_name, module)| {
+            module
+                .entities()
+                .iter()
+                .map(move |entity| (qualified_entity_name(module_name, entity), entity))
+        })
+        .collect();
     for module in modules {
         let Some(module_name) = module.name.as_deref() else {
             continue;
@@ -213,7 +223,11 @@ pub fn derive(modules: &[Module]) -> RuntimeSchema {
             if !entity.persistable || entity.oql_view() {
                 continue;
             }
-            entities.push(entity_schema(module_name, entity));
+            entities.push(entity_schema(
+                module_name,
+                entity,
+                &inherited_attributes(entity, &all),
+            ));
         }
         for association in module.associations() {
             let Some(name) = association.name.as_deref() else {
@@ -253,7 +267,48 @@ pub fn derive(modules: &[Module]) -> RuntimeSchema {
     }
 }
 
-fn entity_schema(module_name: &str, entity: &mxrs_model::Entity) -> EntitySchema {
+/// What a specialization inherits: the attributes of its generalizations
+/// the project declares, the root's first. A specialization's table holds
+/// them beside its own, as mxrb's `runtime_attributes` does, so an object
+/// keeps every member it has.
+fn inherited_attributes<'a>(
+    entity: &mxrs_model::Entity,
+    all: &BTreeMap<String, &'a mxrs_model::Entity>,
+) -> Vec<&'a mxrs_model::Attribute> {
+    let mut ancestors: Vec<&mxrs_model::Entity> = Vec::new();
+    let mut target = entity
+        .generalization
+        .as_ref()
+        .and_then(|generalization| generalization.target.clone());
+    while let Some(name) = target {
+        let Some(parent) = all.get(&name) else {
+            break;
+        };
+        if ancestors
+            .iter()
+            .any(|ancestor| std::ptr::eq(*ancestor, *parent))
+            || std::ptr::eq(*parent, entity)
+        {
+            break;
+        }
+        ancestors.push(parent);
+        target = parent
+            .generalization
+            .as_ref()
+            .and_then(|generalization| generalization.target.clone());
+    }
+    ancestors
+        .iter()
+        .rev()
+        .flat_map(|ancestor| ancestor.attributes.iter())
+        .collect()
+}
+
+fn entity_schema(
+    module_name: &str,
+    entity: &mxrs_model::Entity,
+    inherited: &[&mxrs_model::Attribute],
+) -> EntitySchema {
     let qualified = qualified_entity_name(module_name, entity);
     let mut key = entity.data_storage_guid.clone().unwrap_or_default();
     if key.is_empty() {
@@ -262,9 +317,19 @@ fn entity_schema(module_name: &str, entity: &mxrs_model::Entity) -> EntitySchema
     if key.is_empty() {
         key = qualified.clone();
     }
-    let columns = entity
-        .attributes
+    // The inherited members first, each overridden by one of the same name
+    // nearer the entity, in the order mxrb's flattening keeps.
+    let mut members: Vec<&mxrs_model::Attribute> = inherited
         .iter()
+        .copied()
+        .chain(entity.attributes.iter())
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    members.reverse();
+    members.retain(|attribute| seen.insert(attribute.name.clone()));
+    members.reverse();
+    let columns = members
+        .into_iter()
         .map(|attribute| {
             let mut attribute_key = attribute.data_storage_guid.clone().unwrap_or_default();
             if attribute_key.is_empty() {

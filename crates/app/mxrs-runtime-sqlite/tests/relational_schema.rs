@@ -535,3 +535,54 @@ fn a_version_one_snapshot_database_upgrades_in_place() {
         Value::String("from-v1".into())
     );
 }
+
+/// A specialization's table holds what it inherits, so an object keeps its
+/// inherited members across a restart, and asking for the generalization
+/// answers with it.
+#[test]
+fn a_specialization_keeps_its_inherited_members_across_a_restart() {
+    let animal = entity("Animal", vec![attribute("Name", AttributeType::String)]);
+    let mut dog = entity("Dog", vec![attribute("Breed", AttributeType::String)]);
+    dog.generalization = Some(mxrs_model::entity::Generalization {
+        id: None,
+        native_type: "DomainModels$Generalization".to_string(),
+        target: Some("App.Animal".to_string()),
+        persistable: None,
+        system_members: Default::default(),
+        raw: doc! {},
+    });
+    let module = module_with(vec![animal, dog], Vec::new());
+    let modules = std::slice::from_ref(&module);
+    let derived = schema::derive(modules);
+    let columns: Vec<&str> = derived
+        .entity("App.Dog")
+        .unwrap()
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(columns, ["Name", "Breed"]);
+
+    let schema = || store_schema(modules).generalization("App.Dog", "App.Animal");
+    let mut persistence = RelationalRuntimeStore::in_memory(modules, false).unwrap();
+    let mut store = Store::new(schema());
+    let rex = store.create("App.Dog").unwrap();
+    store
+        .set_member("App.Animal", &rex.id, "Name", Value::String("Rex".into()))
+        .unwrap();
+    store
+        .set_member("App.Dog", &rex.id, "Breed", Value::String("Collie".into()))
+        .unwrap();
+    store.commit("App.Animal", &rex.id).unwrap();
+    persistence.save(&store).unwrap();
+
+    let mut restored = Store::new(schema());
+    persistence.load(&mut restored).unwrap();
+    let animals = restored.retrieve("App.Animal").unwrap();
+    assert_eq!(animals.len(), 1);
+    assert_eq!(animals[0].entity, "App.Dog");
+    assert_eq!(animals[0].members["Name"], Value::String("Rex".into()));
+    assert_eq!(animals[0].members["Breed"], Value::String("Collie".into()));
+    assert!(restored.find("App.Animal", &rex.id).unwrap().is_some());
+    assert!(restored.retrieve("App.Dog").unwrap().len() == 1);
+}

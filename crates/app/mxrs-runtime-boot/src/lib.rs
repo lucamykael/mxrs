@@ -442,6 +442,7 @@ pub fn build_with(
     let mut entity_rules: BTreeMap<String, Vec<EntityRule>> = BTreeMap::new();
     let mut skipped_xpath_rules = Vec::new();
     let mut skipped_validation_rules = Vec::new();
+    let mut declared: Vec<DeclaredEntity> = Vec::new();
     for module in &modules {
         let Some(module_name) = module.name.as_deref() else {
             continue;
@@ -504,10 +505,17 @@ pub fn build_with(
                     Err(reason) => skipped_validation_rules.push(format!("{qualified}.{reason}")),
                 }
             }
-            schema = schema
-                .entity(qualified.clone(), defaults, transient)
-                .members(&qualified, kinds)
-                .rules(&qualified, rules);
+            declared.push(DeclaredEntity {
+                name: qualified.clone(),
+                defaults,
+                transient,
+                kinds,
+                rules,
+                generalization: entity
+                    .generalization
+                    .as_ref()
+                    .and_then(|generalization| generalization.target.clone()),
+            });
             entities += 1;
             let mut rules = Vec::new();
             for rule in &entity.access_rules {
@@ -550,6 +558,7 @@ pub fn build_with(
             );
         }
     }
+    schema = with_inheritance(schema, &declared);
     let mut policy = SecurityPolicy {
         enabled: false,
         administrator_roles: BTreeSet::new(),
@@ -574,6 +583,63 @@ pub fn build_with(
         skipped_xpath_rules,
         skipped_validation_rules,
     })
+}
+
+/// An entity as its own declaration states it, before what it inherits.
+struct DeclaredEntity {
+    name: String,
+    defaults: BTreeMap<String, Value>,
+    transient: bool,
+    kinds: BTreeMap<String, mxrs_runtime::MemberKind>,
+    rules: Vec<mxrs_runtime::ValidationRule>,
+    generalization: Option<String>,
+}
+
+/// Registers every entity with what it inherits: the defaults, attribute
+/// kinds and validation rules of its generalizations, the root's first and
+/// its own last, and the generalization itself, so asking for an entity
+/// answers with its specializations' objects too.
+fn with_inheritance(mut schema: StoreSchema, declared: &[DeclaredEntity]) -> StoreSchema {
+    let by_name: BTreeMap<&str, &DeclaredEntity> = declared
+        .iter()
+        .map(|entity| (entity.name.as_str(), entity))
+        .collect();
+    for entity in declared {
+        let mut lineage = vec![entity];
+        let mut parent = entity.generalization.as_deref();
+        while let Some(name) = parent {
+            let Some(ancestor) = by_name.get(name) else {
+                break;
+            };
+            if lineage.iter().any(|seen| seen.name == ancestor.name) {
+                break;
+            }
+            lineage.push(ancestor);
+            parent = ancestor.generalization.as_deref();
+        }
+        let mut defaults = BTreeMap::new();
+        let mut kinds = BTreeMap::new();
+        let mut rules = Vec::new();
+        for member in lineage.iter().rev() {
+            defaults.extend(member.defaults.clone());
+            kinds.extend(member.kinds.clone());
+            rules.extend(member.rules.iter().cloned());
+        }
+        schema = schema
+            .entity(entity.name.clone(), defaults, entity.transient)
+            .members(&entity.name, kinds)
+            .rules(&entity.name, rules);
+    }
+    for entity in declared {
+        if let Some(parent) = entity
+            .generalization
+            .as_deref()
+            .filter(|parent| by_name.contains_key(parent))
+        {
+            schema = schema.generalization(&entity.name, parent);
+        }
+    }
+    schema
 }
 
 /// Reads `Security$ProjectSecurity`'s sign-in material. An account with no
