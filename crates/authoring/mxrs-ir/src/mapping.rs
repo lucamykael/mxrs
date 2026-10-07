@@ -163,8 +163,10 @@ pub enum MappingAssociation {
 /// An element of the structure a mapping maps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappingElement {
-    /// The last part of the element's path: a member's name, or
-    /// `(Object)`, `(Array)`, `(Wrapper)`, `(Value)`.
+    /// Where the element is from its parent's: a member's name, or
+    /// `(Object)`, `(Array)`, `(Wrapper)`, `(Value)` — or several of them,
+    /// `data|(Object)`, where the mapping passes over what it maps nothing
+    /// of. A mapping's first element is named by its whole path.
     pub key: String,
     pub kind: MappingElementKind,
 }
@@ -254,11 +256,14 @@ impl MappingDecl {
     /// which element the structure does not have.
     pub fn document(&self, structure: &JsonStructureDecl) -> Result<NativeDocument, String> {
         let mut elements = Vec::with_capacity(self.elements.len());
+        // A mapping may start anywhere in its structure: at an array's
+        // object, say, rather than at the array.
         for element in &self.elements {
             let found = structure
                 .elements
                 .iter()
-                .find(|root| root.path == element.key)
+                .flat_map(JsonElement::walk)
+                .find(|candidate| candidate.path == element.key)
                 .ok_or_else(|| self.missing(&element.key))?;
             elements.push(NativeValue::Document(self.element(element, found, None)?));
         }
@@ -337,10 +342,12 @@ impl MappingDecl {
                 let entity = object.entity.as_deref();
                 let mut children = Vec::with_capacity(object.children.len());
                 for child in &object.children {
+                    // A mapping may pass over what it maps nothing of: an
+                    // array whose objects it does map, say.
                     let path = format!("{}|{}", json.path, child.key);
                     let found = json
-                        .children
-                        .iter()
+                        .walk()
+                        .into_iter()
                         .find(|candidate| candidate.path == path)
                         .ok_or_else(|| self.missing(&path))?;
                     let owner = entity.or(parent);
@@ -599,6 +606,7 @@ impl MappingDecl {
             if let Some(json) = structure
                 .elements
                 .iter()
+                .flat_map(JsonElement::walk)
                 .find(|element| element.path == root.key)
             {
                 simplify(root, json, direction, true);
@@ -631,7 +639,7 @@ fn simplify(
             }
             for child in &mut object.children {
                 let path = format!("{}|{}", json.path, child.key);
-                if let Some(found) = json.children.iter().find(|found| found.path == path) {
+                if let Some(found) = json.walk().into_iter().find(|found| found.path == path) {
                     simplify(child, found, direction, false);
                 }
             }
@@ -767,5 +775,43 @@ mod tests {
             .unwrap()
             .simplified(&structure);
         assert_eq!(read, bare);
+    }
+    /// A mapping may start below its structure's root — at an array's
+    /// object — and pass over an array whose objects it maps.
+    #[test]
+    fn a_mapping_may_start_inside_its_structure_and_pass_over_an_array() {
+        let structure = JsonStructureDecl::derive(
+            "JSON_Orders",
+            r#"[{"number": "A-1", "lines": [{"sku": "S"}]}]"#,
+        )
+        .unwrap();
+        let mut line = ObjectMapping::new(Some("Sales.Line".into()));
+        line.children.push(MappingElement {
+            key: "sku".into(),
+            kind: MappingElementKind::Value(ValueMapping::default()),
+        });
+        let mut order = ObjectMapping::new(Some("Sales.Order".into()));
+        order.children.push(MappingElement {
+            key: "lines|(Object)".into(),
+            kind: MappingElementKind::Object(line),
+        });
+        let mut mapping =
+            MappingDecl::new(MappingDirection::Export, "EM_Orders", "Sales.JSON_Orders");
+        mapping.elements.push(MappingElement {
+            key: "(Array)|(Object)".into(),
+            kind: MappingElementKind::Object(order),
+        });
+        let document = mapping.document(&structure).unwrap();
+        assert_eq!(
+            document
+                .at("Elements[0].Children[0]")
+                .unwrap()
+                .text("JsonPath"),
+            Some("(Array)|(Object)|lines|(Object)")
+        );
+        let read = MappingDecl::from_document(&document, &structure)
+            .unwrap()
+            .simplified(&structure);
+        assert_eq!(read, mapping);
     }
 }
