@@ -36,7 +36,7 @@ pub use flow::{
     MicroflowCallMapping, MicroflowDecl, NativeDocument, NativeValue, SwitchCase,
 };
 pub use javascript_action::{
-    CodeActionType, JavaScriptActionDecl, JavaScriptActionParameter, JavaScriptPlatform,
+    CodeActionParameter, CodeActionType, JavaActionDecl, JavaScriptActionDecl, JavaScriptPlatform,
 };
 pub use markers::system;
 pub use markers::{

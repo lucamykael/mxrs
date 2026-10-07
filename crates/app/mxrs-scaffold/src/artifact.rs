@@ -164,9 +164,9 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
     ScaffoldCommand {
         name: "java-action",
         action: "new",
-        argument: "<Module.Adapter>",
-        summary: "Create a Java Action adapter microflow",
-        destination: "src/domain/actions/<module>",
+        argument: "<Module.Action>",
+        summary: "Create a Java action and its Java",
+        destination: "src/ports/<module>/java_actions",
         kind: ArtifactKind::JavaAction,
     },
     ScaffoldCommand {
@@ -1653,8 +1653,11 @@ fn create_artifact(
     if options.kind == ArtifactKind::Repository {
         return create_repository(transaction, root, module_name, artifact_name);
     }
-    if options.kind == ArtifactKind::JavaScriptAction {
-        return create_javascript_action(transaction, root, module_name, artifact_name);
+    if matches!(
+        options.kind,
+        ArtifactKind::JavaScriptAction | ArtifactKind::JavaAction
+    ) {
+        return create_code_action(transaction, root, options.kind, module_name, artifact_name);
     }
     // A nanoflow is the frontend's: a method of a TypeScript service.
     if options.kind == ArtifactKind::Nanoflow {
@@ -1717,12 +1720,14 @@ fn create_artifact(
         ArtifactKind::UseCase => templates::use_case(module_name, artifact_name),
         ArtifactKind::PublishedRest => templates::published_rest(module_name, artifact_name),
         ArtifactKind::ConsumedRest => templates::consumed_rest(module_name, artifact_name),
-        ArtifactKind::JavaAction => templates::java_action(module_name, artifact_name),
         ArtifactKind::FunctionalTest => unreachable!("handled by the caller"),
         ArtifactKind::Evaluation | ArtifactKind::Ci => unreachable!("handled by the caller"),
         ArtifactKind::Validation => templates::validation(module_name, artifact_name),
         ArtifactKind::Integration => templates::integration(module_name, artifact_name),
-        ArtifactKind::Repository | ArtifactKind::Nanoflow | ArtifactKind::JavaScriptAction => {
+        ArtifactKind::Repository
+        | ArtifactKind::Nanoflow
+        | ArtifactKind::JavaScriptAction
+        | ArtifactKind::JavaAction => {
             unreachable!("handled above")
         }
         ArtifactKind::Page => unreachable!("handled above"),
@@ -1756,12 +1761,17 @@ fn create_artifact(
 /// declaration of what a call takes and returns, a port of the project,
 /// and the function Studio Pro would create for it in
 /// `javascriptsource/<module>/actions/`, which every build ships.
-fn create_javascript_action(
+/// A Java or JavaScript action: its declaration in
+/// `src/ports/<module>/{java,javascript}_actions/` and the code Studio Pro
+/// would write for it, where every build ships it from.
+fn create_code_action(
     transaction: &mut Transaction,
     root: &Path,
+    kind: ArtifactKind,
     module_name: &str,
     artifact_name: &str,
 ) -> Result<()> {
+    let java = kind == ArtifactKind::JavaAction;
     let library = root.join("src/lib.rs");
     if transaction.content(&library)?.is_none() {
         return Err(ScaffoldError::ProjectNotFound(
@@ -1781,12 +1791,21 @@ fn create_javascript_action(
             module_directory.as_str(),
             format!("//! Contracts the {module_name} module exposes to hand-written code.\n\n"),
         ),
-        (
-            "javascript_actions",
-            format!(
-                "//! The JavaScript actions of the {module_name} module: what a nanoflow's call\n//! takes and returns. Their JavaScript is `javascriptsource/`'s.\n\n"
-            ),
-        ),
+        if java {
+            (
+                "java_actions",
+                format!(
+                    "//! The Java actions of the {module_name} module: what a microflow's call takes and\n//! returns. Their Java is `java/`'s; the Rust each runs in mxrs fulfils its\n//! contract in `actions`.\n\n"
+                ),
+            )
+        } else {
+            (
+                "javascript_actions",
+                format!(
+                    "//! The JavaScript actions of the {module_name} module: what a nanoflow's call\n//! takes and returns. Their JavaScript is `javascriptsource/`'s.\n\n"
+                ),
+            )
+        },
     ];
     let mut parent = library;
     let mut current = root.join("src");
@@ -1800,18 +1819,22 @@ fn create_javascript_action(
         parent = index;
     }
     let stem = snake_case(artifact_name);
-    transaction.create(
-        current.join(format!("{stem}.rs")),
-        templates::javascript_action(module_name, artifact_name),
-    )?;
+    let (declaration, source_path, source) = if java {
+        (
+            templates::java_action(module_name, artifact_name),
+            templates::java_action_source_path(module_name, artifact_name),
+            templates::java_action_source(module_name, artifact_name),
+        )
+    } else {
+        (
+            templates::javascript_action(module_name, artifact_name),
+            templates::javascript_action_source_path(module_name, artifact_name),
+            templates::javascript_action_source(artifact_name),
+        )
+    };
+    transaction.create(current.join(format!("{stem}.rs")), declaration)?;
     declare_child_module(transaction, &parent, &stem)?;
-    transaction.create(
-        root.join(templates::javascript_action_source_path(
-            module_name,
-            artifact_name,
-        )),
-        templates::javascript_action_source(artifact_name),
-    )
+    transaction.create(root.join(source_path), source)
 }
 
 fn create_repository(
@@ -1960,9 +1983,8 @@ fn module_folder(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Page => "ui/pages",
         ArtifactKind::Nanoflow => "ui/nanoflows",
         ArtifactKind::ConsumedRest | ArtifactKind::Integration => "domain/integrations",
-        ArtifactKind::JavaAction => "domain/actions",
-        ArtifactKind::JavaScriptAction => {
-            unreachable!("a JavaScript action is written by create_javascript_action")
+        ArtifactKind::JavaAction | ArtifactKind::JavaScriptAction => {
+            unreachable!("a code action is written by create_code_action")
         }
         ArtifactKind::Security => "domain/module_security",
         ArtifactKind::Presentation => "ui/layouts",

@@ -141,10 +141,15 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     let authored = |module: &str| {
         super::module_root(&super::module_stem(module), &packages) == super::ModuleRoot::Authored
     };
-    stated_whole.insert(
-        "JavaScriptActions$JavaScriptAction".to_string(),
-        super::javascript_actions::declare(&project, authored)?.len(),
-    );
+    for kind in [
+        super::code_actions::Kind::JavaScript,
+        super::code_actions::Kind::Java,
+    ] {
+        stated_whole.insert(
+            kind.native_type().to_string(),
+            super::code_actions::declare(&project, kind, authored)?.len(),
+        );
+    }
 
     let mut families = Vec::with_capacity(counts.len());
     for (native_type, total) in counts {

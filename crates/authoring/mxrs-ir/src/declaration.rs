@@ -659,6 +659,8 @@ pub struct ModuleDecl {
     pub forms: Vec<crate::FormDecl>,
     /// The JavaScript actions its nanoflows call.
     pub javascript_actions: Vec<crate::JavaScriptActionDecl>,
+    /// The Java actions its microflows call.
+    pub java_actions: Vec<crate::JavaActionDecl>,
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
@@ -747,6 +749,7 @@ impl ProjectDecl {
         target
             .javascript_actions
             .extend(declared.javascript_actions);
+        target.java_actions.extend(declared.java_actions);
         target.layouts.extend(declared.layouts);
         if let Some(roles) = declared.roles {
             target.roles = Some(roles);

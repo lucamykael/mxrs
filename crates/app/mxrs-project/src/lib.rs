@@ -327,6 +327,7 @@ fn declares(declaration: &mxrs_ir::ProjectDecl, unit: &DeclaredUnit) -> bool {
             .javascript_actions
             .iter()
             .any(|item| item.name == name),
+        "JavaActions$JavaAction" => module.java_actions.iter().any(|item| item.name == name),
         _ => true,
     }
 }
@@ -346,6 +347,7 @@ fn kind_of(native_type: &str) -> &str {
         "Menus$MenuDocument" => "menu",
         "Queues$Queue" => "task queue",
         "JavaScriptActions$JavaScriptAction" => "JavaScript action",
+        "JavaActions$JavaAction" => "Java action",
         other => other,
     }
 }

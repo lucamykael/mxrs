@@ -66,13 +66,13 @@ use mxrs_model::{Association, Module, Project};
 
 use entity_export::TypedEntityTarget;
 
+mod code_actions;
 mod entity_export;
 mod flow_export;
 mod flow_general;
 mod frontend_export;
 mod frontend_flows;
 mod frontend_forms;
-mod javascript_actions;
 mod layout;
 mod names;
 #[cfg(test)]
@@ -429,14 +429,21 @@ fn import_cargo_project_inner(
                 )
             }),
     );
-    let javascript_actions = javascript_actions::declare(&project, authored)?;
-    declared.extend(javascript_actions.iter().map(|action| {
-        (
-            "JavaScriptActions$JavaScriptAction".to_string(),
-            action.module.clone(),
-            action.declaration.name.clone(),
-        )
-    }));
+    let javascript_actions =
+        code_actions::declare(&project, code_actions::Kind::JavaScript, authored)?;
+    let java_actions = code_actions::declare(&project, code_actions::Kind::Java, authored)?;
+    for (kind, actions) in [
+        (code_actions::Kind::JavaScript, &javascript_actions),
+        (code_actions::Kind::Java, &java_actions),
+    ] {
+        declared.extend(actions.iter().map(|action| {
+            (
+                kind.native_type().to_string(),
+                action.module.clone(),
+                action.name.clone(),
+            )
+        }));
+    }
     declared.retain(|(_, module, _)| authored(module));
     drop(project);
     // A nanoflow, page, layout or snippet the frontend states is read from
@@ -572,6 +579,11 @@ fn import_cargo_project_inner(
     for action in &javascript_actions {
         generated_module(&mut generated_modules, &action.module)
             .javascript_actions
+            .push((action.stem.clone(), action.source.clone()));
+    }
+    for action in &java_actions {
+        generated_module(&mut generated_modules, &action.module)
+            .java_actions
             .push((action.stem.clone(), action.source.clone()));
     }
     for module in &modules {
@@ -7331,6 +7343,8 @@ struct GeneratedModule {
     /// `(file stem, source)` per JavaScript action the module declares, in
     /// `ports/<module>/javascript_actions/`.
     javascript_actions: Vec<(String, String)>,
+    /// `ports/<module>/java_actions/`.
+    java_actions: Vec<(String, String)>,
     /// `markers.rs` — the module's compile-time model markers.
     markers: Option<String>,
     /// `(file stem, source)` per export mapping a published REST operation
@@ -7666,6 +7680,7 @@ fn write_authored_ports(
             module.ports_services.is_some()
                 || module.ports_actions.is_some()
                 || !module.javascript_actions.is_empty()
+                || !module.java_actions.is_empty()
         })
         .collect();
     if owned.is_empty() {
@@ -7690,6 +7705,20 @@ fn write_authored_ports(
         if let Some(actions) = &module.ports_actions {
             module_index.push_str("pub mod actions;\n");
             write_text(&folder.join("actions.rs"), actions)?;
+        }
+        if !module.java_actions.is_empty() {
+            module_index.push_str("pub mod java_actions;\n");
+            let actions = folder.join("java_actions");
+            std::fs::create_dir_all(&actions).map_err(|source| io_error(&actions, source))?;
+            let mut actions_index = format!(
+                "//! The Java actions of the {} module: what a microflow's call takes and\n//! returns. Their Java is `java/`'s; the Rust each runs in mxrs fulfils its\n//! contract in `actions`.\n\n",
+                module.name
+            );
+            for (stem, source) in &module.java_actions {
+                let _ = writeln!(actions_index, "pub mod {stem};");
+                write_text(&actions.join(format!("{stem}.rs")), source)?;
+            }
+            write_text(&actions.join("mod.rs"), &actions_index)?;
         }
         if !module.javascript_actions.is_empty() {
             module_index.push_str("pub mod javascript_actions;\n");

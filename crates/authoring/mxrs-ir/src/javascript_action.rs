@@ -1,10 +1,12 @@
-//! JavaScript actions: code a nanoflow runs in the browser. The model
-//! stores what the action takes and returns; its JavaScript is the
-//! project's, in `javascriptsource/<module>/actions/<Name>.js`.
+//! Code actions: Java actions, which a microflow runs on the server, and
+//! JavaScript actions, which a nanoflow runs in the browser. The model
+//! stores what an action takes and returns; its code is the project's, in
+//! `javasource/<module>/actions/<Name>.java` or
+//! `javascriptsource/<module>/actions/<Name>.js`.
 
 use crate::{ExportLevel, NativeDocument, NativeValue};
 
-/// What a JavaScript action takes or returns.
+/// What a code action takes or returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeActionType {
     Void,
@@ -101,9 +103,9 @@ impl JavaScriptPlatform {
     }
 }
 
-/// One parameter of a JavaScript action.
+/// One parameter of a code action.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JavaScriptActionParameter {
+pub struct CodeActionParameter {
     pub name: String,
     pub ty: CodeActionType,
     pub description: String,
@@ -111,7 +113,7 @@ pub struct JavaScriptActionParameter {
     pub required: bool,
 }
 
-impl JavaScriptActionParameter {
+impl CodeActionParameter {
     pub fn new(name: impl Into<String>, ty: CodeActionType) -> Self {
         Self {
             name: name.into(),
@@ -122,7 +124,10 @@ impl JavaScriptActionParameter {
         }
     }
 
-    fn from_document(document: &NativeDocument) -> Option<Self> {
+    fn from_document(document: &NativeDocument, family: Family) -> Option<Self> {
+        if document.ty != family.parameter() {
+            return None;
+        }
         let ty = match document.get("ParameterType")? {
             NativeValue::Document(kind) if kind.ty == "CodeActions$BasicParameterType" => {
                 match kind.get("Type")? {
@@ -144,8 +149,8 @@ impl JavaScriptActionParameter {
         })
     }
 
-    fn document(&self) -> NativeDocument {
-        NativeDocument::new("JavaScriptActions$JavaScriptActionParameter")
+    fn document(&self, family: Family) -> NativeDocument {
+        NativeDocument::new(family.parameter())
             .with("Category", self.category.as_str())
             .with("Description", self.description.as_str())
             .with("IsRequired", self.required)
@@ -164,7 +169,7 @@ impl JavaScriptActionParameter {
 pub struct JavaScriptActionDecl {
     pub name: String,
     pub documentation: String,
-    pub parameters: Vec<JavaScriptActionParameter>,
+    pub parameters: Vec<CodeActionParameter>,
     pub return_type: CodeActionType,
     /// The name a call gives the value it returns unless it says another.
     pub return_name: String,
@@ -191,7 +196,133 @@ impl JavaScriptActionDecl {
     /// that document again: an action this cannot say — a type parameter,
     /// a toolbox icon, a parameter of another kind — is none.
     pub fn from_document(document: &NativeDocument) -> Option<Self> {
-        if document.ty != "JavaScriptActions$JavaScriptAction" {
+        let shape = Shape::from_document(document, Family::JavaScript)?;
+        let declaration = Self {
+            name: shape.name,
+            documentation: shape.documentation,
+            parameters: shape.parameters,
+            return_type: shape.return_type,
+            return_name: shape.return_name,
+            platform: JavaScriptPlatform::parse(document.text("Platform")?)?,
+            excluded: shape.excluded,
+            export_level: shape.export_level,
+        };
+        (declaration.document() == *document).then_some(declaration)
+    }
+
+    /// The document the model stores for the action, its fields in the
+    /// order Mendix stores them.
+    pub fn document(&self) -> NativeDocument {
+        Shape {
+            name: self.name.clone(),
+            documentation: self.documentation.clone(),
+            parameters: self.parameters.clone(),
+            return_type: self.return_type.clone(),
+            return_name: self.return_name.clone(),
+            excluded: self.excluded,
+            export_level: self.export_level,
+        }
+        .document(Family::JavaScript, Some(self.platform))
+    }
+}
+
+/// A Java action of a module: its name and what it takes and returns. Its
+/// Java is the project's, and mxrs runs the Rust registered for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaActionDecl {
+    pub name: String,
+    pub documentation: String,
+    pub parameters: Vec<CodeActionParameter>,
+    pub return_type: CodeActionType,
+    /// The name a call gives the value it returns unless it says another.
+    pub return_name: String,
+    pub excluded: bool,
+    pub export_level: ExportLevel,
+}
+
+impl JavaActionDecl {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            documentation: String::new(),
+            parameters: Vec::new(),
+            return_type: CodeActionType::Void,
+            return_name: "ReturnValueName".to_string(),
+            excluded: false,
+            export_level: ExportLevel::Hidden,
+        }
+    }
+
+    /// The declaration a stored action is, when [`Self::document`] states
+    /// that document again: an action this cannot say — a type parameter,
+    /// a toolbox icon, a microflow parameter — is none.
+    pub fn from_document(document: &NativeDocument) -> Option<Self> {
+        let shape = Shape::from_document(document, Family::Java)?;
+        let declaration = Self {
+            name: shape.name,
+            documentation: shape.documentation,
+            parameters: shape.parameters,
+            return_type: shape.return_type,
+            return_name: shape.return_name,
+            excluded: shape.excluded,
+            export_level: shape.export_level,
+        };
+        (declaration.document() == *document).then_some(declaration)
+    }
+
+    /// The document the model stores for the action, its fields in the
+    /// order Mendix stores them.
+    pub fn document(&self) -> NativeDocument {
+        Shape {
+            name: self.name.clone(),
+            documentation: self.documentation.clone(),
+            parameters: self.parameters.clone(),
+            return_type: self.return_type.clone(),
+            return_name: self.return_name.clone(),
+            excluded: self.excluded,
+            export_level: self.export_level,
+        }
+        .document(Family::Java, None)
+    }
+}
+
+/// Which kind of code action a document is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Java,
+    JavaScript,
+}
+
+impl Family {
+    fn action(self) -> &'static str {
+        match self {
+            Family::Java => "JavaActions$JavaAction",
+            Family::JavaScript => "JavaScriptActions$JavaScriptAction",
+        }
+    }
+
+    fn parameter(self) -> &'static str {
+        match self {
+            Family::Java => "JavaActions$JavaActionParameter",
+            Family::JavaScript => "JavaScriptActions$JavaScriptActionParameter",
+        }
+    }
+}
+
+/// What Java and JavaScript actions store alike.
+struct Shape {
+    name: String,
+    documentation: String,
+    parameters: Vec<CodeActionParameter>,
+    return_type: CodeActionType,
+    return_name: String,
+    excluded: bool,
+    export_level: ExportLevel,
+}
+
+impl Shape {
+    fn from_document(document: &NativeDocument, family: Family) -> Option<Self> {
+        if document.ty != family.action() {
             return None;
         }
         let parameters = match document.get("Parameters")? {
@@ -199,7 +330,7 @@ impl JavaScriptActionDecl {
                 .iter()
                 .map(|item| match item {
                     NativeValue::Document(parameter) => {
-                        JavaScriptActionParameter::from_document(parameter)
+                        CodeActionParameter::from_document(parameter, family)
                     }
                     _ => None,
                 })
@@ -210,27 +341,24 @@ impl JavaScriptActionDecl {
             NativeValue::Document(ty) => CodeActionType::from_document(ty)?,
             _ => return None,
         };
-        let declaration = Self {
+        Some(Self {
             name: document.text("Name")?.to_string(),
             documentation: document.text("Documentation")?.to_string(),
             parameters,
             return_type,
             return_name: document.text("ActionDefaultReturnName")?.to_string(),
-            platform: JavaScriptPlatform::parse(document.text("Platform")?)?,
             excluded: matches!(document.get("Excluded")?, NativeValue::Bool(true)),
             export_level: match document.text("ExportLevel")? {
                 "Hidden" => ExportLevel::Hidden,
                 "Published" => ExportLevel::Published,
                 _ => return None,
             },
-        };
-        (declaration.document() == *document).then_some(declaration)
+        })
     }
 
-    /// The document the model stores for the action, its fields in the
-    /// order Mendix stores them.
-    pub fn document(&self) -> NativeDocument {
-        NativeDocument::new("JavaScriptActions$JavaScriptAction")
+    /// The document, a JavaScript action's with where it runs.
+    fn document(self, family: Family, platform: Option<JavaScriptPlatform>) -> NativeDocument {
+        let mut document = NativeDocument::new(family.action())
             .with("ActionDefaultReturnName", self.return_name.as_str())
             .with("Documentation", self.documentation.as_str())
             .with("Excluded", self.excluded)
@@ -250,12 +378,14 @@ impl JavaScriptActionDecl {
                     2,
                     self.parameters
                         .iter()
-                        .map(|parameter| NativeValue::Document(parameter.document()))
+                        .map(|parameter| NativeValue::Document(parameter.document(family)))
                         .collect(),
                 ),
-            )
-            .with("Platform", self.platform.as_str())
-            .with("TypeParameters", NativeValue::List(2, Vec::new()))
+            );
+        if let Some(platform) = platform {
+            document = document.with("Platform", platform.as_str());
+        }
+        document.with("TypeParameters", NativeValue::List(2, Vec::new()))
     }
 }
 
@@ -268,7 +398,7 @@ mod tests {
     #[test]
     fn an_action_is_stored_as_studio_pro_stores_one() {
         let mut action = JavaScriptActionDecl::new("OpenMap");
-        action.parameters.push(JavaScriptActionParameter::new(
+        action.parameters.push(CodeActionParameter::new(
             "Address",
             CodeActionType::Object("Sales.Address".into()),
         ));
@@ -309,5 +439,42 @@ mod tests {
             NativeDocument::new("CodeActions$MicroflowActionInfo").with("Caption", "Open"),
         );
         assert_eq!(JavaScriptActionDecl::from_document(&iconed), None);
+    }
+
+    /// A Java action is stored as a JavaScript action is, without where it
+    /// runs, and one kind never reads back as the other.
+    #[test]
+    fn a_java_action_is_stored_as_studio_pro_stores_one() {
+        let mut action = JavaActionDecl::new("Pad");
+        action
+            .parameters
+            .push(CodeActionParameter::new("Value", CodeActionType::String));
+        action.return_type = CodeActionType::String;
+        let document = action.document();
+        assert_eq!(document.ty, "JavaActions$JavaAction");
+        assert_eq!(
+            document
+                .fields
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "ActionDefaultReturnName",
+                "Documentation",
+                "Excluded",
+                "ExportLevel",
+                "JavaReturnType",
+                "MicroflowActionInfo",
+                "Name",
+                "Parameters",
+                "TypeParameters",
+            ]
+        );
+        assert_eq!(
+            document.at("Parameters[0]").unwrap().ty,
+            "JavaActions$JavaActionParameter"
+        );
+        assert_eq!(JavaActionDecl::from_document(&document), Some(action));
+        assert_eq!(JavaScriptActionDecl::from_document(&document), None);
     }
 }

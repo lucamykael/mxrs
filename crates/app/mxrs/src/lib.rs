@@ -13,8 +13,8 @@ pub use mxrs_dsl::{
 pub use mxrs_dsl::{
     ButtonBuilder, CallArgument, CodeActionValue, ConstantBuilder, ContainerBuilder,
     DataViewBuilder, DemoUserBuilder, EntityBuilder, EnumerationBuilder, FlowBuilder,
-    FlowParameterBuilder, JavaScriptActionBuilder, LayoutBuilder, LayoutGridBuilder,
-    LayoutGridColumnBuilder, LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder,
+    FlowParameterBuilder, JavaActionBuilder, JavaScriptActionBuilder, LayoutBuilder,
+    LayoutGridBuilder, LayoutGridColumnBuilder, LayoutGridRowBuilder, MenuBuilder, MenuItemBuilder,
     MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder, NavigationBuilder,
     NavigationItemBuilder, NavigationProfileBuilder, PageBuilder, PluggableWidgetBuilder,
     ProjectBuilder, ScheduledEventBuilder, SecurityBuilder, TaskQueueBuilder, UserRoleBuilder,

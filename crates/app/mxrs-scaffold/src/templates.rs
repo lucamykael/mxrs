@@ -267,16 +267,65 @@ pub(crate) fn consumed_rest(module_name: &str, name: &str) -> String {
     )
 }
 
+/// The declaration of a Java action: mxrb's — no parameters, nothing
+/// returned, documented by its name.
 pub(crate) fn java_action(module_name: &str, name: &str) -> String {
-    flow(
-        module_name,
-        name,
-        "microflow",
-        "Java Action adapter",
-        "//! The Java Action document stays a native Studio Pro operation:\n\
-         //! `mxrs_ir::Activity` has no Java-action-call variant, so this scaffold\n\
-         //! creates only the adapter microflow that will call it.\n"
-            .to_string(),
+    let (function, _) = document_function(name);
+    let source = java_action_source_path(module_name, name);
+    format!(
+        "//! Java action `{module_name}.{name}`: what a microflow's call takes and\n\
+         //! returns. Its Java is `{source}`; in mxrs it runs the Rust registered\n\
+         //! for it in `infrastructure::adapters::java_actions`.\n\
+         //!\n\
+         //! Parameter and return vocabulary: `mxrs::JavaActionBuilder`.\n\n\
+         use mxrs::prelude::*;\n\n\
+         #[declaration(module = {module_name:?})]\n\
+         pub fn {function}(module: &mut ModuleBuilder) {{\n    \
+         module.java_action({name:?}, |action| {{\n        \
+         action.documentation({documentation:?});\n    \
+         }});\n\
+         }}\n",
+        documentation = humanize(name),
+    )
+}
+
+/// Where a Java action's source is, from the project root: `java/`, which
+/// every build ships as the model's `javasource/`.
+pub(crate) fn java_action_source_path(module_name: &str, name: &str) -> String {
+    format!("java/{}/actions/{name}.java", module_name.to_lowercase())
+}
+
+/// The Java Studio Pro writes for a new action, which it keeps between its
+/// `BEGIN`/`END` markers when it regenerates the file: mxrb's.
+pub(crate) fn java_action_source(module_name: &str, name: &str) -> String {
+    let package = module_name.to_lowercase();
+    format!(
+        "// This file follows the Mendix Java action regeneration contract.\n\
+         // Imports and code inside the USER/EXTRA sections are retained by Studio Pro.\n\n\
+         package {package}.actions;\n\n\
+         import com.mendix.systemwideinterfaces.core.IContext;\n\
+         import com.mendix.systemwideinterfaces.core.UserAction;\n\n\
+         public class {name} extends UserAction<java.lang.Void>\n\
+         {{\n\
+         \tpublic {name}(IContext context)\n\
+         \t{{\n\
+         \t\tsuper(context);\n\
+         \t}}\n\n\
+         \t@java.lang.Override\n\
+         \tpublic java.lang.Void executeAction() throws Exception\n\
+         \t{{\n\
+         \t\t// BEGIN USER CODE\n\
+         \t\treturn null;\n\
+         \t\t// END USER CODE\n\
+         \t}}\n\n\
+         \t@java.lang.Override\n\
+         \tpublic java.lang.String toString()\n\
+         \t{{\n\
+         \t\treturn \"{name}\";\n\
+         \t}}\n\n\
+         \t// BEGIN EXTRA CODE\n\
+         \t// END EXTRA CODE\n\
+         }}\n"
     )
 }
 
@@ -698,10 +747,6 @@ mod tests {
             (
                 consumed_rest("Sales", "String"),
                 "#[microflow(module = \"Sales\")]\npub fn string_(_flow: &mut FlowBuilder) {}\n",
-            ),
-            (
-                java_action("Sales", "invoke"),
-                "#[microflow(module = \"Sales\", name = \"invoke\")]\npub fn invoke_flow(_flow: &mut FlowBuilder) {}\n",
             ),
             (
                 constant("Sales", "MaximumOrders"),

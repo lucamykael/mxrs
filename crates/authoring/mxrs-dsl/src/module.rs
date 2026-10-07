@@ -58,6 +58,7 @@ impl ModuleBuilder {
                 layouts: vec![],
                 forms: Vec::new(),
                 javascript_actions: Vec::new(),
+                java_actions: Vec::new(),
                 roles: None,
                 installed: false,
             },
@@ -196,6 +197,20 @@ impl ModuleBuilder {
         let mut builder = crate::JavaScriptActionBuilder::new(name);
         configure(&mut builder);
         self.decl.javascript_actions.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a Java action: what its microflow calls take and return.
+    /// Its Java is the project's own, in `java/<module>/actions/<Name>.java`,
+    /// and mxrs runs the Rust registered for it.
+    pub fn java_action(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut crate::JavaActionBuilder),
+    ) -> &mut Self {
+        let mut builder = crate::JavaActionBuilder::new(name);
+        configure(&mut builder);
+        self.decl.java_actions.push(builder.into_decl());
         self
     }
 

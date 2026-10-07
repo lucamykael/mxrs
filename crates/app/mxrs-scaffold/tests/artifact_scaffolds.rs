@@ -109,6 +109,12 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
     scaffold(&root, ArtifactKind::PublishedRest, "Sales.HandleOrder");
     scaffold(&root, ArtifactKind::ConsumedRest, "Sales.FetchCatalog");
     scaffold(&root, ArtifactKind::JavaAction, "Sales.InvokeCheckout");
+    // Its Java is the class Studio Pro would write, in `java/`, which every
+    // build ships as `javasource/`.
+    let java =
+        std::fs::read_to_string(root.join("java/sales/actions/InvokeCheckout.java")).unwrap();
+    assert!(java.contains("package sales.actions;\n"), "{java}");
+    assert!(java.contains("public class InvokeCheckout extends UserAction<java.lang.Void>"));
     scaffold(&root, ArtifactKind::JavaScriptAction, "Sales.OpenMap");
     // Its JavaScript is the function Studio Pro would write, where every
     // build ships it from.
@@ -177,7 +183,6 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
         "ACT_CreateOrder",
         "HandleOrder",
         "FetchCatalog",
-        "InvokeCheckout",
         // The scheduled-event scaffold generates its handler too — a job
         // pointing at a microflow that does not exist would not build.
         "SE_ExpireCarts",
@@ -203,6 +208,7 @@ fn every_scaffolded_artifact_compiles_and_reaches_the_written_model() {
         ("Constants$Constant", "ApiEndpoint"),
         ("ScheduledEvents$ScheduledEvent", "SE_ExpireCarts"),
         ("JavaScriptActions$JavaScriptAction", "OpenMap"),
+        ("JavaActions$JavaAction", "InvokeCheckout"),
     ] {
         let expected = (expected.0.to_string(), expected.1.to_string());
         assert!(documents.contains(&expected), "{expected:?}: {documents:?}");

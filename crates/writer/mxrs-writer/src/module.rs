@@ -135,6 +135,13 @@ pub fn write_module(
         &decl.javascript_actions,
         identity,
     )?;
+    crate::native::synchronize_java_actions_with_identity(
+        mpr,
+        &module_id,
+        &decl.name,
+        &decl.java_actions,
+        identity,
+    )?;
 
     Ok(())
 }

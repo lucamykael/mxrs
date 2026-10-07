@@ -247,7 +247,7 @@ commands! {
     "import", "<file.mpr> --output <directory> [--mode axum|actix-web|rocket] [--mxrs-workspace <path>]", "Import into a Cargo-native project", run_import;
     "inspect", "<file.mpr> [--json]", "Show a structural model snapshot", run_inspect;
     "integration", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Create an integration adapter microflow", run_integration;
-    "java-action", "new <Module.Adapter> [--target DIR] [--dry-run] [--json]", "Scaffold a Java Action adapter microflow", run_java_action;
+    "java-action", "new <Module.Action> [--target DIR] [--dry-run] [--json]", "Scaffold a Java action and its Java", run_java_action;
     "javascript-action", "new <Module.Action> [--target DIR] [--dry-run] [--json]", "Scaffold a JavaScript action and its JavaScript", run_javascript_action;
     "javagen", "<file.mpr> [--project-root <directory>]", "Generate Java entity proxies", run_javagen;
     "lint", "<file.mpr> [--json]", "Check explicit references and recursive call components", run_lint;

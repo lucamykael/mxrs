@@ -298,6 +298,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.javascript_actions,
             identity,
         )?;
+        crate::native::synchronize_java_actions_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.java_actions,
+            identity,
+        )?;
     }
     security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;
     if let Some(declaration) = &project.navigation {

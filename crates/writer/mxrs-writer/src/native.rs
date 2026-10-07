@@ -673,6 +673,32 @@ pub(crate) fn synchronize_javascript_actions_with_identity(
     synchronize_documents(mpr, module_id, &documents, identity)
 }
 
+/// Writes the Java actions a module declares.
+pub(crate) fn synchronize_java_actions_with_identity(
+    mpr: &mut mxrs_mpr::MprFile,
+    module_id: &str,
+    module_name: &str,
+    actions: &[mxrs_ir::JavaActionDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let stated: Vec<NativeDocument> = actions
+        .iter()
+        .map(mxrs_ir::JavaActionDecl::document)
+        .collect();
+    let documents: Vec<(ArtifactKind, String, &NativeDocument)> = actions
+        .iter()
+        .zip(&stated)
+        .map(|(action, document)| {
+            (
+                ArtifactKind::JavaAction,
+                format!("{module_name}.{}", action.name),
+                document,
+            )
+        })
+        .collect();
+    synchronize_documents(mpr, module_id, &documents, identity)
+}
+
 /// Writes documents a module states whole, each by its type and name: one
 /// the module stores keeps its identities and is left as it is when it says
 /// what is stored; a new one takes the identity its kind and qualified name

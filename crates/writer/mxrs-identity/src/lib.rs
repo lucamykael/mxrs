@@ -78,6 +78,7 @@ pub enum ArtifactKind {
     Navigation,
     DataStorage,
     JavaScriptAction,
+    JavaAction,
 }
 
 impl fmt::Display for ArtifactKind {
@@ -136,6 +137,7 @@ impl fmt::Display for ArtifactKind {
             Self::Navigation => "navigation",
             Self::DataStorage => "data-storage",
             Self::JavaScriptAction => "javascript-action",
+            Self::JavaAction => "java-action",
         })
     }
 }

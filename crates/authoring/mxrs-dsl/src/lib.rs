@@ -80,7 +80,7 @@ pub use flow_actions::{
     EntityName, FlowVar, ListChange, LogSeverity, MemberName, MessageKind, MicroflowName,
     NanoflowName, SortOrder, Variable, var,
 };
-pub use javascript_action::{CodeActionValue, JavaScriptActionBuilder};
+pub use javascript_action::{CodeActionValue, JavaActionBuilder, JavaScriptActionBuilder};
 pub use menu::{MenuBuilder, MenuItemBuilder};
 pub use module::{ModuleBuilder, OqlViewSourceBuilder};
 pub use mxrs_expr::{
