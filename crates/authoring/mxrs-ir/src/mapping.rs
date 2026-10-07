@@ -484,7 +484,11 @@ impl MappingDecl {
         }) {
             declaration.sample_values = false;
         }
-        (declaration.document(structure).ok()? == document.narrowed()).then_some(declaration)
+        declaration
+            .document(structure)
+            .ok()?
+            .says_the_same(document)
+            .then_some(declaration)
     }
 }
 

@@ -272,7 +272,10 @@ impl JsonStructureDecl {
     /// that document again.
     pub fn from_document(document: &NativeDocument) -> Option<Self> {
         let declaration = Self::read(document)?;
-        (declaration.document() == document.narrowed()).then_some(declaration)
+        declaration
+            .document()
+            .says_the_same(document)
+            .then_some(declaration)
     }
 
     /// What a stored structure says, whatever order its fields are stored

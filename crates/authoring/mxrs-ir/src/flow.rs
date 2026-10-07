@@ -248,6 +248,35 @@ impl NativeDocument {
         }
     }
 
+    /// Whether `other` says what this document says, whatever order either
+    /// stores its fields in and whichever width its numbers are: the order
+    /// of a document's fields means nothing to the model.
+    pub fn says_the_same(&self, other: &NativeDocument) -> bool {
+        fn canonical(document: &NativeDocument) -> NativeDocument {
+            fn canonical_value(value: &NativeValue) -> NativeValue {
+                match value {
+                    NativeValue::Document(document) => NativeValue::Document(canonical(document)),
+                    NativeValue::List(marker, items) => {
+                        NativeValue::List(*marker, items.iter().map(canonical_value).collect())
+                    }
+                    other => other.clone(),
+                }
+            }
+            let mut fields: Vec<(String, NativeValue)> = document
+                .narrowed()
+                .fields
+                .iter()
+                .map(|(key, field)| (key.clone(), canonical_value(field)))
+                .collect();
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
+            NativeDocument {
+                ty: document.ty.clone(),
+                fields,
+            }
+        }
+        canonical(self) == canonical(other)
+    }
+
     /// Builder-style [`NativeDocument::set`].
     pub fn with(mut self, key: &str, value: impl Into<NativeValue>) -> Self {
         self.set(key, value);

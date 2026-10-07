@@ -192,7 +192,10 @@ impl DataSetDecl {
         for role in list(access.get("ModuleRoleAccessList")?)? {
             declaration.roles.push(role.text("ModuleRole")?.to_string());
         }
-        (declaration.document() == document.narrowed()).then_some(declaration)
+        declaration
+            .document()
+            .says_the_same(document)
+            .then_some(declaration)
     }
 }
 

@@ -207,7 +207,10 @@ impl JavaScriptActionDecl {
             excluded: shape.excluded,
             export_level: shape.export_level,
         };
-        (declaration.document() == *document).then_some(declaration)
+        declaration
+            .document()
+            .says_the_same(document)
+            .then_some(declaration)
     }
 
     /// The document the model stores for the action, its fields in the
@@ -267,7 +270,10 @@ impl JavaActionDecl {
             excluded: shape.excluded,
             export_level: shape.export_level,
         };
-        (declaration.document() == *document).then_some(declaration)
+        declaration
+            .document()
+            .says_the_same(document)
+            .then_some(declaration)
     }
 
     /// The document the model stores for the action, its fields in the
