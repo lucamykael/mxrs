@@ -669,6 +669,8 @@ pub struct ModuleDecl {
     pub data_sets: Vec<crate::DataSetDecl>,
     /// The images its pages show.
     pub image_collections: Vec<crate::ImageCollectionDecl>,
+    /// Rules: flows a decision asks to choose its way.
+    pub rules: Vec<MicroflowDecl>,
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
@@ -762,6 +764,7 @@ impl ProjectDecl {
         target.mappings.extend(declared.mappings);
         target.data_sets.extend(declared.data_sets);
         target.image_collections.extend(declared.image_collections);
+        target.rules.extend(declared.rules);
         target.layouts.extend(declared.layouts);
         if let Some(roles) = declared.roles {
             target.roles = Some(roles);

@@ -26,6 +26,7 @@ use crate::derive::to_pascal_case;
 pub enum FlowKind {
     Microflow,
     Nanoflow,
+    Rule,
 }
 
 /// Arguments of `#[mxrs::microflow(...)]` and `#[mxrs::nanoflow(...)]`.
@@ -325,6 +326,13 @@ fn flow_declaration(declaration: FlowDeclaration<'_>) -> syn::Result<TokenStream
             quote!(::mxrs::registry::Stage::Nanoflow),
             "nanoflow",
         ),
+        FlowKind::Rule => (
+            quote!(::mxrs::RuleMarker),
+            quote!(::mxrs::RuleModuleBuilder),
+            quote!(rule),
+            quote!(::mxrs::registry::Stage::Microflow),
+            "rule",
+        ),
     };
     let summary = format!(
         "The `{}.{name}` {noun}, declared by [`{doc_target}`].",
@@ -498,6 +506,7 @@ pub fn expand_service(args: &ServiceArgs, mut item: syn::ItemImpl) -> syn::Resul
         {
             Some("microflow") => Some(FlowKind::Microflow),
             Some("nanoflow") => Some(FlowKind::Nanoflow),
+            Some("rule") => Some(FlowKind::Rule),
             _ => None,
         };
         let Some(position) = method

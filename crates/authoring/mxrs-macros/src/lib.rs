@@ -374,6 +374,13 @@ pub fn nanoflow(attributes: TokenStream, item: TokenStream) -> TokenStream {
     expand_flow(attributes, item, declare::FlowKind::Nanoflow)
 }
 
+/// Declares a rule: a flow a decision asks to choose its way. Same shape as
+/// [`macro@microflow`].
+#[proc_macro_attribute]
+pub fn rule(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    expand_flow(attributes, item, declare::FlowKind::Rule)
+}
+
 /// Declares a page as the function that builds it: `#[page(module =
 /// "Sales")] fn order_overview(page: &mut PageBuilder)` is
 /// `Sales.OrderOverview`. `name = "..."` states a Mendix name the function

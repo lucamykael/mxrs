@@ -18,8 +18,8 @@ pub use mxrs_dsl::{
     LayoutGridBuilder, LayoutGridColumnBuilder, LayoutGridRowBuilder, MappingBuilder, MenuBuilder,
     MenuItemBuilder, MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder,
     NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder, ObjectMappingBuilder,
-    PageBuilder, PluggableWidgetBuilder, ProjectBuilder, ScheduledEventBuilder, SecurityBuilder,
-    TaskQueueBuilder, UserRoleBuilder, ValueMappingBuilder,
+    PageBuilder, PluggableWidgetBuilder, ProjectBuilder, RuleModuleBuilder, ScheduledEventBuilder,
+    SecurityBuilder, TaskQueueBuilder, UserRoleBuilder, ValueMappingBuilder,
 };
 pub use mxrs_expr::*;
 pub use mxrs_frontend::{FrontendDecl, FrontendError, read_frontend};
@@ -31,7 +31,7 @@ pub use mxrs_macros::{
     call_microflow, call_nanoflow, change_list, change_object, change_variable, close_page,
     commit_object, constant, create_list, create_object, create_variable, declaration,
     delete_object, demo_user, dto, entity, enumeration, layout, log, menu, microflow, module_roles,
-    nanoflow, navigation, navigation_item, page, retrieve, rollback_object, route, security,
+    nanoflow, navigation, navigation_item, page, retrieve, rollback_object, route, rule, security,
     service, show_message, show_page, view,
 };
 
@@ -288,10 +288,10 @@ pub mod prelude {
         MxDateTime, MxDecimal, MxEntity, MxEnumeration, MxFloat, MxInteger, MxLong, MxString,
         NanoflowMarker, NanoflowModuleBuilder, NanoflowRef, NavigationBuilder,
         NavigationItemBuilder, NavigationProfileBuilder, OnOverlap, PageBuilder, ProjectBuilder,
-        Ref, Reference, ReferenceSet, RenderExpr, ScheduleUnit, ScheduledEventBuilder,
-        ScheduledEventSchedule, SecurityBuilder, SecurityLevel, TaskQueueBuilder, TaskQueueConfig,
-        TaskQueueScope, TypedAttributeMarker, UserRoleBuilder, Var, application, boolean, decimal,
-        float, integer, long, project, string,
+        Ref, Reference, ReferenceSet, RenderExpr, RuleMarker, RuleModuleBuilder, ScheduleUnit,
+        ScheduledEventBuilder, ScheduledEventSchedule, SecurityBuilder, SecurityLevel,
+        TaskQueueBuilder, TaskQueueConfig, TaskQueueScope, TypedAttributeMarker, UserRoleBuilder,
+        Var, application, boolean, decimal, float, integer, long, project, string,
     };
     pub use crate::{
         AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, CodeActionType,
@@ -302,6 +302,6 @@ pub mod prelude {
         commit_object, constant, create_list, create_object, create_variable, declaration,
         delete_object, demo_user, dto, entity, enumeration, layout, log, menu, microflow,
         module_roles, nanoflow, navigation, navigation_item, page, retrieve, rollback_object,
-        route, security, service, show_message, show_page, view,
+        route, rule, security, service, show_message, show_page, view,
     };
 }

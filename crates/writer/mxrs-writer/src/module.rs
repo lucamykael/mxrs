@@ -54,6 +54,7 @@ pub fn write_module(
         &decl.nanoflows,
         identity,
     )?;
+    documents::synchronize_rules_with_identity(mpr, &module_id, &decl.name, &decl.rules, identity)?;
 
     documents::synchronize_enumerations_with_identity(
         mpr,

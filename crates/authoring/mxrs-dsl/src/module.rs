@@ -63,6 +63,7 @@ impl ModuleBuilder {
                 mappings: Vec::new(),
                 data_sets: Vec::new(),
                 image_collections: Vec::new(),
+                rules: Vec::new(),
                 roles: None,
                 installed: false,
             },
@@ -108,6 +109,19 @@ impl ModuleBuilder {
         let mut builder = FlowBuilder::new(name);
         configure(&mut builder);
         self.decl.microflows.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a rule: a flow, returning a boolean or an enumeration value,
+    /// a decision asks to choose its way.
+    pub fn rule(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        let mut builder = FlowBuilder::new(name);
+        configure(&mut builder);
+        self.decl.rules.push(builder.into_decl());
         self
     }
 

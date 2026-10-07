@@ -53,7 +53,7 @@ pub use markers::system;
 pub use markers::{
     AssociationMarker, AssociationRef, AttributeMarker, AttributeRef, EntityMarker,
     EnumerationMarker, FlowName, MicroflowMarker, MicroflowRef, NanoflowMarker, NanoflowRef, Ref,
-    Reference, ReferenceSet,
+    Reference, ReferenceSet, RuleMarker,
 };
 pub use page::{
     ButtonAction, DataSourceDecl, FormDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl,

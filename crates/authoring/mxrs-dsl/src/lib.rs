@@ -79,6 +79,7 @@ pub use entity::{EntityBuilder, EntityIndexBuilder, LifecycleBuilder, SystemMemb
 pub use enumeration::EnumerationBuilder;
 pub use flow::{
     CallArgument, FlowBuilder, FlowParameterBuilder, MicroflowModuleBuilder, NanoflowModuleBuilder,
+    RuleModuleBuilder,
 };
 pub use flow_actions::{
     ActivityValue, AggregateFunction, AssociationName, AttributeName, ChangeKind, Commit,

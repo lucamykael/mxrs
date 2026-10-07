@@ -89,6 +89,44 @@ impl NanoflowModuleBuilder {
     }
 }
 
+/// A module facet that can declare only rules.
+pub struct RuleModuleBuilder {
+    name: String,
+    flows: Vec<MicroflowDecl>,
+}
+
+impl RuleModuleBuilder {
+    /// Starts a standalone rule module facet; see
+    /// [`MicroflowModuleBuilder::new`].
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            flows: Vec::new(),
+        }
+    }
+
+    pub fn rule(
+        &mut self,
+        name: impl Into<String>,
+        configure: impl FnOnce(&mut FlowBuilder),
+    ) -> &mut Self {
+        let mut builder = FlowBuilder::new(name);
+        configure(&mut builder);
+        self.flows.push(builder.into_decl());
+        self
+    }
+
+    /// Finishes the module facet; the counterpart of
+    /// [`RuleModuleBuilder::new`] for a standalone declaration file.
+    pub fn into_decl(self) -> ModuleDecl {
+        ModuleDecl {
+            name: self.name,
+            rules: self.flows,
+            ..ModuleDecl::default()
+        }
+    }
+}
+
 pub struct CallArgument {
     parameter: String,
     value: String,

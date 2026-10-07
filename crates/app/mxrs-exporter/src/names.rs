@@ -464,6 +464,8 @@ const MXRS_PRELUDE: &[&str] = &[
     "Reference",
     "ReferenceSet",
     "RenderExpr",
+    "RuleMarker",
+    "RuleModuleBuilder",
     "ScheduleUnit",
     "ScheduledEventBuilder",
     "ScheduledEventSchedule",

@@ -100,6 +100,26 @@ pub fn synchronize_nanoflows(
     synchronize_nanoflows_with_identity(mpr, module_id, module_name, nanoflows, identity)
 }
 
+/// Upserts rules by name as microflows are, written with the fields a rule
+/// stores: no roles and no concurrency of its own, as a decision runs it.
+pub(crate) fn synchronize_rules_with_identity(
+    mpr: &mut MprFile,
+    module_id: &str,
+    module_name: &str,
+    rules: &[MicroflowDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    synchronize_flows_with_identity(
+        mpr,
+        module_id,
+        module_name,
+        rules,
+        identity,
+        "Microflows$Rule",
+        ArtifactKind::Rule,
+    )
+}
+
 pub(crate) fn synchronize_nanoflows_with_identity(
     mpr: &mut MprFile,
     module_id: &str,
@@ -266,6 +286,12 @@ fn synchronize_flows_with_identity(
                     })
                 });
             }
+        }
+        if native_type == "Microflows$Rule" {
+            // A decision runs a rule: who may run it and how often is the
+            // flow's that asks.
+            doc.remove("AllowConcurrentExecution");
+            doc.remove("AllowedModuleRoles");
         }
         updates.push((existing_id, id, doc));
     }

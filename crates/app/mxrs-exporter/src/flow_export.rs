@@ -463,7 +463,12 @@ pub(crate) fn collect_all(
         let Some(module_name) = module.name.as_deref() else {
             continue;
         };
-        for flow in module.microflows.iter().chain(&module.nanoflows) {
+        for flow in module
+            .microflows
+            .iter()
+            .chain(&module.nanoflows)
+            .chain(&module.rules)
+        {
             let Some(id) = flow.id.as_deref() else {
                 continue;
             };
@@ -1685,10 +1690,10 @@ fn flow_item(
     names: &ModelNames<'_>,
     relations: &HashMap<String, mxrs_model::relations::FlowRelations>,
 ) -> (String, String) {
-    let attribute = if flow.is_nanoflow() {
-        "nanoflow"
-    } else {
-        "microflow"
+    let attribute = match flow.native_type.as_str() {
+        "Microflows$Nanoflow" => "nanoflow",
+        "Microflows$Rule" => "rule",
+        _ => "microflow",
     };
     let name = &flow.declaration.name;
     let mut lines = flow.source.clone();
