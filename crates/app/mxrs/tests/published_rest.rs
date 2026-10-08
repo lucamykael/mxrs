@@ -41,6 +41,19 @@ pub fn service() -> Service<()> {
         })
 }
 
+/// The microflows the operations call.
+#[declaration(module = "Sales")]
+pub fn order_flows(module: &mut ModuleBuilder) {
+    module
+        .microflow("MF_Order_List", |_| {})
+        .microflow("MF_Order_Create", |flow| {
+            flow.parameter::<MxString>("note", |_| {});
+        })
+        .microflow("MF_Order_Show", |flow| {
+            flow.parameter::<MxLong>("id", |_| {});
+        });
+}
+
 #[declaration(module = "Sales")]
 pub fn orders_api(module: &mut ModuleBuilder) {
     module.published_rest_service(service().declaration());

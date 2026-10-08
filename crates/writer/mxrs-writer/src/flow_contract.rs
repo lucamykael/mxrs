@@ -56,7 +56,95 @@ pub(crate) fn validate_project(project: &ProjectDecl, existing: &[Module]) -> Re
         })
         .collect::<Vec<_>>();
     validate_roles(project, existing, &flows)?;
-    validate(&flows, &entities, existing)
+    validate(&flows, &entities, existing)?;
+    validate_rest_operations(project, existing)
+}
+
+/// Checks every operation a published REST service declares against the
+/// microflow it calls, as Studio Pro would before the model deploys: the
+/// microflow is one the project has, each parameter binds one of its
+/// parameters, and the path's `{name}`s are its path parameters.
+fn validate_rest_operations(project: &ProjectDecl, existing: &[Module]) -> Result<()> {
+    let parameters_of = |qualified: &str| -> Option<Vec<String>> {
+        let (module, name) = qualified.split_once('.')?;
+        let declared = project
+            .modules
+            .iter()
+            .filter(|declared| declared.name == module)
+            .flat_map(|declared| &declared.microflows)
+            .find(|flow| flow.name == name);
+        if let Some(flow) = declared {
+            return Some(flow.parameters.iter().map(|p| p.name.clone()).collect());
+        }
+        existing
+            .iter()
+            .filter(|native| native.name.as_deref() == Some(module))
+            .flat_map(|native| &native.microflows)
+            .find(|flow| flow.name.as_deref() == Some(name))
+            .map(|flow| {
+                flow.parameters
+                    .iter()
+                    .filter_map(|parameter| parameter.get_str("Name").ok().map(str::to_string))
+                    .collect()
+            })
+    };
+    for module in &project.modules {
+        for service in &module.published_rest_services {
+            for resource in &service.resources {
+                for operation in &resource.operations {
+                    let error = |reason: String| WriterError::InvalidRestOperation {
+                        service: format!("{}.{}", module.name, service.name),
+                        operation: format!(
+                            "{} {}",
+                            operation.method.as_http(),
+                            service.route(resource, operation)
+                        ),
+                        reason,
+                    };
+                    let Some(microflow_parameters) = parameters_of(&operation.microflow) else {
+                        return Err(error(format!(
+                            "calls {:?}, which is no microflow of the project",
+                            operation.microflow
+                        )));
+                    };
+                    for parameter in &operation.parameters {
+                        if !microflow_parameters.contains(&parameter.microflow_parameter) {
+                            return Err(error(format!(
+                                "binds its parameter {:?} to {:?}, which {} does not take",
+                                parameter.name, parameter.microflow_parameter, operation.microflow
+                            )));
+                        }
+                    }
+                    let in_path: Vec<&str> = operation
+                        .path
+                        .split('/')
+                        .filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}'))
+                        .collect();
+                    let path_parameters: Vec<&str> = operation
+                        .parameters
+                        .iter()
+                        .filter(|parameter| parameter.source == mxrs_ir::RestParameterSource::Path)
+                        .map(|parameter| parameter.name.as_str())
+                        .collect();
+                    if let Some(missing) =
+                        in_path.iter().find(|name| !path_parameters.contains(name))
+                    {
+                        return Err(error(format!(
+                            "has {{{missing}}} in its path and no path parameter of that name"
+                        )));
+                    }
+                    if let Some(unused) =
+                        path_parameters.iter().find(|name| !in_path.contains(name))
+                    {
+                        return Err(error(format!(
+                            "has a path parameter {unused:?} its path does not hold"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Checks that every role a flow is stated to allow is one its module

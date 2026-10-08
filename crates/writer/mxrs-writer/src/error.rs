@@ -17,6 +17,13 @@ pub enum WriterError {
     #[error("flow {flow:?} has an invalid activity: {reason}")]
     InvalidFlowActivity { flow: String, reason: String },
 
+    #[error("published REST service {service}: {operation} {reason}")]
+    InvalidRestOperation {
+        service: String,
+        operation: String,
+        reason: String,
+    },
+
     #[error("flow {flow:?} has invalid parameter {parameter:?}: {reason}")]
     InvalidFlowParameter {
         flow: String,
