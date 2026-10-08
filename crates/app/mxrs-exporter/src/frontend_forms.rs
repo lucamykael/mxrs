@@ -66,6 +66,12 @@ fn stored_forms(modules: &[mxrs_model::Module]) -> Vec<StoredForm> {
     stored
 }
 
+/// Whether a form is a page template or a building block: what a designer
+/// starts from, which nothing draws.
+pub(crate) fn is_template(ty: &str) -> bool {
+    matches!(ty, "Forms$PageTemplate" | "Forms$BuildingBlock")
+}
+
 /// Declares in the frontend every page, layout and snippet of an authored
 /// module that `keeps` does not hold back and whose TSX reads back as the
 /// document the model stores.
@@ -86,14 +92,33 @@ pub(crate) fn declare_in_frontend(
         }
     };
     let stored = stored_forms(modules);
-    let documents: Vec<&NativeDocument> = stored
-        .iter()
-        .filter_map(|form| form.document.as_ref().ok())
-        .collect();
-    if documents.is_empty() {
+    // The pages, layouts and snippets are what the elements are mined from;
+    // templates and building blocks — a package brings many, saved by
+    // another Studio Pro — only add the elements they are made of and the
+    // vocabulary lacks, so they never rename what the pages are written
+    // with.
+    // A template held back is not mined either.
+    let documents_of = |templates: bool| -> Vec<&NativeDocument> {
+        stored
+            .iter()
+            .filter(|form| is_template(&form.ty) == templates)
+            .filter(|form| !templates || !keeps(&form.module, &form.ty, &form.name))
+            .filter_map(|form| form.document.as_ref().ok())
+            .collect()
+    };
+    let (documents, templates) = (documents_of(false), documents_of(true));
+    if documents.is_empty() && templates.is_empty() {
         return FrontendForms::default();
     }
-    let mined = forms::mine(&documents);
+    let mut mined = forms::mine(&documents);
+    if !templates.is_empty() {
+        match forms::extend(&mined, &templates) {
+            Ok(extension) => mined = extension.vocabulary,
+            Err(reason) => eprintln!(
+                "[mxrs] warning: no page template or building block is declared in the frontend: {reason}"
+            ),
+        }
+    }
     // What a build will read is the text, so the text is what is checked.
     let elements = forms::render_elements(&mined.shapes);
     let shapes = match forms::read_elements(&elements, "src/mxrs/elements.ts") {

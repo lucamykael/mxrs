@@ -203,6 +203,45 @@ pub fn request_value(
     })
 }
 
+/// The value of the request header `name`, whatever its case, when the
+/// request carries it as text.
+pub fn request_header(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+/// Each header the request carries as text, by its name in lower case:
+/// what its request object holds.
+pub fn request_headers(headers: &axum::http::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        })
+        .collect()
+}
+
+/// Sets on `response` the headers a flow joined to its response object,
+/// but those the connection says of itself.
+pub fn set_response_headers(response: &mut axum::response::Response, headers: &[(String, String)]) {
+    for (name, value) in headers {
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "content-length" | "transfer-encoding" | "connection"
+        ) {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(name.as_str()),
+            axum::http::HeaderValue::try_from(value.as_str()),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+}
+
 /// A published REST operation's body, read with the import mapping the
 /// model gives the operation: the objects the mapping makes of it are the
 /// microflow's `parameter`, and are committed — with the entity's events

@@ -131,7 +131,10 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
         &modules,
         |_| true,
         |module, ty, name| {
-            ty == "Forms$Page" && rust_pages.contains(&(module.to_string(), name.to_string()))
+            (ty == "Forms$Page" && rust_pages.contains(&(module.to_string(), name.to_string())))
+                || (super::frontend_forms::is_template(ty)
+                    && super::module_root(&super::module_stem(module), &packages)
+                        != super::ModuleRoot::Authored)
         },
     );
     let mut stated_whole = BTreeMap::<String, usize>::new();

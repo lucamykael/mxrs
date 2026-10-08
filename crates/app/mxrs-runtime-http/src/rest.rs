@@ -183,12 +183,20 @@ impl Operation {
         // The body as it came, and as JSON when it is some.
         let text = String::from_utf8_lossy(&body).into_owned();
         let json = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+        // Each header by its name, as HTTP spells it in lower case.
+        let headers: BTreeMap<String, String> = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+            })
+            .collect();
         let arguments = json!({
             "path": path,
             "query": query,
             "body": json,
             "text": text,
             "uri": uri.to_string(),
+            "headers": headers,
         });
         // Operations wait their turn on the one runtime, as a page's data
         // does.
@@ -290,9 +298,41 @@ impl Refusal {
     }
 }
 
-/// The action's answer — `{status, content, document}` — as the response:
-/// the content the flow wrote under its status, else the document.
+/// The action's answer — `{status, content, headers, document}` — as the
+/// response: the content the flow wrote under its status, else the
+/// document, with the headers the flow set.
 fn respond(answer: Value) -> Response {
+    let mut response = answered(&answer);
+    for pair in answer
+        .get("headers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (Some(name), Some(value)) = (
+            pair.get(0).and_then(Value::as_str),
+            pair.get(1).and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        // What the connection says of itself is the server's to say.
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "content-length" | "transfer-encoding" | "connection"
+        ) {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(name),
+            axum::http::HeaderValue::try_from(value),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    response
+}
+
+fn answered(answer: &Value) -> Response {
     let status = answer
         .get("status")
         .and_then(Value::as_u64)
@@ -400,6 +440,26 @@ mod tests {
 
     /// A route answers its method at its path with what the request
     /// carries; the status is the action's.
+    /// The headers a flow set are the response's, but those the connection
+    /// says of itself.
+    #[test]
+    fn a_flows_headers_are_the_responses() {
+        let response = respond(json!({
+            "status": 200,
+            "content": "a,b",
+            "headers": [["Content-Type", "text/csv"], ["Content-Length", "999"]],
+            "document": null,
+        }));
+        assert_eq!(response.headers()["content-type"], "text/csv");
+        assert_ne!(
+            response
+                .headers()
+                .get("content-length")
+                .map(|value| value.to_str().unwrap()),
+            Some("999")
+        );
+    }
+
     /// What the router cannot hold is set aside with why.
     #[test]
     fn routes_the_router_cannot_hold_are_set_aside() {
@@ -448,6 +508,14 @@ mod tests {
             body["uri"],
             "/rest/orders/v1/order/7?expand=true&status=201"
         );
+        let (_, body, _) = call(
+            Request::get("/rest/orders/v1/order/7")
+                .header("X-Trace", "abc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(body["headers"]["x-trace"], "abc");
         let (status, _, _) = call(
             Request::patch("/rest/orders/v1/order/7")
                 .body(Body::empty())

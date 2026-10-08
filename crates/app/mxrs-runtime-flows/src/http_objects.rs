@@ -10,10 +10,9 @@
 //! `404` answers `404` — so binding the objects and reading back what the flow
 //! wrote are two halves of one thing, and neither is useful alone.
 //!
-//! What is *not* carried: headers. `System.HttpHeader` exists in the store, but
-//! no header object is created or associated, so a flow that retrieves
-//! `System.HttpHeaders` finds none and a content type the flow sets through a
-//! header is not honoured.
+//! Headers are objects too: each of the request's is a `System.HttpHeader`
+//! joined to the request object by `System.HttpHeaders`, and each header the
+//! flow joins to its response object — a content type — is the response's.
 
 use mxrs_runtime::{RuntimeError, Store};
 
@@ -29,6 +28,8 @@ pub struct HttpObjects {
     request: Option<(String, String)>,
     /// The request's body, as text, which the request object carries.
     content: Option<String>,
+    /// The request's headers, by name and value, which its object holds.
+    headers: Vec<(String, String)>,
     response: Option<String>,
 }
 
@@ -49,6 +50,12 @@ impl HttpObjects {
     /// holds.
     pub fn with_content(mut self, content: impl Into<String>) -> Self {
         self.content = Some(content.into());
+        self
+    }
+
+    /// The request's headers: each a `System.HttpHeader` of its object.
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = headers;
         self
     }
 
@@ -88,6 +95,24 @@ impl HttpObjects {
                     &request.id,
                     "Content",
                     serde_json::Value::String(content.clone()),
+                )?;
+            }
+            for (key, value) in &self.headers {
+                let header = store.create("System.HttpHeader")?;
+                for (member, text) in [("Key", key), ("Value", value)] {
+                    store.set_member(
+                        &header.entity,
+                        &header.id,
+                        member,
+                        serde_json::Value::String(text.clone()),
+                    )?;
+                }
+                // `System.HttpHeaders` is the header's: it holds the message.
+                store.set_member(
+                    &header.entity,
+                    &header.id,
+                    HEADERS,
+                    serde_json::Value::String(request.id.clone()),
                 )?;
             }
             arguments.insert(
@@ -138,7 +163,28 @@ impl HttpBinding {
                 .unwrap_or_default()
                 .to_string()
         };
+        // The headers the flow joined to its response, in the order made.
+        let headers = store
+            .retrieve("System.HttpHeader")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|header| {
+                header.members.get(HEADERS).and_then(|value| value.as_str())
+                    == Some(reference.id.as_str())
+            })
+            .filter_map(|header| {
+                let key = header.members.get("Key")?.as_str()?.to_string();
+                let value = header
+                    .members
+                    .get("Value")?
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                (!key.is_empty()).then_some((key, value))
+            })
+            .collect();
         Some(HttpAnswer {
+            headers,
             // A status outside the u16 range is not a status; the boundary
             // turns an unusable one into a server error rather than guessing.
             status: object
@@ -164,7 +210,13 @@ pub struct HttpAnswer {
     /// `System.HttpMessage.Content` — empty when the flow wrote no body of its
     /// own and the operation's own document should answer instead.
     pub content: String,
+    /// The headers the flow joined to its response object, by name and
+    /// value.
+    pub headers: Vec<(String, String)>,
 }
+
+/// The association that joins a header to its message, on the header.
+const HEADERS: &str = "HttpHeaders";
 
 #[cfg(test)]
 mod tests {
@@ -198,8 +250,54 @@ mod tests {
                         ("ReasonPhrase".to_string(), json!("OK")),
                     ]),
                     true,
+                )
+                .entity(
+                    "System.HttpHeader",
+                    BTreeMap::from([
+                        ("Key".to_string(), json!("")),
+                        ("Value".to_string(), json!("")),
+                    ]),
+                    true,
                 ),
         )
+    }
+
+    /// Each request header is a header object of the request; each header
+    /// the flow joins to its response is the response's.
+    #[test]
+    fn headers_are_objects_of_their_message() {
+        let mut store = store();
+        let mut arguments = Variables::new();
+        let binding = HttpObjects::none()
+            .with_request("HttpRequest", "/api")
+            .with_headers(vec![("x-trace".into(), "1".into())])
+            .with_response("HttpResponse")
+            .bind(&mut store, &mut arguments)
+            .unwrap();
+        let FlowValue::Object(request) = &arguments["HttpRequest"] else {
+            panic!("the request parameter is bound to an object");
+        };
+        let request = store.find(&request.entity, &request.id).unwrap().unwrap();
+        let headers = store.retrieve_association("System.HttpHeaders", &request);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].members["Key"], json!("x-trace"));
+        let FlowValue::Object(response) = &arguments["HttpResponse"] else {
+            panic!("the response parameter is bound to an object");
+        };
+        let header = store.create("System.HttpHeader").unwrap();
+        for (member, value) in [
+            ("Key", json!("Content-Type")),
+            ("Value", json!("text/csv")),
+            (HEADERS, json!(response.id)),
+        ] {
+            store
+                .set_member(&header.entity, &header.id, member, value)
+                .unwrap();
+        }
+        assert_eq!(
+            binding.answer(&store).unwrap().headers,
+            [("Content-Type".to_string(), "text/csv".to_string())]
+        );
     }
 
     #[test]
@@ -252,6 +350,7 @@ mod tests {
                 status: 200,
                 reason: "OK".to_string(),
                 content: String::new(),
+                headers: Vec::new(),
             })
         );
     }
@@ -285,6 +384,7 @@ mod tests {
                 status: 404,
                 reason: "Not Found".to_string(),
                 content: "Invalid or missing BuildingID".to_string(),
+                headers: Vec::new(),
             })
         );
     }

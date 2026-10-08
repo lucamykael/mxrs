@@ -342,8 +342,15 @@ impl mxrs_runtime::Action for RestAction {
                         (_, Some(body)) => FlowValue::Json(body.clone()),
                     }
                 }
-                // Headers are not carried to the runtime yet.
-                RestParameterSource::Header => FlowValue::Empty,
+                RestParameterSource::Header => {
+                    match FlowValue::from_request(
+                        text("headers", &name.to_ascii_lowercase()).as_deref(),
+                        kind,
+                    ) {
+                        Ok(value) => value,
+                        Err(why) => return Ok(refused(&format!("parameter {name}: {why}"))),
+                    }
+                }
             };
             variables.insert(bound.clone(), value);
         }
@@ -353,12 +360,27 @@ impl mxrs_runtime::Action for RestAction {
                 .get("uri")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            objects = objects.with_request(parameter.clone(), uri).with_content(
-                arguments
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            );
+            let headers = arguments
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            Some((name.clone(), value.as_str()?.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            objects = objects
+                .with_request(parameter.clone(), uri)
+                .with_content(
+                    arguments
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+                .with_headers(headers);
         }
         if let Some(parameter) = &self.response {
             objects = objects.with_response(parameter.clone());
@@ -392,6 +414,7 @@ impl mxrs_runtime::Action for RestAction {
         Ok(json!({
             "status": answer.status,
             "content": answer.content,
+            "headers": answer.headers,
             "document": answer.document,
         }))
     }

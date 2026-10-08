@@ -203,9 +203,9 @@ fn project_security(project: &Project) -> Result<Option<Document>, BootError> {
 ///
 /// Deliberately narrow: the rest of the System module is still absent, so a
 /// flow touching `System.User` or `System.FileDocument` fails on an unknown
-/// entity rather than being silently handed one. `System.HttpHeader` is
-/// registered because the model can name it, but no header objects are created
-/// or associated — a flow that retrieves `System.HttpHeaders` finds none.
+/// entity rather than being silently handed one. `System.HttpHeader` holds
+/// each header of a request, and of a response a flow builds, joined to its
+/// message by `System.HttpHeaders`.
 fn http_message_schema(schema: StoreSchema) -> StoreSchema {
     let message = || {
         [

@@ -338,11 +338,15 @@ fn import_cargo_project_inner(
     // An installed module's layouts, snippets and pages are the frontend's
     // as well: a page of the project is shown in Atlas's layout, and the
     // browser draws it from its TSX.
+    // A package's page templates and building blocks are what its next
+    // upgrade replaces, and nothing draws them: they stay its own.
     let frontend_forms = frontend_forms::declare_in_frontend(
         &modules,
         |_| true,
         |module, ty, name| {
-            ty == "Forms$Page" && rust_pages.contains(&(module.to_string(), name.to_string()))
+            (ty == "Forms$Page" && rust_pages.contains(&(module.to_string(), name.to_string())))
+                || (frontend_forms::is_template(ty)
+                    && module_root(&module_stem(module), &packages) != ModuleRoot::Authored)
         },
     );
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
@@ -5206,7 +5210,7 @@ fn render_runtime_services(ports: &[ServicePort]) -> String {
 /// `controllers/state.rs` — the axum state every handler extracts.
 fn render_http_state(project_name: &str) -> String {
     format!(
-        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store, plus the model's own answer to who\n//! is calling.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse axum::Json;\nuse axum::http::header::AUTHORIZATION;\nuse axum::http::{{HeaderMap, StatusCode}};\nuse axum::response::{{IntoResponse, Response}};\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{\n    BodyImport, BootError, FlowError, FlowValue, HttpObjects, SecurityContext, ServiceError,\n    Variables, basic_credentials, boot,\n}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::authentication::Authentication;\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\nuse crate::controllers::ApiError;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n    authentication: Arc<Authentication>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`, reading the model once for both\n    /// the engine and the accounts a request signs in against.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        let booted = boot(path)?;\n        Ok(Self::new(\n            FlowRuntime::from_boot(&booted),\n            Authentication::from_boot(&booted),\n        ))\n    }}\n\n    /// Wraps a runtime and an authentication adapter the caller assembled.\n    pub fn new(runtime: FlowRuntime, authentication: Authentication) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n            authentication: Arc::new(authentication),\n        }}\n    }}\n\n    /// Who a request with no credentials is, for a service the model\n    /// published to anyone.\n    pub fn anonymous(&self) -> SecurityContext {{\n        self.authentication.anonymous()\n    }}\n\n    /// The caller behind an `Authorization: Basic` header, refused with `401`\n    /// when it is missing or signs nobody in, and with `403` when it signs in\n    /// a caller holding none of `allowed_roles`.\n    ///\n    /// Missing and wrong credentials are one answer on purpose: telling them\n    /// apart tells a caller which user names exist.\n    pub fn basic_caller(\n        &self,\n        headers: &HeaderMap,\n        realm: &'static str,\n        allowed_roles: &[&str],\n    ) -> Result<SecurityContext, ApiError> {{\n        let caller = headers\n            .get(AUTHORIZATION)\n            .and_then(|header| header.to_str().ok())\n            .and_then(basic_credentials)\n            .and_then(|(user, password)| self.authentication.sign_in(&user, &password))\n            .ok_or(ApiError::unauthenticated(realm))?;\n        if !self.authentication.allows(&caller, allowed_roles) {{\n            return Err(ApiError::Forbidden);\n        }}\n        Ok(caller)\n    }}\n\n    /// Runs one microflow as `caller` and serializes its result. A poisoned\n    /// mutex is recovered rather than propagated: a handler that panicked\n    /// left the store as it found it, because every call is its own unit of\n    /// work.\n    pub fn call(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.json(&result, Some(caller)))\n    }}\n\n    /// Runs one microflow as `caller` and shapes its result with the export\n    /// mapping its operation declares, so the response is the JSON document\n    /// the model publishes instead of the entity's stored attributes. Either\n    /// way the response carries only what `caller` may read.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.mapped(mapping, &result, Some(caller)))\n    }}\n\n    /// Runs an operation whose microflow declares the implicit\n    /// `System.HttpRequest` / `System.HttpResponse` parameters Mendix supplies\n    /// itself, and answers what the flow built.\n    ///\n    /// The objects are created and bound before the call, because a microflow\n    /// missing one of its arguments never starts. Afterwards the response\n    /// object is read back: a flow that wrote content answers that content with\n    /// the status it chose — which is how an operation documented as answering\n    /// `404` answers `404` — and a flow that wrote none answers the operation's\n    /// own document under that status. A status the flow left unusable is a\n    /// fault in the application, not in the request.\n    pub fn call_operation(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: Option<&ExportMapping>,\n        caller: &SecurityContext,\n        objects: HttpObjects,\n    ) -> Result<Response, ServiceError> {{\n        self.call_importing(flow, arguments, None, mapping, caller, objects)\n    }}\n\n    /// [`Self::call_operation`] for an operation whose body the model reads\n    /// with an import mapping: the objects it makes are the microflow's\n    /// parameter, made in the same unit of work the microflow runs in.\n    pub fn call_importing(\n        &self,\n        flow: &str,\n        mut arguments: Variables,\n        import: Option<BodyImport<'_>>,\n        mapping: Option<&ExportMapping>,\n        caller: &SecurityContext,\n        objects: HttpObjects,\n    ) -> Result<Response, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        if let Some(import) = import {{\n            let imported = runtime.import(import, Some(caller))?;\n            arguments.insert(import.parameter.to_string(), imported);\n        }}\n        let binding = objects\n            .bind(runtime.store_mut(), &mut arguments)\n            .map_err(|error| ServiceError::Flow(FlowError::Runtime(error)))?;\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        let document = match mapping {{\n            Some(mapping) => runtime.mapped(mapping, &result, Some(caller)),\n            None => runtime.json(&result, Some(caller)),\n        }};\n        let Some(answer) = binding.answer(runtime.store()) else {{\n            return Ok(Json(document).into_response());\n        }};\n        let status = StatusCode::from_u16(answer.status)\n            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);\n        if answer.content.is_empty() {{\n            return Ok((status, Json(document)).into_response());\n        }}\n        // The flow wrote the body itself. Its content type would come from a\n        // header the flow set, and headers are not carried yet, so the content\n        // goes out as text.\n        Ok((status, answer.content).into_response())\n    }}\n}}\n",
+        "//! Shared axum state: one booted flow runtime behind a mutex, so\n//! every handler drives the same store, plus the model's own answer to who\n//! is calling.\n\nuse std::sync::{{Arc, Mutex}};\n\nuse axum::Json;\nuse axum::http::header::AUTHORIZATION;\nuse axum::http::{{HeaderMap, StatusCode}};\nuse axum::response::{{IntoResponse, Response}};\nuse mxrs::mapping::ExportMapping;\nuse mxrs::ports::{{\n    BodyImport, BootError, FlowError, FlowValue, HttpObjects, SecurityContext, ServiceError,\n    Variables, basic_credentials, boot, set_response_headers,\n}};\nuse serde_json::Value;\n\nuse crate::infrastructure::adapters::authentication::Authentication;\nuse crate::infrastructure::adapters::flow_runtime::FlowRuntime;\nuse crate::controllers::ApiError;\n\n/// The default model a `serve` run loads when no path is given.\npub const DEFAULT_MODEL: &str = {};\n\n#[derive(Clone)]\npub struct AppState {{\n    runtime: Arc<Mutex<FlowRuntime>>,\n    authentication: Arc<Authentication>,\n}}\n\nimpl AppState {{\n    /// Boots the runtime from a built `.mpr`, reading the model once for both\n    /// the engine and the accounts a request signs in against.\n    pub fn from_mpr(path: impl AsRef<std::path::Path>) -> Result<Self, BootError> {{\n        let booted = boot(path)?;\n        Ok(Self::new(\n            FlowRuntime::from_boot(&booted),\n            Authentication::from_boot(&booted),\n        ))\n    }}\n\n    /// Wraps a runtime and an authentication adapter the caller assembled.\n    pub fn new(runtime: FlowRuntime, authentication: Authentication) -> Self {{\n        Self {{\n            runtime: Arc::new(Mutex::new(runtime)),\n            authentication: Arc::new(authentication),\n        }}\n    }}\n\n    /// Who a request with no credentials is, for a service the model\n    /// published to anyone.\n    pub fn anonymous(&self) -> SecurityContext {{\n        self.authentication.anonymous()\n    }}\n\n    /// The caller behind an `Authorization: Basic` header, refused with `401`\n    /// when it is missing or signs nobody in, and with `403` when it signs in\n    /// a caller holding none of `allowed_roles`.\n    ///\n    /// Missing and wrong credentials are one answer on purpose: telling them\n    /// apart tells a caller which user names exist.\n    pub fn basic_caller(\n        &self,\n        headers: &HeaderMap,\n        realm: &'static str,\n        allowed_roles: &[&str],\n    ) -> Result<SecurityContext, ApiError> {{\n        let caller = headers\n            .get(AUTHORIZATION)\n            .and_then(|header| header.to_str().ok())\n            .and_then(basic_credentials)\n            .and_then(|(user, password)| self.authentication.sign_in(&user, &password))\n            .ok_or(ApiError::unauthenticated(realm))?;\n        if !self.authentication.allows(&caller, allowed_roles) {{\n            return Err(ApiError::Forbidden);\n        }}\n        Ok(caller)\n    }}\n\n    /// Runs one microflow as `caller` and serializes its result. A poisoned\n    /// mutex is recovered rather than propagated: a handler that panicked\n    /// left the store as it found it, because every call is its own unit of\n    /// work.\n    pub fn call(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.json(&result, Some(caller)))\n    }}\n\n    /// Runs one microflow as `caller` and shapes its result with the export\n    /// mapping its operation declares, so the response is the JSON document\n    /// the model publishes instead of the entity's stored attributes. Either\n    /// way the response carries only what `caller` may read.\n    pub fn call_mapped(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: &ExportMapping,\n        caller: &SecurityContext,\n    ) -> Result<Value, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        Ok(runtime.mapped(mapping, &result, Some(caller)))\n    }}\n\n    /// Runs an operation whose microflow declares the implicit\n    /// `System.HttpRequest` / `System.HttpResponse` parameters Mendix supplies\n    /// itself, and answers what the flow built.\n    ///\n    /// The objects are created and bound before the call, because a microflow\n    /// missing one of its arguments never starts. Afterwards the response\n    /// object is read back: a flow that wrote content answers that content with\n    /// the status it chose — which is how an operation documented as answering\n    /// `404` answers `404` — and a flow that wrote none answers the operation's\n    /// own document under that status. A status the flow left unusable is a\n    /// fault in the application, not in the request.\n    pub fn call_operation(\n        &self,\n        flow: &str,\n        arguments: Variables,\n        mapping: Option<&ExportMapping>,\n        caller: &SecurityContext,\n        objects: HttpObjects,\n    ) -> Result<Response, ServiceError> {{\n        self.call_importing(flow, arguments, None, mapping, caller, objects)\n    }}\n\n    /// [`Self::call_operation`] for an operation whose body the model reads\n    /// with an import mapping: the objects it makes are the microflow's\n    /// parameter, made in the same unit of work the microflow runs in.\n    pub fn call_importing(\n        &self,\n        flow: &str,\n        mut arguments: Variables,\n        import: Option<BodyImport<'_>>,\n        mapping: Option<&ExportMapping>,\n        caller: &SecurityContext,\n        objects: HttpObjects,\n    ) -> Result<Response, ServiceError> {{\n        let mut runtime = self\n            .runtime\n            .lock()\n            .unwrap_or_else(|poisoned| poisoned.into_inner());\n        if let Some(import) = import {{\n            let imported = runtime.import(import, Some(caller))?;\n            arguments.insert(import.parameter.to_string(), imported);\n        }}\n        let binding = objects\n            .bind(runtime.store_mut(), &mut arguments)\n            .map_err(|error| ServiceError::Flow(FlowError::Runtime(error)))?;\n        let result: FlowValue = runtime.call(flow, arguments, Some(caller))?;\n        let document = match mapping {{\n            Some(mapping) => runtime.mapped(mapping, &result, Some(caller)),\n            None => runtime.json(&result, Some(caller)),\n        }};\n        let Some(answer) = binding.answer(runtime.store()) else {{\n            return Ok(Json(document).into_response());\n        }};\n        let status = StatusCode::from_u16(answer.status)\n            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);\n        // The flow wrote the body itself, or answers the operation's own\n        // document; either way under the headers it set — its content type.\n        let mut response = if answer.content.is_empty() {{\n            (status, Json(document)).into_response()\n        }} else {{\n            (status, answer.content).into_response()\n        }};\n        set_response_headers(&mut response, &answer.headers);\n        Ok(response)\n    }}\n}}\n",
         rust_string(&format!("build/{project_name}.mpr")),
     )
 }
@@ -6185,7 +6189,12 @@ fn render_controller(
         let _ = writeln!(out, "use axum::extract::{{{}}};", extractors.join(", "));
     }
     let mut http_types = Vec::new();
-    if matches!(service.authentication, ServiceAuthentication::Basic { .. }) {
+    if serves
+        && operations
+            .iter()
+            .any(|(_, operation)| operation.reads_headers(&service.authentication))
+        || matches!(service.authentication, ServiceAuthentication::Basic { .. })
+    {
         http_types.push("HeaderMap");
     }
     if binds_http_request {
@@ -6230,6 +6239,15 @@ fn render_controller(
         {
             ports.push("RequestValue");
             ports.push("request_value");
+        }
+        if parameters().any(|parameter| parameter.source == ParameterSource::Header) {
+            ports.push("request_header");
+        }
+        if operations
+            .iter()
+            .any(|(_, operation)| operation.http_parameters.request.is_some())
+        {
+            ports.push("request_headers");
         }
         if binds_http_objects {
             ports.push("HttpObjects");
@@ -6352,9 +6370,10 @@ fn render_controller(
         } else {
             ""
         };
-        let headers = match service.authentication {
-            ServiceAuthentication::Basic { .. } => "\n    headers: HeaderMap,",
-            _ => "",
+        let headers = if operation.reads_headers(&service.authentication) {
+            "\n    headers: HeaderMap,"
+        } else {
+            ""
         };
         // The request object carries the URI, so only an operation whose
         // microflow asks for one extracts it.
@@ -6406,6 +6425,14 @@ fn render_controller(
                 ),
                 (ParameterSource::Query, None) => format!(
                     "query.get({:?}).map_or(FlowValue::Empty, |value| FlowValue::String(value.clone()))",
+                    parameter.name
+                ),
+                (ParameterSource::Header, Some(kind)) => format!(
+                    "request_value({:?}, request_header(&headers, {:?}).as_ref(), RequestValue::{kind})?",
+                    parameter.name, parameter.name
+                ),
+                (ParameterSource::Header, None) => format!(
+                    "request_header(&headers, {:?}).map_or(FlowValue::Empty, FlowValue::String)",
                     parameter.name
                 ),
                 (ParameterSource::Body, _) if parameter.text => {
@@ -6874,6 +6901,17 @@ struct ServiceOperation {
 }
 
 impl ServiceOperation {
+    /// Whether the handler reads the request's headers: to sign the caller
+    /// in, for a header parameter, or for its request object.
+    fn reads_headers(&self, authentication: &ServiceAuthentication) -> bool {
+        matches!(authentication, ServiceAuthentication::Basic { .. })
+            || self.http_parameters.request.is_some()
+            || self
+                .parameters
+                .iter()
+                .any(|parameter| parameter.source == ParameterSource::Header)
+    }
+
     /// The body parameter the model reads with the operation's import
     /// mapping: what it makes is the microflow's parameter.
     fn imported_body(&self) -> Option<&OperationParameter> {
@@ -6912,7 +6950,7 @@ impl HttpParameters {
         if let Some(parameter) = &self.request {
             let _ = write!(
                 out,
-                ".with_request({}, uri.to_string()).with_content(body.clone())",
+                ".with_request({}, uri.to_string()).with_content(body.clone()).with_headers(request_headers(&headers))",
                 rust_string(parameter)
             );
         }
@@ -6982,6 +7020,7 @@ enum ParameterSource {
     Path,
     Query,
     Body,
+    Header,
 }
 
 fn http_method(value: &str) -> Option<&'static str> {
@@ -7112,6 +7151,7 @@ fn published_service(
                     "Path" => ParameterSource::Path,
                     "Query" => ParameterSource::Query,
                     "Body" => ParameterSource::Body,
+                    "Header" => ParameterSource::Header,
                     _ => {
                         malformed = true;
                         break;
@@ -9097,6 +9137,59 @@ mod tests {
         assert!(!rendered.contains("Json(body)"), "{rendered}");
     }
 
+    /// A header parameter is read from the request's headers, as its type;
+    /// a request object holds the request's headers.
+    #[test]
+    fn a_header_parameter_is_read_from_the_request() {
+        let header = |name: &str, ty: &str| {
+            mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$RestOperationParameter",
+                "Name": name,
+                "ParameterType": "Header",
+                "MicroflowParameter": format!("Sales.MF_List.{name}"),
+                "Type": mxrs_bson::doc! { "$Type": ty },
+            })
+        };
+        let service = mxrs_bson::doc! {
+            "$Type": "Rest$PublishedRestService",
+            "Name": "Lists",
+            "Path": "api",
+            "Resources": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$PublishedRestServiceResource",
+                "Name": "lists",
+                "Operations": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                    "$Type": "Rest$PublishedRestServiceOperation",
+                    "HttpMethod": "Get",
+                    "Path": "",
+                    "Microflow": "Sales.MF_List",
+                    "Parameters": mxrs_bson::build_array(vec![
+                        header("tenant", "DataTypes$StringType"),
+                        header("page", "DataTypes$IntegerType"),
+                    ], 3),
+                })], 2),
+            })], 3),
+        };
+        let http = HashMap::from([(
+            "Sales.MF_List".to_string(),
+            HttpParameters {
+                request: Some("Request".to_string()),
+                response: None,
+            },
+        )]);
+        let service = published_service(&service, "Sales", |_| ModuleRoot::Package, &http)
+            .expect("routable service");
+        let rendered = rendered_service(service, &HashMap::new());
+        for expected in [
+            "    headers: HeaderMap,",
+            "request_header(&headers, \"tenant\").map_or(FlowValue::Empty, FlowValue::String)",
+            "request_value(\"page\", request_header(&headers, \"page\").as_ref(), RequestValue::Integer)?",
+            ".with_headers(request_headers(&headers))",
+            "use axum::http::{HeaderMap, Uri};",
+        ] {
+            assert!(rendered.contains(expected), "{expected}\n---\n{rendered}");
+        }
+    }
+
     /// A package's service, and one with an operation the router cannot
     /// serve, stay the model's: their route table only routes.
     #[test]
@@ -9571,7 +9664,10 @@ mod tests {
             .expect("routable service");
         let rendered = rendered_service(service, &HashMap::new());
 
-        assert!(rendered.contains("use axum::http::{Uri};"), "{rendered}");
+        assert!(
+            rendered.contains("use axum::http::{HeaderMap, Uri};"),
+            "{rendered}"
+        );
         assert!(
             rendered.contains("use axum::response::Response;"),
             "{rendered}"
@@ -9579,13 +9675,13 @@ mod tests {
         assert!(rendered.contains("HttpObjects"), "{rendered}");
         assert!(
             rendered.contains(
-                "pub async fn index(\n    State(state): State<AppState>,\n    uri: Uri,\n    body: String,\n) -> Result<Response, ApiError> {"
+                "pub async fn index(\n    State(state): State<AppState>,\n    headers: HeaderMap,\n    uri: Uri,\n    body: String,\n) -> Result<Response, ApiError> {"
             ),
             "{rendered}"
         );
         assert!(
             rendered.contains(
-                "        HttpObjects::none().with_request(\"Request\", uri.to_string()).with_content(body.clone()).with_response(\"HttpResponse\"),"
+                "        HttpObjects::none().with_request(\"Request\", uri.to_string()).with_content(body.clone()).with_headers(request_headers(&headers)).with_response(\"HttpResponse\"),"
             ),
             "{rendered}"
         );

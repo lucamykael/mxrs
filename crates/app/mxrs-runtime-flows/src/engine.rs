@@ -2445,11 +2445,13 @@ impl FlowEngine {
             Some(answer) => OperationAnswer {
                 status: answer.status,
                 content: (!answer.content.is_empty()).then_some(answer.content),
+                headers: answer.headers,
                 document,
             },
             None => OperationAnswer {
                 status: 200,
                 content: None,
+                headers: Vec::new(),
                 document,
             },
         })
@@ -3020,6 +3022,8 @@ pub struct OperationAnswer {
     pub status: u16,
     /// The body the flow wrote itself, as text; `None` when it wrote none.
     pub content: Option<String>,
+    /// The headers the flow joined to its response object.
+    pub headers: Vec<(String, String)>,
     /// The operation's own document: the result, mapped or as stored.
     pub document: Value,
 }
