@@ -50,6 +50,44 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
+/// (year, month, day) → days since 1970-01-01. Hinnant's `days_from_civil`.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let month = i64::from(month);
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Seconds since the epoch an ISO 8601 date or UTC date-time says:
+/// `2026-10-08`, `2026-10-08T14:30:00`, `2026-10-08T14:30:00.250Z`.
+pub fn parse_iso(text: &str) -> Option<f64> {
+    let text = text.trim().trim_end_matches('Z');
+    let (date, time) = text.split_once(['T', ' ']).unwrap_or((text, "00:00:00"));
+    let mut date = date.splitn(3, '-');
+    let year: i64 = date.next()?.parse().ok()?;
+    let month: u32 = date.next()?.parse().ok()?;
+    let day: u32 = date.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let mut time = time.splitn(3, ':');
+    let hour: u32 = time.next()?.parse().ok()?;
+    let minute: u32 = time.next().unwrap_or("0").parse().ok()?;
+    let second: f64 = time.next().unwrap_or("0").parse().ok()?;
+    if hour > 23 || minute > 59 || !(0.0..61.0).contains(&second) {
+        return None;
+    }
+    Some(
+        (days_from_civil(year, month, day) * 86_400
+            + i64::from(hour) * 3600
+            + i64::from(minute) * 60) as f64
+            + second,
+    )
+}
+
 /// Ports mxrb's `format_datetime` strftime translation table.
 pub fn format(seconds: f64, pattern: &str) -> String {
     let civil = civil_from_epoch(seconds);
@@ -109,5 +147,30 @@ mod tests {
         assert_eq!(format(951_827_696.0, "EEE"), "Tue");
         assert_eq!(format(-86_400.0, "yyyy-MM-dd EEE"), "1969-12-31 Wed");
         assert_eq!(format(0.0, "literal 'x' yyyy"), "literal 'x' 1970");
+    }
+}
+
+#[cfg(test)]
+mod iso_tests {
+    use super::*;
+
+    #[test]
+    fn an_iso_date_time_reads_back_as_it_renders() {
+        let seconds = parse_iso("2026-10-08T14:30:05Z").unwrap();
+        let civil = civil_from_epoch(seconds);
+        assert_eq!(
+            (
+                civil.year,
+                civil.month,
+                civil.day,
+                civil.hour,
+                civil.minute,
+                civil.second
+            ),
+            (2026, 10, 8, 14, 30, 5)
+        );
+        assert_eq!(parse_iso("1970-01-01"), Some(0.0));
+        assert_eq!(parse_iso("2026-13-01"), None);
+        assert_eq!(parse_iso("yesterday"), None);
     }
 }

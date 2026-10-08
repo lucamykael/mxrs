@@ -30,12 +30,12 @@ mod value;
 
 pub use engine::{
     Adapter, AdapterKind, Effect, Execution, FlowEngine, HttpCall, HttpResponse, JavaAction,
-    StoreMembers,
+    OperationAnswer, StoreMembers,
 };
 pub use export_mapping::{ExportMapping, NullValues, ObjectMapping, ValueMapping};
 pub use expression::{Expression, MemberSource, NoObjects};
 pub use http_objects::{HttpAnswer, HttpBinding, HttpObjects};
-pub use value::{FlowValue, ObjectRef, Variables, member_to_json};
+pub use value::{FlowValue, ObjectRef, RequestValue, Variables, member_to_json};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FlowError {

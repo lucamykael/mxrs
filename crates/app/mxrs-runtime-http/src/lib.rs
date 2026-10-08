@@ -15,7 +15,10 @@
 //! receive 503; running synchronous actions cannot be forcibly cancelled.
 
 mod origin;
+mod rest;
 mod static_files;
+
+pub use rest::{RestAccounts, RestAuthentication, RestRoute};
 
 use std::future::{Future, pending};
 use std::net::SocketAddr;
@@ -90,6 +93,9 @@ struct AppState {
 pub struct RuntimeHttp {
     state: AppState,
     web_root: PathBuf,
+    /// The operations of the model's published REST services, and who
+    /// signs in to them.
+    rest: Option<(Vec<RestRoute>, Arc<dyn RestAccounts>)>,
 }
 
 impl RuntimeHttp {
@@ -102,7 +108,20 @@ impl RuntimeHttp {
                 public_origin: None,
             },
             web_root: web_root.into(),
+            rest: None,
         }
+    }
+
+    /// Serves the operations of the model's published REST services: each
+    /// `route` answers its method at its path by running its action, as
+    /// the caller its service signs in through `accounts`.
+    pub fn with_published_rest(
+        mut self,
+        routes: Vec<RestRoute>,
+        accounts: Arc<dyn RestAccounts>,
+    ) -> Self {
+        self.rest = Some((routes, accounts));
+        self
     }
 
     /// Installs a context obtained from a trusted server-side authentication
@@ -128,12 +147,39 @@ impl RuntimeHttp {
 
     pub fn router(&self) -> Result<Router> {
         let files = static_files::Snapshot::load(&self.web_root)?;
-        Ok(Router::new()
+        let mut router = Router::new()
             .route("/api/health", get(health))
-            .route("/api/{kind}/{handler}", post(invoke))
+            .route("/api/{kind}/{handler}", post(invoke));
+        if let Some((routes, accounts)) = &self.rest {
+            router = rest::serve(
+                router,
+                routes,
+                accounts.clone(),
+                self.state.runtime.clone(),
+                self.state.action_slots.clone(),
+            );
+        }
+        Ok(router
             .layer(DefaultBodyLimit::max(MAX_ACTION_BODY_BYTES))
             .fallback(move |request| files.clone().respond(request))
             .with_state(self.state.clone()))
+    }
+
+    /// The runtime's routes without the web shell, for a test that asks
+    /// only those.
+    #[cfg(test)]
+    fn router_without_files(&self) -> Router {
+        let mut router = Router::new();
+        if let Some((routes, accounts)) = &self.rest {
+            router = rest::serve(
+                router,
+                routes,
+                accounts.clone(),
+                self.state.runtime.clone(),
+                self.state.action_slots.clone(),
+            );
+        }
+        router.with_state(self.state.clone())
     }
 
     pub async fn serve(self, address: SocketAddr) -> Result<()> {
@@ -266,7 +312,7 @@ struct ErrorBody<'a> {
     violations: Vec<mxrs_runtime::Violation>,
 }
 
-fn runtime_error_response(error: RuntimeError) -> Response {
+pub(crate) fn runtime_error_response(error: RuntimeError) -> Response {
     let status = match error {
         RuntimeError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
         RuntimeError::UnknownAction(_)
@@ -301,7 +347,7 @@ fn runtime_error_response(error: RuntimeError) -> Response {
         .into_response()
 }
 
-fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
+pub(crate) fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
     (
         status,
         Json(ErrorBody {

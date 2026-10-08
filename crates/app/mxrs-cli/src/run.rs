@@ -544,7 +544,23 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     runtime.set_lifecycle(FlowLifecycle {
         engine: engine.clone(),
     });
-    let http = RuntimeHttp::new(runtime, &target.web_root);
+    // The model's published REST services are served from the model too:
+    // each operation an action, and a route of the server.
+    let mut rest_routes = Vec::new();
+    for (route, action) in crate::published_rest::operations(&target.mpr, &boot.modules, &engine)
+        .map_err(RunError::Target)?
+    {
+        runtime.register_action(route.action.clone(), action);
+        rest_routes.push(route);
+    }
+    let rest_operations = rest_routes.len();
+    let http = RuntimeHttp::new(runtime, &target.web_root).with_published_rest(
+        rest_routes,
+        Arc::new(crate::published_rest::Accounts {
+            accounts: boot.accounts.clone(),
+            policy: boot.security.clone(),
+        }),
+    );
     let runtime_handle = http.runtime_handle();
     let jobs = mxrs_runtime_scheduler::jobs_from_modules(&boot.modules)
         .map_err(|error| RunError::Scheduler(error.to_string()))?;
@@ -575,6 +591,9 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
         "[mxrs] {} flow(s) registered on the native interpreter (POST /api/microflow/<Module.Flow>)",
         flow_names.len()
     );
+    if rest_operations > 0 {
+        println!("[mxrs] {rest_operations} published REST operation(s) served at their own paths");
+    }
     if let Some(task) = &scheduler {
         println!(
             "[mxrs] {} scheduled event(s) armed (1s poll)",

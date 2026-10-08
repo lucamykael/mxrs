@@ -1227,6 +1227,27 @@ impl Runtime {
         Ok(readable(&self.store, &self.security, answer, context))
     }
 
+    /// Runs the action `name` for a published REST operation, as one unit of
+    /// work, and answers what the action answers.
+    ///
+    /// The operation's service has already decided who may call it — its
+    /// authentication and allowed roles — so the document's own roles are
+    /// not asked again, and nothing is handed to a page: the action answers
+    /// its document already shaped for `context`.
+    pub fn invoke_published(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        context: &SecurityContext,
+    ) -> Result<Value> {
+        let action = self
+            .actions
+            .get(name)
+            .ok_or_else(|| RuntimeError::UnknownAction(name.to_string()))?;
+        self.store
+            .transaction(|store| action.execute(store, arguments, context))
+    }
+
     /// What a page does with the objects it shows, by the operation's name:
     /// `retrieve` the objects of an entity the caller may read, `create` a
     /// blank one for a form, `save` the members a form changed and commit

@@ -75,6 +75,7 @@ pub mod marketplace;
 pub mod module_catalog;
 pub mod preflight;
 pub mod protocols;
+mod published_rest;
 pub mod refactor;
 pub mod run;
 pub mod scaffold;

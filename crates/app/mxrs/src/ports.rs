@@ -58,7 +58,7 @@ pub use mxrs_runtime::{SecurityContext, SecurityPolicy};
 pub use mxrs_runtime_boot::{Boot, BootError, LocalAccounts, boot};
 pub use mxrs_runtime_flows::{
     Adapter, AdapterKind, Execution, FlowEngine, FlowError, FlowValue, HttpAnswer, HttpBinding,
-    HttpObjects, JavaAction, ObjectRef, Variables, member_to_json,
+    HttpObjects, JavaAction, ObjectRef, RequestValue, Variables, member_to_json,
 };
 pub use mxrs_runtime_http::basic_credentials;
 
@@ -184,6 +184,24 @@ impl fmt::Display for PortValueError {
 }
 
 impl std::error::Error for PortValueError {}
+
+/// The value a published REST operation's `parameter` takes from the
+/// request's `text` — its path segment or query value — read as `kind`.
+/// Text that is no value of the kind is the caller's mistake: the boundary
+/// answers `400` with why.
+pub fn request_value(
+    parameter: &str,
+    text: Option<&String>,
+    kind: RequestValue,
+) -> Result<FlowValue, ServiceError> {
+    FlowValue::from_request(text.map(String::as_str), kind).map_err(|_| {
+        PortValueError::new(
+            format!("{} for parameter {parameter}", kind.description()),
+            format!("{:?}", text.map_or("", String::as_str)),
+        )
+        .into()
+    })
+}
 
 /// The runtime representation of one authoring type marker, and the two
 /// conversions a generated port needs at its boundary.

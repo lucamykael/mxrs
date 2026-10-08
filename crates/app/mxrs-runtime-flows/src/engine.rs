@@ -2087,6 +2087,83 @@ impl FlowEngine {
         }
     }
 
+    /// A flow result as the JSON a published operation without an export
+    /// mapping answers: an object its stored members and identity, a list
+    /// its objects. An object `caller` may not read answers `null` on its own
+    /// and is left out of a list, so this shape carries no more than a
+    /// mapped one would.
+    pub fn result_json(
+        &self,
+        store: &Store,
+        caller: Option<&SecurityContext>,
+        value: &FlowValue,
+    ) -> Value {
+        match value {
+            FlowValue::Object(reference) => {
+                let Ok(Some(object)) = store.find(&reference.entity, &reference.id) else {
+                    return Value::Null;
+                };
+                if !self.readable(caller, &object) {
+                    return Value::Null;
+                }
+                let mut fields = serde_json::Map::new();
+                fields.insert("id".to_string(), Value::String(object.id.clone()));
+                for (name, member) in &object.members {
+                    fields.insert(name.clone(), crate::value::member_to_json(member));
+                }
+                Value::Object(fields)
+            }
+            FlowValue::List(values) => Value::Array(
+                values
+                    .iter()
+                    .map(|value| self.result_json(store, caller, value))
+                    .filter(|value| !value.is_null())
+                    .collect(),
+            ),
+            other => other.to_json_shallow(),
+        }
+    }
+
+    /// Runs the microflow a published REST operation calls, as `caller`, and
+    /// answers what the operation responds with: the flow's result shaped by
+    /// the operation's export mapping (or as [`Self::result_json`] shapes it
+    /// without one), under the status — and with the content — the flow left
+    /// on its response object when it declares one.
+    ///
+    /// The implicit `System.HttpRequest`/`HttpResponse` objects `objects`
+    /// names are created and bound first: a microflow missing an argument
+    /// never starts.
+    pub fn answer_operation(
+        &self,
+        store: &mut Store,
+        flow: &str,
+        mut arguments: Variables,
+        mapping: Option<&ExportMapping>,
+        caller: &SecurityContext,
+        objects: &crate::HttpObjects,
+    ) -> Result<OperationAnswer, FlowError> {
+        let binding = objects
+            .bind(store, &mut arguments)
+            .map_err(FlowError::Runtime)?;
+        let (result, _) = self.call(store, flow, arguments, Some(caller.clone()))?;
+        let document = match mapping {
+            Some(mapping) => self.apply_export_mapping(store, Some(caller), mapping, &result),
+            None => self.result_json(store, Some(caller), &result),
+        };
+        Ok(match binding.answer(store) {
+            Some(answer) => OperationAnswer {
+                status: answer.status,
+                content: (!answer.content.is_empty()).then_some(answer.content),
+                document,
+            },
+            None => OperationAnswer {
+                status: 200,
+                content: None,
+                document,
+            },
+        })
+    }
+
     /// Whether `caller` may read `object` — the question `filter_readable`
     /// asks of a retrieved row, with the row's members in hand so a
     /// constrained rule can decide.
@@ -2642,4 +2719,16 @@ fn underscore(value: &str) -> String {
         result.push(character.to_ascii_lowercase());
     }
     result
+}
+
+/// What a published REST operation responds with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OperationAnswer {
+    /// The status the flow left on its response object, `200` without one;
+    /// `0` when the flow left one HTTP has no use for.
+    pub status: u16,
+    /// The body the flow wrote itself, as text; `None` when it wrote none.
+    pub content: Option<String>,
+    /// The operation's own document: the result, mapped or as stored.
+    pub document: Value,
 }

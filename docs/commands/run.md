@@ -46,6 +46,22 @@ navigation, downloads, unadapted client actions) surface as `effects`.
 Java custom actions and web-service/mapping/document activities require
 explicitly registered adapters and fail with named errors otherwise.
 
+## Published REST services
+
+Every operation of every `Rest$PublishedRestService` the model publishes is
+served at its own route — the service's path, the resource's name and the
+operation's path, `GET /rest/orders/v1/order/{id}` — from the model alone:
+a project with no generated HTTP layer serves its services too. A request
+signs in as its service asks: anyone, as the project's guest; HTTP Basic
+against the model's own accounts, holding one of the service's roles
+(`401` with the service's realm, `403` without a role); authentication the
+runtime does not offer is refused with `501` rather than served to anyone.
+Path and query parameters are read as their types (`400` with why when one
+is not), bound to the microflow, and the result answers through the
+operation's export mapping — or as the stored object without one — under
+the status, and with the content, the flow left on its
+`System.HttpResponse`. Headers are not carried yet.
+
 ## Scheduled events
 
 Enabled `ScheduledEvents$ScheduledEvent` documents are armed on the ported

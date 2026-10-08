@@ -501,6 +501,13 @@ impl PublishedRestServiceDecl {
     /// The declaration a stored service is, when [`Self::document`] states
     /// that document again.
     pub fn from_document(document: &NativeDocument) -> Option<Self> {
+        Self::read(document).filter(|service| service.document().says_the_same(document))
+    }
+
+    /// What a stored service says, of everything the declaration states —
+    /// what a runtime serving it needs — whether or not the declaration
+    /// states the document again.
+    pub fn read(document: &NativeDocument) -> Option<Self> {
         if document.ty != "Rest$PublishedRestService" {
             return None;
         }
@@ -550,10 +557,7 @@ impl PublishedRestServiceDecl {
             }
             service.resources.push(declared);
         }
-        service
-            .document()
-            .says_the_same(document)
-            .then_some(service)
+        Some(service)
     }
 }
 

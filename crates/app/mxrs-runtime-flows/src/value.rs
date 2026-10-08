@@ -44,7 +44,55 @@ pub enum FlowValue {
     Json(Value),
 }
 
+/// The type a request's text is read as, for a published REST operation's
+/// path or query parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestValue {
+    /// Text as it is: a string, or an enumeration value's name.
+    Text,
+    Integer,
+    Decimal,
+    Boolean,
+    /// An ISO 8601 date or UTC date-time.
+    DateTime,
+}
+
+impl RequestValue {
+    /// What a value of the kind is, in a sentence: `an integer`.
+    pub fn description(self) -> &'static str {
+        match self {
+            RequestValue::Text => "text",
+            RequestValue::Integer => "an integer",
+            RequestValue::Decimal => "a decimal",
+            RequestValue::Boolean => "a boolean",
+            RequestValue::DateTime => "an ISO 8601 date",
+        }
+    }
+}
+
 impl FlowValue {
+    /// The value a request's `text` is for a parameter of `kind`: empty
+    /// when the request carries none, and why not when the text is not one.
+    pub fn from_request(text: Option<&str>, kind: RequestValue) -> Result<FlowValue, String> {
+        let Some(text) = text else {
+            return Ok(FlowValue::Empty);
+        };
+        let refused = || format!("{text:?} is not {}", kind.description());
+        Ok(match kind {
+            RequestValue::Text => FlowValue::String(text.to_string()),
+            RequestValue::Integer => FlowValue::Int(text.trim().parse().map_err(|_| refused())?),
+            RequestValue::Decimal => FlowValue::Float(text.trim().parse().map_err(|_| refused())?),
+            RequestValue::Boolean => match text.trim().to_ascii_lowercase().as_str() {
+                "true" => FlowValue::Bool(true),
+                "false" => FlowValue::Bool(false),
+                _ => return Err(refused()),
+            },
+            RequestValue::DateTime => {
+                FlowValue::DateTime(crate::datetime::parse_iso(text).ok_or_else(refused)?)
+            }
+        })
+    }
+
     pub fn now() -> Self {
         let seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -427,6 +475,43 @@ mod tests {
         assert_eq!(
             FlowValue::from_member(&Value::String(DATETIME_MEMBER_PREFIX.into())),
             FlowValue::String(DATETIME_MEMBER_PREFIX.into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    /// A request's text is read as its parameter's type; text that is no
+    /// value of it says why, and no text is empty.
+    #[test]
+    fn a_request_value_is_read_as_its_type() {
+        let read = FlowValue::from_request;
+        assert_eq!(
+            read(Some("42"), RequestValue::Integer),
+            Ok(FlowValue::Int(42))
+        );
+        assert_eq!(
+            read(Some("2.5"), RequestValue::Decimal),
+            Ok(FlowValue::Float(2.5))
+        );
+        assert_eq!(
+            read(Some("TRUE"), RequestValue::Boolean),
+            Ok(FlowValue::Bool(true))
+        );
+        assert_eq!(
+            read(Some("1970-01-02"), RequestValue::DateTime),
+            Ok(FlowValue::DateTime(86_400.0))
+        );
+        assert_eq!(
+            read(Some("abc"), RequestValue::Text),
+            Ok(FlowValue::String("abc".into()))
+        );
+        assert_eq!(read(None, RequestValue::Integer), Ok(FlowValue::Empty));
+        assert_eq!(
+            read(Some("abc"), RequestValue::Integer),
+            Err("\"abc\" is not an integer".to_string())
         );
     }
 }

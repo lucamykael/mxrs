@@ -6152,11 +6152,23 @@ fn render_controller(
         // Only a bound parameter names a `FlowValue`; a controller whose
         // operations take none would carry an unused import.
         let mut ports = vec!["Variables"];
-        if operations
-            .iter()
-            .any(|(_, operation)| !operation.parameters.is_empty())
+        let parameters = || {
+            operations
+                .iter()
+                .flat_map(|(_, operation)| &operation.parameters)
+        };
+        // A path or query parameter of another type than text is read as
+        // its type; every other one is a `FlowValue` as it comes.
+        if parameters()
+            .any(|parameter| parameter.kind.is_none() || parameter.source == ParameterSource::Body)
         {
             ports.push("FlowValue");
+        }
+        if parameters()
+            .any(|parameter| parameter.kind.is_some() && parameter.source != ParameterSource::Body)
+        {
+            ports.push("RequestValue");
+            ports.push("request_value");
         }
         if binds_http_objects {
             ports.push("HttpObjects");
@@ -6291,16 +6303,24 @@ fn render_controller(
         };
         let _ = writeln!(out, "    {binding} = Variables::new();");
         for parameter in &operation.parameters {
-            let value = match parameter.source {
-                ParameterSource::Path => format!(
+            let value = match (parameter.source, parameter.kind) {
+                (ParameterSource::Path, Some(kind)) => format!(
+                    "request_value({:?}, path.get({:?}), RequestValue::{kind})?",
+                    parameter.name, parameter.name
+                ),
+                (ParameterSource::Query, Some(kind)) => format!(
+                    "request_value({:?}, query.get({:?}), RequestValue::{kind})?",
+                    parameter.name, parameter.name
+                ),
+                (ParameterSource::Path, None) => format!(
                     "FlowValue::String(path.get({:?}).cloned().unwrap_or_default())",
                     parameter.name
                 ),
-                ParameterSource::Query => format!(
+                (ParameterSource::Query, None) => format!(
                     "query.get({:?}).map_or(FlowValue::Empty, |value| FlowValue::String(value.clone()))",
                     parameter.name
                 ),
-                ParameterSource::Body => format!(
+                (ParameterSource::Body, _) => format!(
                     "body.get({:?}).map_or(FlowValue::Empty, |value| FlowValue::Json(value.clone()))",
                     parameter.name
                 ),
@@ -6812,6 +6832,10 @@ fn http_parameters(modules: &[Module]) -> HashMap<String, HttpParameters> {
 struct OperationParameter {
     /// REST parameter name, as it appears in the path or query string.
     name: String,
+    /// What a path or query parameter's text is read as, by
+    /// `mxrs::ports::RequestValue`'s variant; `None` for text, taken as it
+    /// is.
+    kind: Option<&'static str>,
     /// Microflow parameter the value binds to.
     microflow_parameter: String,
     source: ParameterSource,
@@ -6968,8 +6992,20 @@ fn published_service(
                     malformed = true;
                     break;
                 }
+                let kind = match parameter
+                    .get_document("Type")
+                    .ok()
+                    .and_then(|ty| ty.get_str("$Type").ok())
+                {
+                    Some("DataTypes$IntegerType" | "DataTypes$LongType") => Some("Integer"),
+                    Some("DataTypes$DecimalType" | "DataTypes$FloatType") => Some("Decimal"),
+                    Some("DataTypes$BooleanType") => Some("Boolean"),
+                    Some("DataTypes$DateTimeType") => Some("DateTime"),
+                    _ => None,
+                };
                 parameters.push(OperationParameter {
                     name: parameter_name.to_string(),
+                    kind,
                     microflow_parameter,
                     source,
                 });
@@ -8740,6 +8776,14 @@ mod tests {
         assert!(!rendered.contains("/// Get one order"), "{rendered}");
         assert!(
             rendered.contains("/// Calls `Sales.MF_Order_Show`."),
+            "{rendered}"
+        );
+        // A path parameter of another type than text is read as its type.
+        assert!(
+            rendered.contains("request_value(\"id\", path.get(\"id\"), RequestValue::Integer)?")
+                && rendered.contains(
+                    "use mxrs::ports::{FlowValue, RequestValue, Variables, request_value};"
+                ),
             "{rendered}"
         );
     }
