@@ -67,6 +67,7 @@ impl ModuleBuilder {
                 rules: Vec::new(),
                 roles: None,
                 installed: false,
+                folders: Default::default(),
             },
         }
     }
@@ -75,6 +76,15 @@ impl ModuleBuilder {
     /// standalone declaration file.
     pub fn into_decl(self) -> ModuleDecl {
         self.decl
+    }
+
+    /// Declares what `declare` declares in the module's folder `folder`, a
+    /// path inside it: `module.folder("Orders/Admin", |module| { ... })`.
+    pub fn folder(&mut self, folder: &str, declare: impl FnOnce(&mut ModuleBuilder)) -> &mut Self {
+        let mut inner = ModuleBuilder::new(self.decl.name.clone());
+        declare(&mut inner);
+        self.decl.absorb(inner.into_decl().in_folder(folder));
+        self
     }
 
     pub fn entity(

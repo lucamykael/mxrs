@@ -83,6 +83,7 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     let project = Project::open(&path, true)?;
     let units = project.all_units()?;
     let mut counts = BTreeMap::<String, usize>::new();
+    let mut folder_containers = Vec::new();
     for unit in &units {
         let document = project
             .mpr()
@@ -92,6 +93,9 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
             .get_str("$Type")
             .unwrap_or("<missing $Type>")
             .to_string();
+        if native_type == "Projects$Folder" {
+            folder_containers.push(unit.container_id.clone());
+        }
         *counts.entry(native_type).or_default() += 1;
     }
 
@@ -118,7 +122,9 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     // them; the inventory is about what the export covers, not about where it
     // lands.
     let packages = super::package_stems(&modules);
-    let editable_documents = super::render_documents_module(&project, &packages)?.counts;
+    // Only counts are read here: where a document lives does not change them.
+    let none = super::folders::Folders::default();
+    let editable_documents = super::render_documents_module(&project, &packages, &none)?.counts;
     let converted_flows = super::flow_export::collect(&project, &modules)?;
     // What the importer states whole, and reads back as stored: the forms
     // its TSX declares, and the JavaScript actions of the modules the
@@ -136,6 +142,7 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
                     && super::module_root(&super::module_stem(module), &packages)
                         != super::ModuleRoot::Authored)
         },
+        &none,
     );
     let mut stated_whole = BTreeMap::<String, usize>::new();
     for (_, ty, _) in &frontend_forms.declared {
@@ -144,9 +151,29 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     let authored = |module: &str| {
         super::module_root(&super::module_stem(module), &packages) == super::ModuleRoot::Authored
     };
+    // A folder of a module the project made is the one its declarations
+    // state; a package's stay as it was installed.
+    let parents: BTreeMap<String, String> = units
+        .iter()
+        .map(|unit| (unit.unit_id.clone(), unit.container_id.clone()))
+        .collect();
+    let module_names: BTreeMap<String, String> = modules
+        .iter()
+        .filter_map(|module| Some((module.id.clone(), module.name.clone()?)))
+        .collect();
+    stated_whole.insert(
+        "Projects$Folder".to_string(),
+        folder_containers
+            .iter()
+            .filter(|container| {
+                owning_module(container, &parents, &module_names)
+                    .is_some_and(|module| authored(&module))
+            })
+            .count(),
+    );
     stated_whole.insert(
         "JsonStructures$JsonStructure".to_string(),
-        super::json_structures::declare(&project, authored)?.len(),
+        super::json_structures::declare(&project, authored, &none)?.len(),
     );
     // Every OQL view source is declared by the project's persistence
     // module (`render_persistence_module`).
@@ -162,7 +189,7 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     );
     stated_whole.insert(
         "Images$ImageCollection".to_string(),
-        super::images::declare(&modules, authored).len(),
+        super::images::declare(&modules, authored, &none).len(),
     );
     // A service's route table declares it, in a project served by axum.
     stated_whole.insert(
@@ -174,9 +201,9 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     );
     stated_whole.insert(
         "DataSets$DataSet".to_string(),
-        super::data_sets::declare(&project, authored)?.len(),
+        super::data_sets::declare(&project, authored, &none)?.len(),
     );
-    for mapping in super::mappings::declare(&project, authored)? {
+    for mapping in super::mappings::declare(&project, authored, &none)? {
         *stated_whole
             .entry(mapping.native_type.to_string())
             .or_default() += 1;
@@ -187,7 +214,7 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
     ] {
         stated_whole.insert(
             kind.native_type().to_string(),
-            super::code_actions::declare(&project, kind, authored)?.len(),
+            super::code_actions::declare(&project, kind, authored, &none)?.len(),
         );
     }
 
@@ -229,6 +256,9 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
                         .to_string()
                 } else if native_type == "JavaScriptActions$JavaScriptAction" {
                     "each action a declaration restates is emitted as typed Rust and read back as stored; the rest are preserved byte-for-byte"
+                        .to_string()
+                } else if native_type == "Projects$Folder" {
+                    "a folder of a module the project made is the one its declarations state (`folder = ...`, a form's folder, `@folder`); a package's stay as installed"
                         .to_string()
                 } else {
                     "each form is stated whole as TSX (or a typed Rust page) and read back as stored; the rest are preserved byte-for-byte"

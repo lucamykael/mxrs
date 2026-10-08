@@ -33,6 +33,7 @@ pub(crate) struct DeclaredMapping {
 pub(crate) fn declare(
     project: &mxrs_model::Project,
     authored: impl Fn(&str) -> bool,
+    folders: &crate::folders::Folders,
 ) -> crate::Result<Vec<DeclaredMapping>> {
     let units = project.all_units()?;
     let containers: HashMap<&str, &str> = units
@@ -87,7 +88,8 @@ pub(crate) fn declare(
         };
         let mapping = mapping.simplified(structure);
         let stem = crate::inner_file_stem(&mapping.name);
-        let source = render(&module, &stem, &mapping);
+        let folder = folders.argument(&module, &mapping.name);
+        let source = render(&module, &stem, &mapping, folder);
         declared.push(DeclaredMapping {
             module,
             native_type,
@@ -102,16 +104,16 @@ pub(crate) fn declare(
 }
 
 /// The file declaring `mapping`.
-fn render(module: &str, stem: &str, mapping: &MappingDecl) -> String {
+fn render(module: &str, stem: &str, mapping: &MappingDecl, folder: Option<String>) -> String {
     let (method, what) = match mapping.direction {
         MappingDirection::Import => ("import_mapping", "becomes objects"),
         MappingDirection::Export => ("export_mapping", "is made of objects"),
     };
     let mut source = format!(
-        "//! Mapping `{module}.{name}`: how the JSON of `{structure}` {what}.\n\nuse mxrs::prelude::*;\n\n#[declaration(module = {module_literal})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    module.{method}(\n        {name_literal},\n        {structure_literal},\n        |mapping| {{\n",
+        "//! Mapping `{module}.{name}`: how the JSON of `{structure}` {what}.\n\nuse mxrs::prelude::*;\n\n#[declaration({arguments})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    module.{method}(\n        {name_literal},\n        {structure_literal},\n        |mapping| {{\n",
+        arguments = crate::folders::declaration_arguments(module, folder),
         name = mapping.name,
         structure = mapping.json_structure,
-        module_literal = crate::rust_string(module),
         name_literal = crate::rust_string(&mapping.name),
         structure_literal = crate::rust_string(&mapping.json_structure),
     );
@@ -282,7 +284,7 @@ mod tests {
             key: "(Object)".into(),
             kind: MappingElementKind::Object(root),
         });
-        let source = render("Sales", "imm_order", &mapping);
+        let source = render("Sales", "imm_order", &mapping, None);
         assert!(source.contains("mapping.object(\"(Object)\", \"Sales.Order\", |order| {\n"));
         assert!(source.contains("order.value(\"number\");\n"));
         assert!(source.contains("order.object(\"customer\", \"Sales.Customer\", |_| {});\n"));

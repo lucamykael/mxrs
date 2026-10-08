@@ -237,6 +237,7 @@ pub fn apply_with_frontend(
         }
     }
     let origins = frontend.nanoflow_origins;
+    let folders = frontend.folders;
     let forms = frontend.forms;
     let form_origins = frontend.form_origins;
     let mut navigation = frontend.navigation;
@@ -262,7 +263,7 @@ pub fn apply_with_frontend(
         if declaration.stage > Stage::Nanoflow
             && let Some(declared) = nanoflows.take()
         {
-            add_nanoflows(project, declared, &origins, installed)?;
+            add_nanoflows(project, declared, &origins, &folders, installed)?;
         }
         if declaration.stage > Stage::Navigation
             && let Some(declared) = navigation.take()
@@ -272,12 +273,23 @@ pub fn apply_with_frontend(
         declaration.apply(project);
     }
     if let Some(declared) = nanoflows {
-        add_nanoflows(project, declared, &origins, installed)?;
+        add_nanoflows(project, declared, &origins, &folders, installed)?;
     }
     if let Some(declared) = navigation {
         project.navigation = Some(declared);
     }
-    add_forms(project, forms, &form_origins, installed)
+    add_forms(project, forms, &form_origins, &folders, installed)
+}
+
+/// Places `name` of `module` in the folder the frontend states for it.
+fn place(
+    module: &mut mxrs_ir::ModuleDecl,
+    name: &str,
+    folders: &std::collections::HashMap<String, String>,
+) {
+    if let Some(folder) = folders.get(&format!("{}.{name}", module.name)) {
+        module.folders.insert(name.to_string(), folder.clone());
+    }
 }
 
 /// The module the frontend declares something of. One the project
@@ -302,6 +314,7 @@ fn add_forms(
     project: &mut ProjectDecl,
     forms: Vec<(String, mxrs_ir::FormDecl)>,
     origins: &std::collections::HashMap<String, String>,
+    folders: &std::collections::HashMap<String, String>,
     installed: &std::collections::BTreeSet<String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     for (module, form) in forms {
@@ -328,6 +341,7 @@ fn add_forms(
                 ),
             });
         }
+        place(declared, form.name(), folders);
         declared.forms.push(form);
     }
     Ok(())
@@ -340,6 +354,7 @@ fn add_nanoflows(
     project: &mut ProjectDecl,
     nanoflows: Vec<(String, mxrs_ir::flow::MicroflowDecl)>,
     origins: &std::collections::HashMap<String, String>,
+    folders: &std::collections::HashMap<String, String>,
     installed: &std::collections::BTreeSet<String>,
 ) -> Result<(), mxrs_frontend::FrontendError> {
     for (module, nanoflow) in nanoflows {
@@ -380,6 +395,7 @@ fn add_nanoflows(
                 ),
             });
         }
+        place(declared, &nanoflow.name, folders);
         declared.nanoflows.push(nanoflow);
     }
     Ok(())
@@ -449,6 +465,7 @@ mod installed_tests {
             &mut project,
             vec![("Atlas_Core".to_string(), nanoflow.clone())],
             &origins,
+            &Default::default(),
             &installed(&["Atlas_Core"]),
         )
         .unwrap_err()
@@ -463,6 +480,7 @@ mod installed_tests {
             &mut project,
             vec![("Portal".to_string(), nanoflow)],
             &origins,
+            &Default::default(),
             &installed(&["Atlas_Core"]),
         )
         .unwrap();

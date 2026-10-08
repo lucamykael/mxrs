@@ -743,14 +743,17 @@ fn synchronize_project_updates_documents_inside_folders_without_duplicating_them
     }
     drop(mpr);
 
+    // The declaration states the folder the documents are in.
     let mut updated = ProjectBuilder::new("11.12.1");
     updated.module("Sales", |module| {
-        module.enumeration("Status", |enumeration| {
-            enumeration.value("Open");
-            enumeration.value("Closed");
-        });
-        module.constant("Limit", |constant| {
-            constant.value("20");
+        module.folder("Configuration", |module| {
+            module.enumeration("Status", |enumeration| {
+                enumeration.value("Open");
+                enumeration.value("Closed");
+            });
+            module.constant("Limit", |constant| {
+                constant.value("20");
+            });
         });
     });
     mxrs_writer::synchronize_project(&path, &updated.build()).unwrap();
@@ -790,6 +793,109 @@ fn synchronize_project_updates_documents_inside_folders_without_duplicating_them
             .unwrap(),
         "20"
     );
+}
+
+/// A document is in the folder its declaration states: the folders the
+/// model lacks are made under stable identities, a document moves between
+/// them, and one that states none is at its module's root.
+#[test]
+fn a_declared_folder_places_its_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Folders.mpr");
+    let declare = |limit: &str, status: Option<&str>| {
+        let mut project = ProjectBuilder::new("11.12.1");
+        project.module("Sales", |module| {
+            module.folder(limit, |module| {
+                module.constant("Limit", |constant| {
+                    constant.value("10");
+                });
+            });
+            match status {
+                Some(folder) => {
+                    module.folder(folder, |module| {
+                        module.enumeration("Status", |enumeration| {
+                            enumeration.value("Open");
+                        });
+                    });
+                }
+                None => {
+                    module.enumeration("Status", |enumeration| {
+                        enumeration.value("Open");
+                    });
+                }
+            }
+        });
+        project.build()
+    };
+    let placed = |path: &std::path::Path| {
+        let mpr = mxrs_mpr::MprFile::open(path, true).unwrap();
+        let units = mpr.all_units().unwrap();
+        let named = |id: &str| {
+            units
+                .iter()
+                .find(|unit| unit.unit_id == id)
+                .and_then(|unit| mpr.parse_contents(unit).ok())
+                .map(|document| {
+                    (
+                        document.get_str("$Type").unwrap_or_default().to_string(),
+                        document.get_str("Name").unwrap_or_default().to_string(),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        let mut found = std::collections::BTreeMap::new();
+        for unit in &units {
+            let (ty, name) = named(&unit.unit_id);
+            if !matches!(
+                ty.as_str(),
+                "Constants$Constant" | "Enumerations$Enumeration"
+            ) {
+                continue;
+            }
+            // The folder path, from the document up to its module.
+            let mut path = Vec::new();
+            let mut container = unit.container_id.clone();
+            loop {
+                let (ty, folder) = named(&container);
+                if ty != "Projects$Folder" {
+                    break;
+                }
+                path.push(folder);
+                container = units
+                    .iter()
+                    .find(|unit| unit.unit_id == container)
+                    .unwrap()
+                    .container_id
+                    .clone();
+            }
+            path.reverse();
+            found.insert(name, path.join("/"));
+        }
+        let folders = units
+            .iter()
+            .filter(|unit| named(&unit.unit_id).0 == "Projects$Folder")
+            .count();
+        (found, folders)
+    };
+
+    mxrs_writer::write_project(&path, &declare("Config/Limits", Some("Config"))).unwrap();
+    let (found, folders) = placed(&path);
+    assert_eq!(found["Limit"], "Config/Limits");
+    assert_eq!(found["Status"], "Config");
+    assert_eq!(folders, 2);
+
+    mxrs_writer::synchronize_project(&path, &declare("Other", None)).unwrap();
+    let (found, folders) = placed(&path);
+    assert_eq!(found["Limit"], "Other");
+    assert_eq!(found["Status"], "");
+    // The folders no declaration names any more are kept.
+    assert_eq!(folders, 3);
+
+    // Stating it again finds the folder it made, by its identity.
+    mxrs_writer::synchronize_project(&path, &declare("Config/Limits", Some("Config"))).unwrap();
+    let (found, folders) = placed(&path);
+    assert_eq!(found["Limit"], "Config/Limits");
+    assert_eq!(folders, 3);
 }
 
 #[test]

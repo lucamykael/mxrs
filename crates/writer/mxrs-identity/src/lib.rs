@@ -88,12 +88,15 @@ pub enum ArtifactKind {
     DataStorage,
     JavaScriptAction,
     JavaAction,
+    /// A folder of a module, by its path: `Sales/Orders/Admin`.
+    Folder,
 }
 
 impl fmt::Display for ArtifactKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Module => "module",
+            Self::Folder => "folder",
             Self::DomainModel => "domain-model",
             Self::Entity => "entity",
             Self::Attribute => "attribute",

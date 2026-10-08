@@ -24,6 +24,7 @@ pub(crate) struct DeclaredStructure {
 pub(crate) fn declare(
     project: &mxrs_model::Project,
     authored: impl Fn(&str) -> bool,
+    folders: &crate::folders::Folders,
 ) -> crate::Result<Vec<DeclaredStructure>> {
     let units = project.all_units()?;
     let containers: std::collections::HashMap<&str, &str> = units
@@ -61,7 +62,8 @@ pub(crate) fn declare(
             continue;
         };
         let stem = crate::inner_file_stem(&stored.name);
-        let source = render(&module, &stem, &stored, &changes);
+        let folder = folders.argument(&module, &stored.name);
+        let source = render(&module, &stem, &stored, &changes, folder);
         declared.push(DeclaredStructure {
             module,
             name: stored.name,
@@ -199,7 +201,13 @@ fn element_changes(derived: &JsonElement, stored: &JsonElement) -> Vec<String> {
 }
 
 /// The file declaring `structure`.
-fn render(module: &str, stem: &str, structure: &JsonStructureDecl, changes: &[Change]) -> String {
+fn render(
+    module: &str,
+    stem: &str,
+    structure: &JsonStructureDecl,
+    changes: &[Change],
+    folder: Option<String>,
+) -> String {
     let mut calls: Vec<String> = Vec::new();
     if !structure.documentation.is_empty() {
         calls.push(format!(
@@ -225,10 +233,10 @@ fn render(module: &str, stem: &str, structure: &JsonStructureDecl, changes: &[Ch
         calls.push(call);
     }
     let mut source = format!(
-        "//! JSON structure `{module}.{name}`: the JSON its mappings read and write,\n//! and what differs from the elements Studio Pro derives from its snippet.\n\nuse mxrs::prelude::*;\n\nconst SNIPPET: &str = {snippet};\n\n#[declaration(module = {module_literal})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n",
+        "//! JSON structure `{module}.{name}`: the JSON its mappings read and write,\n//! and what differs from the elements Studio Pro derives from its snippet.\n\nuse mxrs::prelude::*;\n\nconst SNIPPET: &str = {snippet};\n\n#[declaration({arguments})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n",
+        arguments = crate::folders::declaration_arguments(module, folder),
         name = structure.name,
         snippet = snippet_literal(&structure.snippet),
-        module_literal = crate::rust_string(module),
     );
     let name = crate::rust_string(&structure.name);
     if calls.is_empty() {

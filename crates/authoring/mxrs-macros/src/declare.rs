@@ -45,6 +45,29 @@ pub struct FlowArgs {
     uses: Option<Vec<Related>>,
     /// `used_by(...)`: what refers to it.
     used_by: Option<Vec<Related>>,
+    /// `folder = "..."`: the folder of its module it lives in.
+    folder: Option<syn::LitStr>,
+}
+
+/// `folder = "Orders/Admin"`: a path of folder names inside the module.
+pub(crate) fn folder_path(input: syn::parse::ParseStream<'_>) -> syn::Result<syn::LitStr> {
+    let folder: syn::LitStr = input.parse()?;
+    let value = folder.value();
+    if value.split('/').any(str::is_empty) {
+        return Err(syn::Error::new(
+            folder.span(),
+            "a folder is a path of folder names inside the module: `Orders/Admin` (a `/` in a name is `%2F`)",
+        ));
+    }
+    Ok(folder)
+}
+
+/// What places a declaration's documents in the folder it states.
+pub(crate) fn placed(folder: Option<&syn::LitStr>) -> TokenStream {
+    match folder {
+        Some(folder) => quote! { .in_folder(#folder) },
+        None => TokenStream::new(),
+    }
 }
 
 /// One item of a relation list: the Rust item that declares the related
@@ -79,6 +102,7 @@ impl syn::parse::Parse for FlowArgs {
         let mut prefix = None;
         let mut module = None;
         let mut name = None;
+        let mut folder = None;
         let (mut roles, mut calls, mut uses, mut used_by) = (None, None, None, None);
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
@@ -106,10 +130,11 @@ impl syn::parse::Parse for FlowArgs {
                 match key.to_string().as_str() {
                     "module" => module = Some(input.parse()?),
                     "name" => name = Some(input.parse()?),
+                    "folder" => folder = Some(folder_path(input)?),
                     _ => {
                         return Err(syn::Error::new(
                             key.span(),
-                            "unknown flow option; expected `module` or `name`",
+                            "unknown flow option; expected `module`, `name` or `folder`",
                         ));
                     }
                 }
@@ -141,6 +166,7 @@ impl syn::parse::Parse for FlowArgs {
             calls,
             uses,
             used_by,
+            folder,
         })
     }
 }
@@ -338,6 +364,7 @@ fn flow_declaration(declaration: FlowDeclaration<'_>) -> syn::Result<TokenStream
         "The `{}.{name}` {noun}, declared by [`{doc_target}`].",
         module.value()
     );
+    let placed = placed(args.folder.as_ref());
 
     Ok(quote! {
         #[doc = #summary]
@@ -372,7 +399,7 @@ fn flow_declaration(declaration: FlowDeclaration<'_>) -> syn::Result<TokenStream
                         #used_by
                         #call(__mxrs_flow);
                     });
-                    __mxrs_project.merge_module(__mxrs_module.into_decl());
+                    __mxrs_project.merge_module(__mxrs_module.into_decl()#placed);
                 },
             )
         }
@@ -663,22 +690,25 @@ pub enum DocumentKind {
 pub struct DocumentArgs {
     module: syn::LitStr,
     name: Option<syn::LitStr>,
+    folder: Option<syn::LitStr>,
 }
 
 impl syn::parse::Parse for DocumentArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         let mut module = None;
         let mut name = None;
+        let mut folder = None;
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
             match key.to_string().as_str() {
                 "module" => module = Some(input.parse()?),
                 "name" => name = Some(input.parse()?),
+                "folder" => folder = Some(folder_path(input)?),
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "unknown option; expected `module` or `name`",
+                        "unknown option; expected `module`, `name` or `folder`",
                     ));
                 }
             }
@@ -689,6 +719,7 @@ impl syn::parse::Parse for DocumentArgs {
         Ok(Self {
             module: module.ok_or_else(|| input.error("missing `module = \"ModuleName\"`"))?,
             name,
+            folder,
         })
     }
 }
@@ -733,6 +764,7 @@ pub fn expand_document(
         .iter()
         .filter(|attribute| attribute.path().is_ident("doc"))
         .collect::<Vec<_>>();
+    let placed = placed(args.folder.as_ref());
     // Layouts and menus carry no documentation of their own in the model.
     let documentation = match kind {
         DocumentKind::Constant | DocumentKind::Page => {
@@ -756,7 +788,7 @@ pub fn expand_document(
                         #documentation
                         #ident(__mxrs_builder);
                     });
-                    __mxrs_project.merge_module(__mxrs_module.into_decl());
+                    __mxrs_project.merge_module(__mxrs_module.into_decl()#placed);
                 },
             )
         }
@@ -847,22 +879,26 @@ impl NamedStrings {
 pub struct DeclarationArgs {
     module: syn::LitStr,
     stage: Option<syn::Ident>,
+    /// `folder = "..."`: the folder every document it declares lives in.
+    folder: Option<syn::LitStr>,
 }
 
 impl syn::parse::Parse for DeclarationArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         let mut module = None;
         let mut stage = None;
+        let mut folder = None;
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
             match key.to_string().as_str() {
                 "module" => module = Some(input.parse()?),
                 "stage" => stage = Some(input.parse()?),
+                "folder" => folder = Some(folder_path(input)?),
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "unknown option; expected `module` or `stage`",
+                        "unknown option; expected `module`, `stage` or `folder`",
                     ));
                 }
             }
@@ -873,6 +909,7 @@ impl syn::parse::Parse for DeclarationArgs {
         Ok(Self {
             module: module.ok_or_else(|| input.error("missing `module = \"ModuleName\"`"))?,
             stage,
+            folder,
         })
     }
 }
@@ -887,12 +924,13 @@ pub fn expand_declaration(args: &DeclarationArgs, item: &syn::ItemFn) -> syn::Re
         Some(stage) => quote!(#stage),
         None => quote!(Document),
     };
+    let placed = placed(args.folder.as_ref());
     let registration = registration(
         stage,
         quote! {
             let mut __mxrs_module = ::mxrs::ModuleBuilder::new(#module);
             #ident(&mut __mxrs_module);
-            __mxrs_project.merge_module(__mxrs_module.into_decl());
+            __mxrs_project.merge_module(__mxrs_module.into_decl()#placed);
         },
     );
     Ok(quote! {

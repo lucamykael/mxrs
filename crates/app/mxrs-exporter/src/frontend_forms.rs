@@ -74,11 +74,13 @@ pub(crate) fn is_template(ty: &str) -> bool {
 
 /// Declares in the frontend every page, layout and snippet of an authored
 /// module that `keeps` does not hold back and whose TSX reads back as the
-/// document the model stores.
+/// document the model stores — in the folder of its module's folder that is
+/// the module's folder it lives in.
 pub(crate) fn declare_in_frontend(
     modules: &[mxrs_model::Module],
     authored: impl Fn(&str) -> bool,
     keeps: impl Fn(&str, &str, &str) -> bool,
+    folders: &crate::folders::Folders,
 ) -> FrontendForms {
     let explain = std::env::var_os("MXRS_EXPLAIN_FLOWS").is_some();
     let stays = |form: &StoredForm, reason: &str| {
@@ -175,8 +177,12 @@ pub(crate) fn declare_in_frontend(
             }
         };
         let folder = forms::folder(&form.ty).expect("a stored form has a folder");
+        let inner = folders
+            .of(&form.module, &form.name)
+            .map(|inner| format!("{inner}/"))
+            .unwrap_or_default();
         let path = format!(
-            "{folder}/{}/{}.tsx",
+            "{folder}/{}/{inner}{}.tsx",
             crate::module_stem(&form.module),
             form.name
         );

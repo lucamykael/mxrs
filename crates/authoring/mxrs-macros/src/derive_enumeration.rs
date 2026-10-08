@@ -22,6 +22,7 @@ pub struct EnumerationArgs {
     module: syn::LitStr,
     name: Option<syn::LitStr>,
     imported: bool,
+    folder: Option<syn::LitStr>,
 }
 
 impl syn::parse::Parse for EnumerationArgs {
@@ -29,6 +30,7 @@ impl syn::parse::Parse for EnumerationArgs {
         let mut module = None;
         let mut name = None;
         let mut imported = false;
+        let mut folder = None;
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             match key.to_string().as_str() {
@@ -41,10 +43,14 @@ impl syn::parse::Parse for EnumerationArgs {
                     name = Some(input.parse()?);
                 }
                 "imported" => imported = true,
+                "folder" => {
+                    input.parse::<syn::Token![=]>()?;
+                    folder = Some(crate::declare::folder_path(input)?);
+                }
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "unknown enumeration option; expected `module`, `name`, or `imported`",
+                        "unknown enumeration option; expected `module`, `name`, `folder`, or `imported`",
                     ));
                 }
             }
@@ -56,6 +62,7 @@ impl syn::parse::Parse for EnumerationArgs {
             module: module.ok_or_else(|| input.error("missing `module = \"ModuleName\"`"))?,
             name,
             imported,
+            folder,
         })
     }
 }
@@ -125,6 +132,7 @@ pub fn expand_enumeration(
             .retain(|attribute| !attribute.path().is_ident("mxrs"));
     }
     let ident = &item.ident;
+    let placed = crate::declare::placed(args.folder.as_ref());
     let registration = (!args.imported).then(|| {
         quote! {
             ::mxrs::inventory::submit! {
@@ -136,7 +144,7 @@ pub fn expand_enumeration(
                     |__mxrs_project| {
                         let mut __mxrs_module = ::mxrs::ModuleBuilder::new(#module);
                         #ident::mx_register(&mut __mxrs_module);
-                        __mxrs_project.merge_module(__mxrs_module.into_decl());
+                        __mxrs_project.merge_module(__mxrs_module.into_decl()#placed);
                     },
                 )
             }

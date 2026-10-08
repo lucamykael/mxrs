@@ -36,6 +36,7 @@ pub use declaration::{
     LocalizedText, MemberAccessDecl, MemberRights, MenuActionDecl, MenuDecl, MenuIconDecl,
     MenuItemDecl, ModuleDecl, OnOverlap, OqlViewSourceDecl, ProjectDecl, RegularExpressionDecl,
     ScheduleUnit, ScheduledEventDecl, ScheduledEventSchedule, SystemMember, SystemMembersDecl,
+    folder_names, folder_segment,
 };
 pub use flow::{
     Activity, DataType, ErrorHandling, FlowParameterDecl, FlowRelations, Member,

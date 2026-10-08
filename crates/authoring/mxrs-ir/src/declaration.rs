@@ -680,6 +680,119 @@ pub struct ModuleDecl {
     /// declares it, and only what the frontend states of it — its forms —
     /// is written. The rest of it, its entities first, stays the model's.
     pub installed: bool,
+    /// The folder each document it declares lives in, by the document's
+    /// name: a path inside the module, `Orders/Admin`, each folder's name
+    /// as [`folder_segment`] spells it. A document it declares and this does
+    /// not name is at the module's root.
+    pub folders: std::collections::BTreeMap<String, String>,
+}
+
+/// A folder's name as a segment of a folder path: a `/` it holds is
+/// `%2F`, and a `%` `%25`, so the path's `/` only ever separates folders.
+pub fn folder_segment(name: &str) -> String {
+    name.replace('%', "%25").replace('/', "%2F")
+}
+
+/// The folder names a folder path spells, outermost first.
+pub fn folder_names(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.replace("%2F", "/").replace("%25", "%"))
+        .collect()
+}
+
+impl ModuleDecl {
+    /// The name of every document this declares that a build places in the
+    /// module's folders; its entities are its domain model's.
+    pub fn document_names(&self) -> Vec<&str> {
+        // A view's source document stays where the model has it: `#[view]`
+        // states no folder yet.
+        let mut names: Vec<&str> = Vec::new();
+        names.extend(self.enumerations.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.constants.iter().map(|decl| decl.name.as_str()));
+        names.extend(
+            self.regular_expressions
+                .iter()
+                .map(|decl| decl.name.as_str()),
+        );
+        names.extend(self.task_queues.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.scheduled_events.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.menus.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.microflows.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.nanoflows.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.rules.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.pages.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.layouts.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.forms.iter().map(crate::FormDecl::name));
+        names.extend(
+            self.javascript_actions
+                .iter()
+                .map(|decl| decl.name.as_str()),
+        );
+        names.extend(self.java_actions.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.json_structures.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.mappings.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.data_sets.iter().map(|decl| decl.name.as_str()));
+        names.extend(self.image_collections.iter().map(|decl| decl.name.as_str()));
+        names.extend(
+            self.published_rest_services
+                .iter()
+                .map(|decl| decl.name.as_str()),
+        );
+        names.retain(|name| !name.is_empty());
+        names
+    }
+
+    /// Folds `declared` — more of this module — into this. Its `roles`
+    /// replace these when it states any; see [`ProjectDecl::merge_module`].
+    pub fn absorb(&mut self, declared: ModuleDecl) {
+        self.entities.extend(declared.entities);
+        self.oql_view_sources.extend(declared.oql_view_sources);
+        self.enumerations.extend(declared.enumerations);
+        self.constants.extend(declared.constants);
+        self.task_queues.extend(declared.task_queues);
+        self.regular_expressions
+            .extend(declared.regular_expressions);
+        self.scheduled_events.extend(declared.scheduled_events);
+        self.menus.extend(declared.menus);
+        self.microflows.extend(declared.microflows);
+        self.nanoflows.extend(declared.nanoflows);
+        self.pages.extend(declared.pages);
+        self.forms.extend(declared.forms);
+        self.javascript_actions.extend(declared.javascript_actions);
+        self.java_actions.extend(declared.java_actions);
+        self.json_structures.extend(declared.json_structures);
+        self.mappings.extend(declared.mappings);
+        self.data_sets.extend(declared.data_sets);
+        self.image_collections.extend(declared.image_collections);
+        self.rules.extend(declared.rules);
+        self.published_rest_services
+            .extend(declared.published_rest_services);
+        self.layouts.extend(declared.layouts);
+        self.folders.extend(declared.folders);
+        if let Some(roles) = declared.roles {
+            self.roles = Some(roles);
+        }
+    }
+
+    /// Places every document this declares in `folder`, a path inside the
+    /// module (`Orders/Admin`); an empty path is the module's root.
+    pub fn in_folder(mut self, folder: &str) -> Self {
+        let folder = folder.trim_matches('/');
+        let names: Vec<String> = self
+            .document_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for name in names {
+            if folder.is_empty() {
+                self.folders.remove(&name);
+            } else {
+                self.folders.insert(name, folder.to_string());
+            }
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -744,36 +857,7 @@ impl ProjectDecl {
             self.modules.push(declared);
             return;
         };
-        target.entities.extend(declared.entities);
-        target.oql_view_sources.extend(declared.oql_view_sources);
-        target.enumerations.extend(declared.enumerations);
-        target.constants.extend(declared.constants);
-        target.task_queues.extend(declared.task_queues);
-        target
-            .regular_expressions
-            .extend(declared.regular_expressions);
-        target.scheduled_events.extend(declared.scheduled_events);
-        target.menus.extend(declared.menus);
-        target.microflows.extend(declared.microflows);
-        target.nanoflows.extend(declared.nanoflows);
-        target.pages.extend(declared.pages);
-        target.forms.extend(declared.forms);
-        target
-            .javascript_actions
-            .extend(declared.javascript_actions);
-        target.java_actions.extend(declared.java_actions);
-        target.json_structures.extend(declared.json_structures);
-        target.mappings.extend(declared.mappings);
-        target.data_sets.extend(declared.data_sets);
-        target.image_collections.extend(declared.image_collections);
-        target.rules.extend(declared.rules);
-        target
-            .published_rest_services
-            .extend(declared.published_rest_services);
-        target.layouts.extend(declared.layouts);
-        if let Some(roles) = declared.roles {
-            target.roles = Some(roles);
-        }
+        target.absorb(declared);
     }
 
     /// Returns the module of this name, declaring an empty one when the

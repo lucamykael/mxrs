@@ -81,7 +81,7 @@ fn service_files(services: &Path) -> Vec<PathBuf> {
 /// The nanoflows the services under `services` declare.
 #[cfg(test)]
 pub(crate) fn read(services: &Path) -> Result<Vec<Declared>, FrontendError> {
-    Ok(read_with_origins(services)?.0)
+    Ok(read_with_origins(services)?.nanoflows)
 }
 
 /// Where a declaration is: its file and line.
@@ -94,11 +94,17 @@ fn origin(path: &Path, source: &str, span: Span) -> String {
     )
 }
 
+/// The nanoflows services declare, where each is declared and the folder
+/// of its module each lives in — by its qualified name.
+pub(crate) struct Services {
+    pub(crate) nanoflows: Vec<Declared>,
+    pub(crate) origins: HashMap<String, String>,
+    pub(crate) folders: HashMap<String, String>,
+}
+
 /// The nanoflows the services under `services` declare, and where each is
 /// declared, by its qualified name.
-pub(crate) fn read_with_origins(
-    services: &Path,
-) -> Result<(Vec<Declared>, HashMap<String, String>), FrontendError> {
+pub(crate) fn read_with_origins(services: &Path) -> Result<Services, FrontendError> {
     let mut sources = Vec::new();
     for path in service_files(services) {
         let source = std::fs::read_to_string(&path).map_err(|source| FrontendError::Io {
@@ -114,6 +120,7 @@ pub(crate) fn read_with_origins(
     // same name is refused, saying where the first is.
     let mut service_origins: HashMap<String, String> = HashMap::new();
     let mut origins: HashMap<String, String> = HashMap::new();
+    let mut folders: HashMap<String, String> = HashMap::new();
     for (path, source) in &sources {
         let allocator = Allocator::default();
         let program = parse(&allocator, path, source)?;
@@ -155,6 +162,9 @@ pub(crate) fn read_with_origins(
             let mut methods = HashMap::new();
             for method in &service.methods {
                 let qualified = format!("{}.{}", service.module, method.nanoflow);
+                if let Some(folder) = &method.folder {
+                    folders.insert(qualified.clone(), folder.clone());
+                }
                 if let Some(first) =
                     origins.insert(qualified.clone(), origin(path, source, method.span))
                 {
@@ -203,7 +213,11 @@ pub(crate) fn read_with_origins(
             }
         }
     }
-    Ok((declared, origins))
+    Ok(Services {
+        nanoflows: declared,
+        origins,
+        folders,
+    })
 }
 
 fn parse<'a>(
@@ -244,6 +258,8 @@ struct Method<'p, 'a> {
     documentation: String,
     /// Who may run it: no one in particular when its comment names no role.
     roles: Vec<String>,
+    /// The folder of its module it lives in: `@folder Orders/Admin`.
+    folder: Option<String>,
     parameters: Vec<Parameter>,
     returns: Option<DataType>,
     span: Span,
@@ -418,6 +434,7 @@ fn services_in<'p, 'a>(
                 methods.push(Method {
                     name: name.to_string(),
                     nanoflow,
+                    folder: tags.folder,
                     documentation: tags.documentation,
                     roles: tags
                         .roles
@@ -488,6 +505,7 @@ struct Tags {
     documentation: String,
     nanoflow: Option<String>,
     roles: Option<Vec<String>>,
+    folder: Option<String>,
     parameters: HashMap<String, String>,
     names: HashMap<String, String>,
     defaults: HashMap<String, String>,
@@ -547,6 +565,13 @@ impl Tags {
                     }
                     tags.roles = Some(roles);
                 }
+                "folder" => {
+                    once(tags.folder.is_some())?;
+                    if rest.is_empty() || rest.split('/').any(str::is_empty) {
+                        return refuse("`@folder <Folder>/<Folder>`, a folder of its module");
+                    }
+                    tags.folder = Some(rest.to_string());
+                }
                 "param" => {
                     if !is_name(ident) {
                         return refuse("`@param <parameter> <what it is>`");
@@ -579,7 +604,7 @@ impl Tags {
                 }
                 _ => {
                     return refuse(
-                        "a tag of a nanoflow: @nanoflow, @roles, @param, @mendixName or @defaultValue",
+                        "a tag of a nanoflow: @nanoflow, @roles, @folder, @param, @mendixName or @defaultValue",
                     );
                 }
             }
@@ -2434,6 +2459,35 @@ mod tests {
             service_files(directory.path()),
             [directory.path().join("sales/orderService.ts")]
         );
+    }
+
+    /// `@folder` names the folder of its module a nanoflow lives in.
+    #[test]
+    fn a_nanoflow_says_its_folder() {
+        let directory = services(&[(
+            "sales/orderService.ts",
+            r#"import { nanoflowService } from "@/mxrs/flows";
+
+export const OrderService = nanoflowService("Sales", {
+  /**
+   * @nanoflow ACT_Order_Open
+   * @folder Orders/Private - en%2Fde
+   */
+  async open(): Promise<void> {},
+});
+"#,
+        )]);
+        let read = read_with_origins(directory.path()).unwrap();
+        assert_eq!(
+            read.folders["Sales.ACT_Order_Open"],
+            "Orders/Private - en%2Fde"
+        );
+        let empty = services(&[(
+            "sales/orderService.ts",
+            "import { nanoflowService } from \"@/mxrs/flows\";\n\nexport const OrderService = nanoflowService(\"Sales\", {\n  /**\n   * @nanoflow ACT_Order_Open\n   * @folder Orders//Admin\n   */\n  async open(): Promise<void> {},\n});\n",
+        )]);
+        let error = read_with_origins(empty.path()).err().unwrap().to_string();
+        assert!(error.contains("@folder"), "{error}");
     }
 
     #[test]

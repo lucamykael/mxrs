@@ -144,7 +144,7 @@ pub fn application_layout(layout: &mut LayoutBuilder) {
 }
 
 /// Lists the open orders.
-#[page(module = "Sales", name = "Order_Overview")]
+#[page(module = "Sales", name = "Order_Overview", folder = "Orders/Overviews")]
 pub fn order_overview(page: &mut PageBuilder) {
     page.title("Orders");
     page.layout("Sales.ApplicationLayout", "Main");
@@ -162,7 +162,7 @@ pub enum Role {
     Clerk,
 }
 
-#[declaration(module = "Sales")]
+#[declaration(module = "Sales", folder = "Configuration")]
 pub fn order_number_format(module: &mut ModuleBuilder) {
     module.regular_expression("OrderNumberFormat", "^A-[0-9]{4}$", |_| {});
 }
@@ -203,6 +203,16 @@ fn sales() -> mxrs::ModuleDecl {
         .into_iter()
         .find(|module| module.name == "Sales")
         .expect("the Sales module is declared")
+}
+
+/// A declaration states the folder of its module what it declares lives
+/// in; one that states none is at the module's root.
+#[test]
+fn a_declaration_places_what_it_declares_in_its_folder() {
+    let sales = sales();
+    assert_eq!(sales.folders["Order_Overview"], "Orders/Overviews");
+    assert_eq!(sales.folders["OrderNumberFormat"], "Configuration");
+    assert!(!sales.folders.contains_key("HomeRegion"));
 }
 
 #[test]

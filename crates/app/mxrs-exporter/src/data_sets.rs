@@ -24,6 +24,7 @@ pub(crate) struct DeclaredDataSet {
 pub(crate) fn declare(
     project: &mxrs_model::Project,
     authored: impl Fn(&str) -> bool,
+    folders: &crate::folders::Folders,
 ) -> crate::Result<Vec<DeclaredDataSet>> {
     let units = project.all_units()?;
     let containers: std::collections::HashMap<&str, &str> = units
@@ -58,7 +59,8 @@ pub(crate) fn declare(
             continue;
         };
         let stem = crate::inner_file_stem(&data_set.name);
-        let source = render(&module, &stem, &data_set);
+        let folder = folders.argument(&module, &data_set.name);
+        let source = render(&module, &stem, &data_set, folder);
         declared.push(DeclaredDataSet {
             module,
             name: data_set.name,
@@ -71,7 +73,7 @@ pub(crate) fn declare(
 }
 
 /// The file declaring `data_set`.
-fn render(module: &str, stem: &str, data_set: &DataSetDecl) -> String {
+fn render(module: &str, stem: &str, data_set: &DataSetDecl, folder: Option<String>) -> String {
     let mut calls: Vec<String> = Vec::new();
     for parameter in &data_set.parameters {
         let name = crate::rust_string(&parameter.name);
@@ -106,10 +108,10 @@ fn render(module: &str, stem: &str, data_set: &DataSetDecl) -> String {
         calls.push(".export_level(ExportLevel::Published)".to_string());
     }
     let mut source = format!(
-        "//! Data set `{module}.{name}`: the OQL query a report runs, the parameters\n//! it takes and the module roles that may run it.\n\nuse mxrs::prelude::*;\n\nconst QUERY: &str = {query};\n\n#[declaration(module = {module_literal})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n",
+        "//! Data set `{module}.{name}`: the OQL query a report runs, the parameters\n//! it takes and the module roles that may run it.\n\nuse mxrs::prelude::*;\n\nconst QUERY: &str = {query};\n\n#[declaration({arguments})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n",
+        arguments = crate::folders::declaration_arguments(module, folder),
         name = data_set.name,
         query = crate::json_structures::snippet_literal(&data_set.query),
-        module_literal = crate::rust_string(module),
     );
     let name = crate::rust_string(&data_set.name);
     if calls.is_empty() {

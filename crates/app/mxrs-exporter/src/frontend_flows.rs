@@ -43,15 +43,24 @@ pub(crate) struct Method {
 
 type Outcome<T> = Result<T, String>;
 
+/// What a nanoflow's comment says beside its name: who may run it — none
+/// said when `None` — and the folder of its module it lives in.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Said<'a> {
+    pub(crate) roles: Option<&'a [String]>,
+    pub(crate) folder: Option<&'a str>,
+}
+
 /// Restates `body`, the Rust body of the nanoflow `declaration`, as the
-/// service method `method`. `roles` are the module roles allowed to run it,
-/// qualified; `callees` the nanoflows a service method declares.
+/// service method `method`. `said` is what its comment says besides — the
+/// module roles allowed to run it, qualified, and the folder it lives in;
+/// `callees` the nanoflows a service method declares.
 pub(crate) fn translate(
     module: &str,
     service: &str,
     method: &str,
     declaration: &MicroflowDecl,
-    roles: Option<&[String]>,
+    said: Said<'_>,
     body: &[String],
     callees: &HashMap<String, Callee>,
 ) -> Outcome<Method> {
@@ -111,7 +120,7 @@ pub(crate) fn translate(
         text.push_str("   *\n");
     }
     text.push_str(&format!("   * @nanoflow {}\n", declaration.name));
-    if let Some(roles) = roles {
+    if let Some(roles) = said.roles {
         let roles: Vec<String> = roles
             .iter()
             .map(|role| match role.split_once('.') {
@@ -124,6 +133,9 @@ pub(crate) fn translate(
         } else {
             text.push_str(&format!("   * @roles {}\n", roles.join(" ")));
         }
+    }
+    if let Some(folder) = said.folder {
+        text.push_str(&format!("   * @folder {folder}\n"));
     }
     for parameter in &parameters {
         if !parameter.documentation.is_empty() {
@@ -3065,7 +3077,10 @@ pub(crate) fn declare_in_frontend(
                 &slot.service,
                 &method_of(slot),
                 &flow.declaration,
-                roles.as_deref(),
+                Said {
+                    roles: roles.as_deref(),
+                    folder: flow.folder.as_deref(),
+                },
                 flow.body(),
                 &callees,
             ) {

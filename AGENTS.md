@@ -164,7 +164,11 @@ read-only behavioral oracle; never edit it.
   is kept from the imported model with an explicit `preserve(...)`. What
   names an artifact lives with it — an attribute is its entity's accessor
   (`Order::number()`), a flow is the type its declaration generates — so
-  authored modules have no separate marker file.
+  authored modules have no separate marker file. So does where it lives:
+  `folder = "Orders/Admin"` on its attribute (`module.folder(...)` for part
+  of a `#[declaration]`), the folder of its module's folder a form's file is
+  in, a nanoflow's `@folder`; one that states none is at its module's root,
+  and a build says when a document leaves a folder for the root.
 - An activity of a flow is the macro named for it (user directive,
   2026-10-02): `create_object!`, `change_object!`, `commit_object!`,
   `delete_object!`, `rollback_object!`, `retrieve!`, `create_list!`,

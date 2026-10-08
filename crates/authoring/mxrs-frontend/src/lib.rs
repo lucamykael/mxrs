@@ -43,6 +43,10 @@ pub struct FrontendDecl {
     /// The file that declares each of those forms, by its type and
     /// qualified name: `Forms$Page Sales.Orders`.
     pub form_origins: HashMap<String, String>,
+    /// The folder of its module each form and nanoflow declared in one
+    /// lives in — `Orders/Admin` — by its qualified name. One this does not
+    /// name is at its module's root.
+    pub folders: HashMap<String, String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -113,9 +117,13 @@ pub fn read_frontend(frontend: impl AsRef<Path>) -> Result<FrontendDecl, Fronten
     }
     let services = source.join("services");
     if services.is_dir() {
-        (declared.nanoflows, declared.nanoflow_origins) = nanoflows::read_with_origins(&services)?;
+        let read = nanoflows::read_with_origins(&services)?;
+        (declared.nanoflows, declared.nanoflow_origins) = (read.nanoflows, read.origins);
+        declared.folders.extend(read.folders);
     }
-    (declared.forms, declared.form_origins) = read_forms(&source)?;
+    let read = read_forms(&source)?;
+    (declared.forms, declared.form_origins) = (read.forms, read.origins);
+    declared.folders.extend(read.folders);
     Ok(declared)
 }
 
@@ -143,13 +151,65 @@ fn read_source(path: &Path) -> Result<String, FrontendError> {
     })
 }
 
+/// The forms a frontend's TSX declares, the file declaring each and the
+/// folder of its module it lives in.
+#[derive(Default)]
+struct ReadForms {
+    forms: Forms,
+    origins: HashMap<String, String>,
+    folders: HashMap<String, String>,
+}
+
+/// The `.tsx` files of a module's folder and of the folders inside it, each
+/// with the path of the folder it is in: the module's own folder of the
+/// same path (`Orders/Admin`), empty at its root.
+fn module_tsx_files(module: &Path) -> Result<Vec<(String, std::path::PathBuf)>, FrontendError> {
+    let mut found = Vec::new();
+    let mut pending = vec![(String::new(), module.to_path_buf())];
+    while let Some((path, folder)) = pending.pop() {
+        found.extend(
+            tsx_files(&folder)?
+                .into_iter()
+                .map(|file| (path.clone(), file)),
+        );
+        let io = |source| FrontendError::Io {
+            path: folder.display().to_string(),
+            source,
+        };
+        for entry in std::fs::read_dir(&folder).map_err(io)? {
+            let nested = entry.map_err(io)?.path();
+            // A link is not a folder of the module's: following one could
+            // read a form twice, or forever.
+            if !nested.is_dir() || nested.is_symlink() {
+                continue;
+            }
+            let name = nested
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            pending.push((
+                if path.is_empty() {
+                    name
+                } else {
+                    format!("{path}/{name}")
+                },
+                nested,
+            ));
+        }
+    }
+    found.sort_by(|left, right| left.1.cmp(&right.1));
+    Ok(found)
+}
+
 /// The pages, layouts, snippets, page templates and building blocks the
 /// frontend's TSX declares: each file of a module's folder under `pages/`,
 /// `components/layout/`, `components/snippets/`, `templates/pages/` and
-/// `templates/blocks/`, read with the elements `mxrs/elements.ts`
-/// declares and the widgets `widgets/` defines.
-fn read_forms(source: &Path) -> Result<(Forms, HashMap<String, String>), FrontendError> {
+/// `templates/blocks/` — a folder inside it being the module's folder of
+/// that name — read with the elements `mxrs/elements.ts` declares and the
+/// widgets `widgets/` defines.
+fn read_forms(source: &Path) -> Result<ReadForms, FrontendError> {
     let mut origins = HashMap::new();
+    let mut folders = HashMap::new();
     let mut files = Vec::new();
     for ty in [
         "Forms$Layout",
@@ -175,26 +235,20 @@ fn read_forms(source: &Path) -> Result<(Forms, HashMap<String, String>), Fronten
         }
         modules.sort();
         for module in modules {
-            // A module's forms are directly in its folder: one in a folder
-            // of that folder would be a form no build sees.
-            for entry in std::fs::read_dir(&module).map_err(io)? {
-                let nested = entry.map_err(io)?.path();
-                if nested.is_dir() {
-                    return Err(FrontendError::Syntax {
-                        path: nested.display().to_string(),
-                        detail: format!(
-                            "a folder inside a module's folder is not read: its files belong in {}",
-                            module.display()
-                        ),
-                    });
-                }
-            }
-            files.extend(tsx_files(&module)?.into_iter().map(|file| (ty, file)));
+            let module_folder = module
+                .file_name()
+                .map(|folder| folder.to_string_lossy().to_string())
+                .unwrap_or_default();
+            files.extend(
+                module_tsx_files(&module)?
+                    .into_iter()
+                    .map(|(folder, file)| (ty, module_folder.clone(), folder, file)),
+            );
         }
     }
     let elements = source.join("mxrs/elements.ts");
     if files.is_empty() {
-        return Ok((Vec::new(), origins));
+        return Ok(ReadForms::default());
     }
     if !elements.is_file() {
         return Err(FrontendError::Syntax {
@@ -221,7 +275,7 @@ fn read_forms(source: &Path) -> Result<(Forms, HashMap<String, String>), Fronten
     }
     let vocabulary = forms::Vocabulary { shapes, widgets };
     let mut declared: Vec<(String, mxrs_ir::FormDecl)> = Vec::new();
-    for (ty, file) in files {
+    for (ty, folder, inner, file) in files {
         let path = file.display().to_string();
         let (module, form) = forms::read_form(&read_source(&file)?, &path, &vocabulary)?;
         if form.kind() != ty {
@@ -243,11 +297,6 @@ fn read_forms(source: &Path) -> Result<(Forms, HashMap<String, String>), Fronten
             });
         }
         // A module named otherwise than its folder is a typo, not a module.
-        let folder = file
-            .parent()
-            .and_then(Path::file_name)
-            .map(|folder| folder.to_string_lossy().to_string())
-            .unwrap_or_default();
         if !naming::is_module_folder(&folder, &module) {
             return Err(FrontendError::Syntax {
                 path,
@@ -257,9 +306,16 @@ fn read_forms(source: &Path) -> Result<(Forms, HashMap<String, String>), Fronten
             });
         }
         origins.insert(format!("{} {module}.{}", form.kind(), form.name()), path);
+        if !inner.is_empty() {
+            folders.insert(format!("{module}.{}", form.name()), inner);
+        }
         declared.push((module, form));
     }
-    Ok((declared, origins))
+    Ok(ReadForms {
+        forms: declared,
+        origins,
+        folders,
+    })
 }
 
 #[cfg(test)]

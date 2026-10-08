@@ -545,11 +545,13 @@ fn synchronize_project_updates_task_queues_inside_folders_without_duplicating_th
 
     let mut updated = ProjectBuilder::new("11.12.1");
     updated.module("Jobs", |module| {
-        module.task_queue(
-            "Imports",
-            TaskQueueConfig::Fixed { parallelism: 12 },
-            |_| {},
-        );
+        module.folder("Queues", |module| {
+            module.task_queue(
+                "Imports",
+                TaskQueueConfig::Fixed { parallelism: 12 },
+                |_| {},
+            );
+        });
     });
     mxrs_writer::synchronize_project(&path, &updated.build()).unwrap();
 

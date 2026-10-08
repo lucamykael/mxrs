@@ -389,20 +389,15 @@ pub(crate) fn synchronize_pages_with_identity(
     // at the target's own directory (`WidgetPackage.find(File.dirname(@path))`).
     let packages_root = mpr.path().parent().map(std::path::Path::to_path_buf);
 
-    let existing_by_name: HashMap<String, String> = mpr
-        .children_of(module_id)?
-        .into_iter()
-        .filter(|u| u.containment_name == "Documents")
-        .filter_map(|u| {
-            let doc = mpr.parse_contents(&u).ok()?;
-            let type_name = doc.get_str("$Type").ok()?;
-            if type_name != "Forms$Page" && type_name != "Pages$Page" {
-                return None;
-            }
-            let name = doc.get_str("Name").ok()?.to_string();
-            Some((name, u.unit_id))
-        })
-        .collect();
+    // A page is found wherever it is in the module, its folders included.
+    let mut existing_by_name: HashMap<String, String> = HashMap::new();
+    for page_type in ["Forms$Page", "Pages$Page"] {
+        existing_by_name.extend(
+            existing_documents_by_name(mpr, module_id, page_type)?
+                .into_iter()
+                .map(|(name, (id, _))| (name, id)),
+        );
+    }
 
     for decl in pages {
         let existing_id = existing_by_name.get(&decl.name).cloned();

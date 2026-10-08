@@ -53,6 +53,10 @@ pub fn write_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Result<()
         )?;
     }
     synchronize_mappings(&mut mpr, &root_id, project, identity)?;
+    let modules = existing_module_ids_by_name(&mpr, &root_id)?;
+    for warning in crate::folders::place_documents(&mut mpr, &modules, project, identity)? {
+        eprintln!("[mxrs] warning: {warning}");
+    }
     security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;
     if let Some(declaration) = &project.navigation {
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;
@@ -343,6 +347,10 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
         )?;
     }
     synchronize_mappings(&mut mpr, &root_id, project, identity)?;
+    let modules = existing_module_ids_by_name(&mpr, &root_id)?;
+    for warning in crate::folders::place_documents(&mut mpr, &modules, project, identity)? {
+        eprintln!("[mxrs] warning: {warning}");
+    }
     security::synchronize_declared_security(&mut mpr, &root_id, project, identity)?;
     if let Some(declaration) = &project.navigation {
         navigation::synchronize_navigation(&mut mpr, &root_id, declaration, identity)?;

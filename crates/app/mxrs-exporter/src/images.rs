@@ -27,6 +27,7 @@ pub(crate) struct DeclaredCollection {
 pub(crate) fn declare(
     modules: &[mxrs_model::Module],
     authored: impl Fn(&str) -> bool,
+    folders: &crate::folders::Folders,
 ) -> Vec<DeclaredCollection> {
     let mut declared = Vec::new();
     for module in modules {
@@ -40,7 +41,9 @@ pub(crate) fn declare(
             if document.get_str("$Type").ok() != Some("Images$ImageCollection") {
                 continue;
             }
-            if let Some(collection) = collection(module_name, document) {
+            let folder =
+                folders.argument(module_name, document.get_str("Name").unwrap_or_default());
+            if let Some(collection) = collection(module_name, document, folder) {
                 declared.push(collection);
             }
         }
@@ -49,7 +52,11 @@ pub(crate) fn declare(
     declared
 }
 
-fn collection(module: &str, document: &mxrs_bson::Document) -> Option<DeclaredCollection> {
+fn collection(
+    module: &str,
+    document: &mxrs_bson::Document,
+    placed: Option<String>,
+) -> Option<DeclaredCollection> {
     let keys: Vec<&str> = document.keys().map(String::as_str).collect();
     if keys
         != [
@@ -104,8 +111,8 @@ fn collection(module: &str, document: &mxrs_bson::Document) -> Option<DeclaredCo
     }
     let stem = crate::inner_file_stem(name);
     let mut source = format!(
-        "//! Image collection `{module}.{name}`: the images its pages show, each a\n//! file of `assets/{folder}/`.\n\nuse mxrs::prelude::*;\n\n#[declaration(module = {})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n",
-        crate::rust_string(module),
+        "//! Image collection `{module}.{name}`: the images its pages show, each a\n//! file of `assets/{folder}/`.\n\nuse mxrs::prelude::*;\n\n#[declaration({})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n",
+        crate::folders::declaration_arguments(module, placed),
     );
     let mut calls = Vec::new();
     for (image_name, format, file) in &images {

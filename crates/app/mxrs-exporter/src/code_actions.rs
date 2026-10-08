@@ -75,6 +75,7 @@ pub(crate) fn declare(
     project: &mxrs_model::Project,
     kind: Kind,
     authored: impl Fn(&str) -> bool,
+    folders: &crate::folders::Folders,
 ) -> crate::Result<Vec<DeclaredAction>> {
     let units = project.all_units()?;
     let containers: std::collections::HashMap<&str, &str> = units
@@ -115,7 +116,8 @@ pub(crate) fn declare(
             continue;
         };
         let stem = crate::inner_file_stem(declaration.name());
-        let source = render(&module, &stem, &declaration);
+        let folder = folders.argument(&module, declaration.name());
+        let source = render(&module, &stem, &declaration, folder);
         declared.push(DeclaredAction {
             module,
             name: declaration.name().to_string(),
@@ -148,7 +150,7 @@ pub(crate) fn module_of(
 
 /// The file declaring `declaration`, stating only what differs from a new
 /// one.
-fn render(module: &str, stem: &str, declaration: &Declaration) -> String {
+fn render(module: &str, stem: &str, declaration: &Declaration, folder: Option<String>) -> String {
     let (parameters, return_type, return_name, documentation, excluded, export_level) =
         match declaration {
             Declaration::Java(action) => (
@@ -228,8 +230,8 @@ fn render(module: &str, stem: &str, declaration: &Declaration) -> String {
         ),
     };
     let mut source = format!(
-        "{header}\nuse mxrs::prelude::*;\n\n#[declaration(module = {})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n",
-        crate::rust_string(module),
+        "{header}\nuse mxrs::prelude::*;\n\n#[declaration({})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n",
+        crate::folders::declaration_arguments(module, folder),
     );
     let name = crate::rust_string(name);
     if calls.is_empty() {

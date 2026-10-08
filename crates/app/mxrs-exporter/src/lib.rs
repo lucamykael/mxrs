@@ -71,6 +71,7 @@ mod data_sets;
 mod entity_export;
 mod flow_export;
 mod flow_general;
+mod folders;
 mod frontend_export;
 mod frontend_flows;
 mod frontend_forms;
@@ -275,7 +276,14 @@ fn import_cargo_project_inner(
     let persistence_source = render_persistence_module(&modules);
     let infrastructure_source = render_infrastructure_module(persistence_source.is_some());
     let packages = package_stems_for_import(&modules, mpr_path);
-    let documents_export = render_documents_module(&project, &packages)?;
+    // Each declaration states the folder of its module it lives in.
+    let folders = folders::Folders::read(&project)?;
+    for page in &mut converted_pages {
+        page.folder = folders
+            .of(&page.module_name, &page.decl.name)
+            .map(str::to_string);
+    }
+    let documents_export = render_documents_module(&project, &packages, &folders)?;
     // A flow names an enumeration's value by its variant where the value has
     // one.
     let enumeration_values: std::collections::HashSet<String> = documents_export
@@ -312,6 +320,11 @@ fn import_cargo_project_inner(
     let java_actions: std::collections::HashSet<String> = java_macros.keys().cloned().collect();
     let (mut converted_flows, kept_flows) =
         flow_export::collect_all(&project, &modules, &enumeration_values, &java_actions)?;
+    for flow in &mut converted_flows {
+        flow.folder = folders
+            .of(&flow.module, &flow.declaration.name)
+            .map(str::to_string);
+    }
     let flow_relations = mxrs_model::relations::flow_relations(&project)?;
     // Nanoflows are the frontend's services: each one whose TypeScript
     // reads back as its declaration is declared there, not in Rust.
@@ -348,6 +361,7 @@ fn import_cargo_project_inner(
                 || (frontend_forms::is_template(ty)
                     && module_root(&module_stem(module), &packages) != ModuleRoot::Authored)
         },
+        &folders,
     );
     let security_document = project.all_units()?.into_iter().find_map(|unit| {
         let document = project.mpr().parse_contents(&unit).ok()?;
@@ -366,11 +380,15 @@ fn import_cargo_project_inner(
         None => false,
     };
     let navigation_source = frontend_export::render_navigation(&navigation);
-    let task_queues_source = render_task_queue_declarations(&project)?;
+    let task_queues_source = render_task_queue_declarations(&project, &folders)?;
     // The HTTP layer is generated for the axum adapter only; the other two
     // presets keep their server stub until their routers are ported, and
     // declare the services the project made all the same.
-    let collected = collect_published_services(&project, &packages, &http_parameters(&modules))?;
+    let mut collected =
+        collect_published_services(&project, &packages, &http_parameters(&modules))?;
+    for service in &mut collected {
+        service.folder = folders.argument(&service.module_name, &service.name);
+    }
     let (published_services, declared_only_services) = match api_mode {
         ApiMode::Axum => (collected, Vec::new()),
         _ => (
@@ -444,11 +462,12 @@ fn import_cargo_project_inner(
             }),
     );
     let javascript_actions =
-        code_actions::declare(&project, code_actions::Kind::JavaScript, authored)?;
-    let java_actions = code_actions::declare(&project, code_actions::Kind::Java, authored)?;
-    let json_structures = json_structures::declare(&project, authored)?;
-    let data_sets = data_sets::declare(&project, authored)?;
-    let image_collections = images::declare(&modules, authored);
+        code_actions::declare(&project, code_actions::Kind::JavaScript, authored, &folders)?;
+    let java_actions =
+        code_actions::declare(&project, code_actions::Kind::Java, authored, &folders)?;
+    let json_structures = json_structures::declare(&project, authored, &folders)?;
+    let data_sets = data_sets::declare(&project, authored, &folders)?;
+    let image_collections = images::declare(&modules, authored, &folders);
     declared.extend(image_collections.iter().map(|collection| {
         (
             "Images$ImageCollection".to_string(),
@@ -494,7 +513,7 @@ fn import_cargo_project_inner(
             data_set.name.clone(),
         )
     }));
-    let mappings = mappings::declare(&project, authored)?;
+    let mappings = mappings::declare(&project, authored, &folders)?;
     // An export mapping whose structure is declared too reads its runtime
     // mapping from the declaration: one source for both.
     let declared_structures: std::collections::BTreeSet<String> = json_structures
@@ -1462,6 +1481,7 @@ impl DerivedEnumeration {
 fn render_documents_module(
     project: &Project,
     packages: &std::collections::BTreeSet<String>,
+    folders: &folders::Folders,
 ) -> Result<DocumentsExport> {
     let mut declarations = collect_editable_documents(project)?;
     let mut counts = HashMap::new();
@@ -1494,6 +1514,7 @@ fn render_documents_module(
                 &documentation,
                 &values,
                 root == ModuleRoot::Package,
+                folders.argument(&module, &name),
             );
             derived_enumerations.insert(
                 format!("{module}.{name}"),
@@ -1510,7 +1531,8 @@ fn render_documents_module(
         }
         let module = editable_document_module(&declaration).to_string();
         let stem = inner_file_stem(editable_document_key(&declaration).2);
-        let source = render_document_file(&module, &stem, declaration);
+        let folder = folders.argument(&module, editable_document_key(&declaration).2);
+        let source = render_document_file(&module, &stem, declaration, folder);
         documents_by_module.push((module, stem, source));
     }
 
@@ -1527,8 +1549,14 @@ fn render_documents_module(
 /// One Mendix document — a constant, regular expression, scheduled event
 /// or standalone menu — as its own editable file. A constant is the function
 /// that builds it; the other kinds declare into their module through its
-/// builder. `stem` is the file's, and so the function's.
-fn render_document_file(module_name: &str, stem: &str, document: EditableDocument) -> String {
+/// builder. `stem` is the file's, and so the function's; `folder` the
+/// attribute's argument placing it in its module's folder.
+fn render_document_file(
+    module_name: &str,
+    stem: &str,
+    document: EditableDocument,
+    folder: Option<String>,
+) -> String {
     if let EditableDocument::Constant {
         module,
         name,
@@ -1562,6 +1590,7 @@ fn render_document_file(module_name: &str, stem: &str, document: EditableDocumen
         if derive_pascal_case(stem) != *name {
             arguments.push(format!("name = {}", rust_string(name)));
         }
+        arguments.extend(folder);
         let _ = writeln!(
             source,
             "#[constant({})]\npub fn {stem}(constant: &mut ConstantBuilder) {{\n{}\n}}",
@@ -1579,12 +1608,14 @@ fn render_document_file(module_name: &str, stem: &str, document: EditableDocumen
         | EditableDocument::TaskQueue { .. } => "Document",
     };
     let name = editable_document_key(&document).2.to_string();
+    let mut arguments = vec![format!("module = {}", rust_string(module_name))];
+    arguments.extend(folder);
     let mut source = format!(
         "//! {kind} `{module_name}.{name}`.\n\n\
          use mxrs::prelude::*;\n\n\
-         #[declaration(module = {})]\n\
+         #[declaration({})]\n\
          pub fn {stem}(module: &mut ModuleBuilder) {{\n",
-        rust_string(module_name),
+        arguments.join(", "),
     );
     render_editable_document_body(&mut source, document);
     source.push_str("}\n");
@@ -1601,6 +1632,7 @@ fn render_enumeration_file(
     documentation: &str,
     values: &[(String, Vec<(String, String)>)],
     imported: bool,
+    folder: Option<String>,
 ) -> (String, String, HashMap<String, String>) {
     let mut type_name = derive_pascal_case(&sanitize_ident(name));
     let mut declared = HashMap::new();
@@ -1677,6 +1709,8 @@ fn render_enumeration_file(
     }
     if imported {
         arguments.push("imported".to_string());
+    } else {
+        arguments.extend(folder);
     }
     let _ = writeln!(out, "#[enumeration({})]", arguments.join(", "));
     for option in options {
@@ -2039,7 +2073,10 @@ fn render_task_queues_module(project: &Project, mendix_version: &str) -> Result<
 
 /// The project's task queues for a Cargo project: one self-registering
 /// function per module that declares any. `None` when the model has none.
-fn render_task_queue_declarations(project: &Project) -> Result<Option<String>> {
+fn render_task_queue_declarations(
+    project: &Project,
+    folders: &folders::Folders,
+) -> Result<Option<String>> {
     let mut queues = collect_editable_documents(project)?;
     queues.retain(|document| matches!(document, EditableDocument::TaskQueue { .. }));
     if queues.is_empty() {
@@ -2063,13 +2100,28 @@ fn render_task_queue_declarations(project: &Project) -> Result<Option<String>> {
                 rust_string(&module),
                 module_stem(&module)
             );
-            current_module = Some(module);
+            current_module = Some(module.clone());
         }
+        let folder = folders
+            .of(&module, editable_document_key(&declaration).2)
+            .map(str::to_string);
         let mut body = String::new();
         render_editable_document_body(&mut body, declaration);
         // The body is shared with the single-file export, which names the
         // implementation crate; a Cargo project has the prelude instead.
-        source.push_str(&body.replace("::mxrs_ir::", ""));
+        let body = body.replace("::mxrs_ir::", "");
+        // A queue in a folder of its module is declared there.
+        match folder {
+            Some(folder) => {
+                let _ = writeln!(source, "    module.folder({folder:?}, |module| {{");
+                source.push_str(&body);
+                source.push_str(
+                    "    });
+",
+                );
+            }
+            None => source.push_str(&body),
+        }
     }
     source.push_str("}\n");
     Ok(Some(source))
@@ -5810,7 +5862,7 @@ fn render_declared_service(
         stem @ ("service" | "router") => format!("declare_{stem}"),
         stem => stem.to_string(),
     };
-    let module = rust_string(&service.module_name);
+    let module = folders::declaration_arguments(&service.module_name, service.folder.clone());
     let Some(controllers) = controllers else {
         out.push_str(
             "//!\n//! This file declares the service, and every build writes it into the\n//! model: the runtime serving the model serves it. No router of this\n//! project's routes it.\n\nuse mxrs::prelude::*;\n\n",
@@ -5820,7 +5872,7 @@ fn render_declared_service(
         }
         let _ = write!(
             out,
-            "#[declaration(module = {module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    let mut service = PublishedRestServiceBuilder::new({}, {});\n{}    module.published_rest_service(service);\n}}\n",
+            "#[declaration({module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    let mut service = PublishedRestServiceBuilder::new({}, {});\n{}    module.published_rest_service(service);\n}}\n",
             rust_string(&declaration.name),
             rust_string(&declaration.path),
             if chain.is_empty() {
@@ -5850,7 +5902,7 @@ fn render_declared_service(
     }
     let _ = write!(
         out,
-        "/// What the service publishes, each operation with the function serving it.\npub fn service() -> Service<AppState> {{\n    Service::new({}, {}){chain}\n}}\n\n#[declaration(module = {module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    module.published_rest_service(service().declaration());\n}}\n\npub fn router() -> Router<AppState> {{\n    service().router()\n}}\n\n#[cfg(test)]\nmod tests {{\n    /// Every operation the service declares is served, and no two answer\n    /// one method at one route: building the router would panic.\n    #[test]\n    fn the_router_serves_the_service() {{\n        let _router = super::router();\n    }}\n}}\n",
+        "/// What the service publishes, each operation with the function serving it.\npub fn service() -> Service<AppState> {{\n    Service::new({}, {}){chain}\n}}\n\n#[declaration({module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    module.published_rest_service(service().declaration());\n}}\n\npub fn router() -> Router<AppState> {{\n    service().router()\n}}\n\n#[cfg(test)]\nmod tests {{\n    /// Every operation the service declares is served, and no two answer\n    /// one method at one route: building the router would panic.\n    #[test]\n    fn the_router_serves_the_service() {{\n        let _router = super::router();\n    }}\n}}\n",
         rust_string(&declaration.name),
         rust_string(&declaration.path),
     );
@@ -6807,6 +6859,8 @@ struct PublishedService {
     /// a package's service, or one the declaration cannot restate or the
     /// router cannot serve whole, whose document stays the model's.
     declaration: Option<mxrs_ir::PublishedRestServiceDecl>,
+    /// `folder = "..."` when the service is in a folder of its module.
+    folder: Option<String>,
 }
 
 /// How a published service authenticates its callers, as the model declares
@@ -7318,6 +7372,7 @@ fn published_service(
         routes,
         authentication: service_authentication(document),
         declaration,
+        folder: None,
     })
 }
 
@@ -10241,7 +10296,7 @@ mod tests {
             ),
         ];
         let (rendered, type_name, _) =
-            render_enumeration_file("Sales", "ENUM_Status", "Lifecycle.", &values, false);
+            render_enumeration_file("Sales", "ENUM_Status", "Lifecycle.", &values, false, None);
         assert_eq!(type_name, "ENUMStatus");
         assert_eq!(
             rendered,
@@ -10266,7 +10321,21 @@ pub enum ENUMStatus {
         // An installed module's enumeration is named, not declared, and
         // documentation a comment would change is stated as an option.
         let (rendered, type_name, _) =
-            render_enumeration_file("Atlas", "Self", "- a list", &[], true);
+            render_enumeration_file("Atlas", "Self", "- a list", &[], true, None);
+        // One in a folder of its module says so; an installed one declares
+        // nothing, and so places nothing.
+        let (placed, _, _) = render_enumeration_file(
+            "Sales",
+            "Priority",
+            "",
+            &[],
+            false,
+            Some("folder = \"Config\"".to_string()),
+        );
+        assert!(
+            placed.contains("#[enumeration(module = \"Sales\", folder = \"Config\")]"),
+            "{placed}"
+        );
         assert_eq!(type_name, "SelfEnumeration");
         assert_eq!(
             rendered,

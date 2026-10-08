@@ -19,6 +19,8 @@ pub(crate) struct ConvertedFlow {
     pub native_type: String,
     pub declaration: MicroflowDecl,
     source: Vec<String>,
+    /// The folder of its module it lives in; `None` at its root.
+    pub folder: Option<String>,
 }
 
 impl ConvertedFlow {
@@ -547,6 +549,7 @@ pub(crate) fn collect_all(
                         native_type: doc.get_str("$Type").ok()?.to_string(),
                         declaration,
                         source: crate::flow_general::polish(source),
+                        folder: None,
                     }),
                     Err(reason) => {
                         keep(&mut kept, explain, module, doc, reason);
@@ -717,6 +720,7 @@ fn convert(
         native_type: doc.get_str("$Type").ok()?.into(),
         declaration,
         source,
+        folder: None,
     })
 }
 
@@ -1718,6 +1722,9 @@ fn flow_item(
     if plan.explicit_name {
         arguments.push(format!("name = {}", rust_string(name)));
     }
+    if let Some(folder) = &flow.folder {
+        arguments.push(format!("folder = {}", rust_string(folder)));
+    }
     // What the model says the flow is related to, each named by the Rust
     // item that declares it where there is one.
     if let Some(related) = relations.get(&format!("{}.{name}", flow.module)) {
@@ -2032,6 +2039,7 @@ mod tests {
             .into(),
             declaration: MicroflowDecl::new(name),
             source: Vec::new(),
+            folder: None,
         }
     }
 

@@ -591,6 +591,19 @@ pub struct Order {
 | `#[navigation_item(profile = "...", caption = "...")]` | fn | one item, declared next to the page it opens |
 | `#[demo_user]` | fn | a local demo user |
 
+Where a document lives in its module is its declaration's too.
+`folder = "Orders/Admin"` on the attribute of a flow, page, layout,
+constant, menu, enumeration or `#[declaration]` places what it declares in
+that folder of its module — a `/` in a folder's own name is `%2F` — and
+`module.folder("Queues", |module| { ... })` places part of what one
+`#[declaration]` declares. A form of the frontend is in the folder its file
+is in under its module's folder (`pages/sales/Admin/Orders.tsx`), and a
+nanoflow says `@folder Orders/Admin`. A document whose declaration states no
+folder is at its module's root: a build makes each folder the model lacks,
+moves every document it declares into its own, warns when one leaves a
+folder for the root, and keeps folders no declaration names any more. A
+view's source document stays where the model has it.
+
 The rules that keep these readable:
 
 - **The type says what it can.** A field's type is the attribute's

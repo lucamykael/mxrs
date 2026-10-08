@@ -83,6 +83,8 @@ pub struct ConvertedPage {
     pub decl: PageDecl,
     source_type: String,
     flow_return_entities: HashMap<String, String>,
+    /// The folder of its module it lives in; `None` at its root.
+    pub folder: Option<String>,
 }
 
 impl ConvertedPage {
@@ -200,6 +202,7 @@ pub fn convert_pages_for_version(
                     pages.push(ConvertedPage {
                         module_name: module_name.clone(),
                         function_name: String::new(),
+                        folder: None,
                         source_type: page
                             .raw_document()
                             .get_str("$Type")
@@ -1011,6 +1014,9 @@ fn render_page_function(page: &ConvertedPage) -> String {
     let mut arguments = vec![format!("module = {:?}", page.module_name)];
     if crate::derive_pascal_case(&page.function_name) != decl.name {
         arguments.push(format!("name = {:?}", decl.name));
+    }
+    if let Some(folder) = &page.folder {
+        arguments.push(format!("folder = {folder:?}"));
     }
     let _ = writeln!(out, "#[page({})]", arguments.join(", "));
     let _ = writeln!(out, "pub fn {}(p: &mut PageBuilder) {{", page.function_name);
@@ -1935,6 +1941,7 @@ mod tests {
             source_type: "Forms$Page".into(),
             decl,
             flow_return_entities: HashMap::new(),
+            folder: None,
         });
         assert!(source.contains("p.class(\"page-order\")"));
         assert!(source.contains("p.style(\"max-width: 80rem\")"));
@@ -1973,6 +1980,7 @@ mod tests {
             source_type: "Forms$Page".into(),
             decl,
             flow_return_entities: HashMap::new(),
+            folder: None,
         });
         assert!(source.contains("b.save_changes();"), "{source}");
         assert!(source.contains("b.cancel_changes();"), "{source}");
@@ -2072,6 +2080,7 @@ mod tests {
         let converted = ConvertedPage {
             module_name: "Sales".into(),
             function_name: "order_detail".into(),
+            folder: None,
             source_type: "Forms$Page".into(),
             flow_return_entities: HashMap::from([(
                 "Sales.ACT_GetOrder".into(),
@@ -2138,6 +2147,7 @@ mod tests {
                 function_name: "order_edit".into(),
                 source_type: "Forms$Page".into(),
                 flow_return_entities: HashMap::new(),
+                folder: None,
                 decl,
             },
             &sales_names(&entities),
@@ -2211,6 +2221,7 @@ mod tests {
             function_name: String::new(),
             source_type: "Forms$Page".into(),
             flow_return_entities: HashMap::new(),
+            folder: None,
             decl: PageDecl::new(name),
         };
         let mut pages = [

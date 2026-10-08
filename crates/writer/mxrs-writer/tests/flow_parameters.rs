@@ -249,6 +249,10 @@ fn sync_preserves_folder_parameter_and_type_ids_and_future_fields() {
     param.documentation = "Edited".into();
     param.default_value = Some("'new'".into());
     param.required = true;
+    // The declaration states the folder the flow is in.
+    project.modules[0]
+        .folders
+        .insert("Target".into(), "Application".into());
     mxrs_writer::synchronize_project(&path, &project).unwrap();
     let after = flow(&path, "Target");
     assert_eq!(id(&before), id(&after));
