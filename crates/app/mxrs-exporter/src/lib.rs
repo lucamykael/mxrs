@@ -364,12 +364,18 @@ fn import_cargo_project_inner(
     let navigation_source = frontend_export::render_navigation(&navigation);
     let task_queues_source = render_task_queue_declarations(&project)?;
     // The HTTP layer is generated for the axum adapter only; the other two
-    // presets keep their server stub until their routers are ported.
-    let published_services = match api_mode {
-        ApiMode::Axum => {
-            collect_published_services(&project, &packages, &http_parameters(&modules))?
-        }
-        _ => Vec::new(),
+    // presets keep their server stub until their routers are ported, and
+    // declare the services the project made all the same.
+    let collected = collect_published_services(&project, &packages, &http_parameters(&modules))?;
+    let (published_services, declared_only_services) = match api_mode {
+        ApiMode::Axum => (collected, Vec::new()),
+        _ => (
+            Vec::new(),
+            collected
+                .into_iter()
+                .filter(|service| service.declaration.is_some())
+                .collect::<Vec<_>>(),
+        ),
     };
     let export_mappings = collect_export_mappings(
         &project,
@@ -467,6 +473,7 @@ fn import_cargo_project_inner(
     declared.extend(
         published_services
             .iter()
+            .chain(&declared_only_services)
             .filter(|service| service.declaration.is_some())
             .map(|service| {
                 (
@@ -829,6 +836,24 @@ fn import_cargo_project_inner(
             });
         }
     }
+    // A preset no axum router serves declares a service the project made
+    // in its module's controllers folder, and routes none.
+    for service in &declared_only_services {
+        let Some(declaration) = &service.declaration else {
+            continue;
+        };
+        let module = generated_module(&mut generated_modules, &service.module_name);
+        let http = module.http.get_or_insert_with(|| GeneratedHttp {
+            index: String::new(),
+            files: Vec::new(),
+        });
+        http.files.push((
+            service.file_stem.clone(),
+            render_declared_service(service, declaration, None),
+        ));
+        http.files.sort_by(|left, right| left.0.cmp(&right.0));
+        http.index = render_module_http_index(&service.module_name, &http.files);
+    }
     // Ownership combines the model's `FromAppStore` flag with any adjacent
     // MXRB authoring manifest discovered above.
     for module in &modules {
@@ -944,7 +969,13 @@ fn import_cargo_project_inner(
         }
         _ => write_text(
             &controllers_directory.join("mod.rs"),
-            &render_server_stub(api_mode),
+            &render_server_stub(
+                api_mode,
+                &declared_only_services
+                    .iter()
+                    .map(|service| module_stem(&service.module_name))
+                    .collect(),
+            ),
         )?,
     }
     write_text(
@@ -1157,7 +1188,7 @@ fn render_infrastructure_module(persistence: bool) -> String {
 
 /// The non-axum presets keep their framework's server stub until their
 /// published-REST routers are ported.
-fn render_server_stub(api_mode: ApiMode) -> String {
+fn render_server_stub(api_mode: ApiMode, modules: &std::collections::BTreeSet<String>) -> String {
     let server = match api_mode {
         ApiMode::Axum => {
             "use axum::{Router, routing::get};\n\npub fn router() -> Router {\n    Router::new().route(\"/health\", get(|| async { \"ok\" }))\n}\n\npub async fn serve() -> Result<(), Box<dyn std::error::Error>> {\n    let listener = tokio::net::TcpListener::bind(\"0.0.0.0:3000\").await?;\n    axum::serve(listener, router()).await?;\n    Ok(())\n}\n"
@@ -1169,9 +1200,15 @@ fn render_server_stub(api_mode: ApiMode) -> String {
             "#[rocket::get(\"/health\")]\nfn health() -> &'static str {\n    \"ok\"\n}\n\npub async fn serve() -> Result<(), rocket::Error> {\n    rocket::build().mount(\"/\", rocket::routes![health]).launch().await?;\n    Ok(())\n}\n"
         }
     };
+    let declared: String = modules
+        .iter()
+        .map(|module| format!("pub mod {module};\n"))
+        .collect();
     format!(
-        "//! {} server stub. Published REST services are routed for the axum\n//! preset only; this preset keeps the model routes in model/imported\n//! until its router is ported.\n\npub mod server {{\n{}\n}}\n",
+        "//! {} server stub. Published REST services are routed for the axum\n//! preset only: a service of a module the project made is declared in that\n//! module's folder here, and every build writes it into the model, but this\n//! preset routes none of them yet.\n\n{}{}pub mod server {{\n{}\n}}\n",
         api_mode.name(),
+        declared,
+        if declared.is_empty() { "" } else { "\n" },
         indent(server, 4)
     )
 }
@@ -5471,7 +5508,7 @@ fn render_published_service(
     controllers.sort_unstable();
     controllers.dedup();
     let routes = match &service.declaration {
-        Some(declaration) => render_declared_service(service, declaration, &controllers),
+        Some(declaration) => render_declared_service(service, declaration, Some(&controllers)),
         None => render_service_routes(service, &controllers),
     };
     let mut files = vec![(service.file_stem.clone(), routes)];
@@ -5489,10 +5526,14 @@ fn render_published_service(
 /// — with the controller function serving each operation, and its router
 /// serves exactly that. The build writes the model's service from the same
 /// statement.
+///
+/// Without `controllers` — a project no axum router serves — the file is
+/// the declaration alone, which the build writes into the model all the
+/// same.
 fn render_declared_service(
     service: &PublishedService,
     declaration: &mxrs_ir::PublishedRestServiceDecl,
-    controllers: &[&str],
+    controllers: Option<&[&str]>,
 ) -> String {
     use mxrs_ir::{RestAuthentication, RestCommit, RestMethod, RestParameterSource};
 
@@ -5534,11 +5575,8 @@ fn render_declared_service(
         ),
     };
 
-    let mut chain = format!(
-        "Service::new({}, {})",
-        rust_string(&declaration.name),
-        rust_string(&declaration.path)
-    );
+    let served = controllers.is_some();
+    let mut chain = String::new();
     if declaration.service_name != declaration.name {
         let value = constants.text("service_name".into(), &declaration.service_name);
         let _ = write!(chain, ".service_name({value})");
@@ -5559,8 +5597,16 @@ fn render_declared_service(
     }
     match (&declaration.authentication, &service.authentication) {
         (RestAuthentication::None, _) => {}
-        (_, ServiceAuthentication::Basic { .. }) => {
+        (_, ServiceAuthentication::Basic { .. }) if served => {
             chain.push_str(".basic_authentication(ALLOWED_ROLES)");
+        }
+        (_, ServiceAuthentication::Basic { allowed_roles }) => {
+            let roles = allowed_roles
+                .iter()
+                .map(|role| rust_string(role))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(chain, ".basic_authentication(&[{roles}])");
         }
         (
             RestAuthentication::Required {
@@ -5684,9 +5730,13 @@ fn render_declared_service(
             } else {
                 format!("|operation| {{ operation{configure}; }}")
             };
-            let handler = format!("{}::{}", served.controller, served.handler);
+            let handler = if controllers.is_some() {
+                format!("{}::{}, ", served.controller, served.handler)
+            } else {
+                String::new()
+            };
             let arguments = format!(
-                "{}, {}, {handler}, {configure}",
+                "{}, {}, {handler}{configure}",
                 constants.name(format!("{base}_path"), &operation.path, 56),
                 constants.name(format!("{base}_microflow"), &operation.microflow, 56),
             );
@@ -5720,6 +5770,32 @@ fn render_declared_service(
         service.name, service.module_name, service.base_path,
     );
     out.push_str(&service_authentication_paragraph(&service.authentication));
+    // The file's own `service` and `router` keep their names.
+    let stem = match service.file_stem.as_str() {
+        stem @ ("service" | "router") => format!("declare_{stem}"),
+        stem => stem.to_string(),
+    };
+    let module = rust_string(&service.module_name);
+    let Some(controllers) = controllers else {
+        out.push_str(
+            "//!\n//! This file declares the service, and every build writes it into the\n//! model: the runtime serving the model serves it. No router of this\n//! project's routes it.\n\nuse mxrs::prelude::*;\n\n",
+        );
+        for (name, value) in &constants.list {
+            let _ = writeln!(out, "const {name}: &str = {value};\n");
+        }
+        let _ = write!(
+            out,
+            "#[declaration(module = {module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    let mut service = PublishedRestServiceBuilder::new({}, {});\n{}    module.published_rest_service(service);\n}}\n",
+            rust_string(&declaration.name),
+            rust_string(&declaration.path),
+            if chain.is_empty() {
+                String::new()
+            } else {
+                format!("    service{chain};\n")
+            },
+        );
+        return out;
+    };
     out.push_str(
         "//!\n//! This file declares the service — every build writes it into the model —\n//! and binds each operation to the controller function serving it, beside\n//! this file. Its router serves exactly what it declares.\n",
     );
@@ -5739,13 +5815,9 @@ fn render_declared_service(
     }
     let _ = write!(
         out,
-        "/// What the service publishes, each operation with the function serving it.\npub fn service() -> Service<AppState> {{\n    {chain}\n}}\n\n#[declaration(module = {module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    module.published_rest_service(service().declaration());\n}}\n\npub fn router() -> Router<AppState> {{\n    service().router()\n}}\n\n#[cfg(test)]\nmod tests {{\n    /// Every operation the service declares is served, and no two answer\n    /// one method at one route: building the router would panic.\n    #[test]\n    fn the_router_serves_the_service() {{\n        let _router = super::router();\n    }}\n}}\n",
-        module = rust_string(&service.module_name),
-        // The file's own `service` and `router` keep their names.
-        stem = match service.file_stem.as_str() {
-            stem @ ("service" | "router") => format!("declare_{stem}"),
-            stem => stem.to_string(),
-        },
+        "/// What the service publishes, each operation with the function serving it.\npub fn service() -> Service<AppState> {{\n    Service::new({}, {}){chain}\n}}\n\n#[declaration(module = {module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    module.published_rest_service(service().declaration());\n}}\n\npub fn router() -> Router<AppState> {{\n    service().router()\n}}\n\n#[cfg(test)]\nmod tests {{\n    /// Every operation the service declares is served, and no two answer\n    /// one method at one route: building the router would panic.\n    #[test]\n    fn the_router_serves_the_service() {{\n        let _router = super::router();\n    }}\n}}\n",
+        rust_string(&declaration.name),
+        rust_string(&declaration.path),
     );
     out
 }
@@ -8492,7 +8564,7 @@ mod tests {
             (ApiMode::Rocket, "rocket =", "rocket::build"),
         ] {
             let manifest = cargo_manifest("sample", None, mode);
-            let stub = render_server_stub(mode);
+            let stub = render_server_stub(mode, &Default::default());
             let binary = build_binary_source("sample", "Sample", mode);
             assert!(manifest.contains(dependency), "{}", mode.name());
             assert!(stub.contains(server_marker), "{}", mode.name());
@@ -8670,6 +8742,33 @@ mod tests {
             rendered.contains("/// Calls `Sales.MF_Order_Show`."),
             "{rendered}"
         );
+    }
+
+    /// A project no axum router serves declares the service alone: the
+    /// same statement, with no handler, which the build writes all the same.
+    #[test]
+    fn a_service_no_router_serves_is_declared_alone() {
+        let mut service = published_service(
+            &stored_service(&["Sales.User"]),
+            "Sales",
+            |_| ModuleRoot::Authored,
+            &HashMap::new(),
+        )
+        .expect("routable service");
+        assign_controllers(std::slice::from_mut(&mut service));
+        let declaration = service.declaration.clone().expect("declared service");
+        let rendered = render_declared_service(&service, &declaration, None);
+        for expected in [
+            "use mxrs::prelude::*;",
+            "#[declaration(module = \"Sales\")]\npub fn orders_api(module: &mut ModuleBuilder) {\n    let mut service = PublishedRestServiceBuilder::new(\"OrdersApi\", \"api/v1\");\n    service.service_name(\"Orders API\").basic_authentication(&[\"Sales.User\"]).resource(\"orders\", |orders| { orders.get(\"{id}\", \"Sales.MF_Order_Show\", |operation| {",
+            ".post(\"\", \"Sales.MF_Order_Create\", |operation| {",
+            "    module.published_rest_service(service);\n}\n",
+        ] {
+            assert!(rendered.contains(expected), "{expected}\n---\n{rendered}");
+        }
+        for absent in ["axum", "AppState", "_controller", "ALLOWED_ROLES"] {
+            assert!(!rendered.contains(absent), "{absent}\n---\n{rendered}");
+        }
     }
 
     /// What rustfmt could not lay out — a long mapping name — is a named

@@ -106,7 +106,8 @@ impl<S: Clone + Send + Sync + 'static> Service<S> {
         self
     }
 
-    /// A resource and the handlers of its operations.
+    /// A resource and the handlers of its operations. Stated again, a
+    /// resource gains the operations stated with it.
     pub fn resource(
         mut self,
         name: impl Into<String>,
@@ -117,8 +118,13 @@ impl<S: Clone + Send + Sync + 'static> Service<S> {
             handlers: Vec::new(),
         };
         configure(&mut resource);
-        self.service.push_resource(resource.resource.into_decl());
-        self.handlers.push(resource.handlers);
+        // Stated again, a resource gains the operations stated with it, and
+        // their handlers follow them.
+        let position = self.service.push_resource(resource.resource.into_decl());
+        match self.handlers.get_mut(position) {
+            Some(handlers) => handlers.extend(resource.handlers),
+            None => self.handlers.push(resource.handlers),
+        }
         self
     }
 

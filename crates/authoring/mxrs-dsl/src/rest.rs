@@ -2,13 +2,13 @@
 //!
 //! ```
 //! # use mxrs_dsl::{ModuleBuilder, PublishedRestServiceBuilder};
-//! # use mxrs_ir::{RestMethod, RestParameterType};
+//! # use mxrs_ir::RestParameterType;
 //! # let mut module = ModuleBuilder::new("Sales");
 //! let mut service = PublishedRestServiceBuilder::new("OrdersApi", "api/v1");
 //! service
 //!     .basic_authentication(&["Sales.User"])
 //!     .resource("orders", |orders| {
-//!         orders.operation(RestMethod::Get, "{id}", "Sales.MF_Order_Show", |show| {
+//!         orders.get("{id}", "Sales.MF_Order_Show", |show| {
 //!             show.summary("One order")
 //!                 .path_parameter("id", RestParameterType::Integer)
 //!                 .export_mapping("Sales.EM_Order");
@@ -90,7 +90,8 @@ impl PublishedRestServiceBuilder {
         self
     }
 
-    /// A resource: the name its operations are reached under.
+    /// A resource: the name its operations are reached under. Stated again,
+    /// a resource gains the operations stated with it.
     pub fn resource(
         &mut self,
         name: impl Into<String>,
@@ -98,14 +99,32 @@ impl PublishedRestServiceBuilder {
     ) -> &mut Self {
         let mut builder = RestResourceBuilder::new(name);
         configure(&mut builder);
-        self.decl.resources.push(builder.into_decl());
+        self.push_resource(builder.into_decl());
         self
     }
 
-    /// A resource stated whole.
-    pub fn push_resource(&mut self, resource: RestResourceDecl) -> &mut Self {
-        self.decl.resources.push(resource);
-        self
+    /// A resource stated whole, joining the one of its name when the service
+    /// has it already; answers its position among the service's resources.
+    pub fn push_resource(&mut self, resource: RestResourceDecl) -> usize {
+        match self
+            .decl
+            .resources
+            .iter()
+            .position(|existing| existing.name == resource.name)
+        {
+            Some(position) => {
+                let existing = &mut self.decl.resources[position];
+                if existing.documentation.is_empty() {
+                    existing.documentation = resource.documentation;
+                }
+                existing.operations.extend(resource.operations);
+                position
+            }
+            None => {
+                self.decl.resources.push(resource);
+                self.decl.resources.len() - 1
+            }
+        }
     }
 
     /// The service as declared so far.
@@ -154,6 +173,51 @@ impl RestResourceBuilder {
         configure(&mut builder);
         self.decl.operations.push(builder.into_decl());
         self
+    }
+
+    pub fn get(
+        &mut self,
+        path: impl Into<String>,
+        microflow: impl Into<String>,
+        configure: impl FnOnce(&mut RestOperationBuilder),
+    ) -> &mut Self {
+        self.operation(RestMethod::Get, path, microflow, configure)
+    }
+
+    pub fn post(
+        &mut self,
+        path: impl Into<String>,
+        microflow: impl Into<String>,
+        configure: impl FnOnce(&mut RestOperationBuilder),
+    ) -> &mut Self {
+        self.operation(RestMethod::Post, path, microflow, configure)
+    }
+
+    pub fn put(
+        &mut self,
+        path: impl Into<String>,
+        microflow: impl Into<String>,
+        configure: impl FnOnce(&mut RestOperationBuilder),
+    ) -> &mut Self {
+        self.operation(RestMethod::Put, path, microflow, configure)
+    }
+
+    pub fn patch(
+        &mut self,
+        path: impl Into<String>,
+        microflow: impl Into<String>,
+        configure: impl FnOnce(&mut RestOperationBuilder),
+    ) -> &mut Self {
+        self.operation(RestMethod::Patch, path, microflow, configure)
+    }
+
+    pub fn delete(
+        &mut self,
+        path: impl Into<String>,
+        microflow: impl Into<String>,
+        configure: impl FnOnce(&mut RestOperationBuilder),
+    ) -> &mut Self {
+        self.operation(RestMethod::Delete, path, microflow, configure)
     }
 
     pub fn into_decl(self) -> RestResourceDecl {

@@ -42,6 +42,11 @@ pub fn usage(kind: ArtifactKind) -> String {
         )
     } else if kind == ArtifactKind::DemoUser {
         (" [--entity Module.Entity] [--role ROLE]", "")
+    } else if kind == ArtifactKind::PublishedRest {
+        (
+            " [--service NAME] [--path PATH] [--resource NAME] [--method get|post|put|patch|delete] [--operation-path PATH] [--query NAME]",
+            "",
+        )
     } else if kind == ArtifactKind::Design {
         (
             "",
@@ -84,6 +89,20 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
     let chain = take_value(&mut arguments, "--chain");
     let atlas = take_flag(&mut arguments, "--atlas");
     let entity = take_value(&mut arguments, "--entity");
+    let rest = mxrs_scaffold::RestOperationOptions {
+        service: take_value(&mut arguments, "--service"),
+        path: take_value(&mut arguments, "--path"),
+        resource: take_value(&mut arguments, "--resource"),
+        method: take_value(&mut arguments, "--method"),
+        operation_path: take_value(&mut arguments, "--operation-path"),
+        query: take_values(&mut arguments, "--query"),
+    };
+    let rest_given = rest.service.is_some()
+        || rest.path.is_some()
+        || rest.resource.is_some()
+        || rest.method.is_some()
+        || rest.operation_path.is_some()
+        || !rest.query.is_empty();
     let expected = command(kind).action;
     // MXRB's `new` is optional for demo-user (`mxrb demo-user manager` works).
     if kind == ArtifactKind::DemoUser
@@ -132,6 +151,7 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
         || (page_only && kind != ArtifactKind::Page)
         || (!roles.is_empty() && !roles_allowed)
         || (entity.is_some() && kind != ArtifactKind::DemoUser)
+        || (rest_given && kind != ArtifactKind::PublishedRest)
     {
         return Err(format!("usage: mxrs {}", usage(kind)));
     }
@@ -146,7 +166,8 @@ pub fn generate(kind: ArtifactKind, mut arguments: Vec<String>) -> Result<(), St
             .page_template(template)
             .page_chain(chain)
             .atlas(atlas)
-            .demo_entity(entity),
+            .demo_entity(entity)
+            .rest(rest),
     )
     .map_err(|error| error.to_string())?;
     render(&outcome, json);

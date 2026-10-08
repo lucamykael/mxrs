@@ -155,8 +155,20 @@ fn command_options(
         "widgets" => (&["--project"], &[], &[]),
         "ci" | "constant" | "consumed-rest" | "dto" | "entity" | "enumeration" | "evaluation"
         | "functional-test" | "integration" | "java-action" | "javascript-action" | "microflow"
-        | "nanoflow" | "published-rest" | "repository" | "scheduled-event" | "security"
-        | "use-case" | "validation" => (&["--target"], &["--dry-run", "--json"], &[]),
+        | "nanoflow" | "repository" | "scheduled-event" | "security" | "use-case"
+        | "validation" => (&["--target"], &["--dry-run", "--json"], &[]),
+        "published-rest" => (
+            &[
+                "--target",
+                "--service",
+                "--path",
+                "--resource",
+                "--method",
+                "--operation-path",
+            ],
+            &["--dry-run", "--json"],
+            &["--query"],
+        ),
         "module" => (&["--target", "--registry"], &["--dry-run", "--json"], &[]),
         "presentation" => (
             &["--target"],

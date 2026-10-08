@@ -14,6 +14,7 @@ mod manifest;
 mod nanoflow;
 pub mod page_templates;
 pub mod registry;
+pub mod rest;
 mod service;
 mod templates;
 mod transaction;
@@ -25,6 +26,7 @@ pub use artifact::{
 pub use installed_templates::InstalledTemplate;
 pub use page_templates::PageTemplate;
 pub use registry::RegisteredScaffold;
+pub use rest::RestOperationOptions;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScaffoldError {

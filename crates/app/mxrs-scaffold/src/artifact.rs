@@ -205,8 +205,8 @@ pub const SCAFFOLD_COMMANDS: &[ScaffoldCommand] = &[
         name: "published-rest",
         action: "new",
         argument: "<Module.Handler>",
-        summary: "Create a published REST handler microflow",
-        destination: "src/services/<module>",
+        summary: "Publish a REST operation: its handler microflow and its service's declaration",
+        destination: "src/{services,controllers}/<module>",
         kind: ArtifactKind::PublishedRest,
     },
     ScaffoldCommand {
@@ -372,6 +372,10 @@ pub struct ArtifactScaffold {
     /// repeatable `--role` values arrive through [`Self::page_roles`], which
     /// doubles as the generic role list for kinds that grant roles.
     pub demo_entity: Option<String>,
+    /// What a published REST handler's operation says besides the handler
+    /// (`--service`, `--path`, `--resource`, `--method`, `--operation-path`,
+    /// `--query`).
+    pub rest: crate::rest::RestOperationOptions,
 }
 
 impl ArtifactScaffold {
@@ -386,7 +390,13 @@ impl ArtifactScaffold {
             page_chain: None,
             atlas: false,
             demo_entity: None,
+            rest: crate::rest::RestOperationOptions::default(),
         }
+    }
+
+    pub fn rest(mut self, rest: crate::rest::RestOperationOptions) -> Self {
+        self.rest = rest;
+        self
     }
 
     pub fn atlas(mut self, atlas: bool) -> Self {
@@ -1674,6 +1684,25 @@ fn create_artifact(
             &[],
         );
     }
+    // A published REST handler is a microflow, and the operation calling it
+    // joins its service's declaration.
+    if options.kind == ArtifactKind::PublishedRest {
+        let operation =
+            crate::rest::plan(transaction, root, module_name, artifact_name, &options.rest)?;
+        add_microflow(
+            transaction,
+            root,
+            module_name,
+            &crate::service::ServiceMethod {
+                name: artifact_name.to_string(),
+                docs: operation.handler_docs(),
+                imports: Vec::new(),
+                body: operation.microflow_body(),
+            },
+            &[],
+        )?;
+        return crate::rest::publish(transaction, root, &operation);
+    }
     // A microflow is a method of the service of what it is about — the
     // place the importer would have put it.
     let service_docs = match options.kind {
@@ -1686,13 +1715,6 @@ fn create_artifact(
         ArtifactKind::Validation => Some(vec![format!(
             "Application validation `{module_name}.{artifact_name}`."
         )]),
-        ArtifactKind::PublishedRest => Some(vec![
-            format!("Published REST handler `{module_name}.{artifact_name}`."),
-            String::new(),
-            "The REST service publishing it is declared in Rust, each operation".to_string(),
-            "naming the microflow it calls: a `mxrs::rest::Service`, as an import".to_string(),
-            "writes one in `src/controllers/<module>/`.".to_string(),
-        ]),
         _ => None,
     };
     if let Some(docs) = service_docs {
@@ -2119,7 +2141,7 @@ fn connect_concept_folder(
     Ok(parent)
 }
 
-fn declare_child_module(
+pub(crate) fn declare_child_module(
     transaction: &mut Transaction,
     aggregator: &Path,
     stem: &str,
@@ -2280,7 +2302,7 @@ fn qualified_name(kind: ArtifactKind, name: &str) -> Result<(&str, &str)> {
     Ok((module_name, artifact_name))
 }
 
-fn identifier<'a>(value: &'a str, label: &'static str) -> Result<&'a str> {
+pub(crate) fn identifier<'a>(value: &'a str, label: &'static str) -> Result<&'a str> {
     let valid = value
         .chars()
         .next()

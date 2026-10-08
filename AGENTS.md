@@ -63,12 +63,15 @@ read-only behavioral oracle; never edit it.
   service, one file that is its route table (`api_service.rs`: the service
   the model publishes, declared with each operation bound to the controller
   function serving it, and the axum `Router` built from that declaration —
-  one statement for the model and the server) and
+  one statement for the model and the server; in a project no axum router
+  serves, the declaration alone) and
   one `<resource>_controller.rs` per resource with a function per
   operation, named by what it does to the resource (`index`, `show`,
   `create`, `update`, `destroy`) when that tells the operations apart and
-  after the microflow each calls when it does not. Export mappings are
-  part of the domain: `src/domain/mappings/<module>/`.
+  after the microflow each calls when it does not. `mxrs published-rest
+  new` adds an operation there as the importer writes one — chained onto
+  its resource, bound to a new handler when axum serves the project.
+  Export mappings are part of the domain: `src/domain/mappings/<module>/`.
 - The user interface is the frontend's (user directive, 2026-10-02):
   everything a user sees and runs in the browser lives in `frontend/`, a
   React + TypeScript project organized the way one is, and its TypeScript
