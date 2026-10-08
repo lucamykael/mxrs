@@ -977,9 +977,9 @@ fn malformed_target_parameters_keep_both_target_and_caller_out_of_the_projection
     let path = dir.path().join("Malformed.mpr");
     mxrs_writer::write_project(&path, &fixture()).unwrap();
     customize(&path, "Echo", |doc| {
-        doc.get_document_mut("MicroflowParameterCollection")
+        doc.get_document_mut("ObjectCollection")
             .unwrap()
-            .get_array_mut("Parameters")
+            .get_array_mut("Objects")
             .unwrap()
             .push(Bson::String("malformed".into()));
     });

@@ -251,8 +251,8 @@ fn synchronize_flows_with_identity(
                     .extend(notes.into_iter().map(mxrs_bson::Bson::Document));
             }
             if same_parameters && let Some((_, old)) = previous {
-                // Legacy parameters are graph objects; retain them even when
-                // a structural body edit requires a fresh activity graph.
+                // Parameters are graph objects; retain them even when a
+                // structural body edit requires a fresh activity graph.
                 let legacy = old
                     .get_document("ObjectCollection")
                     .ok()
@@ -271,21 +271,16 @@ fn synchronize_flows_with_identity(
             }
         }
         if !same_parameters {
-            let collection =
+            let parameters =
                 crate::flow_parameters::lower(decl, &id, previous.map(|(_, doc)| doc), identity)?;
-            doc.insert("MicroflowParameterCollection", collection);
-            doc.remove("Parameters");
-            if let Ok(objects) = doc
-                .get_document_mut("ObjectCollection")
-                .expect("objects")
-                .get_array_mut("Objects")
-            {
-                objects.retain(|o| {
-                    o.as_document().is_none_or(|o| {
-                        o.get_str("$Type").ok() != Some("Microflows$MicroflowParameter")
-                    })
-                });
-            }
+            crate::flow_parameters::place(&mut doc, parameters);
+        } else if crate::flow_parameters::collected(&doc) {
+            let parameters = Microflow::from_bson(&doc)
+                .parameters
+                .into_iter()
+                .map(mxrs_bson::Bson::Document)
+                .collect();
+            crate::flow_parameters::place(&mut doc, parameters);
         }
         if native_type == "Microflows$Rule" {
             // A decision runs a rule: who may run it and how often is the

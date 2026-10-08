@@ -97,16 +97,21 @@ impl Microflow {
             "AllowedModuleRoles": mxrs_bson::build_array(
                 self.allowed_module_roles.iter().cloned().map(mxrs_bson::Bson::String).collect(), 1,
             ),
-            "MicroflowParameterCollection": mxrs_bson::doc! {
-                "$ID": uuid::Uuid::new_v4().to_string(),
-                "$Type": "Microflows$MicroflowParameterCollection",
-                "Parameters": mxrs_bson::build_array(self.parameters.iter().cloned().map(mxrs_bson::Bson::Document).collect(), 3),
-            },
             "MicroflowReturnType": self.return_type_document.clone().unwrap_or_else(default_void_return),
             "ObjectCollection": mxrs_bson::doc! {
                 "$ID": uuid::Uuid::new_v4().to_string(),
                 "$Type": "Microflows$MicroflowObjectCollection",
-                "Objects": mxrs_bson::build_array(self.objects.iter().cloned().map(mxrs_bson::Bson::Document).collect(), 3),
+                // Parameters are objects of the graph, first, as Studio Pro
+                // stores them.
+                "Objects": mxrs_bson::build_array(
+                    self.parameters
+                        .iter()
+                        .chain(self.objects.iter().filter(|object| !is_parameter(object)))
+                        .cloned()
+                        .map(mxrs_bson::Bson::Document)
+                        .collect(),
+                    3,
+                ),
             },
             "Flows": mxrs_bson::build_array(self.flows.iter().cloned().map(mxrs_bson::Bson::Document).collect(), 3),
         }
@@ -138,10 +143,13 @@ fn default_void_return() -> Document {
     }
 }
 
-/// A microflow's parameters normally live in `MicroflowParameterCollection`,
-/// but mxrb's own writer historically embedded them inside
-/// `ObjectCollection.Objects` instead — mirrors `extract_parameters`'s
-/// fallback.
+fn is_parameter(object: &Document) -> bool {
+    get_str_any(object, &["$Type"]).as_deref() == Some("Microflows$MicroflowParameter")
+}
+
+/// A microflow's parameters are objects of its graph, in
+/// `ObjectCollection.Objects`, as Studio Pro stores them; an earlier mxrs
+/// wrote them in a `MicroflowParameterCollection`, which is still read.
 fn extract_parameters(doc: &Document, obj_col: &Document) -> Vec<Document> {
     if let Some(pc) = get_doc_any(doc, &["MicroflowParameterCollection", "Parameters"]) {
         let list = docs_any(&pc, &["Parameters"]);
@@ -151,7 +159,7 @@ fn extract_parameters(doc: &Document, obj_col: &Document) -> Vec<Document> {
     }
     docs_any(obj_col, &["Objects", "objects"])
         .into_iter()
-        .filter(|o| get_str_any(o, &["$Type"]).as_deref() == Some("Microflows$MicroflowParameter"))
+        .filter(is_parameter)
         .collect()
 }
 
@@ -170,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_object_collection_for_parameters() {
+    fn reads_parameters_from_the_graph_and_writes_them_there_once() {
         let param = doc! { "$ID": uuid::Uuid::new_v4().to_string(), "$Type": "Microflows$MicroflowParameter", "Name": "Order" };
         let d = doc! {
             "$ID": uuid::Uuid::new_v4().to_string(),
@@ -178,6 +186,9 @@ mod tests {
         };
         let mf = Microflow::from_bson(&d);
         assert_eq!(mf.parameters.len(), 1);
+        let written = mf.to_bson();
+        assert!(!written.contains_key("MicroflowParameterCollection"));
+        assert_eq!(Microflow::from_bson(&written).objects.len(), 1);
     }
 
     #[test]

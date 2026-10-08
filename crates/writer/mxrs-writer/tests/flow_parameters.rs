@@ -67,13 +67,39 @@ fn mutate_flow(path: &Path, name: &str, edit: impl FnOnce(&mut Document)) {
     mpr.update_unit(&unit.unit_id, doc).unwrap();
 }
 
+fn is_parameter(object: &Bson) -> bool {
+    object
+        .as_document()
+        .is_some_and(|d| d.get_str("$Type").ok() == Some("Microflows$MicroflowParameter"))
+}
+
+/// Replaces the parameter objects of the flow's graph.
 fn set_parameters(doc: &mut Document, parameters: Vec<Document>) {
-    doc.get_document_mut("MicroflowParameterCollection")
-        .unwrap()
-        .insert(
-            "Parameters",
-            build_array(parameters.into_iter().map(Bson::Document).collect(), 3),
-        );
+    let objects = doc.get_document_mut("ObjectCollection").unwrap();
+    let rest = parse_array(objects.get_array("Objects").ok().map(Vec::as_slice))
+        .items
+        .into_iter()
+        .filter(|object| !is_parameter(object));
+    let list = parameters
+        .into_iter()
+        .map(Bson::Document)
+        .chain(rest)
+        .collect();
+    objects.insert("Objects", build_array(list, 3));
+}
+
+fn graph_parameters(doc: &Document) -> usize {
+    parse_array(
+        doc.get_document("ObjectCollection")
+            .unwrap()
+            .get_array("Objects")
+            .ok()
+            .map(Vec::as_slice),
+    )
+    .items
+    .iter()
+    .filter(|object| is_parameter(object))
+    .count()
 }
 
 #[test]
@@ -187,7 +213,7 @@ fn fresh_parameter_identities_are_deterministic_and_kind_specific() {
 }
 
 #[test]
-fn sync_preserves_folder_parameter_type_and_collection_ids_and_future_fields() {
+fn sync_preserves_folder_parameter_and_type_ids_and_future_fields() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Sync.mpr");
     let mut project = signature(FlowReturnType::Object("Sales.Order".into()));
@@ -203,9 +229,6 @@ fn sync_preserves_folder_parameter_type_and_collection_ids_and_future_fields() {
             .unwrap()
             .insert("FutureType", "type");
         set_parameters(doc, params);
-        doc.get_document_mut("MicroflowParameterCollection")
-            .unwrap()
-            .insert("FutureCollection", "collection");
     });
     let before = flow(&path, "Target");
     let mut mpr = MprFile::open(&path, false).unwrap();
@@ -244,15 +267,8 @@ fn sync_preserves_folder_parameter_type_and_collection_ids_and_future_fields() {
     assert_eq!(params[0].get_str("Documentation").unwrap(), "Edited");
     assert_eq!(params[0].get_str("DefaultValue").unwrap(), "'new'");
     assert!(params[0].get_bool("IsRequired").unwrap());
-    let collection = after.get_document("MicroflowParameterCollection").unwrap();
-    assert_eq!(
-        id(before.get_document("MicroflowParameterCollection").unwrap()),
-        id(collection)
-    );
-    assert_eq!(
-        collection.get_str("FutureCollection").unwrap(),
-        "collection"
-    );
+    assert!(!after.contains_key("MicroflowParameterCollection"));
+    assert_eq!(graph_parameters(&after), 1);
     assert_eq!(after.get_str("FutureHeader").unwrap(), "header");
     assert!(after.get_bool("ApplyEntityAccess").unwrap());
     let mpr = MprFile::open(&path, true).unwrap();
@@ -267,41 +283,51 @@ fn sync_preserves_folder_parameter_type_and_collection_ids_and_future_fields() {
     );
 }
 
+/// Parameters are objects of the flow's graph, as Studio Pro stores them
+/// and finds them by name; a collection an earlier mxrs wrote them in moves
+/// into the graph, identities kept, whether or not they change.
 #[test]
-fn legacy_graph_parameters_move_to_collection_without_identity_loss() {
+fn collected_parameters_move_into_the_graph_without_identity_loss() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("Legacy.mpr");
+    let path = dir.path().join("Collected.mpr");
     let mut project = signature(FlowReturnType::String);
     mxrs_writer::write_project(&path, &project).unwrap();
-    let before = parameters(&flow(&path, "Target"));
-    mutate_flow(&path, "Target", |doc| {
-        let params = parameters(doc);
-        doc.remove("MicroflowParameterCollection");
-        let objects = doc.get_document_mut("ObjectCollection").unwrap();
-        let mut list = parse_array(objects.get_array("Objects").ok().map(Vec::as_slice)).items;
-        list.extend(params.into_iter().map(Bson::Document));
-        objects.insert("Objects", build_array(list, 3));
-    });
+    let written = flow(&path, "Target");
+    assert!(!written.contains_key("MicroflowParameterCollection"));
+    assert_eq!(graph_parameters(&written), 1);
+    let before = parameters(&written);
+    let collect = |path: &Path| {
+        mutate_flow(path, "Target", |doc| {
+            let params = parameters(doc);
+            set_parameters(doc, Vec::new());
+            doc.insert(
+                "MicroflowParameterCollection",
+                doc! {
+                    "$ID": "collection",
+                    "$Type": "Microflows$MicroflowParameterCollection",
+                    "Parameters": build_array(params.into_iter().map(Bson::Document).collect(), 3),
+                },
+            );
+        });
+    };
+    collect(&path);
+    mxrs_writer::synchronize_project(&path, &project).unwrap();
+    let unchanged = flow(&path, "Target");
+    assert!(!unchanged.contains_key("MicroflowParameterCollection"));
+    assert_eq!(graph_parameters(&unchanged), 1);
+    assert_eq!(parameters(&unchanged), before);
+
+    collect(&path);
     project.modules[0].microflows[0].parameters[0].documentation = "Updated".into();
     mxrs_writer::synchronize_project(&path, &project).unwrap();
     let after = flow(&path, "Target");
+    assert!(!after.contains_key("MicroflowParameterCollection"));
+    assert_eq!(graph_parameters(&after), 1);
     assert_eq!(id(&before[0]), id(&parameters(&after)[0]));
     assert_eq!(
         parameters(&after)[0].get_str("Documentation").unwrap(),
         "Updated"
     );
-    let objects = parse_array(
-        after
-            .get_document("ObjectCollection")
-            .unwrap()
-            .get_array("Objects")
-            .ok()
-            .map(Vec::as_slice),
-    );
-    assert!(!objects.items.iter().any(|v| {
-        v.as_document()
-            .is_some_and(|d| d.get_str("$Type").ok() == Some("Microflows$MicroflowParameter"))
-    }));
 }
 
 #[test]

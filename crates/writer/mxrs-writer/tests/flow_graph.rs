@@ -31,26 +31,14 @@ fn flow(mpr: &mxrs_mpr::MprFile) -> Document {
 }
 
 #[test]
-fn unchanged_legacy_parameters_remain_exact_and_structural_edits_keep_them() {
+fn unchanged_parameters_remain_exact_and_structural_edits_keep_them() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("Legacy.mpr");
+    let path = dir.path().join("Parameters.mpr");
     let mut project = declaration();
     mxrs_writer::write_project(&path, &project).unwrap();
-    let mut mpr = mxrs_mpr::MprFile::open(&path, false).unwrap();
-    let mut doc = flow(&mpr);
-    let id = mxrs_bson::extract_id(doc.get("$ID").unwrap()).unwrap();
-    let collection = doc.remove("MicroflowParameterCollection").unwrap();
-    let parameters = mxrs_writer::flow_graph::documents(
-        collection.as_document().unwrap().get("Parameters").unwrap(),
-    )
-    .unwrap();
-    let parameter = parameters[0].clone();
-    doc.get_document_mut("ObjectCollection")
-        .unwrap()
-        .get_array_mut("Objects")
-        .unwrap()
-        .push(Bson::Document(parameter.clone()));
-    mpr.update_unit(&id, doc.clone()).unwrap();
+    let mpr = mxrs_mpr::MprFile::open(&path, true).unwrap();
+    let doc = flow(&mpr);
+    let parameter = mxrs_model::Microflow::from_bson(&doc).parameters[0].clone();
     drop(mpr);
     mxrs_writer::synchronize_project(&path, &project).unwrap();
     let mpr = mxrs_mpr::MprFile::open(&path, true).unwrap();
@@ -67,8 +55,8 @@ fn unchanged_legacy_parameters_remain_exact_and_structural_edits_keep_them() {
     let after = flow(&mpr);
     let nodes = mxrs_writer::flow_graph::linear_nodes(&after).unwrap();
     assert_eq!(nodes.len(), 3);
-    let legacy = mxrs_model::Microflow::from_bson(&after).parameters;
-    assert_eq!(legacy, [parameter]);
+    let kept = mxrs_model::Microflow::from_bson(&after).parameters;
+    assert_eq!(kept, [parameter]);
     assert_eq!(after.get("$ID"), doc.get("$ID"));
 }
 
