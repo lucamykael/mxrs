@@ -57,15 +57,22 @@ pub(crate) fn validate_project(project: &ProjectDecl, existing: &[Module]) -> Re
         .collect::<Vec<_>>();
     validate_roles(project, existing, &flows)?;
     validate(&flows, &entities, existing)?;
-    validate_rest_operations(project, existing)
+    for warning in rest_operation_warnings(project, existing) {
+        eprintln!("[mxrs] warning: {warning}");
+    }
+    Ok(())
 }
 
-/// Checks every operation a published REST service declares against the
-/// microflow it calls, as Studio Pro would before the model deploys: the
-/// microflow is one the project has, each parameter binds one of its
-/// parameters, and the path's `{name}`s are its path parameters.
-fn validate_rest_operations(project: &ProjectDecl, existing: &[Module]) -> Result<()> {
-    let parameters_of = |qualified: &str| -> Option<Vec<String>> {
+/// What Studio Pro would refuse to deploy of the operations the project's
+/// published REST services declare: an operation calling no microflow of
+/// the project, binding a parameter its microflow does not take or of
+/// another type, or whose path's `{name}`s are not its path parameters.
+/// Said as warnings: a model Studio Pro saved that way still builds, and a
+/// build says what to fix.
+pub fn rest_operation_warnings(project: &ProjectDecl, existing: &[Module]) -> Vec<String> {
+    // Each microflow parameter's name and stored type, by the microflow's
+    // qualified name.
+    let parameters_of = |qualified: &str| -> Option<Vec<(String, Option<Document>)>> {
         let (module, name) = qualified.split_once('.')?;
         let declared = project
             .modules
@@ -74,7 +81,17 @@ fn validate_rest_operations(project: &ProjectDecl, existing: &[Module]) -> Resul
             .flat_map(|declared| &declared.microflows)
             .find(|flow| flow.name == name);
         if let Some(flow) = declared {
-            return Some(flow.parameters.iter().map(|p| p.name.clone()).collect());
+            return Some(
+                flow.parameters
+                    .iter()
+                    .map(|parameter| {
+                        (
+                            parameter.name.clone(),
+                            crate::flow_compiler::return_type_document(Some(&parameter.value_type)),
+                        )
+                    })
+                    .collect(),
+            );
         }
         existing
             .iter()
@@ -84,35 +101,68 @@ fn validate_rest_operations(project: &ProjectDecl, existing: &[Module]) -> Resul
             .map(|flow| {
                 flow.parameters
                     .iter()
-                    .filter_map(|parameter| parameter.get_str("Name").ok().map(str::to_string))
+                    .filter_map(|parameter| {
+                        Some((
+                            parameter.get_str("Name").ok()?.to_string(),
+                            parameter.get_document("VariableType").ok().cloned(),
+                        ))
+                    })
                     .collect()
             })
     };
+    // Whether a stored type holds what a REST parameter's type does: the
+    // same kind — a whole number either width — of the same entity or
+    // enumeration.
+    let holds = |stored: &Document, ty: &mxrs_ir::RestParameterType| {
+        let kind = |ty: &str| match ty {
+            "DataTypes$LongType" => "DataTypes$IntegerType".to_string(),
+            other => other.to_string(),
+        };
+        let rest = ty.document();
+        kind(stored.get_str("$Type").unwrap_or_default()) == kind(&rest.ty)
+            && ["Entity", "Enumeration"]
+                .iter()
+                .all(|key| stored.get_str(key).ok() == rest.text(key))
+    };
+    let mut warnings = Vec::new();
     for module in &project.modules {
         for service in &module.published_rest_services {
             for resource in &service.resources {
                 for operation in &resource.operations {
-                    let error = |reason: String| WriterError::InvalidRestOperation {
-                        service: format!("{}.{}", module.name, service.name),
-                        operation: format!(
-                            "{} {}",
+                    let mut warn = |reason: String| {
+                        warnings.push(format!(
+                            "published REST service {}.{}: {} {} {reason}",
+                            module.name,
+                            service.name,
                             operation.method.as_http(),
                             service.route(resource, operation)
-                        ),
-                        reason,
+                        ));
                     };
                     let Some(microflow_parameters) = parameters_of(&operation.microflow) else {
-                        return Err(error(format!(
+                        warn(format!(
                             "calls {:?}, which is no microflow of the project",
                             operation.microflow
-                        )));
+                        ));
+                        continue;
                     };
                     for parameter in &operation.parameters {
-                        if !microflow_parameters.contains(&parameter.microflow_parameter) {
-                            return Err(error(format!(
+                        match microflow_parameters
+                            .iter()
+                            .find(|(name, _)| *name == parameter.microflow_parameter)
+                        {
+                            None => warn(format!(
                                 "binds its parameter {:?} to {:?}, which {} does not take",
                                 parameter.name, parameter.microflow_parameter, operation.microflow
-                            )));
+                            )),
+                            Some((_, Some(stored))) if !holds(stored, &parameter.ty) => {
+                                warn(format!(
+                                    "binds its parameter {:?} to {:?} of {}, which holds another type",
+                                    parameter.name,
+                                    parameter.microflow_parameter,
+                                    operation.microflow
+                                ));
+                            }
+                            Some(_) => {}
                         }
                     }
                     let in_path: Vec<&str> = operation
@@ -129,22 +179,22 @@ fn validate_rest_operations(project: &ProjectDecl, existing: &[Module]) -> Resul
                     if let Some(missing) =
                         in_path.iter().find(|name| !path_parameters.contains(name))
                     {
-                        return Err(error(format!(
+                        warn(format!(
                             "has {{{missing}}} in its path and no path parameter of that name"
-                        )));
+                        ));
                     }
                     if let Some(unused) =
                         path_parameters.iter().find(|name| !in_path.contains(name))
                     {
-                        return Err(error(format!(
+                        warn(format!(
                             "has a path parameter {unused:?} its path does not hold"
-                        )));
+                        ));
                     }
                 }
             }
         }
     }
-    Ok(())
+    warnings
 }
 
 /// Checks that every role a flow is stated to allow is one its module

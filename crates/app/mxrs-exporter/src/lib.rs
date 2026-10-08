@@ -5769,7 +5769,12 @@ fn render_declared_service(
         "//! `{}` — the REST service the {} module publishes at `/{}`.\n",
         service.name, service.module_name, service.base_path,
     );
-    out.push_str(&service_authentication_paragraph(&service.authentication));
+    // A declaration alone routes nothing: it says what the model asks of a
+    // caller, not what a handler does.
+    out.push_str(&match controllers {
+        Some(_) => service_authentication_paragraph(&service.authentication),
+        None => declared_authentication_paragraph(&service.authentication),
+    });
     // The file's own `service` and `router` keep their names.
     let stem = match service.file_stem.as_str() {
         stem @ ("service" | "router") => format!("declare_{stem}"),
@@ -5879,6 +5884,23 @@ fn service_authentication_paragraph(authentication: &ServiceAuthentication) -> S
         ServiceAuthentication::Unsupported { declared } => format!(
             "//!\n//! Every operation here refuses with `501`. The model requires {declared},\n//! which the generated HTTP layer does not offer yet, and serving the\n//! surface without the authentication the model asks for would hand it to\n//! anyone. The routes stay in the table so the published surface stays\n//! visible, and answer the gap instead of the model.\n",
         ),
+    }
+}
+
+/// Who may call a service, as a declaration that routes nothing says it.
+fn declared_authentication_paragraph(authentication: &ServiceAuthentication) -> String {
+    match authentication {
+        ServiceAuthentication::Public => "//!\n//! The model publishes this service to anyone: it declares no\n//! authentication type and no allowed role.\n".to_string(),
+        ServiceAuthentication::Basic { allowed_roles } => format!(
+            "//!\n//! The model requires HTTP Basic authentication, and only these module\n//! roles may call it:\n//!\n{}",
+            allowed_roles
+                .iter()
+                .map(|role| format!("//! - `{role}`\n"))
+                .collect::<String>(),
+        ),
+        ServiceAuthentication::Unsupported { declared } => {
+            format!("//!\n//! The model requires {declared} of a caller.\n")
+        }
     }
 }
 
@@ -6158,11 +6180,18 @@ fn render_controller(
                 .flat_map(|(_, operation)| &operation.parameters)
         };
         // A path or query parameter of another type than text is read as
-        // its type; every other one is a `FlowValue` as it comes.
-        if parameters()
-            .any(|parameter| parameter.kind.is_none() || parameter.source == ParameterSource::Body)
-        {
+        // its type, a body that is not text as the JSON it is; text is a
+        // `FlowValue` as it comes.
+        if parameters().any(|parameter| match parameter.source {
+            ParameterSource::Body => parameter.text,
+            _ => parameter.kind.is_none(),
+        }) {
             ports.push("FlowValue");
+        }
+        if parameters()
+            .any(|parameter| parameter.source == ParameterSource::Body && !parameter.text)
+        {
+            ports.push("request_body");
         }
         if parameters()
             .any(|parameter| parameter.kind.is_some() && parameter.source != ParameterSource::Body)
@@ -6174,13 +6203,11 @@ fn render_controller(
             ports.push("HttpObjects");
         }
         ports.sort_unstable();
-        // `Json<Value>` appears in a handler's answer and in a body extractor.
-        // A controller whose every operation answers through its response
-        // object and binds no body needs neither.
+        // `Json<Value>` is a handler's answer. A controller whose every
+        // operation answers through its response object needs neither.
         let json = operations
             .iter()
-            .any(|(_, operation)| operation.http_parameters.is_empty())
-            || binds(ParameterSource::Body);
+            .any(|(_, operation)| operation.http_parameters.is_empty());
         if json {
             out.push_str("use axum::Json;\n");
         }
@@ -6246,6 +6273,13 @@ fn render_controller(
                 let _ = writeln!(out, "/// Calls `{}`.", operation.microflow);
             }
         }
+        if !operation.import_mapping.is_empty() {
+            let _ = writeln!(
+                out,
+                "///\n/// The model reads its body with the `{}`\n/// import mapping, which mxrs does not apply yet: the body reaches the\n/// microflow as the JSON it is.",
+                operation.import_mapping,
+            );
+        }
         // axum resolves extractors in argument order, so a handler only
         // declares the ones its operation actually binds.
         let extracts = |source: ParameterSource, extractor: &'static str| {
@@ -6267,9 +6301,19 @@ fn render_controller(
             ParameterSource::Query,
             "\n    Query(query): Query<HashMap<String, String>>,",
         );
-        let body = extracts(ParameterSource::Body, "\n    Json(body): Json<Value>,");
-        // `Json` consumes the body, so it has to come last; every other
+        // The body as it came: a parameter's whole, and its request object's
+        // content. It consumes the request, so it comes last; every other
         // extractor reads only the request parts and may precede it.
+        let body = if operation
+            .parameters
+            .iter()
+            .any(|parameter| parameter.source == ParameterSource::Body)
+            || operation.http_parameters.request.is_some()
+        {
+            "\n    body: String,"
+        } else {
+            ""
+        };
         let headers = match service.authentication {
             ServiceAuthentication::Basic { .. } => "\n    headers: HeaderMap,",
             _ => "",
@@ -6320,10 +6364,12 @@ fn render_controller(
                     "query.get({:?}).map_or(FlowValue::Empty, |value| FlowValue::String(value.clone()))",
                     parameter.name
                 ),
-                (ParameterSource::Body, _) => format!(
-                    "body.get({:?}).map_or(FlowValue::Empty, |value| FlowValue::Json(value.clone()))",
-                    parameter.name
-                ),
+                (ParameterSource::Body, _) if parameter.text => {
+                    "FlowValue::String(body.clone())".to_string()
+                }
+                (ParameterSource::Body, _) => {
+                    format!("request_body({:?}, &body)?", parameter.name)
+                }
             };
             let _ = writeln!(
                 out,
@@ -6754,6 +6800,9 @@ struct ServiceOperation {
     /// microflow declares, which the operation never binds because Mendix
     /// supplies them itself.
     http_parameters: HttpParameters,
+    /// The import mapping the model reads the operation's body with; empty
+    /// for none.
+    import_mapping: String,
     /// Where the service document holds it: its resource's position and
     /// its own among that resource's operations.
     position: (usize, usize),
@@ -6779,7 +6828,7 @@ impl HttpParameters {
         if let Some(parameter) = &self.request {
             let _ = write!(
                 out,
-                ".with_request({}, uri.to_string())",
+                ".with_request({}, uri.to_string()).with_content(body.clone())",
                 rust_string(parameter)
             );
         }
@@ -6836,6 +6885,9 @@ struct OperationParameter {
     /// `mxrs::ports::RequestValue`'s variant; `None` for text, taken as it
     /// is.
     kind: Option<&'static str>,
+    /// Whether it is text: a body parameter of type String takes the body
+    /// as it came, one of another type the JSON it is.
+    text: bool,
     /// Microflow parameter the value binds to.
     microflow_parameter: String,
     source: ParameterSource,
@@ -6997,7 +7049,8 @@ fn published_service(
                     .ok()
                     .and_then(|ty| ty.get_str("$Type").ok())
                 {
-                    Some("DataTypes$IntegerType" | "DataTypes$LongType") => Some("Integer"),
+                    Some("DataTypes$IntegerType") => Some("Integer"),
+                    Some("DataTypes$LongType") => Some("Long"),
                     Some("DataTypes$DecimalType" | "DataTypes$FloatType") => Some("Decimal"),
                     Some("DataTypes$BooleanType") => Some("Boolean"),
                     Some("DataTypes$DateTimeType") => Some("DateTime"),
@@ -7006,6 +7059,11 @@ fn published_service(
                 parameters.push(OperationParameter {
                     name: parameter_name.to_string(),
                     kind,
+                    text: parameter
+                        .get_document("Type")
+                        .ok()
+                        .and_then(|ty| ty.get_str("$Type").ok())
+                        == Some("DataTypes$StringType"),
                     microflow_parameter,
                     source,
                 });
@@ -7034,6 +7092,10 @@ fn published_service(
                     .unwrap_or_default()
                     .to_string(),
                 http_parameters: http.get(microflow).cloned().unwrap_or_default(),
+                import_mapping: operation
+                    .get_str("ImportMapping")
+                    .unwrap_or_default()
+                    .to_string(),
                 position: (resource_index, operation_index),
             };
             // Two paths alike but for a parameter's name are one route to
@@ -8890,6 +8952,62 @@ mod tests {
         assert!(service.declaration.is_none());
     }
 
+    /// A body is a parameter's whole: text as it came to a String, the
+    /// JSON it is to any other type; an import mapping the model reads it
+    /// with is said not to be applied.
+    #[test]
+    fn a_body_is_its_parameter_whole() {
+        let body = |name: &str, ty: &str| {
+            mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$RestOperationParameter",
+                "Name": name,
+                "ParameterType": "Body",
+                "MicroflowParameter": format!("Sales.MF_Note.{name}"),
+                "Type": mxrs_bson::doc! { "$Type": ty },
+            })
+        };
+        let service = mxrs_bson::doc! {
+            "$Type": "Rest$PublishedRestService",
+            "Name": "Notes",
+            "Path": "api",
+            "Resources": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$PublishedRestServiceResource",
+                "Name": "notes",
+                "Operations": mxrs_bson::build_array(vec![
+                    mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$Type": "Rest$PublishedRestServiceOperation",
+                        "HttpMethod": "Post",
+                        "Path": "",
+                        "Microflow": "Sales.MF_Note",
+                        "Parameters": mxrs_bson::build_array(vec![body("text", "DataTypes$StringType")], 3),
+                    }),
+                    mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                        "$Type": "Rest$PublishedRestServiceOperation",
+                        "HttpMethod": "Put",
+                        "Path": "",
+                        "Microflow": "Sales.MF_Note",
+                        "ImportMapping": "Sales.IM_Note",
+                        "Parameters": mxrs_bson::build_array(vec![body("note", "DataTypes$ObjectType")], 3),
+                    }),
+                ], 2),
+            })], 3),
+        };
+        let service =
+            published_service(&service, "Sales", |_| ModuleRoot::Package, &HashMap::new())
+                .expect("routable service");
+        let rendered = rendered_service(service, &HashMap::new());
+        for expected in [
+            "    body: String,\n) -> Result<Json<Value>, ApiError> {",
+            "arguments.insert(\"text\".to_string(), FlowValue::String(body.clone()));",
+            "arguments.insert(\"note\".to_string(), request_body(\"note\", &body)?);",
+            "use mxrs::ports::{FlowValue, Variables, request_body};",
+            "/// The model reads its body with the `Sales.IM_Note`\n/// import mapping, which mxrs does not apply yet",
+        ] {
+            assert!(rendered.contains(expected), "{expected}\n---\n{rendered}");
+        }
+        assert!(!rendered.contains("Json(body)"), "{rendered}");
+    }
+
     /// A package's service, and one with an operation the router cannot
     /// serve, stay the model's: their route table only routes.
     #[test]
@@ -9372,13 +9490,13 @@ mod tests {
         assert!(rendered.contains("HttpObjects"), "{rendered}");
         assert!(
             rendered.contains(
-                "pub async fn index(\n    State(state): State<AppState>,\n    uri: Uri,\n) -> Result<Response, ApiError> {"
+                "pub async fn index(\n    State(state): State<AppState>,\n    uri: Uri,\n    body: String,\n) -> Result<Response, ApiError> {"
             ),
             "{rendered}"
         );
         assert!(
             rendered.contains(
-                "        HttpObjects::none().with_request(\"Request\", uri.to_string()).with_response(\"HttpResponse\"),"
+                "        HttpObjects::none().with_request(\"Request\", uri.to_string()).with_content(body.clone()).with_response(\"HttpResponse\"),"
             ),
             "{rendered}"
         );

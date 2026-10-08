@@ -18,7 +18,7 @@ mod origin;
 mod rest;
 mod static_files;
 
-pub use rest::{RestAccounts, RestAuthentication, RestRoute};
+pub use rest::{RestAccounts, RestAuthentication, RestRoute, routable};
 
 use std::future::{Future, pending};
 use std::net::SocketAddr;

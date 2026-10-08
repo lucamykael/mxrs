@@ -53,7 +53,7 @@ pub mod scaffold;
 mod security;
 
 pub use error::{Result, WriterError};
-pub use flow_contract::validate_flow_declaration;
+pub use flow_contract::{rest_operation_warnings, validate_flow_declaration};
 pub use instrumentation::{InstrumentationReport, instrument_functional_tests};
 pub use native::stated_document;
 pub use navigation::restates_navigation;

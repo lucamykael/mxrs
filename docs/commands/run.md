@@ -57,10 +57,17 @@ against the model's own accounts, holding one of the service's roles
 (`401` with the service's realm, `403` without a role); authentication the
 runtime does not offer is refused with `501` rather than served to anyone.
 Path and query parameters are read as their types (`400` with why when one
-is not), bound to the microflow, and the result answers through the
+is not); a body is its parameter's whole — text as it came to a String, the
+JSON it is to any other type — and the content of the request object.
+They are bound to the microflow, and the result answers through the
 operation's export mapping — or as the stored object without one — under
 the status, and with the content, the flow left on its
-`System.HttpResponse`. Headers are not carried yet.
+`System.HttpResponse`. A flow that fails answers `500`, its error logged on
+the console. What is not carried yet, said at startup where it applies:
+headers, and an operation's import mapping (its body reaches the microflow
+as JSON). A route the server cannot hold — alike to another but for a
+parameter's name, or at the runtime's own `/api/...` paths — is not served,
+and startup says which.
 
 ## Scheduled events
 

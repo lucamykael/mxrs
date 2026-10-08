@@ -50,7 +50,10 @@ pub enum FlowValue {
 pub enum RequestValue {
     /// Text as it is: a string, or an enumeration value's name.
     Text,
+    /// A whole number of 32 bits.
     Integer,
+    /// A whole number of 64 bits.
+    Long,
     Decimal,
     Boolean,
     /// An ISO 8601 date or UTC date-time.
@@ -63,6 +66,7 @@ impl RequestValue {
         match self {
             RequestValue::Text => "text",
             RequestValue::Integer => "an integer",
+            RequestValue::Long => "a long integer",
             RequestValue::Decimal => "a decimal",
             RequestValue::Boolean => "a boolean",
             RequestValue::DateTime => "an ISO 8601 date",
@@ -77,11 +81,24 @@ impl FlowValue {
         let Some(text) = text else {
             return Ok(FlowValue::Empty);
         };
+        // A typed value said empty is no value, as one left out is.
+        if kind != RequestValue::Text && text.trim().is_empty() {
+            return Ok(FlowValue::Empty);
+        }
         let refused = || format!("{text:?} is not {}", kind.description());
         Ok(match kind {
             RequestValue::Text => FlowValue::String(text.to_string()),
-            RequestValue::Integer => FlowValue::Int(text.trim().parse().map_err(|_| refused())?),
-            RequestValue::Decimal => FlowValue::Float(text.trim().parse().map_err(|_| refused())?),
+            RequestValue::Integer => FlowValue::Int(i64::from(
+                text.trim().parse::<i32>().map_err(|_| refused())?,
+            )),
+            RequestValue::Long => FlowValue::Int(text.trim().parse().map_err(|_| refused())?),
+            RequestValue::Decimal => FlowValue::Float(
+                text.trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(refused)?,
+            ),
             RequestValue::Boolean => match text.trim().to_ascii_lowercase().as_str() {
                 "true" => FlowValue::Bool(true),
                 "false" => FlowValue::Bool(false),
@@ -509,6 +526,14 @@ mod request_tests {
             Ok(FlowValue::String("abc".into()))
         );
         assert_eq!(read(None, RequestValue::Integer), Ok(FlowValue::Empty));
+        assert_eq!(read(Some(""), RequestValue::Integer), Ok(FlowValue::Empty));
+        assert!(read(Some("3000000000"), RequestValue::Integer).is_err());
+        assert_eq!(
+            read(Some("3000000000"), RequestValue::Long),
+            Ok(FlowValue::Int(3_000_000_000))
+        );
+        assert!(read(Some("NaN"), RequestValue::Decimal).is_err());
+        assert!(read(Some("2026-02-31"), RequestValue::DateTime).is_err());
         assert_eq!(
             read(Some("abc"), RequestValue::Integer),
             Err("\"abc\" is not an integer".to_string())

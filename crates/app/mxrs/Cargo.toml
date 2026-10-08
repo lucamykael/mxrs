@@ -31,6 +31,7 @@ mxrs-runtime-sqlite = { path = "../mxrs-runtime-sqlite" }
 mxrs-semantic = { path = "../../compiler/mxrs-semantic" }
 mxrs-scaffold = { path = "../mxrs-scaffold" }
 mxrs-writer = { path = "../../writer/mxrs-writer" }
+serde_json.workspace = true
 
 [dev-dependencies]
 mxrs-model = { path = "../../model/mxrs-model" }

@@ -177,8 +177,21 @@ pub(crate) fn plan(
             snake_case(&subject.join("_"))
         }
     };
-    if resource.is_empty() {
-        return Err(invalid("resource", &resource));
+    if resource.is_empty()
+        || !resource
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(invalid(
+            "resource (letters, digits, `_`, `-` or `.`)",
+            &resource,
+        ));
+    }
+    if !path_is_valid(&path) {
+        return Err(invalid(
+            "operation path (segments of letters, digits, `_`, `-` or `.`, or `{name}`)",
+            &path,
+        ));
     }
     let mut parameters = Vec::new();
     for segment in path.split('/') {
@@ -205,12 +218,36 @@ pub(crate) fn plan(
         },
     };
     let service_stem = stem(&service);
-    let service_path = options
-        .path
-        .clone()
-        .unwrap_or_else(|| format!("rest/{}/v1", service.to_ascii_lowercase()))
-        .trim_matches('/')
-        .to_string();
+    let given = options.path.as_deref().map(|path| path.trim_matches('/'));
+    if let Some(path) = given
+        && !path_is_valid(path)
+    {
+        return Err(invalid(
+            "service path (segments of letters, digits, `_`, `-` or `.`)",
+            path,
+        ));
+    }
+    // A service the module declares already is where it is.
+    let declared_path = transaction
+        .content(&folder.join(format!("{service_stem}.rs")))?
+        .as_deref()
+        .and_then(declared_service_path);
+    let service_path = match (declared_path, given) {
+        (Some(declared), Some(given)) if declared != given => {
+            return Err(ScaffoldError::InvalidProjectSource {
+                path: folder
+                    .join(format!("{service_stem}.rs"))
+                    .display()
+                    .to_string(),
+                reason: format!(
+                    "the service {service} is published at `/{declared}`, not `/{given}`"
+                ),
+            });
+        }
+        (Some(declared), _) => declared,
+        (None, Some(given)) => given.to_string(),
+        (None, None) => format!("rest/{}/v1", service.to_ascii_lowercase()),
+    };
     Ok(RestOperation {
         module_name: module_name.to_string(),
         module_stem,
@@ -223,6 +260,26 @@ pub(crate) fn plan(
         path,
         parameters,
     })
+}
+
+/// Whether `path` is segments a route can hold: letters, digits, `_`, `-`
+/// or `.`, or a `{name}`.
+fn path_is_valid(path: &str) -> bool {
+    path.is_empty()
+        || path.split('/').all(|segment| {
+            match segment
+                .strip_prefix('{')
+                .and_then(|segment| segment.strip_suffix('}'))
+            {
+                Some(name) => parameter_name(name).is_ok(),
+                None => {
+                    !segment.is_empty()
+                        && segment
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                }
+            }
+        })
 }
 
 /// A file or identifier stem for a name: snake case, a keyword escaped.
@@ -280,6 +337,27 @@ fn declared_service_name(source: &str) -> Option<String> {
         .find_map(|opening| {
             let rest = &source[source.find(opening)? + opening.len()..];
             let rest = rest.trim_start().strip_prefix('"')?;
+            Some(rest[..rest.find('"')?].to_string())
+        })
+}
+
+/// Whether a function body's text ends a statement and opens another at
+/// the body's own indentation.
+fn ends_a_statement_within(text: &str) -> bool {
+    text.match_indices(";\n    ")
+        .any(|(at, found)| !text[at + found.len()..].starts_with(' '))
+}
+
+/// The path a service file declares its service at.
+fn declared_service_path(source: &str) -> Option<String> {
+    ["Service::new(", "PublishedRestServiceBuilder::new("]
+        .into_iter()
+        .find_map(|opening| {
+            let rest = &source[source.find(opening)? + opening.len()..];
+            let rest = rest.trim_start().strip_prefix('"')?;
+            let rest = &rest[rest.find('"')? + 1..];
+            let rest = rest.trim_start().strip_prefix(',')?.trim_start();
+            let rest = rest.strip_prefix('"')?;
             Some(rest[..rest.find('"')?].to_string())
         })
 }
@@ -352,9 +430,22 @@ fn route(operation: &RestOperation) -> String {
 /// Whether a service file already declares the operation's method at its
 /// resource and path.
 fn operation_declared(source: &str, operation: &RestOperation) -> bool {
-    let resource = format!(".resource({:?}", operation.resource);
-    source.contains(&resource)
-        && source.contains(&format!(".{}({:?},", operation.method, operation.path))
+    let marker = format!(".resource({:?}, |", operation.resource);
+    let call = format!(".{}({:?},", operation.method, operation.path);
+    source.match_indices(&marker).any(|(at, _)| {
+        let start = at + marker.len();
+        let Some(open) = source[start..].find('{').map(|offset| start + offset) else {
+            return false;
+        };
+        closure_body(source, open).is_some_and(|(close, _)| {
+            // rustfmt may put the call's arguments on the lines below it.
+            let body: String = source[open..close]
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join("");
+            body.contains(&call.replace(' ', ""))
+        })
+    })
 }
 
 /// A project no axum router serves: the declaration alone.
@@ -381,7 +472,7 @@ fn publish_declared(
             service_file,
             format!(
                 "{}//!\n//! This file declares the service, and every build writes it into the\n//! model: the runtime serving the model serves it. No router of this\n//! project's routes it.\n\nuse mxrs::prelude::*;\n\n#[declaration(module = {:?})]\npub fn {}(module: &mut ModuleBuilder) {{\n    let mut service = PublishedRestServiceBuilder::new({:?}, {:?});\n    {resource}\n    module.published_rest_service(service);\n}}\n",
-                header(operation),
+                declared_header(operation),
                 operation.module_name,
                 declaration_function(operation),
                 operation.service,
@@ -400,7 +491,29 @@ fn publish_declared(
             reason: "its declaration does not end in `module.published_rest_service(service);`, where the operation would join it".to_string(),
         });
     };
-    let edited = format!("{}    {resource}\n{}", &source[..at], &source[at..]);
+    // A new resource joins the statement declaring the others, when the
+    // declaration is that one statement.
+    let before = source[..at].trim_end();
+    let statement = before
+        .strip_suffix(';')
+        .and_then(|head| head.rfind("\n    service").map(|start| (start, head.len())));
+    let edited = match statement {
+        Some((start, end))
+            if !source[start..end].contains("let mut service")
+                && !ends_a_statement_within(&source[start..end]) =>
+        {
+            format!(
+                "{}{}{}",
+                &source[..end],
+                resource
+                    .strip_prefix("service")
+                    .and_then(|link| link.strip_suffix(';'))
+                    .expect("a resource statement"),
+                &source[end..]
+            )
+        }
+        _ => format!("{}    {resource}\n{}", &source[..at], &source[at..]),
+    };
     edit(transaction, service_file, &source, edited)
 }
 
@@ -495,14 +608,25 @@ fn publish_served(
                 .filter(|path| !present.contains(path))
                 .map(|path| format!("use {path};"))
                 .collect();
-            let mut lines: Vec<String> = source.lines().map(str::to_string).collect();
-            let last_use = lines
-                .iter()
-                .rposition(|line| line.starts_with("use "))
-                .map_or(0, |position| position + 1);
-            lines.splice(last_use..last_use, missing);
-            let mut edited = lines.join("\n");
-            edited.push_str("\n\n");
+            // After the last `use` item, however many lines it spans; in a
+            // file with none, after its opening documentation.
+            let at = match source.rfind("\nuse ") {
+                Some(start) => {
+                    let end = start + source[start..].find(';').unwrap_or(0);
+                    end + source[end..].find('\n').unwrap_or(source.len() - end)
+                }
+                None => source
+                    .match_indices('\n')
+                    .map(|(at, _)| at)
+                    .find(|&at| !source[at + 1..].starts_with("//!"))
+                    .unwrap_or(source.len()),
+            };
+            let added: String = missing.iter().map(|line| format!("\n{line}")).collect();
+            let mut edited = format!("{}{added}{}", &source[..at], &source[at..]);
+            if !edited.ends_with('\n') {
+                edited.push('\n');
+            }
+            edited.push('\n');
             edited.push_str(&function);
             edit(transaction, &controller_file, &source, edited)
         }
@@ -525,6 +649,15 @@ fn declaration_function(operation: &RestOperation) -> String {
         stem @ ("service" | "router") => format!("declare_{stem}"),
         stem => stem.to_string(),
     }
+}
+
+/// A declaration's opening paragraph, when no router of the project
+/// serves it: the service, and who may call it.
+fn declared_header(operation: &RestOperation) -> String {
+    format!(
+        "//! `{}` — the REST service the {} module publishes at `/{}`.\n//!\n//! The model publishes this service to anyone: it declares no\n//! authentication type and no allowed role.\n",
+        operation.service, operation.module_name, operation.service_path,
+    )
 }
 
 /// A route table's opening paragraph: the service, and who may call it.
@@ -749,40 +882,44 @@ fn imported(source: &str) -> std::collections::HashSet<String> {
 
 /// The route table's `use super::...` line, naming `controller` too.
 fn import_controller(source: &str, controller: &str) -> String {
-    let mut lines: Vec<String> = source.lines().map(str::to_string).collect();
-    let Some(position) = lines
-        .iter()
-        .position(|line| line.starts_with("use super::"))
-    else {
+    // The item, however rustfmt wrapped it: from `use super::` to its `;`.
+    let Some(start) = source.find("\nuse super::").map(|at| at + 1) else {
         return source.to_string();
     };
-    let named = lines[position]
-        .trim_start_matches("use super::")
-        .trim_end_matches(';')
-        .trim_matches(|c| c == '{' || c == '}')
-        .split(',')
-        .map(|name| name.trim().to_string())
+    let Some(end) = source[start..].find(';').map(|offset| start + offset) else {
+        return source.to_string();
+    };
+    let mut names = source[start + "use super::".len()..end]
+        .split([',', '{', '}'])
+        .map(str::trim)
         .filter(|name| !name.is_empty())
+        .map(str::to_string)
         .collect::<Vec<_>>();
-    if named.iter().any(|name| name == controller) {
+    if names.iter().any(|name| name == controller) {
         return source.to_string();
     }
-    let mut names = named;
     names.push(controller.to_string());
     names.sort();
-    lines[position] = match names.as_slice() {
-        [name] => format!("use super::{name};"),
-        names => format!("use super::{{{}}};", names.join(", ")),
+    let item = match names.as_slice() {
+        [name] => format!("use super::{name}"),
+        names => format!("use super::{{{}}}", names.join(", ")),
     };
-    let mut joined = lines.join("\n");
-    joined.push('\n');
-    joined
+    format!("{}{item}{}", &source[..start], &source[end..])
 }
 
 /// Writes an edited source. A file rustfmt would leave as it is stays so;
 /// one its author formats otherwise keeps their formatting, the edit
 /// written as the scaffold wrote it.
 fn edit(transaction: &mut Transaction, path: &Path, original: &str, edited: String) -> Result<()> {
+    // An edit that leaves the file no Rust is refused, not written.
+    if let Err(error) = syn::parse_file(&edited) {
+        return Err(ScaffoldError::InvalidProjectSource {
+            path: path.display().to_string(),
+            reason: format!(
+                "the operation cannot be added to it as it is written ({error}); add it by hand"
+            ),
+        });
+    }
     let formatted = crate::format_rust(original.to_string()) == original;
     transaction.write(
         path,
@@ -851,24 +988,29 @@ fn declare_controllers_module(
     if source.lines().any(|line| line == declaration) {
         return Ok(());
     }
-    let mut declared: Vec<String> = source[..stub]
-        .lines()
-        .filter(|line| line.starts_with("pub mod ") && line.ends_with(';'))
-        .map(str::to_string)
-        .collect();
-    let opening = source[..stub]
-        .lines()
-        .take_while(|line| !(line.starts_with("pub mod ") && line.ends_with(';')))
-        .collect::<Vec<_>>()
-        .join("\n");
-    declared.push(declaration);
-    declared.sort();
-    let rest = &source[stub + 1..];
-    let opening = opening.trim_end();
-    transaction.write(
-        index,
-        format!("{opening}\n\n{}\n\n{rest}", declared.join("\n")),
-    )
+    // One line, among the plain declarations just above the stub when it
+    // has them, in their order; everything else in the file stays.
+    let mut lines: Vec<&str> = source[..stub].lines().collect();
+    let block_end = lines.len();
+    let block_start = lines
+        .iter()
+        .rposition(|line| !(line.starts_with("pub mod ") && line.ends_with(';')))
+        .map_or(0, |position| position + 1);
+    let position = (block_start..block_end)
+        .find(|&index| lines[index] > declaration.as_str())
+        .unwrap_or(block_end);
+    if block_start == block_end {
+        // The first declaration, a blank line apart from what is above it.
+        lines.insert(position, "");
+        lines.insert(position + 1, &declaration);
+    } else {
+        lines.insert(position, &declaration);
+    }
+    let mut head = lines.join("\n");
+    if source[..stub].ends_with('\n') {
+        head.push('\n');
+    }
+    transaction.write(index, format!("{head}{}", &source[stub..]))
 }
 
 /// Merges a new route table into the project's router.
@@ -1103,6 +1245,102 @@ mod tests {
         assert!(
             handlers.contains("flow.parameter::<MxString>(\"note\", |_| {});"),
             "{handlers}"
+        );
+    }
+
+    /// An operation is declared only when its own resource declares it.
+    #[test]
+    fn an_operation_is_declared_by_its_own_resource() {
+        let source = "Service::new(\"A\", \"a\")\n    .resource(\"order\", |order| {\n        order.delete(\n            \"{id}\",\n            \"Sales.MF_Order_Delete\",\n            order_controller::destroy,\n            |_| {},\n        );\n    })\n    .resource(\"customer\", |customer| {\n        customer.get(\"{id}\", \"Sales.MF_Customer_Show\", c::show, |_| {});\n    })\n";
+        let mut operation = planned("MF_Customer_Delete", &RestOperationOptions::default());
+        assert!(!operation_declared(source, &operation));
+        operation.resource = "order".into();
+        assert!(operation_declared(source, &operation));
+    }
+
+    /// A `use super::` rustfmt wrapped over lines gains the controller as
+    /// one item still.
+    #[test]
+    fn a_wrapped_import_gains_the_controller() {
+        let source = "//! Doc.\n\nuse axum::Router;\n\nuse super::{\n    a_controller, b_controller, c_controller, d_controller, e_controller,\n    f_controller,\n};\nuse crate::controllers::AppState;\n";
+        let edited = import_controller(source, "g_controller");
+        assert!(syn::parse_file(&edited).is_ok(), "{edited}");
+        assert!(edited.contains("use super::{a_controller, b_controller, c_controller, d_controller, e_controller, f_controller, g_controller};\nuse crate::controllers::AppState;"), "{edited}");
+        assert_eq!(import_controller(&edited, "a_controller"), edited);
+    }
+
+    /// A service the module declares is where it is: a different `--path`
+    /// is refused, and none takes its own; a resource or path no route can
+    /// hold is refused.
+    #[test]
+    fn an_existing_service_keeps_its_path() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("src/controllers/sales");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("sales_api.rs"),
+            "fn x() { let mut service = PublishedRestServiceBuilder::new(\"SalesApi\", \"api/v2\"); }",
+        )
+        .unwrap();
+        let plan_with = |options: RestOperationOptions| {
+            plan(
+                &Transaction::default(),
+                root.path(),
+                "Sales",
+                "MF_Order_Show",
+                &options,
+            )
+        };
+        assert_eq!(
+            plan_with(RestOperationOptions::default())
+                .unwrap()
+                .service_path,
+            "api/v2"
+        );
+        assert!(
+            plan_with(RestOperationOptions {
+                path: Some("api/v3".into()),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        for options in [
+            RestOperationOptions {
+                resource: Some("orders/lines".into()),
+                ..Default::default()
+            },
+            RestOperationOptions {
+                operation_path: Some("a b".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(plan_with(options).is_err());
+        }
+    }
+
+    /// A module's folder joins a server stub's declarations, the rest of
+    /// the file as it was.
+    #[test]
+    fn a_module_folder_joins_the_server_stub() {
+        let root = tempfile::tempdir().unwrap();
+        let index = root.path().join("mod.rs");
+        std::fs::write(
+            &index,
+            "//! actix-web server stub.\n\n#[cfg(test)]\nmod checks;\npub mod billing;\npub mod zeta;\n\npub mod server {\n    pub fn serve() {}\n}\n",
+        )
+        .unwrap();
+        let mut transaction = Transaction::default();
+        declare_controllers_module(&mut transaction, &index, "sales").unwrap();
+        assert_eq!(
+            transaction.content(&index).unwrap().unwrap(),
+            "//! actix-web server stub.\n\n#[cfg(test)]\nmod checks;\npub mod billing;\npub mod sales;\npub mod zeta;\n\npub mod server {\n    pub fn serve() {}\n}\n"
+        );
+        std::fs::write(&index, "//! stub.\n\npub mod server {\n}\n").unwrap();
+        let mut transaction = Transaction::default();
+        declare_controllers_module(&mut transaction, &index, "sales").unwrap();
+        assert_eq!(
+            transaction.content(&index).unwrap().unwrap(),
+            "//! stub.\n\npub mod sales;\n\npub mod server {\n}\n"
         );
     }
 

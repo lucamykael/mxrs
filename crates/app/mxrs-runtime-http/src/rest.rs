@@ -5,7 +5,8 @@
 //! — anyone, as the project's guest, or HTTP Basic against the model's own
 //! accounts, holding one of the service's module roles — and then runs the
 //! operation's action with what the request carries: its path parameters,
-//! its query string, its body and its URI. The action binds those to the
+//! its query string, its body — as text, and as JSON when it is — and its
+//! URI. The action binds those to the
 //! microflow and answers the operation's document, under the status the
 //! flow chose.
 
@@ -62,6 +63,54 @@ pub trait RestAccounts: Send + Sync {
     fn anonymous(&self) -> SecurityContext;
     /// Whether `caller` holds one of `roles`.
     fn allows(&self, caller: &SecurityContext, roles: &[&str]) -> bool;
+}
+
+/// The routes a router can hold together, and each one it cannot with
+/// why. Two routes alike but for a parameter's name are one route to the
+/// router, which serves the first; one at the runtime's own
+/// `/api/health` or `/api/<kind>/<handler>` would take what is the
+/// runtime's.
+pub fn routable(routes: Vec<RestRoute>) -> (Vec<RestRoute>, Vec<(RestRoute, String)>) {
+    let shape = |path: &str| {
+        path.split('/')
+            .map(|segment| {
+                if segment.starts_with('{') && segment.ends_with('}') {
+                    "{}"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let mut kept: Vec<RestRoute> = Vec::new();
+    let mut skipped = Vec::new();
+    for route in routes {
+        let route_shape = shape(&route.path);
+        let segments: Vec<&str> = route_shape.trim_start_matches('/').split('/').collect();
+        let runtime_own = match segments.as_slice() {
+            ["api", "health"] => true,
+            ["api", kind, _] => {
+                matches!(*kind, "{}" | "action" | "microflow" | "nanoflow" | "data")
+            }
+            _ => false,
+        };
+        let why = if runtime_own {
+            Some("the runtime answers that path itself".to_string())
+        } else {
+            kept.iter()
+                .find(|other| {
+                    shape(&other.path) == route_shape
+                        && (other.path != route.path || other.method == route.method)
+                })
+                .map(|other| format!("{} {} answers that route already", other.method, other.path))
+        };
+        match why {
+            Some(why) => skipped.push((route, why)),
+            None => kept.push(route),
+        }
+    }
+    (kept, skipped)
 }
 
 /// `router` serving every route.
@@ -131,16 +180,14 @@ impl Operation {
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        let body = if body.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&body)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()))
-        };
+        // The body as it came, and as JSON when it is some.
+        let text = String::from_utf8_lossy(&body).into_owned();
+        let json = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
         let arguments = json!({
             "path": path,
             "query": query,
-            "body": body,
+            "body": json,
+            "text": text,
             "uri": uri.to_string(),
         });
         // Operations wait their turn on the one runtime, as a page's data
@@ -353,6 +400,39 @@ mod tests {
 
     /// A route answers its method at its path with what the request
     /// carries; the status is the action's.
+    /// What the router cannot hold is set aside with why.
+    #[test]
+    fn routes_the_router_cannot_hold_are_set_aside() {
+        let route = |method: Method, path: &str| RestRoute {
+            method,
+            path: path.into(),
+            action: path.into(),
+            authentication: RestAuthentication::Public,
+        };
+        let (kept, skipped) = routable(vec![
+            route(Method::GET, "/rest/items/{id}"),
+            route(Method::DELETE, "/rest/items/{itemId}"),
+            route(Method::GET, "/rest/items/{id}"),
+            route(Method::DELETE, "/rest/items/{id}"),
+            route(Method::GET, "/api/health"),
+            route(Method::POST, "/api/data/{operation}"),
+            route(Method::GET, "/api/v1/orders"),
+        ]);
+        let kept: Vec<_> = kept
+            .iter()
+            .map(|route| (route.method.as_str(), route.path.as_str()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("GET", "/rest/items/{id}"),
+                ("DELETE", "/rest/items/{id}"),
+                ("GET", "/api/v1/orders")
+            ]
+        );
+        assert_eq!(skipped.len(), 4);
+    }
+
     #[tokio::test]
     async fn an_operation_answers_its_route() {
         let (status, body, _) = call(

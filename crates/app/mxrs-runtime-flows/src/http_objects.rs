@@ -27,6 +27,8 @@ pub struct HttpObjects {
     /// belongs to the declaration because nothing else reads it: an operation
     /// whose microflow asks for no request object has no use for one.
     request: Option<(String, String)>,
+    /// The request's body, as text, which the request object carries.
+    content: Option<String>,
     response: Option<String>,
 }
 
@@ -40,6 +42,13 @@ impl HttpObjects {
     /// request at `uri`.
     pub fn with_request(mut self, parameter: impl Into<String>, uri: impl Into<String>) -> Self {
         self.request = Some((parameter.into(), uri.into()));
+        self
+    }
+
+    /// The request's body, as text: what its request object's `Content`
+    /// holds.
+    pub fn with_content(mut self, content: impl Into<String>) -> Self {
+        self.content = Some(content.into());
         self
     }
 
@@ -73,6 +82,14 @@ impl HttpObjects {
                 "Uri",
                 serde_json::Value::String(uri.clone()),
             )?;
+            if let Some(content) = &self.content {
+                store.set_member(
+                    &request.entity,
+                    &request.id,
+                    "Content",
+                    serde_json::Value::String(content.clone()),
+                )?;
+            }
             arguments.insert(
                 parameter.clone(),
                 FlowValue::Object(ObjectRef {

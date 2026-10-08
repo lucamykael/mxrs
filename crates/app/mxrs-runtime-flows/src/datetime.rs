@@ -70,7 +70,15 @@ pub fn parse_iso(text: &str) -> Option<f64> {
     let year: i64 = date.next()?.parse().ok()?;
     let month: u32 = date.next()?.parse().ok()?;
     let day: u32 = date.next()?.parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=days).contains(&day) {
         return None;
     }
     let mut time = time.splitn(3, ':');

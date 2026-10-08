@@ -931,6 +931,7 @@ dependencies = [
  "mxrs-scaffold",
  "mxrs-semantic",
  "mxrs-writer",
+ "serde_json",
  "tempfile",
  "tokio",
  "tower",

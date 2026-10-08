@@ -203,6 +203,21 @@ pub fn request_value(
     })
 }
 
+/// The value a published REST operation's body `parameter` of a type
+/// other than text takes from the request's `body`: the JSON it is, or
+/// nothing when it is empty. A body that is no JSON is the caller's
+/// mistake: the boundary answers `400` with why.
+pub fn request_body(parameter: &str, body: &str) -> Result<FlowValue, ServiceError> {
+    if body.trim().is_empty() {
+        return Ok(FlowValue::Empty);
+    }
+    serde_json::from_str(body)
+        .map(FlowValue::Json)
+        .map_err(|_| {
+            PortValueError::new(format!("JSON for parameter {parameter}"), "another body").into()
+        })
+}
+
 /// The runtime representation of one authoring type marker, and the two
 /// conversions a generated port needs at its boundary.
 pub trait PortValue: MendixType {

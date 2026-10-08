@@ -1,5 +1,6 @@
-//! A published REST operation is checked against the microflow it calls
-//! before anything is written, as Studio Pro checks it before deploying.
+//! A published REST operation is checked against the microflow it calls,
+//! as Studio Pro checks it before deploying: what it would refuse, a build
+//! says.
 
 use mxrs_dsl::{ProjectBuilder, PublishedRestServiceBuilder};
 use mxrs_expr::*;
@@ -18,10 +19,8 @@ fn project(configure: impl FnOnce(&mut PublishedRestServiceBuilder)) -> mxrs_ir:
     builder.build()
 }
 
-fn written(project: &mxrs_ir::ProjectDecl) -> Result<(), String> {
-    let directory = tempfile::tempdir().unwrap();
-    mxrs_writer::write_project(directory.path().join("App.mpr"), project)
-        .map_err(|error| error.to_string())
+fn warnings(project: &mxrs_ir::ProjectDecl) -> Vec<String> {
+    mxrs_writer::rest_operation_warnings(project, &[])
 }
 
 #[test]
@@ -33,11 +32,14 @@ fn an_operation_binding_its_microflow_is_written() {
             });
         });
     });
-    written(&project).unwrap();
+    assert_eq!(warnings(&project), Vec::<String>::new());
+    // A model that says it so is written, whatever a build warns of.
+    let directory = tempfile::tempdir().unwrap();
+    mxrs_writer::write_project(directory.path().join("App.mpr"), &project).unwrap();
 }
 
 #[test]
-fn an_operation_its_microflow_cannot_answer_is_refused() {
+fn an_operation_its_microflow_cannot_answer_is_warned_of() {
     for (configure, expected) in [
         (
             Box::new(|service: &mut PublishedRestServiceBuilder| {
@@ -78,9 +80,19 @@ fn an_operation_its_microflow_cannot_answer_is_refused() {
             }),
             "has a path parameter \"id\" its path does not hold",
         ),
+        (
+            Box::new(|service: &mut PublishedRestServiceBuilder| {
+                service.resource("orders", |orders| {
+                    orders.get("{id}", "Sales.MF_Order_Show", |operation| {
+                        operation.path_parameter("id", RestParameterType::Integer);
+                    });
+                });
+            }),
+            "binds its parameter \"id\" to \"id\" of Sales.MF_Order_Show, which holds another type",
+        ),
     ] {
-        let error = written(&project(configure)).unwrap_err();
-        assert!(error.contains(expected), "{expected}\n---\n{error}");
-        assert!(error.contains("Sales.OrdersApi"), "{error}");
+        let warnings = warnings(&project(configure)).join("\n");
+        assert!(warnings.contains(expected), "{expected}\n---\n{warnings}");
+        assert!(warnings.contains("Sales.OrdersApi"), "{warnings}");
     }
 }

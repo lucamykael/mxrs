@@ -11,20 +11,26 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mxrs_ir::{PublishedRestServiceDecl, RestAuthentication, RestParameterSource};
-use mxrs_runtime::{RuntimeError, SecurityContext, SecurityPolicy, Store};
+use mxrs_runtime::{SecurityContext, SecurityPolicy, Store};
 use mxrs_runtime_flows::{
     ExportMapping, FlowEngine, FlowError, FlowValue, HttpObjects, RequestValue, Variables,
 };
 use mxrs_runtime_http::{RestAccounts, RestRoute};
 use serde_json::{Value, json};
 
-/// The operations the model at `mpr` publishes: the actions that run them,
-/// by name, and the routes that reach those actions.
+/// Each operation, the route reaching it and the action running it, and
+/// what of the model's services is left out, and why.
+pub(crate) type Published = (Vec<(RestRoute, RestAction)>, Vec<String>);
+
+/// The operations the model at `mpr` publishes — the actions that run them,
+/// by name, and the routes that reach those actions — and what of the
+/// model's services they leave out, and why.
 pub(crate) fn operations(
     mpr: &Path,
     modules: &[mxrs_model::Module],
     engine: &Arc<FlowEngine>,
-) -> Result<Vec<(RestRoute, RestAction)>, String> {
+) -> Result<Published, String> {
+    let mut warnings = Vec::new();
     let project = mxrs_model::Project::open(mpr, true).map_err(|error| error.to_string())?;
     let units = project.all_units().map_err(|error| error.to_string())?;
     let containers: HashMap<&str, &str> = units
@@ -49,10 +55,13 @@ pub(crate) fn operations(
     let mut services = Vec::new();
     let mut mappings = HashMap::new();
     for unit in &units {
-        let document = project
-            .mpr()
-            .parse_contents(unit)
-            .map_err(|error| error.to_string())?;
+        let document = match project.mpr().parse_contents(unit) {
+            Ok(document) => document,
+            Err(error) => {
+                warnings.push(format!("unit {} cannot be read: {error}", unit.unit_id));
+                continue;
+            }
+        };
         let ty = document.get_str("$Type").unwrap_or_default();
         if ty != "Rest$PublishedRestService" && ty != "ExportMappings$ExportMapping" {
             continue;
@@ -60,16 +69,22 @@ pub(crate) fn operations(
         let Some(module) = owner(&unit.unit_id) else {
             continue;
         };
-        let Ok(stated) = mxrs_writer::stated_document(&document) else {
+        let name = document.get_str("Name").unwrap_or_default().to_string();
+        let stated = mxrs_writer::stated_document(&document);
+        if ty == "Rest$PublishedRestService" {
+            match stated.ok().and_then(|stated| PublishedRestServiceDecl::read(&stated)) {
+                Some(service) if service.excluded => {}
+                Some(service) => services.push((module, service)),
+                None => warnings.push(format!(
+                    "the published REST service {module}.{name} is not served: its document says what this runtime cannot read"
+                )),
+            }
+            continue;
+        }
+        let Ok(stated) = stated else {
             continue;
         };
-        if ty == "Rest$PublishedRestService" {
-            if let Some(service) = PublishedRestServiceDecl::read(&stated)
-                && !service.excluded
-            {
-                services.push((module, service));
-            }
-        } else if let (Some(name), Some(mapping)) = (
+        if let (Some(name), Some(mapping)) = (
             stated.text("Name").map(str::to_string),
             ExportMapping::from_document(&stated),
         ) {
@@ -86,20 +101,23 @@ pub(crate) fn operations(
                     continue;
                 };
                 let path = service.route(resource, operation);
-                let action = format!(
-                    "{module}.{} {} {path}",
-                    service.name,
-                    operation.method.as_http()
-                );
+                let action = route_name(module, service, operation, &path);
                 let (request, response) = http
                     .get(operation.microflow.as_str())
                     .cloned()
                     .unwrap_or_default();
+                if !operation.import_mapping.is_empty() {
+                    warnings.push(format!(
+                        "{} {path}: its import mapping {} is not applied; its body reaches the microflow as JSON",
+                        operation.method.as_http(),
+                        operation.import_mapping
+                    ));
+                }
                 operations.push((
                     RestRoute {
                         method,
                         path,
-                        action,
+                        action: action.clone(),
                         authentication: authentication.clone(),
                     },
                     RestAction {
@@ -113,27 +131,40 @@ pub(crate) fn operations(
                                     parameter.name.clone(),
                                     parameter.source,
                                     parameter.microflow_parameter.clone(),
-                                    request_value(&parameter.ty),
+                                    parameter.ty.clone(),
                                 )
                             })
                             .collect(),
                         mapping: mappings.get(&operation.export_mapping).cloned(),
                         request,
                         response,
+                        name: action,
                     },
                 ));
             }
         }
     }
-    Ok(operations)
+    Ok((operations, warnings))
+}
+
+fn route_name(
+    module: &str,
+    service: &PublishedRestServiceDecl,
+    operation: &mxrs_ir::RestOperationDecl,
+    path: &str,
+) -> String {
+    format!(
+        "{module}.{} {} {path}",
+        service.name,
+        operation.method.as_http()
+    )
 }
 
 /// What a path or query parameter's text is read as.
 fn request_value(ty: &mxrs_ir::RestParameterType) -> RequestValue {
     match ty {
-        mxrs_ir::RestParameterType::Integer | mxrs_ir::RestParameterType::Long => {
-            RequestValue::Integer
-        }
+        mxrs_ir::RestParameterType::Integer => RequestValue::Integer,
+        mxrs_ir::RestParameterType::Long => RequestValue::Long,
         mxrs_ir::RestParameterType::Decimal => RequestValue::Decimal,
         mxrs_ir::RestParameterType::Boolean => RequestValue::Boolean,
         mxrs_ir::RestParameterType::DateTime => RequestValue::DateTime,
@@ -213,11 +244,18 @@ pub(crate) struct RestAction {
     engine: Arc<FlowEngine>,
     microflow: String,
     /// `(name the request carries it under, where, microflow parameter,
-    /// what its text is read as)`.
-    parameters: Vec<(String, RestParameterSource, String, RequestValue)>,
+    /// its type)`.
+    parameters: Vec<(
+        String,
+        RestParameterSource,
+        String,
+        mxrs_ir::RestParameterType,
+    )>,
     mapping: Option<ExportMapping>,
     request: Option<String>,
     response: Option<String>,
+    /// The operation, as its failures are logged under.
+    name: String,
 }
 
 impl mxrs_runtime::Action for RestAction {
@@ -235,14 +273,15 @@ impl mxrs_runtime::Action for RestAction {
                 .map(str::to_string)
         };
         let mut variables = Variables::new();
-        for (name, source, bound, kind) in &self.parameters {
+        for (name, source, bound, ty) in &self.parameters {
+            let kind = request_value(ty);
             let read = |part: &str| {
-                FlowValue::from_request(text(part, name).as_deref(), *kind)
+                FlowValue::from_request(text(part, name).as_deref(), kind)
                     .map_err(|why| format!("parameter {name}: {why}"))
             };
             let value = match source {
                 RestParameterSource::Path => match read("path") {
-                    Ok(FlowValue::Empty) if *kind == RequestValue::Text => {
+                    Ok(FlowValue::Empty) if kind == RequestValue::Text => {
                         FlowValue::String(String::new())
                     }
                     Ok(value) => value,
@@ -252,10 +291,24 @@ impl mxrs_runtime::Action for RestAction {
                     Ok(value) => value,
                     Err(why) => return Ok(refused(&why)),
                 },
-                RestParameterSource::Body => match arguments.get("body") {
-                    Some(Value::Null) | None => FlowValue::Empty,
-                    Some(body) => FlowValue::Json(body.clone()),
-                },
+                // The body is the parameter's whole: a String takes it as
+                // text, any other type as the JSON it is.
+                RestParameterSource::Body => {
+                    let raw = arguments
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    match (ty, arguments.get("body")) {
+                        (_, _) if raw.is_empty() => FlowValue::Empty,
+                        (mxrs_ir::RestParameterType::String, _) => {
+                            FlowValue::String(raw.to_string())
+                        }
+                        (_, Some(Value::Null) | None) => {
+                            return Ok(refused(&format!("parameter {name}: the body is not JSON")));
+                        }
+                        (_, Some(body)) => FlowValue::Json(body.clone()),
+                    }
+                }
                 // Headers are not carried to the runtime yet.
                 RestParameterSource::Header => FlowValue::Empty,
             };
@@ -267,25 +320,42 @@ impl mxrs_runtime::Action for RestAction {
                 .get("uri")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            objects = objects.with_request(parameter.clone(), uri);
+            objects = objects.with_request(parameter.clone(), uri).with_content(
+                arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            );
         }
         if let Some(parameter) = &self.response {
             objects = objects.with_response(parameter.clone());
         }
-        let answer = self
-            .engine
-            .answer_operation(
-                store,
-                &self.microflow,
-                variables,
-                self.mapping.as_ref(),
-                context,
-                &objects,
-            )
-            .map_err(|error| match error {
-                FlowError::Runtime(error) => error,
-                FlowError::Native(message) => RuntimeError::Transaction(message),
-            })?;
+        let answer = self.engine.answer_operation(
+            store,
+            &self.microflow,
+            variables,
+            self.mapping.as_ref(),
+            context,
+            &objects,
+        );
+        // A flow that fails is the application's fault, not the caller's:
+        // what failed is the server's to log, and the caller is answered
+        // 500, as Mendix answers.
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                let message = match error {
+                    FlowError::Runtime(error) => error.to_string(),
+                    FlowError::Native(message) => message,
+                };
+                eprintln!("[mxrs] {}: {message}", self.name);
+                return Ok(json!({
+                    "status": 500,
+                    "content": "the operation failed",
+                    "document": Value::Null,
+                }));
+            }
+        };
         Ok(json!({
             "status": answer.status,
             "content": answer.content,

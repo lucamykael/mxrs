@@ -114,7 +114,8 @@ pub enum RestParameterType {
 }
 
 impl RestParameterType {
-    fn document(&self) -> NativeDocument {
+    /// The data type document the model stores for it.
+    pub fn document(&self) -> NativeDocument {
         match self {
             Self::String => NativeDocument::new("DataTypes$StringType"),
             Self::Integer => NativeDocument::new("DataTypes$IntegerType"),

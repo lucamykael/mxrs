@@ -547,11 +547,22 @@ pub fn start(options: &RunOptions) -> Result<(), RunError> {
     // The model's published REST services are served from the model too:
     // each operation an action, and a route of the server.
     let mut rest_routes = Vec::new();
-    for (route, action) in crate::published_rest::operations(&target.mpr, &boot.modules, &engine)
-        .map_err(RunError::Target)?
-    {
+    let (operations, warnings) =
+        crate::published_rest::operations(&target.mpr, &boot.modules, &engine)
+            .map_err(RunError::Target)?;
+    for warning in warnings {
+        println!("[mxrs] warning: {warning}");
+    }
+    for (route, action) in operations {
         runtime.register_action(route.action.clone(), action);
         rest_routes.push(route);
+    }
+    let (rest_routes, unroutable) = mxrs_runtime_http::routable(rest_routes);
+    for (route, why) in &unroutable {
+        println!(
+            "[mxrs] warning: {} {} is not served: {why}",
+            route.method, route.path
+        );
     }
     let rest_operations = rest_routes.len();
     let http = RuntimeHttp::new(runtime, &target.web_root).with_published_rest(
