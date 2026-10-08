@@ -827,6 +827,14 @@ export default page(
         assert_eq!(read.document, documents[2]);
         // Without the file beside it, it is said what is missing.
         assert!(read_form_with(&source, "Wizard.tsx", &vocabulary, &|_| None).is_err());
+        // A file anywhere but beside the form is no file it holds.
+        let elsewhere = source.replace("./Wizard.png", "../Wizard.png");
+        let anywhere = |_: &str| Some(png.clone());
+        assert!(read_form_with(&elsewhere, "Wizard.tsx", &vocabulary, &anywhere).is_err());
+        // Markup opening an `<svg>` after a comment is an SVG image.
+        let svg = b"\xef\xbb\xbf<!-- drawn --><svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec();
+        let (_, files) = render_form_files("Sales", &template("Wizard", svg), &vocabulary).unwrap();
+        assert_eq!(files[0].0, "Wizard.svg");
         // Without a thumbnail it is the default, unsaid, and needs no file.
         let source = render_form("Sales", &documents[0], &vocabulary).unwrap();
         assert!(!source.contains("imageData"), "{source}");

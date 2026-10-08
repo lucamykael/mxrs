@@ -30,3 +30,46 @@ fn port_values_drive_a_real_engine_call() {
         .unwrap();
     assert_eq!(MxString::from_flow(result).unwrap(), "olá");
 }
+
+/// An operation that fails leaves the store as the request found it: the
+/// request object it was handed is gone with it, and a body its mapping
+/// cannot read is the caller's mistake.
+#[test]
+fn a_failed_operation_leaves_the_store_as_it_found_it() {
+    use mxrs::ports::{BodyImport, HttpObjects, ServiceError, call_operation};
+
+    let engine = FlowEngine::from_modules(&[]);
+    let mut store = Store::new(StoreSchema::default().entity(
+        "System.HttpRequest",
+        std::collections::BTreeMap::new(),
+        true,
+    ));
+    let objects = HttpObjects::none().with_request("Request", "/api");
+    let failed = call_operation(
+        &engine,
+        &mut store,
+        "App.Missing",
+        Variables::new(),
+        None,
+        &objects,
+        None,
+    );
+    assert!(matches!(failed, Err(ServiceError::Flow(_))));
+    assert!(store.retrieve("System.HttpRequest").unwrap().is_empty());
+
+    let refused = call_operation(
+        &engine,
+        &mut store,
+        "App.Missing",
+        Variables::new(),
+        Some(BodyImport {
+            parameter: "Order",
+            mapping: "App.IM_Order",
+            body: "{}",
+            commit: Some(true),
+        }),
+        &HttpObjects::none(),
+        None,
+    );
+    assert!(matches!(refused, Err(ServiceError::Value(_))));
+}

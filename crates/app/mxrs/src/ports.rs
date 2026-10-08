@@ -254,6 +254,74 @@ pub struct BodyImport<'a> {
     pub commit: Option<bool>,
 }
 
+/// Runs a published operation's microflow `flow` as one unit of work, on
+/// behalf of `caller`: the objects `import` makes of the request's body and
+/// the request objects `objects` hands the flow are made in it, so an
+/// operation that fails anywhere leaves `store` as the request found it —
+/// what the import committed included. A body the mapping cannot read is
+/// the caller's mistake (`400`); a flow that fails, the application's.
+/// Answers the flow's result and the binding its response object is read
+/// back through.
+pub fn call_operation(
+    engine: &FlowEngine,
+    store: &mut mxrs_runtime::Store,
+    flow: &str,
+    arguments: Variables,
+    import: Option<BodyImport<'_>>,
+    objects: &HttpObjects,
+    caller: Option<&SecurityContext>,
+) -> Result<(FlowValue, HttpBinding), ServiceError> {
+    let snapshot = store.clone();
+    let outcome = operation(engine, store, flow, arguments, import, objects, caller);
+    match outcome {
+        Ok(answer) => {
+            store.end_unit_of_work();
+            Ok(answer)
+        }
+        Err(error) => {
+            *store = snapshot;
+            Err(error)
+        }
+    }
+}
+
+fn operation(
+    engine: &FlowEngine,
+    store: &mut mxrs_runtime::Store,
+    flow: &str,
+    mut arguments: Variables,
+    import: Option<BodyImport<'_>>,
+    objects: &HttpObjects,
+    caller: Option<&SecurityContext>,
+) -> Result<(FlowValue, HttpBinding), ServiceError> {
+    let mut execution = engine.new_execution(caller.cloned());
+    if let Some(import) = import {
+        let imported = match request_body(import.parameter, import.body)? {
+            FlowValue::Json(document) => engine
+                .import_document(
+                    store,
+                    &mut execution,
+                    import.mapping,
+                    &document,
+                    import.commit,
+                )
+                .map_err(|error| {
+                    PortValueError::new(
+                        format!("a body the import mapping {} reads", import.mapping),
+                        error.to_string(),
+                    )
+                })?,
+            _ => FlowValue::Empty,
+        };
+        arguments.insert(import.parameter.to_string(), imported);
+    }
+    let binding = objects
+        .bind(store, &mut arguments)
+        .map_err(FlowError::Runtime)?;
+    let result = engine.call_in_unit(store, &mut execution, flow, arguments)?;
+    Ok((result, binding))
+}
+
 /// The value a published REST operation's body `parameter` of a type
 /// other than text takes from the request's `body`: the JSON it is, or
 /// nothing when it is empty. A body that is no JSON is the caller's

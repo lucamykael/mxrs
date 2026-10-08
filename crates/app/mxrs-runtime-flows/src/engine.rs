@@ -1031,19 +1031,27 @@ impl FlowEngine {
         else {
             return Ok(());
         };
+        if self.is_kind_of(entity, expected) {
+            return Ok(());
+        }
+        Err(format!(
+            "{flow} takes {expected} for {parameter}, not {entity}"
+        ))
+    }
+
+    /// Whether `entity` is `ancestor` or one of its specializations.
+    fn is_kind_of(&self, entity: &str, ancestor: &str) -> bool {
         let mut current = entity;
         for _ in 0..32 {
-            if current == expected {
-                return Ok(());
+            if current == ancestor {
+                return true;
             }
             match self.generalizations.get(current) {
                 Some(parent) => current = parent,
                 None => break,
             }
         }
-        Err(format!(
-            "{flow} takes {expected} for {parameter}, not {entity}"
-        ))
+        false
     }
 
     /// Whether this engine applies the import mapping `name` itself.
@@ -1111,13 +1119,17 @@ impl FlowEngine {
         let found = match element.handling {
             ObjectHandling::Create => None,
             ObjectHandling::Find => {
-                let keys: Vec<(String, Value)> = values
+                // A key is compared as the value it is: an integer a flow
+                // stored in a decimal is the document's 4.0.
+                let keys: Vec<(&str, FlowValue)> = values
                     .iter()
                     .filter(|(value, _)| value.key)
                     .map(|(value, read)| {
                         (
-                            value.attribute.clone(),
-                            read.as_ref().map_or(Value::Null, FlowValue::to_member),
+                            value.attribute.as_str(),
+                            FlowValue::from_member(
+                                &read.as_ref().map_or(Value::Null, FlowValue::to_member),
+                            ),
                         )
                     })
                     .collect();
@@ -1127,7 +1139,10 @@ impl FlowEngine {
                     .into_iter()
                     .find(|object| {
                         keys.iter().all(|(attribute, wanted)| {
-                            object.members.get(attribute).unwrap_or(&Value::Null) == wanted
+                            FlowValue::from_member(
+                                object.members.get(*attribute).unwrap_or(&Value::Null),
+                            )
+                            .equals(wanted)
                         })
                     })
                     .map(|object| reference_of(&object))
@@ -1176,7 +1191,10 @@ impl FlowEngine {
         if let Some(above) = above {
             self.join(store, &element.association, &object, above)?;
         }
-        touched.push(object.clone());
+        // An object a document names twice is committed once.
+        if !touched.contains(&object) {
+            touched.push(object.clone());
+        }
         for child in &element.children {
             for nested in child.parts(part) {
                 self.import_part(store, execution, child, nested, Some(&object), touched)?;
@@ -1198,7 +1216,12 @@ impl FlowEngine {
         let info = self.associations.get(association);
         let member = association.rsplit('.').next().unwrap_or(association);
         let (owner, target) = match info.and_then(|info| info.from_entity.as_deref()) {
-            Some(owner) if owner == above.entity && owner != object.entity => (above, object),
+            Some(owner)
+                if self.is_kind_of(&above.entity, owner)
+                    && !self.is_kind_of(&object.entity, owner) =>
+            {
+                (above, object)
+            }
             _ => (object, above),
         };
         let value = if info.is_some_and(|info| info.reference) {
@@ -1210,7 +1233,12 @@ impl FlowEngine {
                 .and_then(|record| record.members.get(member).cloned())
                 .and_then(|held| held.as_array().cloned())
                 .unwrap_or_default();
-            ids.push(Value::String(target.id.clone()));
+            // A set holds an object once, however often it is imported.
+            let id = Value::String(target.id.clone());
+            if ids.contains(&id) {
+                return Ok(());
+            }
+            ids.push(id);
             Value::Array(ids)
         };
         store
@@ -2082,13 +2110,15 @@ impl FlowEngine {
         variables: &mut Variables,
         handling_type: &str,
     ) -> Result<(), FlowError> {
-        if !handling.get_bool("Bind").unwrap_or(false) {
-            return Ok(());
-        }
-        // A response read with an import mapping is the objects it makes.
+        // A response read with an import mapping is the objects it makes,
+        // imported — and committed as the call says — whether or not a
+        // variable holds them.
         if let Some(call) = self.native_import(handling) {
             let call = call.clone();
             return self.bind_import(store, execution, handling, &call, body, variables);
+        }
+        if !handling.get_bool("Bind").unwrap_or(false) {
+            return Ok(());
         }
         let variable_type = handling.get_document("VariableType").ok();
         let result = match handling_type {

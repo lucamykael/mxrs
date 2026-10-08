@@ -10,7 +10,7 @@ use mxrs_model::{Microflow, Module};
 use mxrs_runtime::{
     EntityRule, MemberRight, RuntimeError, SecurityContext, SecurityPolicy, Store, StoreSchema,
 };
-use mxrs_runtime_flows::{FlowEngine, FlowError, FlowValue, JavaAction, Variables};
+use mxrs_runtime_flows::{FlowEngine, FlowError, FlowValue, JavaAction, ObjectRef, Variables};
 
 fn edge(id: &str, origin: &str, destination: &str) -> Bson {
     Bson::Document(doc! {
@@ -1361,4 +1361,88 @@ fn an_import_with_mapping_makes_the_documents_objects() {
         store.find("App.Order", &order.id).unwrap().unwrap().members["Total"],
         20.0
     );
+}
+
+/// An import finds an object by its key as the value it is — a decimal a
+/// flow stored as a whole number is the document's `4.0` — and a set
+/// holds an object it imports again once.
+#[test]
+fn an_import_finds_by_value_and_joins_once() {
+    let mapping = doc! {
+        "$Type": "ImportMappings$ImportMapping",
+        "Name": "IM_Batch",
+        "Elements": build_array(vec![Bson::Document(doc! {
+            "$Type": "ImportMappings$ObjectMappingElement",
+            "Association": "",
+            "Children": build_array(vec![
+                Bson::Document(doc! {
+                    "$Type": "ImportMappings$ValueMappingElement",
+                    "Attribute": "App.Batch.Code",
+                    "Converter": "",
+                    "IsKey": true,
+                    "JsonPath": "(Object)|code",
+                    "Type": doc! { "$Type": "DataTypes$DecimalType" },
+                }),
+                Bson::Document(doc! {
+                    "$Type": "ImportMappings$ObjectMappingElement",
+                    "Association": "App.Batch_Item",
+                    "Children": build_array(vec![Bson::Document(doc! {
+                        "$Type": "ImportMappings$ValueMappingElement",
+                        "Attribute": "App.Item.Name",
+                        "Converter": "",
+                        "IsKey": true,
+                        "JsonPath": "(Object)|items|(Object)|name",
+                        "Type": doc! { "$Type": "DataTypes$StringType" },
+                    })], 2),
+                    "CustomHandlerCall": Bson::Null,
+                    "Entity": "App.Item",
+                    "JsonPath": "(Object)|items|(Object)",
+                    "MaxOccurs": -1,
+                    "ObjectHandling": "Find",
+                    "ObjectHandlingBackup": "Create",
+                }),
+            ], 2),
+            "CustomHandlerCall": Bson::Null,
+            "Entity": "App.Batch",
+            "JsonPath": "(Object)",
+            "MaxOccurs": 1,
+            "ObjectHandling": "Find",
+            "ObjectHandlingBackup": "Create",
+        })], 2),
+    };
+    let mut module = module_with(Vec::new());
+    module.artifact_units.push(mapping);
+    let engine = FlowEngine::from_modules(&[module]);
+    let mut store = Store::new(
+        StoreSchema::default()
+            .entity("App.Batch", BTreeMap::new(), true)
+            .entity("App.Item", BTreeMap::new(), true),
+    );
+    let batch = store.create("App.Batch").unwrap();
+    store
+        .set_member("App.Batch", &batch.id, "Code", serde_json::json!(4))
+        .unwrap();
+    store.commit("App.Batch", &batch.id).unwrap();
+    let document = serde_json::json!({ "code": 4.0, "items": [{ "name": "a" }, { "name": "a" }] });
+    for _ in 0..2 {
+        let mut execution = engine.new_execution(None);
+        let imported = engine
+            .import_document(
+                &mut store,
+                &mut execution,
+                "App.IM_Batch",
+                &document,
+                Some(false),
+            )
+            .unwrap();
+        assert_eq!(
+            imported,
+            FlowValue::Object(ObjectRef {
+                entity: "App.Batch".into(),
+                id: batch.id.clone(),
+            })
+        );
+    }
+    assert_eq!(store.retrieve("App.Batch").unwrap().len(), 1);
+    assert_eq!(store.retrieve("App.Item").unwrap().len(), 1);
 }

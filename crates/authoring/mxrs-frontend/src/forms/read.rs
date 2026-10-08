@@ -420,8 +420,12 @@ impl<'v> Reader<'v, '_> {
             };
             let source = import.source.value.as_str();
             for specifier in import.specifiers.iter().flatten() {
+                // A file beside the form, and only there.
                 if let ImportDeclarationSpecifier::ImportDefaultSpecifier(default) = specifier
-                    && source.starts_with("./")
+                    && let Some(file) = source.strip_prefix("./")
+                    && !file.is_empty()
+                    && !file.contains(['/', '\\'])
+                    && file != ".."
                 {
                     self.imports.insert(
                         default.local.name.to_string(),

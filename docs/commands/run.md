@@ -69,7 +69,9 @@ are bound to the microflow, and the result answers through the operation's
 export mapping — or as the stored object without one — under the status,
 with the content and the headers the flow left on its
 `System.HttpResponse` (a `Content-Type` it set is the response's). A flow
-that fails answers `500`, its error logged on the console. A body the model
+that fails answers `500`, its error logged on the console; a request that
+fails — refused, or its flow failing — leaves the data as it found it,
+what its import committed included. A body the model
 reads with an import mapping is the objects the mapping makes of it,
 committed as the operation says. An import mapping the engine cannot apply
 (a custom handler, a value converter, XML) is said at startup, and its

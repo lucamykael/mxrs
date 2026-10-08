@@ -326,7 +326,8 @@ impl<'a> Writer<'a> {
         let form = self.root.text("Name").unwrap_or("data");
         let file = match self.files.len() {
             0 => format!("{form}.{extension}"),
-            count => format!("{form}{}.{extension}", count + 1),
+            // A dot no form's name holds keeps the next apart from them.
+            count => format!("{form}.{}.{extension}", count + 1),
         };
         self.files.push((local.clone(), file, bytes.to_vec()));
         Ok(local)
@@ -788,10 +789,11 @@ fn image_extension(bytes: &[u8]) -> Option<&'static str> {
     } else if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
         Some("webp")
     } else {
-        let text = std::str::from_utf8(&bytes[..bytes.len().min(256)]).ok()?;
-        let text = text.trim_start();
-        (text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg")))
-            .then_some("svg")
+        // Markup opening an `<svg>` near its start, whatever comes first —
+        // a byte order mark, an XML declaration, a comment, a doctype.
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
+        let text = head.trim_start_matches('\u{feff}').trim_start();
+        (text.starts_with('<') && text.contains("<svg")).then_some("svg")
     }
 }
 

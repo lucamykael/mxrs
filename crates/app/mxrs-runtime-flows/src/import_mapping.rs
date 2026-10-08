@@ -90,10 +90,16 @@ pub struct ImportMapping {
 impl ImportMapping {
     /// The mapping an `ImportMappings$ImportMapping` document states, when
     /// it is one a JSON document can be read with: one root element of an
-    /// entity, no custom handler, no value converter, not excluded.
+    /// entity, no custom handler, no value converter, no XML schema or web
+    /// service behind it, not excluded.
     pub fn from_document(document: &Document) -> Option<Self> {
+        // One built on an XML schema or a web service reads XML.
+        let xml = ["XmlSchema", "WsdlFile"]
+            .iter()
+            .any(|source| !document.get_str(source).unwrap_or_default().is_empty());
         if document.get_str("$Type").ok() != Some("ImportMappings$ImportMapping")
             || document.get_bool("Excluded").unwrap_or(false)
+            || xml
         {
             return None;
         }

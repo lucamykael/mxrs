@@ -61,11 +61,35 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Seconds since the epoch an ISO 8601 date or UTC date-time says:
-/// `2026-10-08`, `2026-10-08T14:30:00`, `2026-10-08T14:30:00.250Z`.
+/// Seconds since the epoch an ISO 8601 date or date-time says:
+/// `2026-10-08`, `2026-10-08T14:30:00`, `2026-10-08T14:30:00.250Z`, and a
+/// time at an offset from UTC, `2026-10-08T16:30:00+02:00`.
 pub fn parse_iso(text: &str) -> Option<f64> {
-    let text = text.trim().trim_end_matches('Z');
+    let text = text.trim();
     let (date, time) = text.split_once(['T', ' ']).unwrap_or((text, "00:00:00"));
+    // What the time says is at its offset east of UTC.
+    let (time, offset) = match time.strip_suffix('Z') {
+        Some(time) => (time, 0),
+        None => match time.rfind(['+', '-']) {
+            Some(at) => {
+                let (time, offset) = time.split_at(at);
+                let east = offset.starts_with('+');
+                let digits = &offset[1..];
+                let (hours, minutes) = match digits.split_once(':') {
+                    Some(parts) => parts,
+                    None if digits.len() == 4 => digits.split_at(2),
+                    None => (digits, "0"),
+                };
+                let (hours, minutes): (i64, i64) = (hours.parse().ok()?, minutes.parse().ok()?);
+                if hours > 23 || minutes > 59 || digits.len() < 2 {
+                    return None;
+                }
+                let seconds = hours * 3600 + minutes * 60;
+                (time, if east { seconds } else { -seconds })
+            }
+            None => (time, 0),
+        },
+    };
     let mut date = date.splitn(3, '-');
     let year: i64 = date.next()?.parse().ok()?;
     let month: u32 = date.next()?.parse().ok()?;
@@ -91,7 +115,8 @@ pub fn parse_iso(text: &str) -> Option<f64> {
     Some(
         (days_from_civil(year, month, day) * 86_400
             + i64::from(hour) * 3600
-            + i64::from(minute) * 60) as f64
+            + i64::from(minute) * 60
+            - offset) as f64
             + second,
     )
 }
@@ -178,6 +203,10 @@ mod iso_tests {
             (2026, 10, 8, 14, 30, 5)
         );
         assert_eq!(parse_iso("1970-01-01"), Some(0.0));
+        // An offset says where the time was read: east of UTC is earlier.
+        assert_eq!(parse_iso("1970-01-01T02:00:00+02:00"), Some(0.0));
+        assert_eq!(parse_iso("1970-01-01T00:00:00-0130"), Some(5400.0));
+        assert_eq!(parse_iso("1970-01-01T00:00:00+25:00"), None);
         assert_eq!(parse_iso("2026-13-01"), None);
         assert_eq!(parse_iso("yesterday"), None);
     }

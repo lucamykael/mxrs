@@ -276,12 +276,33 @@ pub(crate) struct RestAction {
 }
 
 impl mxrs_runtime::Action for RestAction {
+    /// A request that fails — refused, or its flow failing — leaves the
+    /// store as it found it, what its import committed included.
     fn execute(
         &self,
         store: &mut Store,
         arguments: &Value,
         context: &SecurityContext,
     ) -> mxrs_runtime::Result<Value> {
+        let snapshot = store.clone();
+        Ok(self
+            .answer(store, arguments, context)
+            .unwrap_or_else(|failed| {
+                *store = snapshot;
+                failed
+            }))
+    }
+}
+
+impl RestAction {
+    /// The operation's answer, or — `Err` — the answer to a request that
+    /// failed.
+    fn answer(
+        &self,
+        store: &mut Store,
+        arguments: &Value,
+        context: &SecurityContext,
+    ) -> Result<Value, Value> {
         let text = |part: &str, name: &str| {
             arguments
                 .get(part)
@@ -302,11 +323,11 @@ impl mxrs_runtime::Action for RestAction {
                         FlowValue::String(String::new())
                     }
                     Ok(value) => value,
-                    Err(why) => return Ok(refused(&why)),
+                    Err(why) => return Err(refused(&why)),
                 },
                 RestParameterSource::Query => match read("query") {
                     Ok(value) => value,
-                    Err(why) => return Ok(refused(&why)),
+                    Err(why) => return Err(refused(&why)),
                 },
                 // The body is the parameter's whole: a String takes it as
                 // text, any other type as the JSON it is.
@@ -329,7 +350,7 @@ impl mxrs_runtime::Action for RestAction {
                             ) {
                                 Ok(objects) => objects,
                                 Err(error) => {
-                                    return Ok(refused(&format!("parameter {name}: {error}")));
+                                    return Err(refused(&format!("parameter {name}: {error}")));
                                 }
                             }
                         }
@@ -337,7 +358,9 @@ impl mxrs_runtime::Action for RestAction {
                             FlowValue::String(raw.to_string())
                         }
                         (_, Some(Value::Null) | None) => {
-                            return Ok(refused(&format!("parameter {name}: the body is not JSON")));
+                            return Err(refused(&format!(
+                                "parameter {name}: the body is not JSON"
+                            )));
                         }
                         (_, Some(body)) => FlowValue::Json(body.clone()),
                     }
@@ -348,7 +371,7 @@ impl mxrs_runtime::Action for RestAction {
                         kind,
                     ) {
                         Ok(value) => value,
-                        Err(why) => return Ok(refused(&format!("parameter {name}: {why}"))),
+                        Err(why) => return Err(refused(&format!("parameter {name}: {why}"))),
                     }
                 }
             };
@@ -404,7 +427,7 @@ impl mxrs_runtime::Action for RestAction {
                     FlowError::Native(message) => message,
                 };
                 eprintln!("[mxrs] {}: {message}", self.name);
-                return Ok(json!({
+                return Err(json!({
                     "status": 500,
                     "content": "the operation failed",
                     "document": Value::Null,
