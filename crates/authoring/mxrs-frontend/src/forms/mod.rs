@@ -34,9 +34,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use mxrs_ir::{NativeDocument, NativeValue};
 
-pub use read::{read_elements, read_form, read_widget};
+pub use read::{read_elements, read_form, read_form_with, read_widget};
 pub use shapes::{Extension, extend, mine, render_elements};
-pub use write::{render_form, render_widget};
+pub use write::{render_form, render_form_files, render_widget};
 
 /// The type of the document every pluggable widget is stored as.
 pub(crate) const CUSTOM_WIDGET: &str = "CustomWidgets$CustomWidget";
@@ -464,6 +464,8 @@ pub(crate) fn declarer(ty: &str) -> Option<&'static str> {
         "Forms$Page" => Some("page"),
         "Forms$Layout" => Some("layout"),
         "Forms$Snippet" => Some("snippet"),
+        "Forms$PageTemplate" => Some("pageTemplate"),
+        "Forms$BuildingBlock" => Some("buildingBlock"),
         _ => None,
     }
 }
@@ -474,6 +476,8 @@ pub fn folder(ty: &str) -> Option<&'static str> {
         "Forms$Page" => Some("pages"),
         "Forms$Layout" => Some("components/layout"),
         "Forms$Snippet" => Some("components/snippets"),
+        "Forms$PageTemplate" => Some("templates/pages"),
+        "Forms$BuildingBlock" => Some("templates/blocks"),
         _ => None,
     }
 }
@@ -784,6 +788,53 @@ export default page(
         assert_eq!(module, "Sales");
         assert_eq!(read.document, document);
         assert_eq!(read.name(), "Orders");
+    }
+
+    /// A page template's thumbnail is an image beside its file, imported
+    /// by name, and read back as the bytes it is; one without a thumbnail
+    /// holds `binary()`, which most hold and so need not say.
+    #[test]
+    fn a_templates_thumbnail_is_an_image_beside_it() {
+        let png = b"\x89PNG\r\n\x1a\nimage".to_vec();
+        let template = |name: &str, image: Vec<u8>| {
+            NativeDocument::new("Forms$PageTemplate")
+                .with("ImageData", NativeValue::Binary(image))
+                .with("Name", name)
+        };
+        let documents = [
+            template("Blank", Vec::new()),
+            template("Empty", Vec::new()),
+            template("Wizard", png.clone()),
+            template("Plain", Vec::new()),
+        ];
+        let vocabulary = vocabulary(&documents.iter().collect::<Vec<_>>());
+        let elements = render_elements(&vocabulary.shapes);
+        assert!(
+            elements.contains("import { binary, children, element, list, long }")
+                && elements.contains("  imageData: binary(),"),
+            "{elements}"
+        );
+        let (source, files) = render_form_files("Sales", &documents[2], &vocabulary).unwrap();
+        assert!(
+            source.contains("import imageData from \"./Wizard.png\";")
+                && source.contains("export default pageTemplate(")
+                && source.contains("imageData={imageData}"),
+            "{source}"
+        );
+        assert_eq!(files, [("Wizard.png".to_string(), png.clone())]);
+        let beside = |specifier: &str| (specifier == "./Wizard.png").then(|| png.clone());
+        let (_, read) = read_form_with(&source, "Wizard.tsx", &vocabulary, &beside).unwrap();
+        assert_eq!(read.document, documents[2]);
+        // Without the file beside it, it is said what is missing.
+        assert!(read_form_with(&source, "Wizard.tsx", &vocabulary, &|_| None).is_err());
+        // Without a thumbnail it is the default, unsaid, and needs no file.
+        let source = render_form("Sales", &documents[0], &vocabulary).unwrap();
+        assert!(!source.contains("imageData"), "{source}");
+        let (_, read) = read_form(&source, "Blank.tsx", &vocabulary).unwrap();
+        assert_eq!(read.document, documents[0]);
+        // Data that is no image stays where it is.
+        let data = template("Data", b"not an image".to_vec());
+        assert!(render_form_files("Sales", &data, &vocabulary).is_err());
     }
 
     #[test]

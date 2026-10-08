@@ -101,6 +101,10 @@ fn build_value(
         // A pointer at nothing the document holds points at nothing.
         NativeValue::Pointer(target) => ids.get(target).map_or(Bson::Null, |id| blob(id)),
         NativeValue::Identity(id) => blob(id),
+        NativeValue::Binary(bytes) => Bson::Binary(Binary {
+            subtype: BinarySubtype::Generic,
+            bytes: bytes.clone(),
+        }),
     }
 }
 
@@ -185,12 +189,13 @@ fn native_value(
             )
         }
         // The identity of another part of the same document.
-        Bson::Binary(_) => match mxrs_bson::extract_id(value) {
+        Bson::Binary(binary) => match mxrs_bson::extract_id(value) {
             Some(id) => match found.get(&id) {
                 Some(path) => NativeValue::Pointer(path.clone()),
                 None => NativeValue::Identity(id),
             },
-            None => return Err(format!("{ty}.{key} holds data")),
+            // Bytes that are no identity are data the document holds.
+            None => NativeValue::Binary(binary.bytes.clone()),
         },
         other => {
             return Err(format!(
@@ -423,7 +428,14 @@ fn says_the_same(left: &Document, right: &Document) -> bool {
             (Bson::Array(left), Bson::Array(right)) => {
                 left.len() == right.len() && left.iter().zip(right).all(|(a, b)| same(a, b))
             }
-            (Bson::Binary(_), Bson::Binary(_)) => true,
+            // An identity is the same whatever it names; data is the same
+            // bytes.
+            (Bson::Binary(left_bytes), Bson::Binary(right_bytes)) => {
+                match (mxrs_bson::extract_id(left), mxrs_bson::extract_id(right)) {
+                    (Some(_), Some(_)) => true,
+                    _ => left_bytes.bytes == right_bytes.bytes,
+                }
+            }
             // A number is the same number however wide it is stored.
             (Bson::Int32(left), Bson::Int64(right)) | (Bson::Int64(right), Bson::Int32(left)) => {
                 i64::from(*left) == *right
@@ -638,6 +650,14 @@ pub(crate) fn synchronize_forms_with_identity(
                 "Forms$Snippet" => (
                     ArtifactKind::Page,
                     format!("snippet:{module_name}.{}", form.name()),
+                ),
+                "Forms$PageTemplate" => (
+                    ArtifactKind::Page,
+                    format!("page-template:{module_name}.{}", form.name()),
+                ),
+                "Forms$BuildingBlock" => (
+                    ArtifactKind::Page,
+                    format!("building-block:{module_name}.{}", form.name()),
                 ),
                 _ => (ArtifactKind::Page, format!("{module_name}.{}", form.name())),
             };

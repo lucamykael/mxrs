@@ -2043,6 +2043,17 @@ fn native_value_source(value: &NativeValue) -> Vec<String> {
         NativeValue::Identity(id) => {
             vec![format!("NativeValue::Identity({}.into())", rust_string(id))]
         }
+        NativeValue::Binary(bytes) if bytes.is_empty() => {
+            vec!["NativeValue::Binary(Vec::new())".to_string()]
+        }
+        NativeValue::Binary(bytes) => vec![format!(
+            "NativeValue::Binary(vec![{}])",
+            bytes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )],
         NativeValue::Document(document) => native_source(document),
         NativeValue::List(marker, items) if items.is_empty() => {
             vec![format!("NativeValue::List({marker}, Vec::new())")]
@@ -2058,7 +2069,10 @@ fn native_value_source(value: &NativeValue) -> Vec<String> {
                 let last = item_lines.last_mut().expect("a value has a line");
                 if !matches!(
                     item,
-                    NativeValue::Null | NativeValue::Pointer(_) | NativeValue::Identity(_)
+                    NativeValue::Null
+                        | NativeValue::Pointer(_)
+                        | NativeValue::Identity(_)
+                        | NativeValue::Binary(_)
                 ) {
                     last.push_str(".into()");
                 }

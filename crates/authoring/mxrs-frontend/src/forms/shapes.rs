@@ -15,6 +15,9 @@ enum Scalar {
     Int32(i32),
     Int64(i64),
     Text(String),
+    /// Binary data holding nothing; data that holds something is a
+    /// document's content, never a default.
+    EmptyBinary,
 }
 
 impl Scalar {
@@ -25,6 +28,7 @@ impl Scalar {
             Self::Int32(value) => NativeValue::Int32(*value),
             Self::Int64(value) => NativeValue::Int64(*value),
             Self::Text(value) => NativeValue::Text(value.clone()),
+            Self::EmptyBinary => NativeValue::Binary(Vec::new()),
         }
     }
 
@@ -36,6 +40,7 @@ impl Scalar {
             Self::Int32(_) => NativeValue::Int32(0),
             Self::Int64(_) => NativeValue::Int64(0),
             Self::Text(_) => NativeValue::Text(String::new()),
+            Self::EmptyBinary => NativeValue::Binary(Vec::new()),
         }
     }
 
@@ -46,6 +51,7 @@ impl Scalar {
             Self::Int64(_) => 2,
             Self::Bool(_) => 3,
             Self::Null => 4,
+            Self::EmptyBinary => 5,
         }
     }
 }
@@ -126,7 +132,13 @@ fn tally(document: &NativeDocument, tallies: &mut BTreeMap<Variant, Tally>) {
                     }
                 }
             }
-            NativeValue::Pointer(_) | NativeValue::Identity(_) => field.pointers += 1,
+            NativeValue::Binary(bytes) if bytes.is_empty() => {
+                *field.scalars.entry(Scalar::EmptyBinary).or_default() += 1;
+            }
+            // Data, like an identity, is what one document holds.
+            NativeValue::Binary(_) | NativeValue::Pointer(_) | NativeValue::Identity(_) => {
+                field.pointers += 1;
+            }
         }
     }
     for (_, value) in &document.fields {
@@ -432,6 +444,7 @@ fn blank(shapes: &Shapes, document: &NativeDocument) -> Option<NativeDocument> {
             (NativeValue::Null | NativeValue::Pointer(_) | NativeValue::Identity(_), _) => {
                 NativeValue::Null
             }
+            (NativeValue::Binary(_), _) => NativeValue::Binary(Vec::new()),
             (_, FieldDefault::Value(default)) if !matches!(default, NativeValue::Null) => {
                 default.clone()
             }
@@ -709,6 +722,18 @@ pub(crate) const ELEMENTS_HEADER: &str = "// The elements this project's pages, 
 /// hold.
 pub fn render_elements(shapes: &Shapes) -> String {
     let mut out = String::from(ELEMENTS_HEADER);
+    // A field that holds binary data holds none by default: `binary()`.
+    if shapes.iter().any(|shape| {
+        shape
+            .fields
+            .iter()
+            .any(|field| matches!(field.default, FieldDefault::Value(NativeValue::Binary(_))))
+    }) {
+        out = out.replace(
+            "import { children, element, list, long }",
+            "import { binary, children, element, list, long }",
+        );
+    }
     let mut ordered: Vec<&Shape> = shapes.iter().collect();
     ordered.sort_by(|left, right| left.component.cmp(&right.component));
     let mut written: HashSet<&str> = HashSet::new();
@@ -753,6 +778,7 @@ fn write_element<'a>(
         for field in &shape.fields {
             let value = match &field.default {
                 FieldDefault::Value(NativeValue::Int64(value)) => format!("long({value})"),
+                FieldDefault::Value(NativeValue::Binary(_)) => "binary()".to_string(),
                 FieldDefault::Value(value) => {
                     super::tsx::scalar(value).expect("a default is a scalar")
                 }

@@ -41,6 +41,8 @@ pub const ARTIFACT_UNIT_TYPES: &[&str] = &[
     "CustomIcons$CustomIconCollection",
     "Forms$Layout",
     "Forms$Snippet",
+    "Forms$PageTemplate",
+    "Forms$BuildingBlock",
 ];
 
 #[derive(Debug, Clone)]

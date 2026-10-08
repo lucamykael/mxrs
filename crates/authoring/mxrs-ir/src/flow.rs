@@ -125,6 +125,9 @@ pub enum NativeValue {
     /// A stored identity that names nothing in the tree: a document outside
     /// it, or — all zeros — nothing at all.
     Identity(String),
+    /// Bytes the model stores as data, not as an identity: a template's
+    /// thumbnail.
+    Binary(Vec<u8>),
 }
 
 impl NativeValue {

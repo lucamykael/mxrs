@@ -143,14 +143,21 @@ fn read_source(path: &Path) -> Result<String, FrontendError> {
     })
 }
 
-/// The pages, layouts and snippets the frontend's TSX declares: each file
-/// of a module's folder under `pages/`, `components/layout/` and
-/// `components/snippets/`, read with the elements `mxrs/elements.ts`
+/// The pages, layouts, snippets, page templates and building blocks the
+/// frontend's TSX declares: each file of a module's folder under `pages/`,
+/// `components/layout/`, `components/snippets/`, `templates/pages/` and
+/// `templates/blocks/`, read with the elements `mxrs/elements.ts`
 /// declares and the widgets `widgets/` defines.
 fn read_forms(source: &Path) -> Result<(Forms, HashMap<String, String>), FrontendError> {
     let mut origins = HashMap::new();
     let mut files = Vec::new();
-    for ty in ["Forms$Layout", "Forms$Snippet", "Forms$Page"] {
+    for ty in [
+        "Forms$Layout",
+        "Forms$Snippet",
+        "Forms$Page",
+        "Forms$PageTemplate",
+        "Forms$BuildingBlock",
+    ] {
         let folder = source.join(forms::folder(ty).expect("a form has a folder"));
         if !folder.is_dir() {
             continue;

@@ -312,6 +312,8 @@ fn declares(declaration: &mxrs_ir::ProjectDecl, unit: &DeclaredUnit) -> bool {
             module.layouts.iter().any(|layout| layout.name == name) || form("Forms$Layout")
         }
         "Forms$Snippet" => form("Forms$Snippet"),
+        "Forms$PageTemplate" => form("Forms$PageTemplate"),
+        "Forms$BuildingBlock" => form("Forms$BuildingBlock"),
         "Enumerations$Enumeration" => module.enumerations.iter().any(|item| item.name == name),
         "Constants$Constant" => module.constants.iter().any(|item| item.name == name),
         "RegularExpressions$RegularExpression" => module
@@ -359,6 +361,8 @@ fn kind_of(native_type: &str) -> &str {
         "Forms$Page" => "page",
         "Forms$Layout" => "layout",
         "Forms$Snippet" => "snippet",
+        "Forms$PageTemplate" => "page template",
+        "Forms$BuildingBlock" => "building block",
         "Enumerations$Enumeration" => "enumeration",
         "Constants$Constant" => "constant",
         "RegularExpressions$RegularExpression" => "regular expression",

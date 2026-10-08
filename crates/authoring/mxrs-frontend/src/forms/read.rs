@@ -226,6 +226,12 @@ pub fn read_elements(source: &str, path: &str) -> Result<Shapes, FrontendError> 
                     Expression::Identifier(element) => {
                         return Err(file.refuse(element.span, "an element declared above"));
                     }
+                    Expression::CallExpression(call)
+                        if matches!(&call.callee, Expression::Identifier(callee) if callee.name == "binary")
+                            && call.arguments.is_empty() =>
+                    {
+                        FieldDefault::Value(NativeValue::Binary(Vec::new()))
+                    }
                     Expression::CallExpression(call) => {
                         let Expression::Identifier(callee) = &call.callee else {
                             return Err(file.refuse(call.span, "`list(n)` or `children(n)`"));
@@ -357,7 +363,9 @@ fn is_name(name: &str) -> bool {
 }
 
 /// The helpers of `src/mxrs/forms.ts` a declaration's values call.
-const HELPERS: [&str; 6] = ["long", "int", "named", "identity", "unset", "missing"];
+const HELPERS: [&str; 7] = [
+    "long", "int", "named", "identity", "unset", "missing", "binary",
+];
 
 /// `expression` without what only TypeScript reads: parentheses, `as`,
 /// `satisfies` and `!`.
@@ -386,10 +394,17 @@ enum Imported {
     Element(String),
     Widget(String),
     Helper(String),
+    /// A file beside the page — `import thumbnail from "./Home.png"` — by
+    /// the specifier it is imported with: binary data the page holds.
+    File(String),
 }
+
+/// The bytes of a file a page imports, by the specifier it imports it with.
+type Files<'f> = &'f dyn Fn(&str) -> Option<Vec<u8>>;
 
 struct Reader<'v, 's> {
     file: File<'s>,
+    files: Files<'v>,
     shapes: &'v Shapes,
     widgets: &'v [WidgetDefinition],
     imports: HashMap<String, Imported>,
@@ -405,6 +420,15 @@ impl<'v> Reader<'v, '_> {
             };
             let source = import.source.value.as_str();
             for specifier in import.specifiers.iter().flatten() {
+                if let ImportDeclarationSpecifier::ImportDefaultSpecifier(default) = specifier
+                    && source.starts_with("./")
+                {
+                    self.imports.insert(
+                        default.local.name.to_string(),
+                        Imported::File(source.to_string()),
+                    );
+                    continue;
+                }
                 let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
                     continue;
                 };
@@ -442,7 +466,7 @@ impl<'v> Reader<'v, '_> {
         }
         self.file.refuse(
             call.span,
-            "`long(n)`, `int(n)`, `named(name)` or `identity(id)`",
+            "`long(n)`, `int(n)`, `named(name)`, `identity(id)` or `binary()`",
         )
     }
 
@@ -760,6 +784,23 @@ impl<'v> Reader<'v, '_> {
             Expression::Identifier(name) if matches!(self.imports.get(name.name.as_str()), Some(Imported::Helper(helper)) if helper == "unset") => {
                 NativeValue::Identity(NativeValue::NOTHING.to_string())
             }
+            Expression::Identifier(name)
+                if matches!(
+                    self.imports.get(name.name.as_str()),
+                    Some(Imported::File(_))
+                ) =>
+            {
+                let Some(Imported::File(specifier)) = self.imports.get(name.name.as_str()) else {
+                    unreachable!("matched a file just above");
+                };
+                let bytes = (self.files)(specifier).ok_or_else(|| {
+                    self.file.shape(
+                        name.span,
+                        format!("`{specifier}` is no file beside the page"),
+                    )
+                })?;
+                NativeValue::Binary(bytes)
+            }
             Expression::NumericLiteral(_) | Expression::UnaryExpression(_) => {
                 let number = whole(&self.file, expression)?;
                 if wide {
@@ -801,6 +842,7 @@ impl<'v> Reader<'v, '_> {
             }
             Expression::ObjectExpression(object) => NativeValue::Document(self.texts(object)?),
             Expression::CallExpression(call) => match self.helper(call) {
+                Some("binary") if call.arguments.is_empty() => NativeValue::Binary(Vec::new()),
                 Some("long") => {
                     NativeValue::Int64(whole(&self.file, argument(&self.file, call, "a number")?)?)
                 }
@@ -1349,8 +1391,10 @@ pub fn read_widget(
     let allocator = Allocator::default();
     let file = File { path, source };
     let program = parse(&allocator, &file, true)?;
+    // A widget's definition imports no file.
     let mut reader = Reader {
         file,
+        files: &|_: &str| None,
         shapes,
         widgets: &[],
         imports: HashMap::new(),
@@ -1456,11 +1500,30 @@ pub fn read_form(
     path: &str,
     vocabulary: &Vocabulary,
 ) -> Result<(String, FormDecl), FrontendError> {
+    // A file a page imports is beside it.
+    let folder = std::path::Path::new(path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    read_form_with(source, path, vocabulary, &|specifier: &str| {
+        std::fs::read(folder.join(specifier)).ok()
+    })
+}
+
+/// [`read_form`], the files the page imports given by `files` rather
+/// than read beside it.
+pub fn read_form_with(
+    source: &str,
+    path: &str,
+    vocabulary: &Vocabulary,
+    files: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<(String, FormDecl), FrontendError> {
     let allocator = Allocator::default();
     let file = File { path, source };
     let program = parse(&allocator, &file, true)?;
     let mut reader = Reader {
         file,
+        files,
         shapes: &vocabulary.shapes,
         widgets: &vocabulary.widgets,
         imports: HashMap::new(),
@@ -1483,7 +1546,11 @@ pub fn read_form(
             return Err(reader.file.refuse(export.span, expected));
         };
         let declarer = match reader.helper(call) {
-            Some(name @ ("page" | "layout" | "snippet")) if found.is_none() => name.to_string(),
+            Some(name @ ("page" | "layout" | "snippet" | "pageTemplate" | "buildingBlock"))
+                if found.is_none() =>
+            {
+                name.to_string()
+            }
             _ => return Err(reader.file.refuse(call.span, expected)),
         };
         let [module, element] = call.arguments.as_slice() else {

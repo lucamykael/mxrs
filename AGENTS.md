@@ -99,7 +99,11 @@ read-only behavioral oracle; never edit it.
   a flow relates to a nanoflow of the frontend (`calls`, `used_by`) by its
   qualified name, as it does to a page. A page, layout or snippet is TSX that
   states the document the model stores for it (`frontend/src/pages/<module>/`,
-  `components/layout/<module>/`, `components/snippets/<module>/`): every
+  `components/layout/<module>/`, `components/snippets/<module>/`, and a page
+  template or building block in `templates/pages/<module>/` or
+  `templates/blocks/<module>/`, its thumbnail an image beside it imported by
+  name — `import imageData from "./Wizard.png"` — and binary data holding
+  nothing `binary()`): every
   stored document is an element named for its type (`Forms$DivContainer`
   is `<DivContainer>`), every field a prop, the widgets it holds its
   children, texts `{ en_US: "..." }` — nothing is outside the vocabulary,

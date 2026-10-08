@@ -1,5 +1,7 @@
-//! Declares the model's pages, layouts and snippets in the frontend: each
-//! as the TSX that states its document (`mxrs_frontend::forms`).
+//! Declares the model's pages, layouts, snippets, page templates and
+//! building blocks in the frontend: each as the TSX that states its
+//! document (`mxrs_frontend::forms`), a thumbnail it holds an image beside
+//! it.
 //!
 //! Nothing is taken on trust. The elements, the widgets and every form are
 //! read back from the text written for them, and a form is declared in the
@@ -18,6 +20,9 @@ type Outcome<T> = std::result::Result<T, String>;
 pub(crate) struct FrontendForms {
     /// Each file, by its path under `frontend/src/`.
     pub(crate) files: Vec<(String, String)>,
+    /// Each image a form holds, by its path under `frontend/src/`, beside
+    /// the form's file.
+    pub(crate) assets: Vec<(String, Vec<u8>)>,
     /// The forms those files declare: module, type and name.
     pub(crate) declared: BTreeSet<(String, String, String)>,
 }
@@ -156,14 +161,22 @@ pub(crate) fn declare_in_frontend(
             stays(form, "another form already has its file's name");
             continue;
         }
-        let source = match forms::render_form(&form.module, document, &vocabulary) {
-            Ok(source) => source,
+        let (source, assets) = match forms::render_form_files(&form.module, document, &vocabulary) {
+            Ok(rendered) => rendered,
             Err(reason) => {
                 stays(form, &reason);
                 continue;
             }
         };
-        match forms::read_form(&source, &path, &vocabulary) {
+        let folder_of_form = path.rsplit_once('/').map_or("", |(folder, _)| folder);
+        let beside = |specifier: &str| {
+            let name = specifier.strip_prefix("./")?;
+            assets
+                .iter()
+                .find(|(file, _)| file == name)
+                .map(|(_, bytes)| bytes.clone())
+        };
+        match forms::read_form_with(&source, &path, &vocabulary, &beside) {
             Ok((module, read)) if module == form.module && &read.document == document => {}
             Ok(_) => {
                 stays(form, "its TSX reads back differently");
@@ -182,6 +195,13 @@ pub(crate) fn declare_in_frontend(
             )) {
                 used.insert(definition.name.clone());
             }
+        }
+        // A form's images could share their names with another form's
+        // files only if the forms did.
+        for (file, bytes) in assets {
+            declared
+                .assets
+                .push((format!("{folder_of_form}/{file}"), bytes));
         }
         declared.files.push((path, source));
         declared

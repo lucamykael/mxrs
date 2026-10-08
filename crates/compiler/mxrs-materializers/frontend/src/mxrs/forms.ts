@@ -29,6 +29,14 @@ export interface Identity {
   readonly identity: string;
 }
 
+/**
+ * Binary data that holds nothing: `binary()`. Data that holds something — a
+ * template's thumbnail — is a file beside the page, imported by its name.
+ */
+export interface Binary {
+  readonly binary: true;
+}
+
 /** A property the widget's definition has and this use of it does not store. */
 export interface Missing {
   readonly missing: true;
@@ -49,6 +57,7 @@ export type Value =
   | Int
   | Named
   | Identity
+  | Binary
   | { [key: string]: Value | Missing }
   | Value[];
 
@@ -89,6 +98,7 @@ export type Default =
   | boolean
   | null
   | Long
+  | Binary
   | ListDefault
   | ChildrenDefault
   | Component<never, unknown, string>;
@@ -98,7 +108,8 @@ export type Texts = { [language: string]: string };
 
 /**
  * What a field holds, by what it holds by default: a text where the default
- * is a text, a number where it is a number, a list where it is a list. A
+ * is a text, a number where it is a number, a list where it is a list, binary
+ * data — `binary()`, or a file imported beside the page — where it is. A
  * field that holds an element by default holds an element, nothing, or —
  * written alone — the one thing that element is mostly stated for; texts by
  * language where the element is a text. A field that holds nothing by
@@ -106,17 +117,19 @@ export type Texts = { [language: string]: string };
  */
 export type Holds<V> = V extends ListDefault
   ? Value[]
-  : V extends string
-    ? string
-    : V extends number | Long
-      ? number | Long | Int
-      : V extends boolean
-        ? boolean
-        : V extends null
-          ? Value
-          : V extends Component<never, infer M, infer T>
-            ? ReactElement | null | M | (T extends "Texts$Text" ? Texts : never)
-            : never;
+  : V extends Binary
+    ? Binary | string
+    : V extends string
+      ? string
+      : V extends number | Long
+        ? number | Long | Int
+        : V extends boolean
+          ? boolean
+          : V extends null
+            ? Value
+            : V extends Component<never, infer M, infer T>
+              ? ReactElement | null | M | (T extends "Texts$Text" ? Texts : never)
+              : never;
 
 /** An element's props: its fields, each optional, and its children when it holds any. */
 export type Props<D> = {
@@ -129,6 +142,10 @@ export function list(marker: number): ListDefault {
 
 export function children(marker: number): ChildrenDefault {
   return { children: marker };
+}
+
+export function binary(): Binary {
+  return { binary: true };
 }
 
 export function long(value: number): Long {
@@ -189,7 +206,7 @@ export function widget(
 
 /** A page, layout or snippet of a module. */
 export interface Form {
-  readonly kind: "page" | "layout" | "snippet";
+  readonly kind: "page" | "layout" | "snippet" | "pageTemplate" | "buildingBlock";
   readonly module: string;
   readonly document: ReactElement;
 }
@@ -204,4 +221,12 @@ export function layout(module: string, document: ReactElement): Form {
 
 export function snippet(module: string, document: ReactElement): Form {
   return { kind: "snippet", module, document };
+}
+
+export function pageTemplate(module: string, document: ReactElement): Form {
+  return { kind: "pageTemplate", module, document };
+}
+
+export function buildingBlock(module: string, document: ReactElement): Form {
+  return { kind: "buildingBlock", module, document };
 }

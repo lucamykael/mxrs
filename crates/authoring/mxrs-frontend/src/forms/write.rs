@@ -24,6 +24,9 @@ struct Writer<'a> {
     elements: BTreeSet<String>,
     widgets: BTreeSet<String>,
     helpers: BTreeSet<&'static str>,
+    /// The files beside the page its binary data is: the name each is
+    /// imported by, its file's name and its bytes.
+    files: Vec<(String, String, Vec<u8>)>,
 }
 
 /// The value element `shape` as a property of type `value_type` holds it
@@ -89,6 +92,7 @@ impl<'a> Writer<'a> {
             elements: BTreeSet::new(),
             widgets: BTreeSet::new(),
             helpers: BTreeSet::new(),
+            files: Vec::new(),
         }
     }
 
@@ -291,7 +295,41 @@ impl<'a> Writer<'a> {
                 self.helpers.insert("identity");
                 Js::Raw(format!("identity({})", tsx::json(id)))
             }
+            NativeValue::Binary(bytes) if bytes.is_empty() => {
+                self.helpers.insert("binary");
+                Js::Raw("binary()".to_string())
+            }
+            NativeValue::Binary(bytes) => Js::Raw(self.file(bytes, path)?),
         })
+    }
+
+    /// The name a file beside the page holding `bytes` is imported by: the
+    /// prop that holds them, the file named for the page.
+    fn file(&mut self, bytes: &[u8], path: &str) -> Outcome<String> {
+        let extension = image_extension(bytes)
+            .ok_or_else(|| format!("`{path}` holds data that is no image a page can import"))?;
+        let key = path
+            .rsplit('.')
+            .next()
+            .unwrap_or(path)
+            .split('[')
+            .next()
+            .unwrap_or_default();
+        let base = super::prop_of(key).unwrap_or_else(|| "data".to_string());
+        let taken = |name: &str| self.files.iter().any(|(local, _, _)| local == name);
+        let mut local = base.clone();
+        let mut suffix = 2;
+        while taken(&local) {
+            local = format!("{base}{suffix}");
+            suffix += 1;
+        }
+        let form = self.root.text("Name").unwrap_or("data");
+        let file = match self.files.len() {
+            0 => format!("{form}.{extension}"),
+            count => format!("{form}{}.{extension}", count + 1),
+        };
+        self.files.push((local.clone(), file, bytes.to_vec()));
+        Ok(local)
     }
 
     /// A text as its translations by language code, when it is stored the
@@ -684,29 +722,73 @@ impl<'a> Writer<'a> {
                 &format!("@/{WIDGETS_FOLDER}/{widget}"),
             );
         }
+        for (local, file, _) in &self.files {
+            out.push_str(&format!("import {local} from \"./{file}\";\n"));
+        }
         out
     }
 }
 
 /// The file that declares `document` — a page, layout or snippet of
-/// `module` — or why nothing here can state it.
+/// `module` — or why nothing here can state it. A document holding binary
+/// data needs files beside it: [`render_form_files`].
 pub fn render_form(
     module: &str,
     document: &NativeDocument,
     vocabulary: &Vocabulary,
 ) -> Result<String, String> {
+    let (source, files) = render_form_files(module, document, vocabulary)?;
+    if !files.is_empty() {
+        return Err("its binary data is files beside it".to_string());
+    }
+    Ok(source)
+}
+
+/// The file that declares `document` — a page, layout, snippet, page
+/// template or building block of `module` — and the files beside it its
+/// binary data is, by name; or why nothing here can state it.
+pub fn render_form_files(
+    module: &str,
+    document: &NativeDocument,
+    vocabulary: &Vocabulary,
+) -> Result<(String, Vec<(String, Vec<u8>)>), String> {
     let declarer = super::declarer(&document.ty)
-        .ok_or_else(|| format!("{} is not a page, layout or snippet", document.ty))?;
+        .ok_or_else(|| format!("{} is no form the frontend declares", document.ty))?;
     let mut writer = Writer::new(vocabulary, document);
     let element = writer.element(document, "")?;
     let mut body = tsx::lines(&Js::Element(element), 2);
     body.last_mut().expect("an element has a line").push(',');
-    Ok(format!(
+    let source = format!(
         "{}\nexport default {declarer}(\n  {},\n{}\n);\n",
         writer.imports(declarer),
         tsx::json(module),
         body.join("\n")
-    ))
+    );
+    let files = writer
+        .files
+        .into_iter()
+        .map(|(_, file, bytes)| (file, bytes))
+        .collect();
+    Ok((source, files))
+}
+
+/// The extension of an image file holding `bytes`, by what they open
+/// with; `None` for data that is no image a page can import.
+fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("gif")
+    } else if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        let text = std::str::from_utf8(&bytes[..bytes.len().min(256)]).ok()?;
+        let text = text.trim_start();
+        (text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg")))
+            .then_some("svg")
+    }
 }
 
 /// The file that declares a pluggable widget's definition.
