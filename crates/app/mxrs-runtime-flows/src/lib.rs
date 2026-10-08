@@ -25,6 +25,7 @@ mod engine;
 mod export_mapping;
 mod expression;
 mod http_objects;
+mod import_mapping;
 mod marketplace;
 mod value;
 
@@ -35,6 +36,9 @@ pub use engine::{
 pub use export_mapping::{ExportMapping, NullValues, ObjectMapping, ValueMapping};
 pub use expression::{Expression, MemberSource, NoObjects};
 pub use http_objects::{HttpAnswer, HttpBinding, HttpObjects};
+pub use import_mapping::{
+    ImportMapping, ImportedObject, ImportedType, ImportedValue, MissingObject, ObjectHandling,
+};
 pub use value::{FlowValue, ObjectRef, RequestValue, Variables, member_to_json};
 
 #[derive(Debug, thiserror::Error, PartialEq)]

@@ -1237,3 +1237,128 @@ fn list_operations_and_aggregates_follow_the_oracle_table() {
     // sum(2,5,9) = 16 → 160, head = 2 → 162.
     assert_eq!(result, FlowValue::Int(162));
 }
+
+/// An import mapping the model holds is applied by the engine itself: a
+/// flow's import with mapping makes the objects the document is — the root
+/// found by its key and updated the second time, its lines and their plain
+/// tags joined to it — and commits them.
+#[test]
+fn an_import_with_mapping_makes_the_documents_objects() {
+    let value = |attribute: &str, path: &str, ty: &str, key: bool| {
+        Bson::Document(doc! {
+            "$Type": "ImportMappings$ValueMappingElement",
+            "Attribute": attribute,
+            "Converter": "",
+            "IsKey": key,
+            "JsonPath": path,
+            "Type": doc! { "$Type": ty },
+        })
+    };
+    let object = |entity: &str,
+                  path: &str,
+                  occurs: i32,
+                  association: &str,
+                  handling: &str,
+                  children: Vec<Bson>| {
+        Bson::Document(doc! {
+            "$Type": "ImportMappings$ObjectMappingElement",
+            "Association": association,
+            "Children": build_array(children, 2),
+            "CustomHandlerCall": Bson::Null,
+            "Entity": entity,
+            "JsonPath": path,
+            "MaxOccurs": occurs,
+            "ObjectHandling": handling,
+            "ObjectHandlingBackup": "Create",
+        })
+    };
+    let mapping = doc! {
+        "$Type": "ImportMappings$ImportMapping",
+        "Name": "IM_Order",
+        "Elements": build_array(vec![object("App.Order", "(Object)", 1, "", "Find", vec![
+            value("App.Order.Number", "(Object)|number", "DataTypes$StringType", true),
+            value("App.Order.Total", "(Object)|total", "DataTypes$DecimalType", false),
+            object("App.Line", "(Object)|lines|(Object)", -1, "App.Line_Order", "Create", vec![
+                value("App.Line.Quantity", "(Object)|lines|(Object)|quantity", "DataTypes$IntegerType", false),
+                object("App.Tag", "(Object)|lines|(Object)|tags|(Wrapper)", -1, "App.Tag_Line", "Create", vec![
+                    value("App.Tag.Value", "(Object)|lines|(Object)|tags|(Wrapper)|(Value)", "DataTypes$StringType", false),
+                ]),
+            ]),
+        ])], 2),
+    };
+    let import = flow(
+        "Import",
+        vec![
+            start("s"),
+            parameter("p", "Json"),
+            activity(
+                "a",
+                doc! {
+                    "$Type": "Microflows$ImportXmlAction",
+                    "XmlDocumentVariableName": "Json",
+                    "ResultHandling": doc! {
+                        "$Type": "Microflows$ResultHandling",
+                        "Bind": true,
+                        "ResultVariableName": "Order",
+                        "VariableType": doc! { "$Type": "DataTypes$ObjectType", "Entity": "App.Order" },
+                        "ImportMappingCall": doc! {
+                            "$Type": "Microflows$ImportMappingCall",
+                            "Commit": "YesWithoutEvents",
+                            "ContentType": "Json",
+                            "ReturnValueMapping": "App.IM_Order",
+                        },
+                    },
+                },
+            ),
+            end("e", "$Order"),
+        ],
+        vec![edge("f1", "s", "a"), edge("f2", "a", "e")],
+    );
+    let mut module = module_with(vec![import]);
+    module.artifact_units.push(mapping);
+    let engine = FlowEngine::from_modules(&[module]);
+    let mut store = Store::new(
+        StoreSchema::default()
+            .entity("App.Order", BTreeMap::new(), true)
+            .entity("App.Line", BTreeMap::new(), true)
+            .entity("App.Tag", BTreeMap::new(), true),
+    );
+    let run = |store: &mut Store, json: &str| {
+        let mut arguments = Variables::new();
+        arguments.insert("Json".into(), FlowValue::String(json.into()));
+        call(&engine, store, "App.Import", arguments).0
+    };
+    let order = run(
+        &mut store,
+        r#"{"number":"A-1","total":12.5,"lines":[{"quantity":2,"tags":["red","big"]},{"quantity":"3"}]}"#,
+    );
+    let FlowValue::Object(order) = order else {
+        panic!("an order, not {order:?}");
+    };
+    let stored = store.find("App.Order", &order.id).unwrap().unwrap();
+    assert_eq!(stored.members["Number"], "A-1");
+    assert_eq!(stored.members["Total"], 12.5);
+    assert!(store.is_committed("App.Order", &order.id));
+    let lines = store.retrieve_association("App.Line_Order", &stored);
+    assert_eq!(lines.len(), 2);
+    let quantities: Vec<_> = lines
+        .iter()
+        .map(|line| line.members["Quantity"].clone())
+        .collect();
+    assert!(
+        quantities.contains(&serde_json::json!(2)) && quantities.contains(&serde_json::json!(3))
+    );
+    let tags: usize = lines
+        .iter()
+        .map(|line| store.retrieve_association("App.Tag_Line", line).len())
+        .sum();
+    assert_eq!(tags, 2);
+    // The same number again is the same order, found by its key.
+    let again = run(&mut store, r#"{"number":"A-1","total":20}"#);
+    assert_eq!(again, FlowValue::Object(order.clone()));
+    assert_eq!(store.retrieve("App.Order").unwrap().len(), 1);
+    assert_eq!(
+        store.find("App.Order", &order.id).unwrap().unwrap().members["Total"],
+        20.0
+    );
+}

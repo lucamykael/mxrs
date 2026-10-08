@@ -36,7 +36,7 @@ use mxrs_ir::{NativeDocument, NativeValue};
 
 pub use read::{read_elements, read_form, read_form_with, read_widget};
 pub use shapes::{Extension, extend, mine, render_elements};
-pub use write::{render_form, render_form_files, render_widget};
+pub use write::{RenderedForm, render_form, render_form_files, render_widget};
 
 /// The type of the document every pluggable widget is stored as.
 pub(crate) const CUSTOM_WIDGET: &str = "CustomWidgets$CustomWidget";

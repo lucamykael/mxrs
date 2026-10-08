@@ -744,6 +744,10 @@ pub fn render_form(
     Ok(source)
 }
 
+/// A form's file and the files beside it: its source, and each image's
+/// file name and bytes.
+pub type RenderedForm = (String, Vec<(String, Vec<u8>)>);
+
 /// The file that declares `document` — a page, layout, snippet, page
 /// template or building block of `module` — and the files beside it its
 /// binary data is, by name; or why nothing here can state it.
@@ -751,7 +755,7 @@ pub fn render_form_files(
     module: &str,
     document: &NativeDocument,
     vocabulary: &Vocabulary,
-) -> Result<(String, Vec<(String, Vec<u8>)>), String> {
+) -> Result<RenderedForm, String> {
     let declarer = super::declarer(&document.ty)
         .ok_or_else(|| format!("{} is no form the frontend declares", document.ty))?;
     let mut writer = Writer::new(vocabulary, document);

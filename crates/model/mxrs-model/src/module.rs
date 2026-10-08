@@ -43,6 +43,7 @@ pub const ARTIFACT_UNIT_TYPES: &[&str] = &[
     "Forms$Snippet",
     "Forms$PageTemplate",
     "Forms$BuildingBlock",
+    "ImportMappings$ImportMapping",
 ];
 
 #[derive(Debug, Clone)]

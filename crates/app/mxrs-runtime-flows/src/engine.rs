@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use crate::FlowError;
 use crate::export_mapping::ExportMapping;
 use crate::expression::{Expression, MemberSource};
+use crate::import_mapping::{ImportMapping, ImportedObject, MissingObject, ObjectHandling};
 use crate::value::{FlowValue, ObjectRef, Variables};
 
 /// One prepared flow document.
@@ -134,6 +135,9 @@ pub struct FlowEngine {
     java_actions: BTreeMap<String, Box<dyn JavaAction>>,
     http: Option<Box<dyn HttpCall>>,
     expression: Expression,
+    /// The model's import mappings this engine applies itself, by
+    /// qualified name.
+    import_mappings: BTreeMap<String, ImportMapping>,
 }
 
 enum Completion {
@@ -197,6 +201,20 @@ impl FlowEngine {
                     Some((entity.id.clone()?, qualified_entity(module_name, entity)))
                 })
                 .collect();
+            for document in &module.artifact_units {
+                if document.get_str("$Type").ok() != Some("ImportMappings$ImportMapping") {
+                    continue;
+                }
+                let (Ok(name), Some(mapping)) = (
+                    document.get_str("Name"),
+                    ImportMapping::from_document(document),
+                ) else {
+                    continue;
+                };
+                engine
+                    .import_mappings
+                    .insert(format!("{module_name}.{name}"), mapping);
+            }
             for association in module.associations() {
                 let Some(name) = association.name.as_deref() else {
                     continue;
@@ -812,6 +830,9 @@ impl FlowEngine {
                 variables,
                 action.get_str("ResultVariableName").unwrap_or_default(),
             ),
+            "import_xml" if self.imports_natively(action) => {
+                self.action_import_with_mapping(store, execution, action, variables)
+            }
             "import_xml" => self.invoke_adapter(
                 AdapterKind::ImportXml,
                 action.get_str("ImportMapping").unwrap_or_default(),
@@ -1023,6 +1044,178 @@ impl FlowEngine {
         Err(format!(
             "{flow} takes {expected} for {parameter}, not {entity}"
         ))
+    }
+
+    /// Whether this engine applies the import mapping `name` itself.
+    pub fn imports(&self, name: &str) -> bool {
+        self.import_mappings.contains_key(name)
+    }
+
+    /// Reads `document` with the import mapping `name`: the objects its
+    /// elements make or find, each part of the document an object, joined
+    /// by the associations the elements name, and committed — with the
+    /// entity's events when `events` — when `commit`. Answers the root's
+    /// objects: a list when the root holds many, else the one object or
+    /// empty.
+    pub fn import_document(
+        &self,
+        store: &mut Store,
+        execution: &mut Execution,
+        name: &str,
+        document: &Value,
+        commit: Option<bool>,
+    ) -> Result<FlowValue, FlowError> {
+        let mapping = self.import_mappings.get(name).ok_or_else(|| {
+            FlowError::native(format!("import mapping {name} is not applied here"))
+        })?;
+        let mut touched = Vec::new();
+        let mut objects = Vec::new();
+        for part in mapping.root.parts(document) {
+            if let Some(object) =
+                self.import_part(store, execution, &mapping.root, part, None, &mut touched)?
+            {
+                objects.push(FlowValue::Object(object));
+            }
+        }
+        if let Some(events) = commit {
+            for object in &touched {
+                self.commit_object(store, execution, object, events)?;
+            }
+        }
+        Ok(if mapping.root.multiple {
+            FlowValue::List(objects)
+        } else {
+            objects.into_iter().next().unwrap_or(FlowValue::Empty)
+        })
+    }
+
+    /// The object one part of a document is, its values set and its own
+    /// parts below it imported and joined to it; `None` when the element
+    /// leaves the part out.
+    fn import_part(
+        &self,
+        store: &mut Store,
+        execution: &mut Execution,
+        element: &ImportedObject,
+        part: &Value,
+        above: Option<&ObjectRef>,
+        touched: &mut Vec<ObjectRef>,
+    ) -> Result<Option<ObjectRef>, FlowError> {
+        let mut values = Vec::new();
+        for value in &element.values {
+            let read = value.read(part).map_err(|why| {
+                FlowError::native(format!("import into {}: {why}", element.entity))
+            })?;
+            values.push((value, read));
+        }
+        let found = match element.handling {
+            ObjectHandling::Create => None,
+            ObjectHandling::Find => {
+                let keys: Vec<(String, Value)> = values
+                    .iter()
+                    .filter(|(value, _)| value.key)
+                    .map(|(value, read)| {
+                        (
+                            value.attribute.clone(),
+                            read.as_ref().map_or(Value::Null, FlowValue::to_member),
+                        )
+                    })
+                    .collect();
+                store
+                    .retrieve(&element.entity)
+                    .map_err(FlowError::Runtime)?
+                    .into_iter()
+                    .find(|object| {
+                        keys.iter().all(|(attribute, wanted)| {
+                            object.members.get(attribute).unwrap_or(&Value::Null) == wanted
+                        })
+                    })
+                    .map(|object| reference_of(&object))
+            }
+        };
+        let object = match found {
+            Some(object) => object,
+            None if element.handling == ObjectHandling::Find
+                && element.missing == MissingObject::Ignore =>
+            {
+                return Ok(None);
+            }
+            None if element.handling == ObjectHandling::Find
+                && element.missing == MissingObject::Error =>
+            {
+                return Err(FlowError::native(format!(
+                    "import found no {} with the document's key",
+                    element.entity
+                )));
+            }
+            None => {
+                self.authorize_entity(execution, &element.entity, EntityAction::Create, None)?;
+                let created = store.create(&element.entity).map_err(FlowError::Runtime)?;
+                reference_of(&created)
+            }
+        };
+        for (value, read) in values {
+            let Some(read) = read else {
+                continue;
+            };
+            self.authorize_entity(
+                execution,
+                &element.entity,
+                EntityAction::Write,
+                Some(&value.attribute),
+            )?;
+            store
+                .set_member(
+                    &object.entity,
+                    &object.id,
+                    &value.attribute,
+                    read.to_member(),
+                )
+                .map_err(FlowError::Runtime)?;
+        }
+        if let Some(above) = above {
+            self.join(store, &element.association, &object, above)?;
+        }
+        touched.push(object.clone());
+        for child in &element.children {
+            for nested in child.parts(part) {
+                self.import_part(store, execution, child, nested, Some(&object), touched)?;
+            }
+        }
+        Ok(Some(object))
+    }
+
+    /// Joins `object` to the object `above` it by `association`, on the
+    /// side that owns it: a reference holds one object, a reference set
+    /// gains one.
+    fn join(
+        &self,
+        store: &mut Store,
+        association: &str,
+        object: &ObjectRef,
+        above: &ObjectRef,
+    ) -> Result<(), FlowError> {
+        let info = self.associations.get(association);
+        let member = association.rsplit('.').next().unwrap_or(association);
+        let (owner, target) = match info.and_then(|info| info.from_entity.as_deref()) {
+            Some(owner) if owner == above.entity && owner != object.entity => (above, object),
+            _ => (object, above),
+        };
+        let value = if info.is_some_and(|info| info.reference) {
+            Value::String(target.id.clone())
+        } else {
+            let mut ids: Vec<Value> = store
+                .find(&owner.entity, &owner.id)
+                .map_err(FlowError::Runtime)?
+                .and_then(|record| record.members.get(member).cloned())
+                .and_then(|held| held.as_array().cloned())
+                .unwrap_or_default();
+            ids.push(Value::String(target.id.clone()));
+            Value::Array(ids)
+        };
+        store
+            .set_member(&owner.entity, &owner.id, member, value)
+            .map_err(FlowError::Runtime)
     }
 
     /// Commits an object the way a flow's commit with events does: the
@@ -1786,6 +1979,99 @@ impl FlowEngine {
         )
     }
 
+    /// The import mapping call a result handling makes, when this engine
+    /// applies its mapping to JSON itself.
+    fn native_import<'a>(&self, handling: &'a Document) -> Option<&'a Document> {
+        let call = handling.get_document("ImportMappingCall").ok()?;
+        let mapping = call.get_str("ReturnValueMapping").ok()?;
+        let json = matches!(call.get_str("ContentType"), Ok("Json") | Err(_));
+        (json && self.imports(mapping)).then_some(call)
+    }
+
+    fn imports_natively(&self, action: &Document) -> bool {
+        action
+            .get_document("ResultHandling")
+            .is_ok_and(|handling| self.native_import(handling).is_some())
+    }
+
+    /// Imports a document with a mapping and binds what it makes, as a
+    /// result handling says: the objects, or the first of them where the
+    /// variable holds one.
+    fn bind_import(
+        &self,
+        store: &mut Store,
+        execution: &mut Execution,
+        handling: &Document,
+        call: &Document,
+        text: &str,
+        variables: &mut Variables,
+    ) -> Result<(), FlowError> {
+        let document: Value = serde_json::from_str(text)
+            .map_err(|error| FlowError::native(format!("import with mapping: {error}")))?;
+        let commit = match call.get_str("Commit").unwrap_or("No") {
+            "Yes" => Some(true),
+            "YesWithoutEvents" => Some(false),
+            _ => None,
+        };
+        let mapping = call.get_str("ReturnValueMapping").unwrap_or_default();
+        let imported = self.import_document(store, execution, mapping, &document, commit)?;
+        if !handling.get_bool("Bind").unwrap_or(true) {
+            return Ok(());
+        }
+        let one = handling
+            .get_document("VariableType")
+            .ok()
+            .and_then(|kind| kind.get_str("$Type").ok())
+            == Some("DataTypes$ObjectType")
+            || call
+                .get_document("Range")
+                .ok()
+                .and_then(|range| range.get_bool("SingleObject").ok())
+                == Some(true);
+        let imported = match imported {
+            FlowValue::List(objects) if one => {
+                objects.into_iter().next().unwrap_or(FlowValue::Empty)
+            }
+            other => other,
+        };
+        let name = handling.get_str("ResultVariableName").unwrap_or_default();
+        if !name.is_empty() {
+            variables.insert(name.to_string(), imported);
+        }
+        Ok(())
+    }
+
+    fn action_import_with_mapping(
+        &self,
+        store: &mut Store,
+        execution: &mut Execution,
+        action: &Document,
+        variables: &mut Variables,
+    ) -> Result<(), FlowError> {
+        let handling = action
+            .get_document("ResultHandling")
+            .cloned()
+            .unwrap_or_default();
+        let call = self
+            .native_import(&handling)
+            .cloned()
+            .expect("an action this engine imports itself");
+        let source = action
+            .get_str("XmlDocumentVariableName")
+            .unwrap_or_default();
+        let text = match fetch(variables, source)? {
+            FlowValue::String(text) => text,
+            FlowValue::Json(value) => value.to_string(),
+            other => {
+                return Err(FlowError::native(format!(
+                    "import with mapping reads text, not {}",
+                    other.kind()
+                )));
+            }
+        };
+        self.bind_import(store, execution, &handling, &call, &text, variables)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn bind_rest_result(
         &self,
@@ -1798,6 +2084,11 @@ impl FlowEngine {
     ) -> Result<(), FlowError> {
         if !handling.get_bool("Bind").unwrap_or(false) {
             return Ok(());
+        }
+        // A response read with an import mapping is the objects it makes.
+        if let Some(call) = self.native_import(handling) {
+            let call = call.clone();
+            return self.bind_import(store, execution, handling, &call, body, variables);
         }
         let variable_type = handling.get_document("VariableType").ok();
         let result = match handling_type {

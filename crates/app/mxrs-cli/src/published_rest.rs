@@ -106,7 +106,9 @@ pub(crate) fn operations(
                     .get(operation.microflow.as_str())
                     .cloned()
                     .unwrap_or_default();
-                if !operation.import_mapping.is_empty() {
+                if !operation.import_mapping.is_empty()
+                    && !engine.imports(&operation.import_mapping)
+                {
                     warnings.push(format!(
                         "{} {path}: its import mapping {} is not applied; its body reaches the microflow as JSON",
                         operation.method.as_http(),
@@ -139,6 +141,18 @@ pub(crate) fn operations(
                         request,
                         response,
                         name: action,
+                        // A body the model reads with an import mapping is
+                        // the objects the mapping makes of it.
+                        import: (engine.imports(&operation.import_mapping)).then(|| {
+                            (
+                                operation.import_mapping.clone(),
+                                match operation.commit {
+                                    mxrs_ir::RestCommit::No => None,
+                                    mxrs_ir::RestCommit::Yes => Some(true),
+                                    mxrs_ir::RestCommit::YesWithoutEvents => Some(false),
+                                },
+                            )
+                        }),
                     },
                 ));
             }
@@ -256,6 +270,9 @@ pub(crate) struct RestAction {
     response: Option<String>,
     /// The operation, as its failures are logged under.
     name: String,
+    /// The import mapping its body is read with, and whether — and with
+    /// the entity's events or without — what it makes is committed.
+    import: Option<(String, Option<bool>)>,
 }
 
 impl mxrs_runtime::Action for RestAction {
@@ -300,6 +317,22 @@ impl mxrs_runtime::Action for RestAction {
                         .unwrap_or_default();
                     match (ty, arguments.get("body")) {
                         (_, _) if raw.is_empty() => FlowValue::Empty,
+                        (_, Some(body)) if !body.is_null() && self.import.is_some() => {
+                            let (mapping, commit) = self.import.as_ref().expect("checked above");
+                            let mut execution = self.engine.new_execution(Some(context.clone()));
+                            match self.engine.import_document(
+                                store,
+                                &mut execution,
+                                mapping,
+                                body,
+                                *commit,
+                            ) {
+                                Ok(objects) => objects,
+                                Err(error) => {
+                                    return Ok(refused(&format!("parameter {name}: {error}")));
+                                }
+                            }
+                        }
                         (mxrs_ir::RestParameterType::String, _) => {
                             FlowValue::String(raw.to_string())
                         }

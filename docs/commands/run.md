@@ -43,8 +43,13 @@ Every named microflow/nanoflow/rule is registered on the native interpreter
 `Runtime::invoke`'s document authorization + transaction, and answers
 `{result, effects, log}` — client-facing activities (messages, page
 navigation, downloads, unadapted client actions) surface as `effects`.
-Java custom actions and web-service/mapping/document activities require
-explicitly registered adapters and fail with named errors otherwise.
+An import with mapping — the action, or a REST call's result — is applied
+by the engine itself when the mapping reads JSON without a custom handler
+or value converter: each part of the document an object, created or found
+by its key attributes, joined by the mapping's associations and committed
+as the call says. Java custom actions, XML and web-service/document
+activities require explicitly registered adapters and fail with named
+errors otherwise.
 
 ## Published REST services
 
@@ -63,9 +68,11 @@ They are bound to the microflow, and the result answers through the
 operation's export mapping — or as the stored object without one — under
 the status, and with the content, the flow left on its
 `System.HttpResponse`. A flow that fails answers `500`, its error logged on
-the console. What is not carried yet, said at startup where it applies:
-headers, and an operation's import mapping (its body reaches the microflow
-as JSON). A route the server cannot hold — alike to another but for a
+the console. A body the model reads with an import mapping
+is the objects the mapping makes of it, committed as the operation says.
+What is not carried yet, said at startup where it applies: headers, and an
+import mapping the engine cannot apply (a custom handler, a value
+converter, XML), whose body reaches the microflow as JSON. A route the server cannot hold — alike to another but for a
 parameter's name, or at the runtime's own `/api/...` paths — is not served,
 and startup says which.
 

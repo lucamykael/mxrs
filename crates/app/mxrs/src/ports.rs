@@ -203,6 +203,18 @@ pub fn request_value(
     })
 }
 
+/// A published REST operation's body, read with the import mapping the
+/// model gives the operation: the objects the mapping makes of it are the
+/// microflow's `parameter`, and are committed — with the entity's events
+/// or without — when `commit` says.
+#[derive(Debug, Clone, Copy)]
+pub struct BodyImport<'a> {
+    pub parameter: &'a str,
+    pub mapping: &'a str,
+    pub body: &'a str,
+    pub commit: Option<bool>,
+}
+
 /// The value a published REST operation's body `parameter` of a type
 /// other than text takes from the request's `body`: the JSON it is, or
 /// nothing when it is empty. A body that is no JSON is the caller's
