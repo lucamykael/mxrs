@@ -282,7 +282,7 @@ commands! {
     "protocols", "<file.mpr> [--json]", "Audit imported Marketplace protocol connectors", run_protocols;
     "project", "inspect [DIR] [--json]", "Inspect a Cargo-native project workspace", run_project;
     "presentation", "init <Module> [--target DIR] [--dry-run] [--json]", "Initialize presentation and the application layout", run_presentation;
-    "published-rest", "new <Module.Handler> [--target DIR] [--dry-run] [--json]", "Scaffold a published REST handler microflow", run_published_rest;
+    "published-rest", "new <Module.Handler> [--service NAME] [--path PATH] [--resource NAME] [--method get|post|put|patch|delete] [--operation-path PATH] [--query NAME] [--target DIR] [--dry-run] [--json]", "Publish a REST operation: its handler microflow and its service's declaration", run_published_rest;
     "query", "\"SELECT ...\" --from sql|oql [--to oql|sql] [--dialect ansi|postgresql|sql_server] [--project FILE.mpr] [--input FILE|-] [--json]", "Convert a read-only query between SQL and OQL", run_query;
     "refs", "<file.mpr> <artifact> [--json]", "Show incoming references with their property paths", run_refs;
     "remove", "<file.mpr> <qualified-name> [--apply] [--json]", "Preview or apply a reference-safe removal", run_remove;

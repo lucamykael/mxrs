@@ -599,17 +599,31 @@ fn every_scaffold_lands_in_the_layer_its_catalogued_destination_names() {
         let files = [outcome.files, outcome.updated].concat();
         checked += 1;
 
-        // `repository` is the one deliberately two-layer artifact: its port
-        // lives in `ports` and its adapter in `infrastructure`.
-        let expected: Vec<String> = if advertised.contains('{') {
-            vec!["src/ports".to_string(), "src/infrastructure".to_string()]
-        } else {
-            let module = match (command.kind, command.argument) {
-                (ArtifactKind::Module, _) => format!("module{index}"),
-                (_, "<Module>") => "sales".to_string(),
-                _ => "sales".to_string(),
-            };
-            vec![advertised.replace("<module>", &module)]
+        // A two-layer artifact names both: `repository` its port in `ports`
+        // and its adapter in `infrastructure`, `published-rest` its handler
+        // in `services` and its operation in `controllers`.
+        let module = match (command.kind, command.argument) {
+            (ArtifactKind::Module, _) => format!("module{index}"),
+            _ => "sales".to_string(),
+        };
+        let expected: Vec<String> = match advertised
+            .split_once('{')
+            .and_then(|(head, rest)| Some((head, rest.split_once('}')?)))
+        {
+            Some((head, (alternatives, tail))) => alternatives
+                .split(',')
+                .map(|layer| {
+                    let tail = tail.replace("<module>", &module);
+                    // `src/{ports,infrastructure}/repositories` is matched by
+                    // its layer: each side names its own folder below.
+                    if tail.starts_with("/repositories") {
+                        format!("{head}{layer}")
+                    } else {
+                        format!("{head}{layer}{tail}")
+                    }
+                })
+                .collect(),
+            None => vec![advertised.replace("<module>", &module)],
         };
         for destination in &expected {
             assert!(

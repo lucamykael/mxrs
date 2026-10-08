@@ -125,7 +125,7 @@ impl Operation {
     ) -> Response {
         let caller = match self.caller(&headers) {
             Ok(caller) => caller,
-            Err(response) => return response,
+            Err(refusal) => return refusal.response(),
         };
         let path: BTreeMap<String, String> = path
             .iter()
@@ -173,51 +173,72 @@ impl Operation {
         }
     }
 
-    /// Who the request is, as the service asks — or the response refusing
-    /// it.
-    fn caller(&self, headers: &HeaderMap) -> Result<SecurityContext, Response> {
+    /// Who the request is, as the service asks — or why it is refused.
+    fn caller(&self, headers: &HeaderMap) -> Result<SecurityContext, Refusal> {
         match &self.authentication {
             RestAuthentication::Public => Ok(self.accounts.anonymous()),
-            RestAuthentication::Unsupported(declared) => Err(error_response(
-                StatusCode::NOT_IMPLEMENTED,
-                "unsupported_authentication",
-                &format!("the service requires {declared}, which this runtime does not offer"),
-            )),
+            RestAuthentication::Unsupported(declared) => {
+                Err(Refusal::Unsupported(declared.clone()))
+            }
             RestAuthentication::Basic {
                 realm,
                 allowed_roles,
             } => {
                 // Missing and wrong credentials are one answer on purpose:
                 // telling them apart tells a caller which user names exist.
-                let Some(caller) = headers
+                let caller = headers
                     .get(AUTHORIZATION)
                     .and_then(|header| header.to_str().ok())
                     .and_then(crate::basic_credentials)
                     .and_then(|(user, password)| self.accounts.sign_in(&user, &password))
-                else {
-                    let mut response = error_response(
-                        StatusCode::UNAUTHORIZED,
-                        "unauthenticated",
-                        "the service requires HTTP Basic credentials",
-                    );
-                    if let Ok(challenge) =
-                        format!("Basic realm=\"{}\"", realm.replace('"', "'")).parse()
-                    {
-                        response.headers_mut().insert(WWW_AUTHENTICATE, challenge);
-                    }
-                    return Err(response);
-                };
+                    .ok_or_else(|| Refusal::Unauthenticated(realm.clone()))?;
                 let roles: Vec<&str> = allowed_roles.iter().map(String::as_str).collect();
                 if self.accounts.allows(&caller, &roles) {
                     Ok(caller)
                 } else {
-                    Err(error_response(
-                        StatusCode::FORBIDDEN,
-                        "forbidden",
-                        "the caller holds none of the service's roles",
-                    ))
+                    Err(Refusal::Forbidden)
                 }
             }
+        }
+    }
+}
+
+/// Why a request does not reach its operation.
+enum Refusal {
+    /// The service asks for authentication this runtime does not offer.
+    Unsupported(String),
+    /// No credentials, or none that sign anyone in, for the service's realm.
+    Unauthenticated(String),
+    /// The caller holds none of the service's roles.
+    Forbidden,
+}
+
+impl Refusal {
+    fn response(self) -> Response {
+        match self {
+            Refusal::Unsupported(declared) => error_response(
+                StatusCode::NOT_IMPLEMENTED,
+                "unsupported_authentication",
+                &format!("the service requires {declared}, which this runtime does not offer"),
+            ),
+            Refusal::Unauthenticated(realm) => {
+                let mut response = error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthenticated",
+                    "the service requires HTTP Basic credentials",
+                );
+                if let Ok(challenge) =
+                    format!("Basic realm=\"{}\"", realm.replace('"', "'")).parse()
+                {
+                    response.headers_mut().insert(WWW_AUTHENTICATE, challenge);
+                }
+                response
+            }
+            Refusal::Forbidden => error_response(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "the caller holds none of the service's roles",
+            ),
         }
     }
 }
