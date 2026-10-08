@@ -1689,9 +1689,9 @@ fn create_artifact(
         ArtifactKind::PublishedRest => Some(vec![
             format!("Published REST handler `{module_name}.{artifact_name}`."),
             String::new(),
-            "The service publishing it is declared apart — `mxrs::rest::Service` in".to_string(),
-            "`src/controllers/<module>/`, or `ModuleBuilder::published_rest_service` —".to_string(),
-            "naming this microflow for an operation.".to_string(),
+            "The REST service publishing it is declared in Rust, each operation".to_string(),
+            "naming the microflow it calls: a `mxrs::rest::Service`, as an import".to_string(),
+            "writes one in `src/controllers/<module>/`.".to_string(),
         ]),
         _ => None,
     };

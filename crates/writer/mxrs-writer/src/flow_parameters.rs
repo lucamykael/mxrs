@@ -93,9 +93,9 @@ pub(crate) fn lower(
 pub(crate) fn place(flow: &mut Document, parameters: Vec<Bson>) {
     flow.remove("MicroflowParameterCollection");
     flow.remove("Parameters");
-    let Ok(collection) = flow.get_document_mut("ObjectCollection") else {
-        return;
-    };
+    let collection = flow
+        .get_document_mut("ObjectCollection")
+        .expect("a flow document holds its graph's objects");
     let parsed = parse_array(collection.get_array("Objects").ok().map(Vec::as_slice));
     let objects = parameters
         .into_iter()

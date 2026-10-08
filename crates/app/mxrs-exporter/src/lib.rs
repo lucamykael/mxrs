@@ -5503,17 +5503,9 @@ fn render_declared_service(
         .map(|operation| (operation.position, operation))
         .collect();
     // Text rustfmt could not lay out inside the statement is a named
-    // constant at the top of the file.
-    let mut constants: Vec<(String, String)> = Vec::new();
-    let mut text = |name: String, value: &str| -> String {
-        if value.contains('\n') || value.chars().count() > 48 {
-            let name = name.to_ascii_uppercase();
-            constants.push((name.clone(), json_structures::snippet_literal(value)));
-            name
-        } else {
-            rust_string(value)
-        }
-    };
+    // constant at the top of the file: prose past a short line, a name
+    // past what its place in the statement leaves.
+    let mut constants = RouteTableConstants::default();
     let method_call = |method: RestMethod| match method {
         RestMethod::Get => "get",
         RestMethod::Post => "post",
@@ -5522,7 +5514,9 @@ fn render_declared_service(
         RestMethod::Delete => "delete",
         RestMethod::Head | RestMethod::Options => "",
     };
-    let parameter_type = |ty: &mxrs_ir::RestParameterType| match ty {
+    let parameter_type = |ty: &mxrs_ir::RestParameterType,
+                          constants: &mut RouteTableConstants,
+                          base: &str| match ty {
         mxrs_ir::RestParameterType::String => "RestParameterType::String".to_string(),
         mxrs_ir::RestParameterType::Integer => "RestParameterType::Integer".to_string(),
         mxrs_ir::RestParameterType::Long => "RestParameterType::Long".to_string(),
@@ -5530,15 +5524,14 @@ fn render_declared_service(
         mxrs_ir::RestParameterType::Boolean => "RestParameterType::Boolean".to_string(),
         mxrs_ir::RestParameterType::DateTime => "RestParameterType::DateTime".to_string(),
         mxrs_ir::RestParameterType::Binary => "RestParameterType::Binary".to_string(),
-        mxrs_ir::RestParameterType::Enumeration(name) => {
-            format!(
-                "RestParameterType::Enumeration({}.into())",
-                rust_string(name)
-            )
-        }
-        mxrs_ir::RestParameterType::Object(name) => {
-            format!("RestParameterType::Object({}.into())", rust_string(name))
-        }
+        mxrs_ir::RestParameterType::Enumeration(name) => format!(
+            "RestParameterType::Enumeration({}.into())",
+            constants.name(format!("{base}_enumeration"), name, 24)
+        ),
+        mxrs_ir::RestParameterType::Object(name) => format!(
+            "RestParameterType::Object({}.into())",
+            constants.name(format!("{base}_entity"), name, 24)
+        ),
     };
 
     let mut chain = format!(
@@ -5547,18 +5540,18 @@ fn render_declared_service(
         rust_string(&declaration.path)
     );
     if declaration.service_name != declaration.name {
-        let value = text("service_name".into(), &declaration.service_name);
+        let value = constants.text("service_name".into(), &declaration.service_name);
         let _ = write!(chain, ".service_name({value})");
     }
     if declaration.version != "1.0.0" {
         let _ = write!(chain, ".version({})", rust_string(&declaration.version));
     }
     if !declaration.documentation.is_empty() {
-        let value = text("documentation".into(), &declaration.documentation);
+        let value = constants.text("documentation".into(), &declaration.documentation);
         let _ = write!(chain, ".documentation({value})");
     }
     if !declaration.public_documentation.is_empty() {
-        let value = text(
+        let value = constants.text(
             "public_documentation".into(),
             &declaration.public_documentation,
         );
@@ -5603,7 +5596,7 @@ fn render_declared_service(
         }
         let mut body = binding.clone();
         if !resource.documentation.is_empty() {
-            let value = text(format!("{binding}_documentation"), &resource.documentation);
+            let value = constants.text(format!("{binding}_documentation"), &resource.documentation);
             let _ = write!(body, ".documentation({value})");
         }
         for (operation_index, operation) in resource.operations.iter().enumerate() {
@@ -5618,22 +5611,24 @@ fn render_declared_service(
             );
             let mut configure = String::new();
             if !operation.summary.is_empty() {
-                let value = text(format!("{base}_summary"), &operation.summary);
+                let value = constants.text(format!("{base}_summary"), &operation.summary);
                 let _ = write!(configure, ".summary({value})");
             }
             if !operation.documentation.is_empty() {
-                let value = text(format!("{base}_documentation"), &operation.documentation);
+                let value =
+                    constants.text(format!("{base}_documentation"), &operation.documentation);
                 let _ = write!(configure, ".documentation({value})");
             }
             for parameter in &operation.parameters {
-                let ty = parameter_type(&parameter.ty);
+                let parameter_base = format!("{base}_{}", inner_file_stem(&parameter.name));
+                let ty = parameter_type(&parameter.ty, &mut constants, &parameter_base);
                 let source = match parameter.source {
                     RestParameterSource::Path => "path",
                     RestParameterSource::Query => "query",
                     RestParameterSource::Body => "body",
                     RestParameterSource::Header => "header",
                 };
-                let name = rust_string(&parameter.name);
+                let name = constants.name(format!("{parameter_base}_name"), &parameter.name, 32);
                 if parameter.microflow_parameter == parameter.name
                     && parameter.description.is_empty()
                 {
@@ -5642,15 +5637,16 @@ fn render_declared_service(
                 }
                 let mut stated = format!("RestOperationParameter::{source}({name}, {ty})");
                 if parameter.microflow_parameter != parameter.name {
-                    let _ = write!(
-                        stated,
-                        ".bound_to({})",
-                        rust_string(&parameter.microflow_parameter)
+                    let bound = constants.name(
+                        format!("{parameter_base}_bound_to"),
+                        &parameter.microflow_parameter,
+                        32,
                     );
+                    let _ = write!(stated, ".bound_to({bound})");
                 }
                 if !parameter.description.is_empty() {
-                    let value = text(
-                        format!("{base}_{}_description", inner_file_stem(&parameter.name)),
+                    let value = constants.text(
+                        format!("{parameter_base}_description"),
                         &parameter.description,
                     );
                     let _ = write!(stated, ".description({value})");
@@ -5658,18 +5654,20 @@ fn render_declared_service(
                 let _ = write!(configure, ".parameter({stated})");
             }
             if !operation.export_mapping.is_empty() {
-                let _ = write!(
-                    configure,
-                    ".export_mapping({})",
-                    rust_string(&operation.export_mapping)
+                let mapping = constants.name(
+                    format!("{base}_export_mapping"),
+                    &operation.export_mapping,
+                    48,
                 );
+                let _ = write!(configure, ".export_mapping({mapping})");
             }
             if !operation.import_mapping.is_empty() {
-                let _ = write!(
-                    configure,
-                    ".import_mapping({})",
-                    rust_string(&operation.import_mapping)
+                let mapping = constants.name(
+                    format!("{base}_import_mapping"),
+                    &operation.import_mapping,
+                    48,
                 );
+                let _ = write!(configure, ".import_mapping({mapping})");
             }
             match operation.commit {
                 RestCommit::No => {}
@@ -5689,8 +5687,8 @@ fn render_declared_service(
             let handler = format!("{}::{}", served.controller, served.handler);
             let arguments = format!(
                 "{}, {}, {handler}, {configure}",
-                rust_string(&operation.path),
-                rust_string(&operation.microflow),
+                constants.name(format!("{base}_path"), &operation.path, 56),
+                constants.name(format!("{base}_microflow"), &operation.microflow, 56),
             );
             match method_call(operation.method) {
                 "" => {
@@ -5705,11 +5703,16 @@ fn render_declared_service(
                 }
             }
         }
-        let _ = write!(
-            chain,
-            ".resource({}, |{binding}| {{ {body}; }})",
-            rust_string(&resource.name)
-        );
+        let resource_name = constants.name(format!("{binding}_resource"), &resource.name, 56);
+        if body == binding {
+            // A resource with nothing to say takes nothing.
+            let _ = write!(chain, ".resource({resource_name}, |_| {{}})");
+        } else {
+            let _ = write!(
+                chain,
+                ".resource({resource_name}, |{binding}| {{ {body}; }})"
+            );
+        }
     }
 
     let mut out = format!(
@@ -5731,16 +5734,62 @@ fn render_declared_service(
     }
     out.push_str("use crate::controllers::AppState;\n\n");
     out.push_str(&service_authentication_constants(service));
-    for (name, value) in &constants {
+    for (name, value) in &constants.list {
         let _ = writeln!(out, "const {name}: &str = {value};\n");
     }
     let _ = write!(
         out,
         "/// What the service publishes, each operation with the function serving it.\npub fn service() -> Service<AppState> {{\n    {chain}\n}}\n\n#[declaration(module = {module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    module.published_rest_service(service().declaration());\n}}\n\npub fn router() -> Router<AppState> {{\n    service().router()\n}}\n\n#[cfg(test)]\nmod tests {{\n    /// Every operation the service declares is served, and no two answer\n    /// one method at one route: building the router would panic.\n    #[test]\n    fn the_router_serves_the_service() {{\n        let _router = super::router();\n    }}\n}}\n",
         module = rust_string(&service.module_name),
-        stem = service.file_stem,
+        // The file's own `service` and `router` keep their names.
+        stem = match service.file_stem.as_str() {
+            stem @ ("service" | "router") => format!("declare_{stem}"),
+            stem => stem.to_string(),
+        },
     );
     out
+}
+
+/// The named constants a declared route table states its long text in,
+/// each name taken once.
+#[derive(Default)]
+struct RouteTableConstants {
+    list: Vec<(String, String)>,
+    used: std::collections::HashSet<String>,
+}
+
+impl RouteTableConstants {
+    /// Prose: a constant when it spans lines or passes a short line.
+    fn text(&mut self, name: String, value: &str) -> String {
+        if value.contains('\n') || value.chars().count() > 48 {
+            self.push(name, json_structures::snippet_literal(value))
+        } else {
+            rust_string(value)
+        }
+    }
+
+    /// A name: a constant when it is longer than its place in the
+    /// statement leaves room for.
+    fn name(&mut self, name: String, value: &str, room: usize) -> String {
+        let literal = rust_string(value);
+        if literal.chars().count() > room {
+            self.push(name, literal)
+        } else {
+            literal
+        }
+    }
+
+    fn push(&mut self, name: String, literal: String) -> String {
+        let base = name.to_ascii_uppercase();
+        let mut name = base.clone();
+        let mut suffix = 2;
+        while !self.used.insert(name.clone()) {
+            name = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        self.list.push((name.clone(), literal));
+        name
+    }
 }
 
 /// The paragraph a route table's documentation says who may call the
@@ -6879,6 +6928,14 @@ fn published_service(
                 http_parameters: http.get(microflow).cloned().unwrap_or_default(),
                 position: (resource_index, operation_index),
             };
+            // Two paths alike but for a parameter's name are one route to
+            // axum, which refuses to serve both; the first is routed.
+            if routes
+                .iter()
+                .any(|route| route.path != path && route_shape(&route.path) == route_shape(&path))
+            {
+                continue;
+            }
             match routes.iter_mut().find(|route| route.path == path) {
                 Some(route)
                     if route
@@ -6923,6 +6980,20 @@ fn published_service(
         authentication: service_authentication(document),
         declaration,
     })
+}
+
+/// A route with every `{parameter}` alike: what axum matches it by.
+fn route_shape(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            if segment.starts_with('{') && segment.ends_with('}') {
+                "{}"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// One `ExportMappings$ExportMapping` the model declares, lowered into the
@@ -8599,6 +8670,81 @@ mod tests {
             rendered.contains("/// Calls `Sales.MF_Order_Show`."),
             "{rendered}"
         );
+    }
+
+    /// What rustfmt could not lay out — a long mapping name — is a named
+    /// constant; a resource with nothing to say takes nothing; a service
+    /// named `Service` keeps the file's own `service()`; and a constant's
+    /// name is taken once.
+    #[test]
+    fn a_declared_route_table_stays_formattable_and_compiles() {
+        let long = format!("Sales.EM_{}", "Order".repeat(14));
+        let mut stored = stored_service(&[]);
+        stored.insert("Name", "Service");
+        let resources = stored.get_array_mut("Resources").unwrap();
+        resources.push(mxrs_bson::Bson::Document(mxrs_bson::doc! {
+            "$Type": "Rest$PublishedRestServiceResource",
+            "Documentation": "",
+            "Name": "audit",
+            "Operations": mxrs_bson::build_array(Vec::new(), 2),
+        }));
+        let mxrs_bson::Bson::Document(resource) = &mut resources[1] else {
+            panic!("a resource");
+        };
+        let operations = resource.get_array_mut("Operations").unwrap();
+        let mxrs_bson::Bson::Document(show) = &mut operations[1] else {
+            panic!("an operation");
+        };
+        show.insert("ExportMapping", long.clone());
+        let service =
+            published_service(&stored, "Sales", |_| ModuleRoot::Authored, &HashMap::new())
+                .expect("routable service");
+        assert!(service.declaration.is_some());
+        let rendered = rendered_service(service, &HashMap::new());
+        assert!(
+            rendered.contains(&format!(
+                "const ORDERS_SHOW_EXPORT_MAPPING: &str = \"{long}\";"
+            )) && rendered.contains(".export_mapping(ORDERS_SHOW_EXPORT_MAPPING)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(".resource(\"audit\", |_| {})"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pub fn declare_service(module: &mut ModuleBuilder)"),
+            "{rendered}"
+        );
+
+        let mut constants = RouteTableConstants::default();
+        let first = constants.text("public_documentation".into(), &"text ".repeat(20));
+        let second = constants.text("public_documentation".into(), &"more ".repeat(20));
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("PUBLIC_DOCUMENTATION", "PUBLIC_DOCUMENTATION_2")
+        );
+    }
+
+    /// Two paths alike but for a parameter's name are one route to axum:
+    /// the second is not routed, so the service is not declared and its
+    /// router does not refuse to start.
+    #[test]
+    fn paths_alike_but_for_a_parameter_name_are_routed_once() {
+        let mut stored = stored_service(&[]);
+        let resources = stored.get_array_mut("Resources").unwrap();
+        let mxrs_bson::Bson::Document(resource) = &mut resources[1] else {
+            panic!("a resource");
+        };
+        let operations = resource.get_array_mut("Operations").unwrap();
+        let mxrs_bson::Bson::Document(create) = &mut operations[2] else {
+            panic!("an operation");
+        };
+        create.insert("Path", "{number}");
+        let service =
+            published_service(&stored, "Sales", |_| ModuleRoot::Authored, &HashMap::new())
+                .expect("routable service");
+        assert_eq!(service.routes.len(), 1);
+        assert!(service.declaration.is_none());
     }
 
     /// A package's service, and one with an operation the router cannot

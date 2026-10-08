@@ -235,18 +235,17 @@ pub(crate) fn github_workflow() -> String {
 
 /// Mirrors mxrb's `published_rest` template: a handler microflow, an
 /// application service like any other. The service publishing it is
-/// declared apart — `mxrs::rest::Service` in `src/controllers/<module>/`,
-/// or `ModuleBuilder::published_rest_service` — naming the microflow for
-/// an operation, and the scaffold says so.
+/// declared apart, each operation naming the microflow it calls, and the
+/// scaffold says where.
 pub(crate) fn published_rest(module_name: &str, name: &str) -> String {
     flow(
         module_name,
         name,
         "microflow",
         "Published REST handler",
-        "//! The service publishing it is declared apart — `mxrs::rest::Service`\n\
-         //! in `src/controllers/<module>/`, or `ModuleBuilder::published_rest_service`\n\
-         //! — naming this microflow for an operation.\n"
+        "//! The REST service publishing it is declared in Rust, each operation\n\
+         //! naming the microflow it calls: a `mxrs::rest::Service`, as an import\n\
+         //! writes one in `src/controllers/<module>/`.\n"
             .to_string(),
     )
 }
