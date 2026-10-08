@@ -1689,9 +1689,9 @@ fn create_artifact(
         ArtifactKind::PublishedRest => Some(vec![
             format!("Published REST handler `{module_name}.{artifact_name}`."),
             String::new(),
-            "Publishing the REST service document itself stays a native Studio Pro".to_string(),
-            "operation: mxrs has no published-REST declaration surface, so this".to_string(),
-            "scaffold creates only the handler microflow the service calls.".to_string(),
+            "The service publishing it is declared apart — `mxrs::rest::Service` in".to_string(),
+            "`src/controllers/<module>/`, or `ModuleBuilder::published_rest_service` —".to_string(),
+            "naming this microflow for an operation.".to_string(),
         ]),
         _ => None,
     };

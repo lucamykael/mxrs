@@ -18,6 +18,7 @@ pub mod json_structure;
 pub mod mapping;
 pub mod markers;
 pub mod page;
+pub mod rest;
 pub mod task_queue;
 pub use task_queue::{TaskQueueConfig, TaskQueueDecl, TaskQueueScope};
 
@@ -58,4 +59,8 @@ pub use markers::{
 pub use page::{
     ButtonAction, DataSourceDecl, FormDecl, LayoutDecl, LayoutGridColumnDecl, LayoutGridRowDecl,
     LayoutKind, LayoutRef, PageDecl, PageParameterDecl, WidgetDecl,
+};
+pub use rest::{
+    PublishedRestServiceDecl, RestAuthentication, RestCommit, RestMethod, RestOperationDecl,
+    RestOperationParameter, RestParameterSource, RestParameterType, RestResourceDecl,
 };

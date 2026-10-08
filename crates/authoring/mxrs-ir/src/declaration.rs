@@ -671,6 +671,8 @@ pub struct ModuleDecl {
     pub image_collections: Vec<crate::ImageCollectionDecl>,
     /// Rules: flows a decision asks to choose its way.
     pub rules: Vec<MicroflowDecl>,
+    /// The REST services it publishes.
+    pub published_rest_services: Vec<crate::PublishedRestServiceDecl>,
     /// `None` preserves imported module security. `Some` is authoritative,
     /// including an explicitly empty role set.
     pub roles: Option<Vec<ModuleRoleDecl>>,
@@ -765,6 +767,9 @@ impl ProjectDecl {
         target.data_sets.extend(declared.data_sets);
         target.image_collections.extend(declared.image_collections);
         target.rules.extend(declared.rules);
+        target
+            .published_rest_services
+            .extend(declared.published_rest_services);
         target.layouts.extend(declared.layouts);
         if let Some(roles) = declared.roles {
             target.roles = Some(roles);

@@ -725,6 +725,32 @@ pub(crate) fn synchronize_data_sets_with_identity(
     synchronize_documents(mpr, module_id, &documents, identity)
 }
 
+/// Writes the REST services a module publishes.
+pub(crate) fn synchronize_published_rest_services_with_identity(
+    mpr: &mut mxrs_mpr::MprFile,
+    module_id: &str,
+    module_name: &str,
+    services: &[mxrs_ir::PublishedRestServiceDecl],
+    identity: ProjectIdentity,
+) -> Result<()> {
+    let stated: Vec<NativeDocument> = services
+        .iter()
+        .map(mxrs_ir::PublishedRestServiceDecl::document)
+        .collect();
+    let documents: Vec<(ArtifactKind, String, &NativeDocument)> = services
+        .iter()
+        .zip(&stated)
+        .map(|(service, document)| {
+            (
+                ArtifactKind::PublishedRestService,
+                format!("{module_name}.{}", service.name),
+                document,
+            )
+        })
+        .collect();
+    synchronize_documents(mpr, module_id, &documents, identity)
+}
+
 /// Writes the JSON structures a module declares.
 pub(crate) fn synchronize_json_structures_with_identity(
     mpr: &mut mxrs_mpr::MprFile,

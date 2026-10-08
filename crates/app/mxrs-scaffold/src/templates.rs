@@ -233,23 +233,20 @@ pub(crate) fn github_workflow() -> String {
     "name: MXRS\n\non:\n  push:\n  pull_request:\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: dtolnay/rust-toolchain@stable\n        with:\n          components: rustfmt, clippy\n      - run: cargo fmt --all -- --check\n      - run: cargo clippy --workspace --all-targets -- -D warnings\n      - run: cargo test --workspace --all-targets\n".to_string()
 }
 
-/// Mirrors mxrb's `published_rest` template, including its scope statement:
-/// mxrb scaffolds a microflow and says publishing the REST document itself is
-/// still a native Studio Pro operation. That is equally true here — mxrs has
-/// no `Rest$PublishedRestService` declaration surface — so the scaffold
-/// creates the editable half and names the half it cannot create. The
-/// handler is a microflow, so it is an application service like any other;
-/// `src/controllers/` holds what an import generates from a published
-/// service, which is the half this cannot write.
+/// Mirrors mxrb's `published_rest` template: a handler microflow, an
+/// application service like any other. The service publishing it is
+/// declared apart — `mxrs::rest::Service` in `src/controllers/<module>/`,
+/// or `ModuleBuilder::published_rest_service` — naming the microflow for
+/// an operation, and the scaffold says so.
 pub(crate) fn published_rest(module_name: &str, name: &str) -> String {
     flow(
         module_name,
         name,
         "microflow",
         "Published REST handler",
-        "//! Publishing the REST service document itself stays a native Studio Pro\n\
-         //! operation: mxrs has no published-REST declaration surface, so this\n\
-         //! scaffold creates only the handler microflow the service calls.\n"
+        "//! The service publishing it is declared apart — `mxrs::rest::Service`\n\
+         //! in `src/controllers/<module>/`, or `ModuleBuilder::published_rest_service`\n\
+         //! — naming this microflow for an operation.\n"
             .to_string(),
     )
 }

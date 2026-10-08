@@ -60,8 +60,10 @@ read-only behavioral oracle; never edit it.
 - There is no `presentation` layer (user directive, 2026-10-01): what the
   application serves over HTTP and the user interface it declares are
   different things. `src/controllers/<module>/` holds, per published REST
-  service, one file that is only its route table (`api_service.rs`: the
-  axum `Router`, each path and method bound to a controller function) and
+  service, one file that is its route table (`api_service.rs`: the service
+  the model publishes, declared with each operation bound to the controller
+  function serving it, and the axum `Router` built from that declaration —
+  one statement for the model and the server) and
   one `<resource>_controller.rs` per resource with a function per
   operation, named by what it does to the resource (`index`, `show`,
   `create`, `update`, `destroy`) when that tells the operations apart and

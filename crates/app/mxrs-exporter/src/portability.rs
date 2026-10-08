@@ -161,6 +161,14 @@ pub fn audit_portability(path: impl AsRef<Path>) -> Result<PortabilityReport> {
         "Images$ImageCollection".to_string(),
         super::images::declare(&modules, authored).len(),
     );
+    // A service's route table declares it, in a project served by axum.
+    stated_whole.insert(
+        "Rest$PublishedRestService".to_string(),
+        super::collect_published_services(&project, &packages, &super::http_parameters(&modules))?
+            .iter()
+            .filter(|service| service.declaration.is_some())
+            .count(),
+    );
     stated_whole.insert(
         "DataSets$DataSet".to_string(),
         super::data_sets::declare(&project, authored)?.len(),

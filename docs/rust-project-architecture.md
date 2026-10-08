@@ -92,7 +92,7 @@ src/
 │   ├── mod.rs                              router() and serve()
 │   ├── state.rs, error.rs
 │   └── <mendix_module>/
-│       ├── <published_service>.rs          the route table
+│       ├── <published_service>.rs          the service and its route table
 │       └── <resource>_controller.rs        one function per operation
 ├── ui/                                     what Rust still declares of the
 │   │                                       user interface; absent from a fresh project
@@ -224,23 +224,44 @@ so for each flow it rebuilds.
 ## Controllers
 
 A published REST service is two kinds of file in its module's controllers
-folder. The service file is the route table and nothing else — the axum
-`Router`, every path the model publishes, each method bound to the function
-that handles it — together with what the model says about who may call:
+folder. The service file is the route table: it declares the service the
+model publishes — its path, who may call it, each resource and operation —
+with the function serving each operation, and its router serves exactly that
+statement. An operation's route is the service's path, its resource's name
+and its own path; changing one is changing the declaration, and the build
+writes the model's service from the same file:
 
 ```rust
 // src/controllers/sales/order_service.rs
+pub fn service() -> Service<AppState> {
+    Service::new("OrderService", "api/v1")
+        .basic_authentication(ALLOWED_ROLES)
+        .resource("orders", |orders| {
+            orders
+                .get("", "Sales.MF_Order_List", orders_controller::index, |_| {})
+                .get("{id}", "Sales.MF_Order_Show", orders_controller::show, |operation| {
+                    operation
+                        .summary("One order")
+                        .path_parameter("id", RestParameterType::Integer)
+                        .export_mapping("Sales.EM_Order");
+                });
+        })
+}
+
+#[declaration(module = "Sales")]
+pub fn order_service(module: &mut ModuleBuilder) {
+    module.published_rest_service(service().declaration());
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/api/v1/orders", get(orders_controller::index).post(orders_controller::create))
-        .route(
-            "/api/v1/orders/{id}",
-            get(orders_controller::show)
-                .put(orders_controller::update)
-                .delete(orders_controller::destroy),
-        )
+    service().router()
 }
 ```
+
+A service the declaration cannot restate yet, or of an installed module,
+stays the model's: its route table only routes, each path bound to its
+controller's function, and each handler carries its path and method in
+`#[mxrs::route]`.
 
 Each resource of the service is a controller, `<resource>_controller.rs`,
 with one function per operation calling the microflow the model bound to

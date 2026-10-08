@@ -66,6 +66,7 @@ mod navigation;
 pub mod page;
 mod project;
 mod regular_expression;
+mod rest;
 mod scheduled_event;
 mod security;
 mod task_queue;
@@ -109,5 +110,6 @@ pub use page::{
 };
 pub use project::ProjectBuilder;
 pub use regular_expression::RegularExpressionBuilder;
+pub use rest::{PublishedRestServiceBuilder, RestOperationBuilder, RestResourceBuilder};
 pub use scheduled_event::ScheduledEventBuilder;
 pub use security::{DemoUserBuilder, SecurityBuilder, UserRoleBuilder};

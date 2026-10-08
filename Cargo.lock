@@ -911,6 +911,7 @@ dependencies = [
 name = "mxrs"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "inventory",
  "mxrs-dsl",
  "mxrs-expr",
@@ -931,6 +932,8 @@ dependencies = [
  "mxrs-semantic",
  "mxrs-writer",
  "tempfile",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

@@ -63,6 +63,7 @@ impl ModuleBuilder {
                 mappings: Vec::new(),
                 data_sets: Vec::new(),
                 image_collections: Vec::new(),
+                published_rest_services: Vec::new(),
                 rules: Vec::new(),
                 roles: None,
                 installed: false,
@@ -271,6 +272,16 @@ impl ModuleBuilder {
         let mut builder = crate::MappingBuilder::new(direction, name, json_structure);
         configure(&mut builder);
         self.decl.mappings.push(builder.into_decl());
+        self
+    }
+
+    /// Declares a published REST service: its resources, each operation the
+    /// microflow it calls, and who may call it.
+    pub fn published_rest_service(
+        &mut self,
+        service: impl Into<mxrs_ir::PublishedRestServiceDecl>,
+    ) -> &mut Self {
+        self.decl.published_rest_services.push(service.into());
         self
     }
 

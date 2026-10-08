@@ -12,6 +12,7 @@ description = "Public facade for Cargo-native Mendix applications built with mxr
 workspace = true
 
 [dependencies]
+axum = "0.8.7"
 inventory = "0.3"
 mxrs-dsl = { path = "../../authoring/mxrs-dsl" }
 mxrs-expr = { path = "../../authoring/mxrs-expr" }
@@ -33,4 +34,7 @@ mxrs-writer = { path = "../../writer/mxrs-writer" }
 
 [dev-dependencies]
 mxrs-model = { path = "../../model/mxrs-model" }
+mxrs-writer = { path = "../../writer/mxrs-writer" }
 tempfile = "3.27.0"
+tokio = { version = "1.52.0", features = ["macros", "rt"] }
+tower = { version = "0.5.2", features = ["util"] }

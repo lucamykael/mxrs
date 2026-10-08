@@ -463,6 +463,19 @@ fn import_cargo_project_inner(
                 ))
             })
     }));
+    // A service its route table declares is the route table's to write.
+    declared.extend(
+        published_services
+            .iter()
+            .filter(|service| service.declaration.is_some())
+            .map(|service| {
+                (
+                    "Rest$PublishedRestService".to_string(),
+                    service.module_name.clone(),
+                    service.name.clone(),
+                )
+            }),
+    );
     declared.extend(data_sets.iter().map(|data_set| {
         (
             "DataSets$DataSet".to_string(),
@@ -3449,7 +3462,7 @@ fn generated_readme(
         String::new()
     };
     format!(
-        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds a route table per published REST service and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`, when the project has one: what Rust still declares of the user interface — a page, or a nanoflow its TypeScript could not restate — and the names those call the frontend's nanoflows by. A project whose whole interface is the frontend's has no such folder.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. Built here (`mxrs run --frontend`, `npm run build`), it draws each page from its own TSX, inside the layout it calls and under the project's theme — `components/elements/` says how an element is drawn; no data is loaded into a page yet — and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`elements/`, `layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `services/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. {navigation_note} Nanoflows are its services: `services/<module>/<subject>Service.ts` holds them as `async` methods in structured TypeScript, in the vocabulary of `mxrs/flows.ts`, which every build reads into the model. Pages, layouts and snippets are its TSX — `pages/<module>/`, `components/layout/<module>/` and `components/snippets/<module>/` — each stating the document the model stores for it with the elements of `mxrs/elements.ts`, which says what every field holds when a page leaves it unsaid, and the pluggable widgets `widgets/` defines.\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity, and by its qualified name what Rust does not declare — a page, a nanoflow of the frontend; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; every nanoflow a service of the frontend. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
+        "# {project_name}\n\nCargo-native Mendix project imported by `mxrs`. The source uses a layer-first architecture with Mendix modules nested only where names need a namespace:\n\n- `src/domain/`: persisted entities, non-persistable/view data, enumerations, export mappings, model documents and security. It has no HTTP or database dependency.\n- `src/services/`: what the application does. A service is about something: one folder per Mendix module, one `<subject>_service.rs` per subject — an entity the flows' names name, or the module itself — whose `impl` holds those microflows as methods, and the task queues they run on.\n- `src/ports/`: the contracts between the model and hand-written code — what each module's services offer, and what its actions need an adapter in `infrastructure` to provide.\n- `src/controllers/`: what the application serves over HTTP. Each module's folder holds, per published REST service, the file declaring it — each operation bound to the function serving it, and the router built from that — and a controller per resource, with one function per operation; the shared router, state and error type are at the top. Axum-specific types stay here.\n- `src/ui/`, when the project has one: what Rust still declares of the user interface — a page, or a nanoflow its TypeScript could not restate — and the names those call the frontend's nanoflows by. A project whose whole interface is the frontend's has no such folder.\n- `src/infrastructure/`: runtime, persistence, authentication and external-action adapters.\n- `frontend/`: editable React + TypeScript + Vite client. Built here (`mxrs run --frontend`, `npm run build`), it draws each page from its own TSX, inside the layout it calls and under the project's theme — `components/elements/` says how an element is drawn; no data is loaded into a page yet — and calls the Rust runtime through `/api`. Its `src/` is laid out the way a React project is: `api/` (calls to the runtime), `components/` (`elements/`, `layout/`, `widgets/`), `hooks/`, `navigation/`, `pages/`, `services/`, `types/`, `utils/` and `styles/`, with `@/` naming `src/`. {navigation_note} Nanoflows are its services: `services/<module>/<subject>Service.ts` holds them as `async` methods in structured TypeScript, in the vocabulary of `mxrs/flows.ts`, which every build reads into the model. Pages, layouts and snippets are its TSX — `pages/<module>/`, `components/layout/<module>/` and `components/snippets/<module>/` — each stating the document the model stores for it with the elements of `mxrs/elements.ts`, which says what every field holds when a page leaves it unsaid, and the pluggable widgets `widgets/` defines.\n- `java/`: the Java the model's Java actions run in Mendix, in Mendix's own layout. It is yours to edit, and every build ships it as the `.mpr`'s `javasource/`. In mxrs each action runs the Rust registered for it in `src/infrastructure/adapters/java_actions.rs` instead; its contract, with this Java shown, is in its module's `ports::actions`.\n- `model/imported/`: lossless model data and stable Mendix identities that do not yet have a typed Rust representation.\n\nMarketplace modules remain grouped under `src/packages/<module>/` because they are external, upgradeable dependencies rather than application-owned code.\n\n## Declaring the model\n\nA declaration is one annotated item in its own file, and it registers itself: adding one is the file plus its `pub mod` line.\n\n```rust\nuse mxrs::prelude::*;\n\n/// A customer order.\n#[entity(module = \"Sales\")]\n#[mxrs(index(number))]\npub struct Order {{\n    #[mxrs(length = 80, required)]\n    pub number: MxString,\n    pub total: MxDecimal,\n}}\n\n#[microflow(ACT, module = \"Sales\")]\npub fn create_order(flow: &mut FlowBuilder) {{\n    let number = flow.parameter::<MxString>(\"Number\", |_| {{}});\n    let order = flow.create_object(\n        \"Order\",\n        Ref::<Order>::new(),\n        vec![Order::number().set(number)],\n        true,\n    );\n    flow.return_value(order);\n}}\n```\n\n`#[entity]`, `#[dto]` and `#[view]` declare persistable, non-persistable and OQL-view entities; `#[enumeration]` declares an enumeration from a Rust enum. Fields are attributes and associations (`Reference<T>`, `ReferenceSet<T>`), `///` comments are the model's documentation, and every field has an accessor (`Order::number()`) wherever a flow or page names it. `#[microflow(ACT, ...)]` on `create_order` declares `ACT_CreateOrder`, nameable elsewhere as the type `ACT_CreateOrder`; `#[nanoflow]` is its client-side counterpart. The attribute also states who may run a flow and what it is related to — `roles(...)`, `calls(...)`, `uses(...)`, `used_by(...)` — each naming the Rust item that declares the role, flow or entity, and by its qualified name what Rust does not declare — a page, a nanoflow of the frontend; a build reports where the last three no longer match the model.\n\nNothing here carries a Mendix identifier. An artifact that came from the imported model keeps the identity `model/imported/` records for it; a new one gets a stable identity derived from the project and its qualified name, the same on every build. Renaming an artifact in Rust therefore declares a new artifact; it does not rename the imported one.\n\nEvery microflow is a service under `src/services/`; every nanoflow a service of the frontend. `mxrs run --frontend` supervises the Rust API and Vite client together. A flow that cannot be declared yet is named in its service's file, which says why it stayed in the imported model. Edits with the same activity structure preserve node identities and layout; structural edits rebuild the graph.\n\n```sh\n# Mendix → Rust\nmxrs convert mendix-to-rust app.mpr --output . --mode axum\n\ncargo fmt --check\ncargo check\ncargo clippy --all-targets -- -D warnings\ncargo test\n\n# Install the pinned browser client once, then run both processes\nnpm install --prefix frontend\nmxrs run . --frontend\n\n# Rust → Mendix\nmxrs convert rust-to-mendix . --output build/{project_name}.mpr\n```\n\nChoose `--mode axum`, `--mode actix-web`, or `--mode rocket` during import. `mxrs run` materializes missing web assets itself and shuts down cleanly on interrupt; it does not require Studio Pro or mxbuild.\n\nThe typed domain export omitted {gaps} association target(s) that do not resolve inside this imported project; their original model data remains preserved. Run `mxrs portability` for the complete per-family typed/partial/preserved inventory.\n{pages_note}"
     )
 }
 
@@ -5457,10 +5470,11 @@ fn render_published_service(
         .collect();
     controllers.sort_unstable();
     controllers.dedup();
-    let mut files = vec![(
-        service.file_stem.clone(),
-        render_service_routes(service, &controllers),
-    )];
+    let routes = match &service.declaration {
+        Some(declaration) => render_declared_service(service, declaration, &controllers),
+        None => render_service_routes(service, &controllers),
+    };
+    let mut files = vec![(service.file_stem.clone(), routes)];
     for controller in controllers {
         files.push((
             controller.to_string(),
@@ -5468,6 +5482,304 @@ fn render_published_service(
         ));
     }
     files
+}
+
+/// A service the project declares: the route table states the service the
+/// model publishes — its path, who may call it, each resource and operation
+/// — with the controller function serving each operation, and its router
+/// serves exactly that. The build writes the model's service from the same
+/// statement.
+fn render_declared_service(
+    service: &PublishedService,
+    declaration: &mxrs_ir::PublishedRestServiceDecl,
+    controllers: &[&str],
+) -> String {
+    use mxrs_ir::{RestAuthentication, RestCommit, RestMethod, RestParameterSource};
+
+    let operations: HashMap<(usize, usize), &ServiceOperation> = service
+        .routes
+        .iter()
+        .flat_map(|route| &route.operations)
+        .map(|operation| (operation.position, operation))
+        .collect();
+    // Text rustfmt could not lay out inside the statement is a named
+    // constant at the top of the file.
+    let mut constants: Vec<(String, String)> = Vec::new();
+    let mut text = |name: String, value: &str| -> String {
+        if value.contains('\n') || value.chars().count() > 48 {
+            let name = name.to_ascii_uppercase();
+            constants.push((name.clone(), json_structures::snippet_literal(value)));
+            name
+        } else {
+            rust_string(value)
+        }
+    };
+    let method_call = |method: RestMethod| match method {
+        RestMethod::Get => "get",
+        RestMethod::Post => "post",
+        RestMethod::Put => "put",
+        RestMethod::Patch => "patch",
+        RestMethod::Delete => "delete",
+        RestMethod::Head | RestMethod::Options => "",
+    };
+    let parameter_type = |ty: &mxrs_ir::RestParameterType| match ty {
+        mxrs_ir::RestParameterType::String => "RestParameterType::String".to_string(),
+        mxrs_ir::RestParameterType::Integer => "RestParameterType::Integer".to_string(),
+        mxrs_ir::RestParameterType::Long => "RestParameterType::Long".to_string(),
+        mxrs_ir::RestParameterType::Decimal => "RestParameterType::Decimal".to_string(),
+        mxrs_ir::RestParameterType::Boolean => "RestParameterType::Boolean".to_string(),
+        mxrs_ir::RestParameterType::DateTime => "RestParameterType::DateTime".to_string(),
+        mxrs_ir::RestParameterType::Binary => "RestParameterType::Binary".to_string(),
+        mxrs_ir::RestParameterType::Enumeration(name) => {
+            format!(
+                "RestParameterType::Enumeration({}.into())",
+                rust_string(name)
+            )
+        }
+        mxrs_ir::RestParameterType::Object(name) => {
+            format!("RestParameterType::Object({}.into())", rust_string(name))
+        }
+    };
+
+    let mut chain = format!(
+        "Service::new({}, {})",
+        rust_string(&declaration.name),
+        rust_string(&declaration.path)
+    );
+    if declaration.service_name != declaration.name {
+        let value = text("service_name".into(), &declaration.service_name);
+        let _ = write!(chain, ".service_name({value})");
+    }
+    if declaration.version != "1.0.0" {
+        let _ = write!(chain, ".version({})", rust_string(&declaration.version));
+    }
+    if !declaration.documentation.is_empty() {
+        let value = text("documentation".into(), &declaration.documentation);
+        let _ = write!(chain, ".documentation({value})");
+    }
+    if !declaration.public_documentation.is_empty() {
+        let value = text(
+            "public_documentation".into(),
+            &declaration.public_documentation,
+        );
+        let _ = write!(chain, ".public_documentation({value})");
+    }
+    match (&declaration.authentication, &service.authentication) {
+        (RestAuthentication::None, _) => {}
+        (_, ServiceAuthentication::Basic { .. }) => {
+            chain.push_str(".basic_authentication(ALLOWED_ROLES)");
+        }
+        (
+            RestAuthentication::Required {
+                types,
+                allowed_roles,
+                microflow,
+            },
+            _,
+        ) => {
+            let list = |items: &[String]| {
+                items
+                    .iter()
+                    .map(|item| rust_string(item))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let _ = write!(
+                chain,
+                ".authentication(&[{}], &[{}], {})",
+                list(types),
+                list(allowed_roles),
+                rust_string(microflow)
+            );
+        }
+    }
+    if declaration.export_level == mxrs_ir::ExportLevel::Published {
+        chain.push_str(".export_level(ExportLevel::Published)");
+    }
+    for (resource_index, resource) in declaration.resources.iter().enumerate() {
+        let mut binding = inner_file_stem(&resource.name);
+        if binding.is_empty() || binding.starts_with(|c: char| c.is_ascii_digit()) {
+            binding = "resource".to_string();
+        }
+        let mut body = binding.clone();
+        if !resource.documentation.is_empty() {
+            let value = text(format!("{binding}_documentation"), &resource.documentation);
+            let _ = write!(body, ".documentation({value})");
+        }
+        for (operation_index, operation) in resource.operations.iter().enumerate() {
+            let served = operations[&(resource_index, operation_index)];
+            let base = format!(
+                "{}_{}",
+                served
+                    .controller
+                    .strip_suffix("_controller")
+                    .unwrap_or(&served.controller),
+                served.handler
+            );
+            let mut configure = String::new();
+            if !operation.summary.is_empty() {
+                let value = text(format!("{base}_summary"), &operation.summary);
+                let _ = write!(configure, ".summary({value})");
+            }
+            if !operation.documentation.is_empty() {
+                let value = text(format!("{base}_documentation"), &operation.documentation);
+                let _ = write!(configure, ".documentation({value})");
+            }
+            for parameter in &operation.parameters {
+                let ty = parameter_type(&parameter.ty);
+                let source = match parameter.source {
+                    RestParameterSource::Path => "path",
+                    RestParameterSource::Query => "query",
+                    RestParameterSource::Body => "body",
+                    RestParameterSource::Header => "header",
+                };
+                let name = rust_string(&parameter.name);
+                if parameter.microflow_parameter == parameter.name
+                    && parameter.description.is_empty()
+                {
+                    let _ = write!(configure, ".{source}_parameter({name}, {ty})");
+                    continue;
+                }
+                let mut stated = format!("RestOperationParameter::{source}({name}, {ty})");
+                if parameter.microflow_parameter != parameter.name {
+                    let _ = write!(
+                        stated,
+                        ".bound_to({})",
+                        rust_string(&parameter.microflow_parameter)
+                    );
+                }
+                if !parameter.description.is_empty() {
+                    let value = text(
+                        format!("{base}_{}_description", inner_file_stem(&parameter.name)),
+                        &parameter.description,
+                    );
+                    let _ = write!(stated, ".description({value})");
+                }
+                let _ = write!(configure, ".parameter({stated})");
+            }
+            if !operation.export_mapping.is_empty() {
+                let _ = write!(
+                    configure,
+                    ".export_mapping({})",
+                    rust_string(&operation.export_mapping)
+                );
+            }
+            if !operation.import_mapping.is_empty() {
+                let _ = write!(
+                    configure,
+                    ".import_mapping({})",
+                    rust_string(&operation.import_mapping)
+                );
+            }
+            match operation.commit {
+                RestCommit::No => {}
+                RestCommit::Yes => configure.push_str(".commit(RestCommit::Yes)"),
+                RestCommit::YesWithoutEvents => {
+                    configure.push_str(".commit(RestCommit::YesWithoutEvents)");
+                }
+            }
+            if operation.deprecated {
+                configure.push_str(".deprecated(true)");
+            }
+            let configure = if configure.is_empty() {
+                "|_| {}".to_string()
+            } else {
+                format!("|operation| {{ operation{configure}; }}")
+            };
+            let handler = format!("{}::{}", served.controller, served.handler);
+            let arguments = format!(
+                "{}, {}, {handler}, {configure}",
+                rust_string(&operation.path),
+                rust_string(&operation.microflow),
+            );
+            match method_call(operation.method) {
+                "" => {
+                    let _ = write!(
+                        body,
+                        ".operation(RestMethod::{:?}, {arguments})",
+                        operation.method
+                    );
+                }
+                method => {
+                    let _ = write!(body, ".{method}({arguments})");
+                }
+            }
+        }
+        let _ = write!(
+            chain,
+            ".resource({}, |{binding}| {{ {body}; }})",
+            rust_string(&resource.name)
+        );
+    }
+
+    let mut out = format!(
+        "//! `{}` — the REST service the {} module publishes at `/{}`.\n",
+        service.name, service.module_name, service.base_path,
+    );
+    out.push_str(&service_authentication_paragraph(&service.authentication));
+    out.push_str(
+        "//!\n//! This file declares the service — every build writes it into the model —\n//! and binds each operation to the controller function serving it, beside\n//! this file. Its router serves exactly what it declares.\n",
+    );
+    out.push_str("\nuse axum::Router;\nuse mxrs::prelude::*;\nuse mxrs::rest::Service;\n\n");
+    match controllers {
+        [controller] => {
+            let _ = writeln!(out, "use super::{controller};");
+        }
+        controllers => {
+            let _ = writeln!(out, "use super::{{{}}};", controllers.join(", "));
+        }
+    }
+    out.push_str("use crate::controllers::AppState;\n\n");
+    out.push_str(&service_authentication_constants(service));
+    for (name, value) in &constants {
+        let _ = writeln!(out, "const {name}: &str = {value};\n");
+    }
+    let _ = write!(
+        out,
+        "/// What the service publishes, each operation with the function serving it.\npub fn service() -> Service<AppState> {{\n    {chain}\n}}\n\n#[declaration(module = {module})]\npub fn {stem}(module: &mut ModuleBuilder) {{\n    module.published_rest_service(service().declaration());\n}}\n\npub fn router() -> Router<AppState> {{\n    service().router()\n}}\n\n#[cfg(test)]\nmod tests {{\n    /// Every operation the service declares is served, and no two answer\n    /// one method at one route: building the router would panic.\n    #[test]\n    fn the_router_serves_the_service() {{\n        let _router = super::router();\n    }}\n}}\n",
+        module = rust_string(&service.module_name),
+        stem = service.file_stem,
+    );
+    out
+}
+
+/// The paragraph a route table's documentation says who may call the
+/// service in.
+fn service_authentication_paragraph(authentication: &ServiceAuthentication) -> String {
+    match authentication {
+        ServiceAuthentication::Public => "//!\n//! The model publishes this service to anyone: it declares no\n//! authentication type and no allowed role. Its operations therefore run as\n//! the project's guest user role, or as a caller holding no role at all when\n//! the project declares none — which entity access then denies.\n".to_string(),
+        ServiceAuthentication::Basic { allowed_roles } => format!(
+            "//!\n//! The model requires HTTP Basic authentication. Every operation signs the\n//! request in before calling the model and runs as whoever signed in, and\n//! only these module roles may reach it:\n//!\n{}",
+            allowed_roles
+                .iter()
+                .map(|role| format!("//! - `{role}`\n"))
+                .collect::<String>(),
+        ),
+        ServiceAuthentication::Unsupported { declared } => format!(
+            "//!\n//! Every operation here refuses with `501`. The model requires {declared},\n//! which the generated HTTP layer does not offer yet, and serving the\n//! surface without the authentication the model asks for would hand it to\n//! anyone. The routes stay in the table so the published surface stays\n//! visible, and answer the gap instead of the model.\n",
+        ),
+    }
+}
+
+/// The constants a route table states who may call the service with, which
+/// its controllers read.
+fn service_authentication_constants(service: &PublishedService) -> String {
+    match &service.authentication {
+        ServiceAuthentication::Basic { allowed_roles } => format!(
+            "/// The module roles this service allows, exactly as the model lists\n/// them. An empty list would allow nobody, not everybody.\npub(super) const ALLOWED_ROLES: &[&str] = &[{}];\n\n/// The realm a `401` challenges with, so a client knows which credentials\n/// it is being asked for.\npub(super) const REALM: &str = {};\n\n",
+            allowed_roles
+                .iter()
+                .map(|role| rust_string(role))
+                .collect::<Vec<_>>()
+                .join(", "),
+            rust_string(&service.name),
+        ),
+        ServiceAuthentication::Unsupported { declared } => format!(
+            "/// What the model requires of a caller, named in every refusal.\npub(super) const AUTHENTICATION: &str = {};\n\n",
+            rust_string(declared),
+        ),
+        ServiceAuthentication::Public => String::new(),
+    }
 }
 
 /// A service's route table: every path it publishes, each method bound to
@@ -5495,27 +5807,7 @@ fn render_service_routes(service: &PublishedService, controllers: &[&str]) -> St
     {
         let _ = writeln!(out, "//!\n//! {line}");
     }
-    match &service.authentication {
-        ServiceAuthentication::Public => out.push_str(
-            "//!\n//! The model publishes this service to anyone: it declares no\n//! authentication type and no allowed role. Its operations therefore run as\n//! the project's guest user role, or as a caller holding no role at all when\n//! the project declares none — which entity access then denies.\n",
-        ),
-        ServiceAuthentication::Basic { allowed_roles } => {
-            let _ = write!(
-                out,
-                "//!\n//! The model requires HTTP Basic authentication. Every operation signs the\n//! request in before calling the model and runs as whoever signed in, and\n//! only these module roles may reach it:\n//!\n{}",
-                allowed_roles
-                    .iter()
-                    .map(|role| format!("//! - `{role}`\n"))
-                    .collect::<String>(),
-            );
-        }
-        ServiceAuthentication::Unsupported { declared } => {
-            let _ = write!(
-                out,
-                "//!\n//! Every operation here refuses with `501`. The model requires {declared},\n//! which the generated HTTP layer does not offer yet, and serving the\n//! surface without the authentication the model asks for would hand it to\n//! anyone. The routes stay in the table so the published surface stays\n//! visible, and answer the gap instead of the model.\n",
-            );
-        }
-    }
+    out.push_str(&service_authentication_paragraph(&service.authentication));
     out.push_str(
         "//!\n//! This is the route table. Each resource's operations are handled by its\n//! controller, beside this file.\n",
     );
@@ -5533,28 +5825,7 @@ fn render_service_routes(service: &PublishedService, controllers: &[&str]) -> St
         }
     }
     out.push_str("use crate::controllers::AppState;\n\n");
-    match &service.authentication {
-        ServiceAuthentication::Basic { allowed_roles } => {
-            let _ = write!(
-                out,
-                "/// The module roles this service allows, exactly as the model lists\n/// them. An empty list would allow nobody, not everybody.\npub(super) const ALLOWED_ROLES: &[&str] = &[{}];\n\n/// The realm a `401` challenges with, so a client knows which credentials\n/// it is being asked for.\npub(super) const REALM: &str = {};\n\n",
-                allowed_roles
-                    .iter()
-                    .map(|role| rust_string(role))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                rust_string(&service.name),
-            );
-        }
-        ServiceAuthentication::Unsupported { declared } => {
-            let _ = write!(
-                out,
-                "/// What the model requires of a caller, named in every refusal.\npub(super) const AUTHENTICATION: &str = {};\n\n",
-                rust_string(declared),
-            );
-        }
-        ServiceAuthentication::Public => {}
-    }
+    out.push_str(&service_authentication_constants(service));
     out.push_str("pub fn router() -> Router<AppState> {\n    Router::new()\n");
     for route in &service.routes {
         let handlers = route
@@ -5655,11 +5926,22 @@ fn render_controller(
             service.name,
         ),
     };
-    let _ = writeln!(
-        out,
-        "//!\n//! One function per operation, each calling the microflow the model bound\n//! to it. The paths they answer are in `{}`, the service's route table.",
-        service.file_stem,
-    );
+    // A declared service states each operation — its path, method and
+    // documentation — where it routes it to its function.
+    let declared = service.declaration.is_some();
+    if declared {
+        let _ = writeln!(
+            out,
+            "//!\n//! One function per operation, each calling the microflow the model bound\n//! to it. `{}` declares each operation and routes it here.",
+            service.file_stem,
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "//!\n//! One function per operation, each calling the microflow the model bound\n//! to it. The paths they answer are in `{}`, the service's route table.",
+            service.file_stem,
+        );
+    }
     if uses_path || uses_query {
         out.push_str("\nuse std::collections::HashMap;\n");
     }
@@ -5797,25 +6079,9 @@ fn render_controller(
 
     for (route_path, operation) in &operations {
         out.push('\n');
-        if !operation.summary.is_empty() {
-            let _ = writeln!(out, "/// {}", operation.summary);
+        if !declared {
+            render_route_attribute(&mut out, service, route_path, operation);
         }
-        for line in operation.documentation.lines() {
-            if line.is_empty() {
-                out.push_str("///\n");
-            } else {
-                let _ = writeln!(out, "/// {line}");
-            }
-        }
-        if !operation.summary.is_empty() || !operation.documentation.is_empty() {
-            out.push_str("///\n");
-        }
-        let _ = writeln!(
-            out,
-            "#[mxrs::route(method = {:?}, path = {route_path:?}, service = {:?})]",
-            operation.method.to_ascii_uppercase(),
-            service.name,
-        );
         if !serves {
             let _ = writeln!(
                 out,
@@ -5958,6 +6224,35 @@ fn render_controller(
         }
     }
     out
+}
+
+/// What a route table that only routes leaves its handler to say: the
+/// operation's documentation, and its path and method as an attribute.
+fn render_route_attribute(
+    out: &mut String,
+    service: &PublishedService,
+    route_path: &str,
+    operation: &ServiceOperation,
+) {
+    if !operation.summary.is_empty() {
+        let _ = writeln!(out, "/// {}", operation.summary);
+    }
+    for line in operation.documentation.lines() {
+        if line.is_empty() {
+            out.push_str("///\n");
+        } else {
+            let _ = writeln!(out, "/// {line}");
+        }
+    }
+    if !operation.summary.is_empty() || !operation.documentation.is_empty() {
+        out.push_str("///\n");
+    }
+    let _ = writeln!(
+        out,
+        "#[mxrs::route(method = {:?}, path = {route_path:?}, service = {:?})]",
+        operation.method.to_ascii_uppercase(),
+        service.name,
+    );
 }
 
 /// Decides, for every operation of every service, which controller file
@@ -6223,6 +6518,11 @@ struct PublishedService {
     /// one `route` call per path with the methods chained onto it.
     routes: Vec<ServiceRoute>,
     authentication: ServiceAuthentication,
+    /// The service as a module the project made declares it: its route
+    /// table states it, and its router serves what that states. `None` for
+    /// a package's service, or one the declaration cannot restate or the
+    /// router cannot serve whole, whose document stays the model's.
+    declaration: Option<mxrs_ir::PublishedRestServiceDecl>,
 }
 
 /// How a published service authenticates its callers, as the model declares
@@ -6313,6 +6613,9 @@ struct ServiceOperation {
     /// microflow declares, which the operation never binds because Mendix
     /// supplies them itself.
     http_parameters: HttpParameters,
+    /// Where the service document holds it: its resource's position and
+    /// its own among that resource's operations.
+    position: (usize, usize),
 }
 
 /// The variable names a microflow declares its implicit HTTP parameters under.
@@ -6478,9 +6781,14 @@ fn published_service(
         .unwrap_or_default()
         .trim_matches('/');
     let mut routes: Vec<ServiceRoute> = Vec::new();
-    for resource in documents_in(document, "Resources") {
+    let mut stated = 0;
+    for (resource_index, resource) in documents_in(document, "Resources").into_iter().enumerate() {
         let resource_name = resource.get_str("Name").unwrap_or_default().to_string();
-        for operation in documents_in(&resource, "Operations") {
+        for (operation_index, operation) in documents_in(&resource, "Operations")
+            .into_iter()
+            .enumerate()
+        {
+            stated += 1;
             let Some(method) = operation.get_str("HttpMethod").ok().and_then(http_method) else {
                 continue;
             };
@@ -6569,6 +6877,7 @@ fn published_service(
                     .unwrap_or_default()
                     .to_string(),
                 http_parameters: http.get(microflow).cloned().unwrap_or_default(),
+                position: (resource_index, operation_index),
             };
             match routes.iter_mut().find(|route| route.path == path) {
                 Some(route)
@@ -6592,9 +6901,17 @@ fn published_service(
     if routes.is_empty() {
         return None;
     }
+    // A service is declared when its declaration states the document again
+    // and the router serves every operation it states.
+    let root = root(module_name);
+    let routed: usize = routes.iter().map(|route| route.operations.len()).sum();
+    let declaration = (root == ModuleRoot::Authored && routed == stated)
+        .then(|| mxrs_writer::stated_document(document).ok())
+        .flatten()
+        .and_then(|stated| mxrs_ir::PublishedRestServiceDecl::from_document(&stated));
     Some(PublishedService {
         module_name: module_name.to_string(),
-        root: root(module_name),
+        root,
         name: name.to_string(),
         file_stem: inner_file_stem(name),
         base_path: base_path.to_string(),
@@ -6604,6 +6921,7 @@ fn published_service(
             .to_string(),
         routes,
         authentication: service_authentication(document),
+        declaration,
     })
 }
 
@@ -8156,6 +8474,164 @@ mod tests {
             .map(|(file, source)| format!("// {file}.rs\n{source}"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A service document as Studio Pro stores one, every field present.
+    fn stored_service(roles: &[&str]) -> mxrs_bson::Document {
+        let parameter = |name: &str, kind: &str, ty: &str, microflow: &str, bound: &str| {
+            mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$RestOperationParameter",
+                "Description": "",
+                "MicroflowParameter": format!("{microflow}.{bound}"),
+                "Name": name,
+                "ParameterType": kind,
+                "Type": mxrs_bson::doc! { "$Type": ty },
+            })
+        };
+        let operation = |method: &str,
+                         path: &str,
+                         microflow: &str,
+                         summary: &str,
+                         documentation: &str,
+                         mapping: &str,
+                         parameters: Vec<mxrs_bson::Bson>| {
+            mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$PublishedRestServiceOperation",
+                "Commit": "No",
+                "Deprecated": false,
+                "Documentation": documentation,
+                "ExportMapping": mapping,
+                "HttpMethod": method,
+                "ImportMapping": "",
+                "Microflow": microflow,
+                "ObjectHandlingBackup": "Create",
+                "Parameters": mxrs_bson::build_array(parameters, 3),
+                "Path": path,
+                "Summary": summary,
+            })
+        };
+        let texts = |items: &[&str]| {
+            mxrs_bson::build_array(
+                items
+                    .iter()
+                    .map(|item| mxrs_bson::Bson::String(item.to_string()))
+                    .collect(),
+                1,
+            )
+        };
+        let types: &[&str] = if roles.is_empty() { &[] } else { &["basic"] };
+        mxrs_bson::doc! {
+            "$Type": "Rest$PublishedRestService",
+            "AllowedRoles": texts(roles),
+            "AuthenticationMicroflow": "",
+            "AuthenticationTypes": texts(types),
+            "CorsConfiguration": mxrs_bson::Bson::Null,
+            "Documentation": "",
+            "Excluded": false,
+            "ExportLevel": "Hidden",
+            "Name": "OrdersApi",
+            "Parameters": mxrs_bson::build_array(Vec::new(), 3),
+            "Path": "api/v1",
+            "Resources": mxrs_bson::build_array(vec![mxrs_bson::Bson::Document(mxrs_bson::doc! {
+                "$Type": "Rest$PublishedRestServiceResource",
+                "Documentation": "",
+                "Name": "orders",
+                "Operations": mxrs_bson::build_array(vec![
+                    operation(
+                        "Get",
+                        "{id}",
+                        "Sales.MF_Order_Show",
+                        "Get one order",
+                        "Looks an order up by its number.\n\nResponses:\n- 200: The order.",
+                        "Sales.EM_Order",
+                        vec![parameter("id", "Path", "DataTypes$IntegerType", "Sales.MF_Order_Show", "id")],
+                    ),
+                    operation(
+                        "Post",
+                        "",
+                        "Sales.MF_Order_Create",
+                        "",
+                        "",
+                        "",
+                        vec![parameter("note", "Query", "DataTypes$StringType", "Sales.MF_Order_Create", "Note")],
+                    ),
+                ], 2),
+            })], 3),
+            "ServiceName": "Orders API",
+            "Version": "1.0.0",
+            "PublicDocumentation": "",
+        }
+    }
+
+    /// A service of a module the project made, which its declaration
+    /// restates and its router serves whole, is declared by its route
+    /// table: the service, each operation with the function serving it, and
+    /// a router built from that statement.
+    #[test]
+    fn a_service_the_project_made_is_declared_by_its_route_table() {
+        let service = published_service(
+            &stored_service(&["Sales.User"]),
+            "Sales",
+            |_| ModuleRoot::Authored,
+            &HashMap::new(),
+        )
+        .expect("routable service");
+        let declaration = service.declaration.clone().expect("declared service");
+        assert_eq!(declaration.service_name, "Orders API");
+        let rendered = rendered_service(service, &HashMap::new());
+        for expected in [
+            "use mxrs::rest::Service;",
+            "pub(super) const ALLOWED_ROLES: &[&str] = &[\"Sales.User\"];",
+            "const ORDERS_SHOW_DOCUMENTATION: &str = r#\"Looks an order up by its number.",
+            "Service::new(\"OrdersApi\", \"api/v1\").service_name(\"Orders API\").basic_authentication(ALLOWED_ROLES).resource(\"orders\", |orders| { orders.get(\"{id}\", \"Sales.MF_Order_Show\", orders_controller::show, |operation| { operation.summary(\"Get one order\").documentation(ORDERS_SHOW_DOCUMENTATION).path_parameter(\"id\", RestParameterType::Integer).export_mapping(\"Sales.EM_Order\"); })",
+            ".post(\"\", \"Sales.MF_Order_Create\", orders_controller::create, |operation| { operation.parameter(RestOperationParameter::query(\"note\", RestParameterType::String).bound_to(\"Note\")); })",
+            "#[declaration(module = \"Sales\")]\npub fn orders_api(module: &mut ModuleBuilder) {\n    module.published_rest_service(service().declaration());\n}",
+            "pub fn router() -> Router<AppState> {\n    service().router()\n}",
+            "fn the_router_serves_the_service() {",
+        ] {
+            assert!(rendered.contains(expected), "{expected}\n---\n{rendered}");
+        }
+        // The route table states the path, the method and the operation's
+        // documentation: the handler is left to say what it calls.
+        assert!(!rendered.contains("#[mxrs::route("), "{rendered}");
+        assert!(!rendered.contains("/// Get one order"), "{rendered}");
+        assert!(
+            rendered.contains("/// Calls `Sales.MF_Order_Show`."),
+            "{rendered}"
+        );
+    }
+
+    /// A package's service, and one with an operation the router cannot
+    /// serve, stay the model's: their route table only routes.
+    #[test]
+    fn a_service_is_declared_only_when_the_project_made_it_and_it_is_served_whole() {
+        let package = published_service(
+            &stored_service(&[]),
+            "Sales",
+            |_| ModuleRoot::Package,
+            &HashMap::new(),
+        )
+        .expect("routable service");
+        assert!(package.declaration.is_none());
+
+        let mut unserved = stored_service(&[]);
+        let resources = unserved.get_array_mut("Resources").unwrap();
+        let mxrs_bson::Bson::Document(resource) = &mut resources[1] else {
+            panic!("a resource");
+        };
+        let operations = resource.get_array_mut("Operations").unwrap();
+        let mxrs_bson::Bson::Document(operation) = &mut operations[2] else {
+            panic!("an operation");
+        };
+        operation.insert("HttpMethod", "Options");
+        let unserved = published_service(
+            &unserved,
+            "Sales",
+            |_| ModuleRoot::Authored,
+            &HashMap::new(),
+        )
+        .expect("routable service");
+        assert!(unserved.declaration.is_none());
     }
 
     /// A published REST service becomes a route table — the model's own

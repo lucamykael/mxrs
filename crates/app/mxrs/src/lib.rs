@@ -18,7 +18,8 @@ pub use mxrs_dsl::{
     LayoutGridBuilder, LayoutGridColumnBuilder, LayoutGridRowBuilder, MappingBuilder, MenuBuilder,
     MenuItemBuilder, MicroflowModuleBuilder, ModuleBuilder, NanoflowModuleBuilder,
     NavigationBuilder, NavigationItemBuilder, NavigationProfileBuilder, ObjectMappingBuilder,
-    PageBuilder, PluggableWidgetBuilder, ProjectBuilder, RuleModuleBuilder, ScheduledEventBuilder,
+    PageBuilder, PluggableWidgetBuilder, ProjectBuilder, PublishedRestServiceBuilder,
+    RestOperationBuilder, RestResourceBuilder, RuleModuleBuilder, ScheduledEventBuilder,
     SecurityBuilder, TaskQueueBuilder, UserRoleBuilder, ValueMappingBuilder,
 };
 pub use mxrs_expr::*;
@@ -103,6 +104,7 @@ pub use mxrs_writer::{synchronize_project, write_project};
 pub mod mapping;
 pub mod ports;
 pub mod registry;
+pub mod rest;
 
 /// The bytes of a file of the project's `assets/` folder, read when the
 /// project compiles: `mxrs::asset!("images/main/images/logo.png")`. A file
@@ -288,20 +290,22 @@ pub mod prelude {
         MxDateTime, MxDecimal, MxEntity, MxEnumeration, MxFloat, MxInteger, MxLong, MxString,
         NanoflowMarker, NanoflowModuleBuilder, NanoflowRef, NavigationBuilder,
         NavigationItemBuilder, NavigationProfileBuilder, OnOverlap, PageBuilder, ProjectBuilder,
-        Ref, Reference, ReferenceSet, RenderExpr, RuleMarker, RuleModuleBuilder, ScheduleUnit,
-        ScheduledEventBuilder, ScheduledEventSchedule, SecurityBuilder, SecurityLevel,
-        TaskQueueBuilder, TaskQueueConfig, TaskQueueScope, TypedAttributeMarker, UserRoleBuilder,
-        Var, application, boolean, decimal, float, integer, long, project, string,
+        PublishedRestServiceBuilder, Ref, Reference, ReferenceSet, RenderExpr, RuleMarker,
+        RuleModuleBuilder, ScheduleUnit, ScheduledEventBuilder, ScheduledEventSchedule,
+        SecurityBuilder, SecurityLevel, TaskQueueBuilder, TaskQueueConfig, TaskQueueScope,
+        TypedAttributeMarker, UserRoleBuilder, Var, application, boolean, decimal, float, integer,
+        long, project, string,
     };
     pub use crate::{
         AssignAssociation, AssignAttribute, AssociationRef, AttributeRef, CodeActionType,
         ImageFormat, JavaScriptPlatform, JsonPrimitiveType, LayoutBuilder, LifecycleEvent,
         MappingValueType, MemberRights, MxBinary, MxList, MxObject, NullValueOption,
-        ObjectHandling, SystemMember, aggregate_list, call_java_action, call_javascript_action,
-        call_microflow, call_nanoflow, change_list, change_object, change_variable, close_page,
-        commit_object, constant, create_list, create_object, create_variable, declaration,
-        delete_object, demo_user, dto, entity, enumeration, layout, log, menu, microflow,
-        module_roles, nanoflow, navigation, navigation_item, page, retrieve, rollback_object,
-        route, rule, security, service, show_message, show_page, view,
+        ObjectHandling, RestCommit, RestMethod, RestOperationParameter, RestParameterType,
+        SystemMember, aggregate_list, call_java_action, call_javascript_action, call_microflow,
+        call_nanoflow, change_list, change_object, change_variable, close_page, commit_object,
+        constant, create_list, create_object, create_variable, declaration, delete_object,
+        demo_user, dto, entity, enumeration, layout, log, menu, microflow, module_roles, nanoflow,
+        navigation, navigation_item, page, retrieve, rollback_object, route, rule, security,
+        service, show_message, show_page, view,
     };
 }

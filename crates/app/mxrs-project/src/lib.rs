@@ -332,6 +332,10 @@ fn declares(declaration: &mxrs_ir::ProjectDecl, unit: &DeclaredUnit) -> bool {
             module.json_structures.iter().any(|item| item.name == name)
         }
         "DataSets$DataSet" => module.data_sets.iter().any(|item| item.name == name),
+        "Rest$PublishedRestService" => module
+            .published_rest_services
+            .iter()
+            .any(|item| item.name == name),
         "Microflows$Rule" => module.rules.iter().any(|item| item.name == name),
         "Images$ImageCollection" => module
             .image_collections
@@ -365,6 +369,7 @@ fn kind_of(native_type: &str) -> &str {
         "JavaActions$JavaAction" => "Java action",
         "JsonStructures$JsonStructure" => "JSON structure",
         "DataSets$DataSet" => "data set",
+        "Rest$PublishedRestService" => "published REST service",
         "Microflows$Rule" => "rule",
         "Images$ImageCollection" => "image collection",
         "DomainModels$ViewEntitySourceDocument" => "OQL view source",

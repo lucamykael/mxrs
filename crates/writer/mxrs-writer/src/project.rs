@@ -320,6 +320,13 @@ pub fn synchronize_project(path: impl AsRef<Path>, project: &ProjectDecl) -> Res
             &decl.json_structures,
             identity,
         )?;
+        crate::native::synchronize_published_rest_services_with_identity(
+            &mut mpr,
+            &module_id,
+            &decl.name,
+            &decl.published_rest_services,
+            identity,
+        )?;
         crate::native::synchronize_data_sets_with_identity(
             &mut mpr,
             &module_id,
